@@ -3588,6 +3588,169 @@ fn handle_agent_run_complete(
     state.active_tools.clear();
 }
 
+fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) -> bool {
+    match event {
+        Event::StreamDelta(delta) => {
+            state.stream_buffer.push_str(&delta);
+            true
+        }
+        Event::StreamChunk(chunk) => {
+            if let Some(delta) = chunk.delta {
+                let has_stream_payload =
+                    delta.content.as_ref().is_some_and(|text| !text.is_empty())
+                        || delta
+                            .tool_calls
+                            .as_ref()
+                            .is_some_and(|calls| !calls.is_empty());
+                if has_stream_payload {
+                    state.stream_chunk_count = state.stream_chunk_count.saturating_add(1);
+                }
+                if let Some(extra) = delta.extra.as_ref() {
+                    if let Some(control) = extra.get("control").and_then(|v| v.as_str()) {
+                        if control == "mute_post_response" {
+                            state.stream_muted = extra
+                                .get("enabled")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                        } else if control == "stream_break" {
+                            state.stream_needs_break = true;
+                        }
+                    }
+                    if let Some(ui_event) = extra.get("ui_event").and_then(|v| v.as_str()) {
+                        match ui_event {
+                            "tool_start" => {
+                                let tool = extra
+                                    .get("tool")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("tool")
+                                    .trim()
+                                    .to_string();
+                                if !tool.is_empty()
+                                    && !state.active_tools.iter().any(|t| t == &tool)
+                                {
+                                    state.active_tools.push(tool.clone());
+                                }
+                                let args_preview = extra
+                                    .get("args_preview")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .trim();
+                                if args_preview.is_empty() {
+                                    state.push_activity(format!("▶ {}", tool));
+                                } else {
+                                    state.push_activity(format!("▶ {} {}", tool, args_preview));
+                                }
+                            }
+                            "tool_complete" => {
+                                let tool = extra
+                                    .get("tool")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("tool")
+                                    .trim()
+                                    .to_string();
+                                if let Some(idx) =
+                                    state.active_tools.iter().position(|t| t == &tool)
+                                {
+                                    state.active_tools.remove(idx);
+                                }
+                                let result_preview = extra
+                                    .get("result_preview")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .trim();
+                                if result_preview.is_empty() {
+                                    state.push_activity(format!("✓ {}", tool));
+                                } else {
+                                    state.push_activity(format!("✓ {} {}", tool, result_preview));
+                                }
+                            }
+                            "status" => {
+                                let event_type = extra
+                                    .get("event_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("status")
+                                    .trim();
+                                let message = extra
+                                    .get("message")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .trim();
+                                if !message.is_empty() {
+                                    state.push_activity(format!("[{}] {}", event_type, message));
+                                }
+                            }
+                            "lifecycle" => {
+                                let message = extra
+                                    .get("message")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .trim();
+                                if !message.is_empty() {
+                                    state.push_activity(format!("⟡ {}", message));
+                                }
+                            }
+                            "thinking" => {
+                                if let Some(text) = extra.get("text").and_then(|v| v.as_str()) {
+                                    state.append_live_thinking(text);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(thinking) = extra.get("thinking").and_then(|v| v.as_str()) {
+                        state.append_live_thinking(thinking);
+                    }
+                }
+                if let Some(content) = delta.content {
+                    if !state.stream_muted {
+                        if state.stream_needs_break {
+                            state.stream_buffer.push_str("\n\n");
+                            state.stream_needs_break = false;
+                        }
+                        state.stream_buffer.push_str(&content);
+                        state.stream_char_count = state
+                            .stream_char_count
+                            .saturating_add(content.chars().count());
+                        if !state.saw_first_token {
+                            state.saw_first_token = true;
+                            let first_token_ms = state
+                                .processing_started_at
+                                .map(|t| t.elapsed().as_millis())
+                                .unwrap_or_default();
+                            state.push_activity(format!("↧ first token in {}ms", first_token_ms));
+                        }
+                    }
+                }
+            }
+            if let Some(usage) = chunk.usage {
+                state.last_usage = Some((
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.total_tokens,
+                ));
+            }
+            true
+        }
+        Event::AgentDone => {
+            state.finish_processing_cycle("✔ completed in");
+            state.stream_buffer.clear();
+            state.stream_muted = false;
+            state.stream_needs_break = false;
+            state.active_tools.clear();
+            state.status_message.clear();
+            true
+        }
+        Event::AgentRunComplete {
+            result,
+            elapsed_secs,
+        } => {
+            handle_agent_run_complete(app, state, result, elapsed_secs);
+            true
+        }
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main TUI run loop
 // ---------------------------------------------------------------------------
@@ -3890,180 +4053,20 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                 }
             }
             stream_event = tui.stream_events.recv() => {
-                match stream_event {
-                    Some(Event::StreamDelta(delta)) => {
-                        state.stream_buffer.push_str(&delta);
-                        needs_redraw = true;
-                    }
-                    Some(Event::StreamChunk(chunk)) => {
-                        if let Some(delta) = chunk.delta {
-                            let has_stream_payload = delta
-                                .content
-                                .as_ref()
-                                .is_some_and(|text| !text.is_empty())
-                                || delta
-                                    .tool_calls
-                                    .as_ref()
-                                    .is_some_and(|calls| !calls.is_empty());
-                            if has_stream_payload {
-                                state.stream_chunk_count = state.stream_chunk_count.saturating_add(1);
+                if let Some(first) = stream_event {
+                    let mut redraw = process_stream_lane_event(&mut app, &mut state, first);
+                    for _ in 0..256 {
+                        match tui.stream_events.try_recv() {
+                            Ok(next) => {
+                                redraw |= process_stream_lane_event(&mut app, &mut state, next);
                             }
-                            if let Some(extra) = delta.extra.as_ref() {
-                                if let Some(control) = extra.get("control").and_then(|v| v.as_str()) {
-                                    if control == "mute_post_response" {
-                                        state.stream_muted = extra
-                                            .get("enabled")
-                                            .and_then(|v| v.as_bool())
-                                            .unwrap_or(false);
-                                    } else if control == "stream_break" {
-                                        state.stream_needs_break = true;
-                                    }
-                                }
-                                if let Some(ui_event) = extra.get("ui_event").and_then(|v| v.as_str()) {
-                                    match ui_event {
-                                        "tool_start" => {
-                                            let tool = extra
-                                                .get("tool")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("tool")
-                                                .trim()
-                                                .to_string();
-                                            if !tool.is_empty()
-                                                && !state.active_tools.iter().any(|t| t == &tool)
-                                            {
-                                                state.active_tools.push(tool.clone());
-                                            }
-                                            let args_preview = extra
-                                                .get("args_preview")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("")
-                                                .trim();
-                                            if args_preview.is_empty() {
-                                                state.push_activity(format!("▶ {}", tool));
-                                            } else {
-                                                state.push_activity(format!("▶ {} {}", tool, args_preview));
-                                            }
-                                        }
-                                        "tool_complete" => {
-                                            let tool = extra
-                                                .get("tool")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("tool")
-                                                .trim()
-                                                .to_string();
-                                            if let Some(idx) =
-                                                state.active_tools.iter().position(|t| t == &tool)
-                                            {
-                                                state.active_tools.remove(idx);
-                                            }
-                                            let result_preview = extra
-                                                .get("result_preview")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("")
-                                                .trim();
-                                            if result_preview.is_empty() {
-                                                state.push_activity(format!("✓ {}", tool));
-                                            } else {
-                                                state.push_activity(format!(
-                                                    "✓ {} {}",
-                                                    tool, result_preview
-                                                ));
-                                            }
-                                        }
-                                        "status" => {
-                                            let event_type = extra
-                                                .get("event_type")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("status")
-                                                .trim();
-                                            let message = extra
-                                                .get("message")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("")
-                                                .trim();
-                                            if !message.is_empty() {
-                                                state.push_activity(format!(
-                                                    "[{}] {}",
-                                                    event_type, message
-                                                ));
-                                            }
-                                        }
-                                        "lifecycle" => {
-                                            let message = extra
-                                                .get("message")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("")
-                                                .trim();
-                                            if !message.is_empty() {
-                                                state.push_activity(format!("⟡ {}", message));
-                                            }
-                                        }
-                                        "thinking" => {
-                                            if let Some(text) =
-                                                extra.get("text").and_then(|v| v.as_str())
-                                            {
-                                                state.append_live_thinking(text);
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                if let Some(thinking) = extra.get("thinking").and_then(|v| v.as_str()) {
-                                    state.append_live_thinking(thinking);
-                                }
-                            }
-                            if let Some(content) = delta.content {
-                                if !state.stream_muted {
-                                    if state.stream_needs_break {
-                                        state.stream_buffer.push_str("\n\n");
-                                        state.stream_needs_break = false;
-                                    }
-                                    state.stream_buffer.push_str(&content);
-                                    state.stream_char_count =
-                                        state.stream_char_count.saturating_add(content.chars().count());
-                                    if !state.saw_first_token {
-                                        state.saw_first_token = true;
-                                        let first_token_ms = state
-                                            .processing_started_at
-                                            .map(|t| t.elapsed().as_millis())
-                                            .unwrap_or_default();
-                                        state.push_activity(format!(
-                                            "↧ first token in {}ms",
-                                            first_token_ms
-                                        ));
-                                    }
-                                }
-                            }
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
                         }
-                        if let Some(usage) = chunk.usage {
-                            state.last_usage =
-                                Some((usage.prompt_tokens, usage.completion_tokens, usage.total_tokens));
-                        }
+                    }
+                    if redraw {
                         needs_redraw = true;
                     }
-                    Some(Event::AgentDone) => {
-                        state.finish_processing_cycle("✔ completed in");
-                        state.stream_buffer.clear();
-                        state.stream_muted = false;
-                        state.stream_needs_break = false;
-                        state.active_tools.clear();
-                        state.status_message.clear();
-                        needs_redraw = true;
-                    }
-                    Some(Event::AgentRunComplete {
-                        result,
-                        elapsed_secs,
-                    }) => {
-                        handle_agent_run_complete(
-                            &mut app,
-                            &mut state,
-                            result,
-                            elapsed_secs,
-                        );
-                        needs_redraw = true;
-                    }
-                    Some(_) => {}
-                    None => {}
                 }
             }
             _ = frame_tick.tick() => {

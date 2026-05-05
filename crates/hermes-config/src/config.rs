@@ -280,7 +280,7 @@ impl Default for AgentLoopBehaviorConfig {
 }
 
 fn default_max_turns() -> u32 {
-    30
+    250
 }
 
 fn default_tools() -> Vec<String> {
@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn gateway_config_default() {
         let cfg = GatewayConfig::default();
-        assert_eq!(cfg.max_turns, 30);
+        assert_eq!(cfg.max_turns, 250);
         assert!(!cfg.tools.is_empty());
         assert!(cfg.model.is_none());
         assert!(cfg.proxy.is_none());

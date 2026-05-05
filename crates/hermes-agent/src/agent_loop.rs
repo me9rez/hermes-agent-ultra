@@ -505,7 +505,7 @@ pub struct AgentConfig {
 }
 
 fn default_max_turns() -> u32 {
-    30
+    250
 }
 
 fn default_model() -> String {
@@ -6606,7 +6606,7 @@ mod tests {
     #[test]
     fn test_agent_config_default() {
         let config = AgentConfig::default();
-        assert_eq!(config.max_turns, 30);
+        assert_eq!(config.max_turns, 250);
         assert_eq!(config.model, "gpt-4o");
         assert!(!config.stream);
         assert_eq!(config.max_concurrent_delegates, 1);

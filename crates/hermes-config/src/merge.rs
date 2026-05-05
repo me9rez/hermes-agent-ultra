@@ -147,7 +147,7 @@ mod tests {
         let merged = merge_configs(&yaml_cfg, &json_cfg);
         // yaml wins for model
         assert_eq!(merged.model.as_deref(), Some("gpt-4o"));
-        // yaml's default max_turns (30) overrides json's 10 since yaml is primary
-        assert_eq!(merged.max_turns, 30);
+        // yaml's default max_turns (250) overrides json's 10 since yaml is primary
+        assert_eq!(merged.max_turns, 250);
     }
 }

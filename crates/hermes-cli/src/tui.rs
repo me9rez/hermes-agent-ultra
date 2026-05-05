@@ -1266,6 +1266,12 @@ impl TuiState {
 // Rendering
 // ---------------------------------------------------------------------------
 
+const TRANSCRIPT_HARD_WRAP_COLS: u16 = 80;
+
+fn transcript_wrap_width(viewport_width: u16) -> u16 {
+    viewport_width.min(TRANSCRIPT_HARD_WRAP_COLS).max(1)
+}
+
 /// Render the full TUI frame.
 pub fn render(frame: &mut Frame, app: &App, state: &mut TuiState, theme: &Theme) {
     let resolved = theme.resolved_styles();
@@ -2438,17 +2444,24 @@ fn render_messages(
         frame.render_widget(block, area);
         return;
     }
+    let wrap_width = transcript_wrap_width(inner.width);
+    let content_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: wrap_width.min(inner.width),
+        height: inner.height,
+    };
     let transcript = app.transcript_messages();
     let viewport_rows = usize::from(inner.height.max(1));
-    let fingerprint = transcript_fingerprint(&transcript, state, inner.width);
+    let fingerprint = transcript_fingerprint(&transcript, state, wrap_width);
     let message_fingerprints = transcript_message_fingerprints(&transcript);
     if state.transcript_cache.fingerprint != fingerprint
-        || state.transcript_cache.width != inner.width
+        || state.transcript_cache.width != wrap_width
     {
         let cache = &state.transcript_cache;
         let can_incremental_append = !cache.had_streaming
             && state.stream_buffer.is_empty()
-            && cache.width == inner.width
+            && cache.width == wrap_width
             && cache.total_messages > 0
             && transcript.len() > cache.total_messages
             && cache.show_timestamps == state.show_timestamps
@@ -2460,7 +2473,7 @@ fn render_messages(
             let start_idx = state.transcript_cache.total_messages;
             let mut lines = std::mem::take(&mut state.transcript_cache.lines);
             let mut rendered_messages = state.transcript_cache.rendered_messages;
-            let divider = transcript_divider(inner.width);
+            let divider = transcript_divider(wrap_width);
             for (msg_idx, msg) in transcript.iter().enumerate().skip(start_idx) {
                 append_transcript_message_lines(
                     &mut lines,
@@ -2475,7 +2488,7 @@ fn render_messages(
             }
             state.transcript_cache = TranscriptCache {
                 fingerprint,
-                width: inner.width,
+                width: wrap_width,
                 total_messages: transcript.len(),
                 rendered_messages,
                 message_fingerprints,
@@ -2488,7 +2501,7 @@ fn render_messages(
             let prev_width = state.transcript_cache.width;
             let prev_len = state.transcript_cache.lines.len();
             let prev_anchor_line = if prev_width != 0
-                && prev_width != inner.width
+                && prev_width != wrap_width
                 && state.scroll_offset > 0
                 && prev_len > 0
             {
@@ -2506,7 +2519,7 @@ fn render_messages(
                 None
             };
 
-            let new_lines = build_transcript_lines(&transcript, state, styles, colors, inner.width);
+            let new_lines = build_transcript_lines(&transcript, state, styles, colors, wrap_width);
             if let Some(anchor_text) = prev_anchor_line {
                 if let Some(new_idx) = new_lines
                     .iter()
@@ -2520,7 +2533,7 @@ fn render_messages(
             }
             state.transcript_cache = TranscriptCache {
                 fingerprint,
-                width: inner.width,
+                width: wrap_width,
                 total_messages: transcript.len(),
                 rendered_messages: count_renderable_messages(&transcript),
                 message_fingerprints,
@@ -2533,7 +2546,7 @@ fn render_messages(
     }
     let lines = &state.transcript_cache.lines;
     let text = Text::from(lines.clone());
-    let total_visual_rows = approximate_visual_rows(lines, inner.width);
+    let total_visual_rows = approximate_visual_rows(lines, wrap_width);
     let max_hidden_from_bottom = total_visual_rows.saturating_sub(viewport_rows);
     let hidden_from_bottom = usize::from(state.scroll_offset).min(max_hidden_from_bottom);
     if usize::from(state.scroll_offset) != hidden_from_bottom {
@@ -2541,13 +2554,14 @@ fn render_messages(
     }
     let top_visual_row = total_visual_rows.saturating_sub(viewport_rows + hidden_from_bottom);
 
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll((top_visual_row as u16, 0));
-
     frame.render_widget(Clear, area);
-    frame.render_widget(paragraph, area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((top_visual_row as u16, 0)),
+        content_area,
+    );
 
     if total_visual_rows > viewport_rows {
         let mut scrollbar_state = ScrollbarState::new(total_visual_rows)
@@ -2568,7 +2582,7 @@ fn render_messages(
                     .fg(colors.status_bar_strong)
                     .bg(colors.background),
             );
-        frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+        frame.render_stateful_widget(scrollbar, content_area, &mut scrollbar_state);
     }
 }
 
@@ -4467,6 +4481,13 @@ mod tests {
         let lines = vec![Line::from("x".repeat(120))];
         assert_eq!(approximate_visual_rows(&lines, 40), 3);
         assert_eq!(approximate_visual_rows(&lines, 80), 2);
+    }
+
+    #[test]
+    fn test_transcript_wrap_width_caps_at_80() {
+        assert_eq!(transcript_wrap_width(12), 12);
+        assert_eq!(transcript_wrap_width(80), 80);
+        assert_eq!(transcript_wrap_width(140), 80);
     }
 
     #[test]

@@ -22,9 +22,11 @@ use sha2::{Digest, Sha256};
 
 use crate::alpha_runtime::{
     append_counterfactual, clear_objective_contract, enqueue_loop_event,
-    ensure_alpha_runtime_bootstrap, load_alpha_loops, load_objective_contract,
-    recover_orphan_loop_events, render_mission_board, replay_loop_queue,
-    summarize_objective_contract, upsert_objective_contract, utility_terms_from_contract,
+    ensure_alpha_runtime_bootstrap, ensure_trading_runtime_bootstrap, load_alpha_loops,
+    load_last_trading_alpha_report, load_objective_contract, recover_orphan_loop_events,
+    refresh_trading_alpha_report, render_mission_board, render_trading_alpha_board,
+    replay_loop_queue, summarize_objective_contract, upsert_objective_contract,
+    utility_terms_from_contract,
 };
 use crate::app::{App, PetDock, PetSettings};
 use crate::model_switch::{curated_provider_slugs, normalize_provider_model, provider_model_ids};
@@ -173,7 +175,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/ops", "Operator control plane (status + quick controls)"),
     (
         "/mission",
-        "Mission control board for continuous loops (`status|init|recover|replay|enqueue`)",
+        "Mission control board (`status|init|recover|replay|enqueue|trading ...`)",
     ),
     ("/dashboard", "Dashboard control (status|on|off|url)"),
     (
@@ -5184,8 +5186,12 @@ async fn handle_mission_command(app: &mut App, args: &[&str]) -> Result<CommandR
     match action.as_str() {
         "init" => {
             let written = ensure_alpha_runtime_bootstrap(true)?;
+            let trading_written = ensure_trading_runtime_bootstrap(true)?;
             let mut details = String::new();
             for path in written {
+                let _ = writeln!(details, "- {}", path.display());
+            }
+            for path in trading_written {
                 let _ = writeln!(details, "- {}", path.display());
             }
             emit_command_output(
@@ -5244,6 +5250,76 @@ async fn handle_mission_command(app: &mut App, args: &[&str]) -> Result<CommandR
             );
             Ok(CommandResult::Handled)
         }
+        "trading" => {
+            let sub = args
+                .get(1)
+                .copied()
+                .unwrap_or("status")
+                .to_ascii_lowercase();
+            match sub.as_str() {
+                "status" | "show" => {
+                    let report = load_last_trading_alpha_report()?;
+                    emit_command_output(app, render_trading_alpha_board(&report));
+                    Ok(CommandResult::Handled)
+                }
+                "refresh" | "run" | "scan" => {
+                    let report = refresh_trading_alpha_report()?;
+                    emit_command_output(app, render_trading_alpha_board(&report));
+                    Ok(CommandResult::Handled)
+                }
+                "postmortem" => {
+                    let report = load_last_trading_alpha_report()?;
+                    emit_command_output(
+                        app,
+                        format!("Trading postmortem\n\n{}", report.postmortem),
+                    );
+                    Ok(CommandResult::Handled)
+                }
+                "autoresearch" => {
+                    let report = load_last_trading_alpha_report()?;
+                    let mut out = String::new();
+                    out.push_str("Autoresearch artifacts\n");
+                    out.push_str("----------------------\n");
+                    out.push_str(&format!("hypotheses: {}\n", report.hypotheses.len()));
+                    for h in report.hypotheses.iter().take(12) {
+                        let _ = writeln!(
+                            out,
+                            "- {} novelty={:.3} expected_gain_sol={:.4} :: {}",
+                            h.id, h.novelty_score, h.expected_gain_sol, h.statement
+                        );
+                    }
+                    out.push_str("\nexperiments:\n");
+                    for e in report.experiments.iter().take(12) {
+                        let _ = writeln!(
+                            out,
+                            "- {} {} -> {} pass={}",
+                            e.id, e.control, e.treatment, e.pass_criterion
+                        );
+                    }
+                    out.push_str("\nbacktest_matrix:\n");
+                    for row in report.backtest_matrix.iter().take(20) {
+                        let _ = writeln!(out, "- {}", row);
+                    }
+                    out.push_str("\nwalkforward_checks:\n");
+                    for row in report.walkforward_checks.iter().take(20) {
+                        let _ = writeln!(out, "- {}", row);
+                    }
+                    out.push_str("\nmeta_ranking:\n");
+                    for row in report.meta_ranking.iter().take(20) {
+                        let _ = writeln!(out, "- {}", row);
+                    }
+                    emit_command_output(app, out.trim_end());
+                    Ok(CommandResult::Handled)
+                }
+                _ => {
+                    emit_command_output(
+                        app,
+                        "Usage: /mission trading [status|refresh|postmortem|autoresearch]",
+                    );
+                    Ok(CommandResult::Handled)
+                }
+            }
+        }
         "status" | "show" => {
             let loops = load_alpha_loops()?;
             let (queued, running, completed, failed) = background_job_counts();
@@ -5271,6 +5347,7 @@ async fn handle_mission_command(app: &mut App, args: &[&str]) -> Result<CommandR
             out.push_str("- /mission recover\n");
             out.push_str("- /mission replay [limit]\n");
             out.push_str("- /mission enqueue <loop-id> <event-type> <payload>\n");
+            out.push_str("- /mission trading [status|refresh|postmortem|autoresearch]\n");
             out.push_str("- /objective <text>\n");
             out.push_str("- /background <task>\n");
             emit_command_output(app, out.trim_end());
@@ -5279,7 +5356,7 @@ async fn handle_mission_command(app: &mut App, args: &[&str]) -> Result<CommandR
         _ => {
             emit_command_output(
                 app,
-                "Usage: /mission [status|init|recover|replay [limit]|enqueue <loop-id> <event-type> <payload>]",
+                "Usage: /mission [status|init|recover|replay [limit]|enqueue <loop-id> <event-type> <payload>|trading ...]",
             );
             Ok(CommandResult::Handled)
         }

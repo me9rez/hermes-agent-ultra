@@ -6,7 +6,7 @@
 use std::process::Stdio;
 use std::sync::Arc;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -23,16 +23,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::alpha_runtime::{
-    append_counterfactual, append_objective_learning_entry, clear_objective_contract,
-    clear_objective_learning_ledger, enqueue_loop_event, ensure_alpha_runtime_bootstrap,
-    ensure_trading_runtime_bootstrap, load_alpha_loops, load_last_trading_alpha_report,
-    load_objective_contract, load_objective_ensemble_policy, load_objective_learning_ledger,
-    load_objective_profile, load_objective_simulation_policy, objective_profile_specialized_for,
+    append_counterfactual, append_objective_learning_entry, build_objective_dag_from_contract,
+    clear_objective_contract, clear_objective_dag, clear_objective_learning_ledger,
+    enqueue_loop_event, ensure_alpha_runtime_bootstrap, ensure_trading_runtime_bootstrap,
+    load_alpha_loops, load_claim_verifier_policy, load_last_trading_alpha_report,
+    load_objective_contract, load_objective_dag, load_objective_ensemble_policy,
+    load_objective_eval_trend, load_objective_learning_ledger, load_objective_profile,
+    load_objective_simulation_policy, load_quorum_policy, objective_profile_specialized_for,
     recover_orphan_loop_events, refresh_trading_alpha_report, render_mission_board,
     render_trading_alpha_board, replay_loop_queue, reset_objective_profile_generalized,
-    set_objective_ensemble_mode, set_objective_profile, set_objective_simulation_mode,
-    summarize_objective_contract, upsert_objective_contract, utility_terms_from_contract,
-    ObjectiveLearningLedgerEntry,
+    set_claim_verifier_enabled, set_objective_ensemble_mode, set_objective_profile,
+    set_objective_simulation_mode, set_quorum_policy, summarize_objective_contract,
+    upsert_objective_contract, utility_terms_from_contract, ObjectiveLearningLedgerEntry,
 };
 use crate::app::{App, PetDock, PetSettings};
 use crate::model_switch::{curated_provider_slugs, normalize_provider_model, provider_model_ids};
@@ -153,7 +155,27 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/objective",
-        "Set/show objective contract + profile/policies (`status|plan|constraints|counterfactual|profile|simulator|ensemble|ledger|clear`)",
+        "Set/show objective contract + profile/policies (`status|plan|constraints|counterfactual|profile|simulator|ensemble|ledger|dag|eval|clear`)",
+    ),
+    (
+        "/claims",
+        "Claim verifier controls (`status|on|off`) for verified/inferred/unproven final tagging",
+    ),
+    (
+        "/quorum",
+        "Optional multi-voter deep-reasoning mode (`status|on|off|models|run`)",
+    ),
+    (
+        "/specpatch",
+        "Speculative patch executor (`/specpatch <verify_cmd> | <candidate_cmd_1> | ...`)",
+    ),
+    (
+        "/heatmap",
+        "Context coverage heatmap for repo files (`/heatmap [repo-path]`)",
+    ),
+    (
+        "/studio",
+        "Replay studio (`/studio replay status|verify|diff <export_a.json> <export_b.json>`)",
     ),
     ("/goal", "Alias for /objective"),
     (
@@ -2981,6 +3003,11 @@ pub async fn handle_slash_command(
         | "/sethome" => handle_session_compat_command(app, canonical_command(cmd), args),
         "/evolve" => handle_ops_evolve_command(app, args).await,
         "/objective" => handle_objective_command(app, args),
+        "/claims" => handle_claims_command(app, args),
+        "/quorum" => handle_quorum_command(app, args).await,
+        "/specpatch" => handle_specpatch_command(app, args).await,
+        "/heatmap" => handle_heatmap_command(app, args).await,
+        "/studio" => handle_studio_command(app, args).await,
         "/ask" => handle_interactive_question_command(app, args),
         "/model" => handle_model_command(app, args).await,
         "/provider" => handle_provider_command(app).await,
@@ -2991,7 +3018,7 @@ pub async fn handle_slash_command(
         }
         "/pet" => handle_pet_command(app, args),
         "/skills" => handle_skills_command(app, args).await,
-        "/tools" => handle_tools_command(app),
+        "/tools" => handle_tools_command(app, args),
         "/toolcards" => handle_toolcards_command(app, args),
         "/toolsets" => handle_toolsets_command(app),
         "/plugins" => handle_plugins_command(app),
@@ -4002,7 +4029,71 @@ async fn handle_skills_command(app: &mut App, args: &[&str]) -> Result<CommandRe
     Ok(CommandResult::Handled)
 }
 
-fn handle_tools_command(app: &mut App) -> Result<CommandResult, AgentError> {
+fn handle_tools_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    if args
+        .first()
+        .is_some_and(|sub| sub.eq_ignore_ascii_case("trust"))
+    {
+        let counters = app.tool_registry.policy_counters();
+        let tools = app.tool_registry.list_tools();
+        let mut risk: Vec<(String, i32, String)> = tools
+            .iter()
+            .map(|tool| {
+                let mut score = 100i32;
+                if !tool.env_deps.is_empty() {
+                    score -= 15;
+                }
+                if matches!(
+                    tool.name.as_str(),
+                    "terminal" | "execute_code" | "shell_exec" | "bash" | "python_exec"
+                ) {
+                    score -= 35;
+                }
+                if tool.toolset.eq_ignore_ascii_case("network")
+                    || tool.name.contains("webhook")
+                    || tool.name.contains("http")
+                {
+                    score -= 20;
+                }
+                if tool.name.contains("secrets")
+                    || tool.name.contains("token")
+                    || tool.name.contains("oauth")
+                {
+                    score -= 25;
+                }
+                score = score.clamp(0, 100);
+                let tier = if score >= 80 {
+                    "low-risk"
+                } else if score >= 55 {
+                    "moderate-risk"
+                } else {
+                    "high-risk"
+                };
+                (tool.name.clone(), score, tier.to_string())
+            })
+            .collect();
+        risk.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut out = String::new();
+        out.push_str("Tool trust scorecard (heuristic)\n");
+        out.push_str("--------------------------------\n");
+        let _ = writeln!(
+            out,
+            "policy_counters: allow={} deny={} audit_only={} simulate={} would_block={}",
+            counters.allow,
+            counters.deny,
+            counters.audit_only,
+            counters.simulate,
+            counters.would_block
+        );
+        let _ = writeln!(out, "registered_tools={}", risk.len());
+        for (name, score, tier) in risk.iter().take(20) {
+            let _ = writeln!(out, "- {name:<28} score={score:>3} tier={tier}");
+        }
+        out.push_str("\nUse `/ops status` and `/raw trace verify` for live enforcement + trace integrity signals.");
+        emit_command_output(app, out.trim_end());
+        return Ok(CommandResult::Handled);
+    }
+
     let tools = app.tool_registry.list_tools();
     if tools.is_empty() {
         emit_command_output(app, "No tools registered.");
@@ -4011,6 +4102,7 @@ fn handle_tools_command(app: &mut App) -> Result<CommandResult, AgentError> {
         for tool in &tools {
             out.push_str(&format!("- `{}` — {}\n", tool.name, tool.description));
         }
+        out.push_str("\n\nUse `/tools trust` for a risk/score summary.");
         emit_command_output(app, out.trim_end());
     }
     Ok(CommandResult::Handled)
@@ -7451,7 +7543,7 @@ fn handle_capability_surface_command(
 }
 
 fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
-    let objective_usage = "Usage: `/objective <text>` or `/objective status|plan|constraints|counterfactual <scenario> | <expected_delta>|profile [status|list|general|me|set <id>]|simulator [status|balanced|strict|aggressive]|ensemble [status|committee|single|debate]|ledger [status|tail [n]|clear]|clear`.";
+    let objective_usage = "Usage: `/objective <text>` or `/objective status|plan|constraints|counterfactual <scenario> | <expected_delta>|profile [status|list|general|me|set <id>]|simulator [status|balanced|strict|aggressive]|ensemble [status|committee|single|debate]|ledger [status|tail [n]|clear]|dag [status|rebuild|clear]|eval [status|tail [n]]|clear`.";
 
     if let Some(first) = args.first() {
         let cmd = first.trim().to_ascii_lowercase();
@@ -7690,6 +7782,111 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
             return Ok(CommandResult::Handled);
         }
 
+        if cmd == "dag" {
+            let sub = args
+                .get(1)
+                .map(|v| v.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "status".to_string());
+            if sub == "rebuild" || sub == "build" {
+                let dag = build_objective_dag_from_contract()?;
+                emit_command_output(
+                    app,
+                    format!(
+                        "Objective DAG rebuilt.\nobjective_id={}\nnodes={}\nauto_resume_checkpoint={}",
+                        dag.objective_id,
+                        dag.nodes.len(),
+                        dag.auto_resume_checkpoint
+                    ),
+                );
+                return Ok(CommandResult::Handled);
+            }
+            if sub == "clear" {
+                clear_objective_dag()?;
+                emit_command_output(app, "Objective DAG cleared.");
+                return Ok(CommandResult::Handled);
+            }
+            let dag = load_objective_dag()?;
+            let mut out = String::new();
+            out.push_str("Objective DAG\n");
+            out.push_str("-------------\n");
+            let _ = writeln!(out, "objective_id: {}", dag.objective_id);
+            let _ = writeln!(out, "updated_at: {}", dag.updated_at);
+            let _ = writeln!(
+                out,
+                "auto_resume_checkpoint: {}",
+                dag.auto_resume_checkpoint
+            );
+            if dag.nodes.is_empty() {
+                out.push_str("nodes: (empty)\n");
+            } else {
+                for node in dag.nodes {
+                    let _ = writeln!(
+                        out,
+                        "- {} [{}] depends_on=[{}] rollback={}",
+                        node.id,
+                        node.status,
+                        node.depends_on.join(","),
+                        node.rollback
+                    );
+                    let _ = writeln!(out, "  title: {}", node.title);
+                }
+            }
+            emit_command_output(app, out.trim_end());
+            return Ok(CommandResult::Handled);
+        }
+
+        if cmd == "eval" {
+            let sub = args
+                .get(1)
+                .map(|v| v.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "status".to_string());
+            let trend = load_objective_eval_trend()?;
+            if sub == "tail" {
+                let n = args
+                    .get(2)
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(12)
+                    .clamp(1, 100);
+                let start = trend.samples.len().saturating_sub(n);
+                let mut out = String::new();
+                out.push_str("Objective eval trend tail\n");
+                out.push_str("------------------------\n");
+                for sample in &trend.samples[start..] {
+                    let _ = writeln!(
+                        out,
+                        "- {} id={} state={} score={:.3} note={}",
+                        sample.recorded_at,
+                        sample.objective_id,
+                        sample.objective_state,
+                        sample.score,
+                        sample.note
+                    );
+                }
+                if trend.samples.is_empty() {
+                    out.push_str("(empty)\n");
+                }
+                emit_command_output(app, out.trim_end());
+                return Ok(CommandResult::Handled);
+            }
+            let latest = trend.samples.last().map(|s| s.score).unwrap_or(0.0);
+            let avg = if trend.samples.is_empty() {
+                0.0
+            } else {
+                trend.samples.iter().map(|s| s.score).sum::<f64>() / trend.samples.len() as f64
+            };
+            emit_command_output(
+                app,
+                format!(
+                    "Objective eval trend\nsamples={}\nlatest_score={:.3}\navg_score={:.3}\nupdated_at={}",
+                    trend.samples.len(),
+                    latest,
+                    avg,
+                    trend.updated_at
+                ),
+            );
+            return Ok(CommandResult::Handled);
+        }
+
         if cmd == "status" || cmd == "show" {
             let mut out = String::new();
             match app.session_objective.as_deref() {
@@ -7860,6 +8057,7 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
     .iter()
     .any(|needle| objective_lc.contains(needle));
     let contract = upsert_objective_contract(&objective, trading_sensitive)?;
+    let _ = build_objective_dag_from_contract();
     app.set_session_objective(Some(objective.clone()));
     let _ = append_objective_learning_entry(ObjectiveLearningLedgerEntry {
         recorded_at: String::new(),
@@ -7882,6 +8080,631 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
             summarize_objective_contract(&contract)
         ),
     );
+    Ok(CommandResult::Handled)
+}
+
+fn handle_claims_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let sub = args
+        .first()
+        .copied()
+        .unwrap_or("status")
+        .trim()
+        .to_ascii_lowercase();
+    match sub.as_str() {
+        "status" => {
+            let policy = load_claim_verifier_policy()?;
+            emit_command_output(
+                app,
+                format!(
+                    "Claim verifier policy\nenabled={}\nrequired={}\nmax_retries={}\nupdated_at={}\n\nWhen enabled, repo-review finalization enforces verified evidence tags before completion claims.",
+                    policy.enabled, policy.required, policy.max_retries, policy.updated_at
+                ),
+            );
+        }
+        "on" | "enable" | "true" | "1" => {
+            let policy = set_claim_verifier_enabled(true)?;
+            std::env::set_var("HERMES_CLAIM_VERIFIER_ENABLED", "1");
+            emit_command_output(
+                app,
+                format!(
+                    "Claim verifier enabled.\nrequired={}\nmax_retries={}",
+                    policy.required, policy.max_retries
+                ),
+            );
+        }
+        "off" | "disable" | "false" | "0" => {
+            let policy = set_claim_verifier_enabled(false)?;
+            std::env::set_var("HERMES_CLAIM_VERIFIER_ENABLED", "0");
+            emit_command_output(
+                app,
+                format!(
+                    "Claim verifier disabled.\nrequired={}\nmax_retries={}",
+                    policy.required, policy.max_retries
+                ),
+            );
+        }
+        _ => emit_command_output(app, "Usage: /claims [status|on|off]"),
+    }
+    Ok(CommandResult::Handled)
+}
+
+fn clear_quorum_system_hints(app: &mut App) {
+    app.messages.retain(|m| {
+        if m.role != hermes_core::MessageRole::System {
+            return true;
+        }
+        !m.content
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("[QUORUM_MODE] ")
+    });
+}
+
+fn install_quorum_system_hint(app: &mut App, voters: usize, models: &[String]) {
+    clear_quorum_system_hints(app);
+    let model_hint = if models.is_empty() {
+        "current-model-only".to_string()
+    } else {
+        models.join(", ")
+    };
+    app.messages.push(hermes_core::Message::system(format!(
+        "[QUORUM_MODE] Quorum reasoning is enabled. For complex decisions, evaluate at least {} independent hypotheses and present: (1) strongest case, (2) strongest counter-case, (3) final synthesis with explicit confidence. Preferred voter models: {}.",
+        voters, model_hint
+    )));
+}
+
+async fn handle_quorum_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let sub = args
+        .first()
+        .copied()
+        .unwrap_or("status")
+        .trim()
+        .to_ascii_lowercase();
+    match sub.as_str() {
+        "status" => {
+            let policy = load_quorum_policy()?;
+            emit_command_output(
+                app,
+                format!(
+                    "Quorum policy\nenabled={}\nmode={}\nvoters={}\nmodels={}\nupdated_at={}\n\nQuorum is optional and off by default to control token cost.",
+                    policy.enabled,
+                    policy.mode,
+                    policy.voters,
+                    if policy.models.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        policy.models.join(", ")
+                    },
+                    policy.updated_at
+                ),
+            );
+        }
+        "on" | "enable" | "true" | "1" => {
+            let policy = set_quorum_policy(true, None, None)?;
+            std::env::set_var("HERMES_QUORUM_ENABLED", "1");
+            install_quorum_system_hint(app, policy.voters, &policy.models);
+            emit_command_output(
+                app,
+                format!(
+                    "Quorum mode enabled (optional deep reasoning).\nvoters={}\nmodels={}",
+                    policy.voters,
+                    if policy.models.is_empty() {
+                        "(current model)".to_string()
+                    } else {
+                        policy.models.join(", ")
+                    }
+                ),
+            );
+        }
+        "off" | "disable" | "false" | "0" => {
+            let policy = set_quorum_policy(false, None, None)?;
+            std::env::set_var("HERMES_QUORUM_ENABLED", "0");
+            clear_quorum_system_hints(app);
+            emit_command_output(
+                app,
+                format!(
+                    "Quorum mode disabled.\nvoters={}\nmodels={}",
+                    policy.voters,
+                    if policy.models.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        policy.models.join(", ")
+                    }
+                ),
+            );
+        }
+        "voters" => {
+            let Some(raw) = args.get(1) else {
+                emit_command_output(app, "Usage: /quorum voters <2..5>");
+                return Ok(CommandResult::Handled);
+            };
+            let voters = raw.parse::<usize>().ok().unwrap_or(3).clamp(2, 5);
+            let current = load_quorum_policy()?;
+            let policy = set_quorum_policy(current.enabled, Some(voters), None)?;
+            if policy.enabled {
+                install_quorum_system_hint(app, policy.voters, &policy.models);
+            }
+            emit_command_output(app, format!("Quorum voters updated to {}.", policy.voters));
+        }
+        "models" => {
+            if args.len() < 2 {
+                emit_command_output(
+                    app,
+                    "Usage: /quorum models <provider:model[,provider:model,...]>",
+                );
+                return Ok(CommandResult::Handled);
+            }
+            let joined = args[1..].join(" ");
+            let models: Vec<String> = joined
+                .split(',')
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .collect();
+            let current = load_quorum_policy()?;
+            let policy = set_quorum_policy(current.enabled, None, Some(models))?;
+            if policy.enabled {
+                install_quorum_system_hint(app, policy.voters, &policy.models);
+            }
+            emit_command_output(
+                app,
+                format!(
+                    "Quorum models updated: {}",
+                    if policy.models.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        policy.models.join(", ")
+                    }
+                ),
+            );
+        }
+        "run" => {
+            let policy = load_quorum_policy()?;
+            if !policy.enabled {
+                emit_command_output(
+                    app,
+                    "Quorum mode is OFF. Run `/quorum on` first (kept optional to control token cost).",
+                );
+                return Ok(CommandResult::Handled);
+            }
+            install_quorum_system_hint(app, policy.voters, &policy.models);
+            emit_command_output(
+                app,
+                "Quorum deep-reasoning hint injected for subsequent turns.\nNow ask your decision/problem prompt and Hermes will respond with competing hypotheses + synthesis.",
+            );
+        }
+        _ => emit_command_output(
+            app,
+            "Usage: /quorum [status|on|off|voters <2..5>|models <a,b,c>|run]",
+        ),
+    }
+    Ok(CommandResult::Handled)
+}
+
+fn specpatch_block_reason(command: &str) -> Option<&'static str> {
+    let lower = command.to_ascii_lowercase();
+    if lower.contains("rm -rf /")
+        || lower.contains("dd if=")
+        || lower.contains("mkfs")
+        || lower.contains("shutdown")
+    {
+        return Some("destructive command pattern");
+    }
+    if lower.contains("git reset --hard") || lower.contains("git clean -fdx") {
+        return Some("history/destructive git command pattern");
+    }
+    None
+}
+
+fn slash_command_payload_from_history(app: &App, cmd: &str, args: &[&str]) -> String {
+    let fallback = args.join(" ");
+    let Some(last) = app.input_history.last() else {
+        return fallback;
+    };
+    if let Some(raw) = last.strip_prefix(cmd) {
+        return raw.trim().to_string();
+    }
+    fallback
+}
+
+async fn run_shell_capture(command: &str) -> Result<(i32, String, String), AgentError> {
+    let output = tokio::process::Command::new("bash")
+        .arg("-lc")
+        .arg(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| AgentError::Io(format!("shell command failed: {}", e)))?;
+    let code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Ok((code, stdout, stderr))
+}
+
+async fn handle_specpatch_command(
+    app: &mut App,
+    args: &[&str],
+) -> Result<CommandResult, AgentError> {
+    let payload = slash_command_payload_from_history(app, "/specpatch", args);
+    if payload.is_empty() {
+        emit_command_output(
+            app,
+            "Usage: /specpatch <verify_cmd> | <candidate_cmd_1> | <candidate_cmd_2> ...",
+        );
+        return Ok(CommandResult::Handled);
+    }
+    let segments: Vec<String> = payload
+        .split('|')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segments.len() < 2 {
+        emit_command_output(
+            app,
+            "Need at least a verify command and one candidate.\nExample: /specpatch \"cargo test -p hermes-cli\" | \"git apply fix.patch\"",
+        );
+        return Ok(CommandResult::Handled);
+    }
+    let verify_cmd = segments[0].clone();
+    let candidates = &segments[1..];
+
+    if let Some(reason) = specpatch_block_reason(&verify_cmd) {
+        emit_command_output(app, format!("specpatch blocked verify_cmd: {}", reason));
+        return Ok(CommandResult::Handled);
+    }
+
+    let mut out = String::new();
+    out.push_str("SpecPatch executor\n");
+    out.push_str("------------------\n");
+    let _ = writeln!(out, "verify_cmd: {}", verify_cmd);
+
+    let mut winner: Option<String> = None;
+    for (idx, candidate) in candidates.iter().enumerate() {
+        if let Some(reason) = specpatch_block_reason(candidate) {
+            let _ = writeln!(
+                out,
+                "[{}] blocked candidate: {} ({})",
+                idx + 1,
+                candidate,
+                reason
+            );
+            continue;
+        }
+        let _ = writeln!(out, "[{}] candidate: {}", idx + 1, candidate);
+        let (code, stdout, stderr) = run_shell_capture(candidate).await?;
+        let _ = writeln!(out, "    apply_exit={}", code);
+        if !stdout.is_empty() {
+            let _ = writeln!(
+                out,
+                "    apply_stdout={}",
+                stdout.lines().next().unwrap_or("")
+            );
+        }
+        if !stderr.is_empty() {
+            let _ = writeln!(
+                out,
+                "    apply_stderr={}",
+                stderr.lines().next().unwrap_or("")
+            );
+        }
+        let (v_code, v_stdout, v_stderr) = run_shell_capture(&verify_cmd).await?;
+        let _ = writeln!(out, "    verify_exit={}", v_code);
+        if !v_stdout.is_empty() {
+            let _ = writeln!(
+                out,
+                "    verify_stdout={}",
+                v_stdout.lines().next().unwrap_or("")
+            );
+        }
+        if !v_stderr.is_empty() {
+            let _ = writeln!(
+                out,
+                "    verify_stderr={}",
+                v_stderr.lines().next().unwrap_or("")
+            );
+        }
+        if v_code == 0 {
+            winner = Some(candidate.clone());
+            break;
+        }
+    }
+
+    if let Some(chosen) = winner {
+        let _ = writeln!(out, "\nwinner={}", chosen);
+    } else {
+        out.push_str("\nNo candidate passed verify command.\n");
+    }
+    emit_command_output(app, out.trim_end());
+    Ok(CommandResult::Handled)
+}
+
+fn objective_runtime_ledger_path() -> PathBuf {
+    hermes_config::hermes_home()
+        .join("alpha")
+        .join("objective_runtime_ledger.jsonl")
+}
+
+fn normalize_repo_relative_path(repo_root: &Path, raw: &str) -> Option<String> {
+    let trimmed = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('`')
+        .trim_matches(',');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        let rel = path.strip_prefix(repo_root).ok()?;
+        return Some(rel.display().to_string());
+    }
+    Some(path.display().to_string())
+}
+
+fn extract_marker_paths(text: &str) -> Vec<String> {
+    let Ok(re) = Regex::new(r"(?:path|file)=([^\s\],;]+)") else {
+        return Vec::new();
+    };
+    re.captures_iter(text)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+        .collect()
+}
+
+async fn count_git_tracked_files(repo_root: &Path) -> Result<usize, AgentError> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("ls-files")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .map_err(|e| AgentError::Io(format!("git ls-files failed: {}", e)))?;
+    if !output.status.success() {
+        return Ok(0);
+    }
+    let count = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    Ok(count)
+}
+
+async fn handle_heatmap_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let repo_root = if let Some(path) = args.first() {
+        PathBuf::from(path)
+    } else if let Some(root) = discover_repo_root_for_about() {
+        root
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    };
+    if !repo_root.exists() {
+        emit_command_output(
+            app,
+            format!("Repo path does not exist: {}", repo_root.display()),
+        );
+        return Ok(CommandResult::Handled);
+    }
+
+    let mut counts: HashMap<String, u64> = HashMap::new();
+    let ledger_path = objective_runtime_ledger_path();
+    if ledger_path.exists() {
+        let raw = std::fs::read_to_string(&ledger_path).unwrap_or_default();
+        for line in raw.lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if let Some(files) = value.get("evidence_files").and_then(|v| v.as_array()) {
+                for raw_path in files.iter().filter_map(|v| v.as_str()) {
+                    if let Some(path) = normalize_repo_relative_path(&repo_root, raw_path) {
+                        *counts.entry(path).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+    for msg in &app.messages {
+        if let Some(content) = msg.content.as_deref() {
+            for raw_path in extract_marker_paths(content) {
+                if let Some(path) = normalize_repo_relative_path(&repo_root, &raw_path) {
+                    *counts.entry(path).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    let tracked = count_git_tracked_files(&repo_root).await?;
+    let mut rows: Vec<(String, u64, bool)> = counts
+        .into_iter()
+        .map(|(path, hits)| {
+            let exists = repo_root.join(&path).exists();
+            (path, hits, exists)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let verified_existing = rows.iter().filter(|(_, _, exists)| *exists).count();
+    let coverage_pct = if tracked == 0 {
+        0.0
+    } else {
+        (verified_existing as f64 / tracked as f64) * 100.0
+    };
+
+    let mut out = String::new();
+    out.push_str("Context heatmap\n");
+    out.push_str("---------------\n");
+    let _ = writeln!(out, "repo_root={}", repo_root.display());
+    let _ = writeln!(out, "tracked_files={}", tracked);
+    let _ = writeln!(out, "observed_paths={}", rows.len());
+    let _ = writeln!(
+        out,
+        "verified_existing_paths={} ({:.2}% coverage of tracked files)",
+        verified_existing, coverage_pct
+    );
+    for (path, hits, exists) in rows.iter().take(30) {
+        let _ = writeln!(out, "- hits={:<4} exists={} path={}", hits, exists, path);
+    }
+    if rows.is_empty() {
+        out.push_str("- no evidence paths recorded yet\n");
+    }
+    emit_command_output(app, out.trim_end());
+    Ok(CommandResult::Handled)
+}
+
+fn read_replay_export_rows(path: &Path) -> Result<Vec<serde_json::Value>, AgentError> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| AgentError::Io(format!("Failed to read {}: {}", path.display(), e)))?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        AgentError::Config(format!(
+            "Failed to parse replay export {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+    Ok(parsed
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+async fn handle_studio_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    if args.is_empty() {
+        emit_command_output(
+            app,
+            "Usage: /studio replay [status|verify [path]|diff <export_a.json> <export_b.json>]",
+        );
+        return Ok(CommandResult::Handled);
+    }
+    let section = args[0].trim().to_ascii_lowercase();
+    if section != "replay" {
+        emit_command_output(
+            app,
+            "Usage: /studio replay [status|verify [path]|diff <export_a.json> <export_b.json>]",
+        );
+        return Ok(CommandResult::Handled);
+    }
+    let action = args
+        .get(1)
+        .map(|v| v.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "status".to_string());
+    match action.as_str() {
+        "status" => {
+            let replay_path = replay_log_path_for_session(&app.session_id);
+            let export_dir = hermes_config::hermes_home()
+                .join("logs")
+                .join("replay")
+                .join("exports");
+            emit_command_output(
+                app,
+                format!(
+                    "Replay studio status\nsession={}\nreplay_log={}\nreplay_exists={}\nexport_dir={}",
+                    app.session_id,
+                    replay_path.display(),
+                    replay_path.exists(),
+                    export_dir.display()
+                ),
+            );
+        }
+        "verify" => {
+            let replay_path = args
+                .get(2)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| replay_log_path_for_session(&app.session_id));
+            if !replay_path.exists() {
+                emit_command_output(
+                    app,
+                    format!("Replay file not found: {}", replay_path.display()),
+                );
+                return Ok(CommandResult::Handled);
+            }
+            if replay_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            {
+                let rows = read_replay_export_rows(&replay_path)?;
+                emit_command_output(
+                    app,
+                    format!(
+                        "Replay export verification\npath={}\nrows={}\nstatus={}",
+                        replay_path.display(),
+                        rows.len(),
+                        if rows.is_empty() { "empty" } else { "ok" }
+                    ),
+                );
+            } else {
+                let (entries, parse_errors, chain_breaks) = replay_trace_integrity(&replay_path)?;
+                emit_command_output(
+                    app,
+                    format!(
+                        "Replay log verification\npath={}\nentries={}\nparse_errors={}\nchain_breaks={}\nstatus={}",
+                        replay_path.display(),
+                        entries,
+                        parse_errors,
+                        chain_breaks,
+                        if parse_errors == 0 && chain_breaks == 0 {
+                            "pass"
+                        } else {
+                            "fail"
+                        }
+                    ),
+                );
+            }
+        }
+        "diff" => {
+            if args.len() < 4 {
+                emit_command_output(
+                    app,
+                    "Usage: /studio replay diff <export_a.json> <export_b.json>",
+                );
+                return Ok(CommandResult::Handled);
+            }
+            let a = PathBuf::from(args[2]);
+            let b = PathBuf::from(args[3]);
+            let a_rows = read_replay_export_rows(&a)?;
+            let b_rows = read_replay_export_rows(&b)?;
+            let a_hashes: HashSet<String> = a_rows
+                .iter()
+                .filter_map(|row| {
+                    row.get("event_hash")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+            let b_hashes: HashSet<String> = b_rows
+                .iter()
+                .filter_map(|row| {
+                    row.get("event_hash")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+            let only_a = a_hashes.difference(&b_hashes).count();
+            let only_b = b_hashes.difference(&a_hashes).count();
+            let overlap = a_hashes.intersection(&b_hashes).count();
+            emit_command_output(
+                app,
+                format!(
+                    "Replay diff\nA={} rows={} hashes={}\nB={} rows={} hashes={}\noverlap_hashes={}\nonly_in_a={}\nonly_in_b={}",
+                    a.display(),
+                    a_rows.len(),
+                    a_hashes.len(),
+                    b.display(),
+                    b_rows.len(),
+                    b_hashes.len(),
+                    overlap,
+                    only_a,
+                    only_b
+                ),
+            );
+        }
+        _ => emit_command_output(
+            app,
+            "Usage: /studio replay [status|verify [path]|diff <export_a.json> <export_b.json>]",
+        ),
+    }
     Ok(CommandResult::Handled)
 }
 
@@ -14433,5 +15256,30 @@ install_command: "uv pip install -r requirements.txt"
             "publish",
             None
         ));
+    }
+
+    #[test]
+    fn specpatch_block_reason_flags_destructive_patterns() {
+        assert!(specpatch_block_reason("echo safe").is_none());
+        assert!(specpatch_block_reason("rm -rf /").is_some());
+        assert!(specpatch_block_reason("rm -rf /tmp").is_some());
+        assert!(specpatch_block_reason("git reset --hard HEAD").is_some());
+    }
+
+    #[test]
+    fn extract_marker_paths_captures_path_and_file_tokens() {
+        let text = "PATCH_VERIFIED: path=/tmp/a.rs file=src/main.rs cmd=rg -n foo";
+        let paths = extract_marker_paths(text);
+        assert!(paths.contains(&"/tmp/a.rs".to_string()));
+        assert!(paths.contains(&"src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn normalize_repo_relative_path_handles_absolute_and_relative() {
+        let root = PathBuf::from("/tmp/repo");
+        let rel = normalize_repo_relative_path(&root, "src/main.rs").expect("relative");
+        assert_eq!(rel, "src/main.rs");
+        let abs = normalize_repo_relative_path(&root, "/tmp/repo/src/lib.rs").expect("abs");
+        assert_eq!(abs, "src/lib.rs");
     }
 }

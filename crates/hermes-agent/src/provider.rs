@@ -8,7 +8,9 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use hermes_intelligence::anthropic_adapter::get_anthropic_max_output;
@@ -1395,6 +1397,27 @@ pub struct OpenRouterProvider {
     pub x_title: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct OpenRouterResponseCacheControl {
+    enabled: bool,
+    clear: bool,
+    ttl_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+struct OpenRouterResponseCacheEntry {
+    response: LlmResponse,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct OpenRouterResponseCache {
+    entries: HashMap<String, OpenRouterResponseCacheEntry>,
+    order: VecDeque<String>,
+}
+
+static OPENROUTER_RESPONSE_CACHE: OnceLock<Mutex<OpenRouterResponseCache>> = OnceLock::new();
+
 impl OpenRouterProvider {
     /// Create a new OpenRouter provider with the given API key.
     pub fn new(api_key: impl Into<String>) -> Self {
@@ -1445,11 +1468,138 @@ impl OpenRouterProvider {
         headers
     }
 
+    fn openrouter_response_cache_enabled() -> bool {
+        std::env::var("HERMES_OPENROUTER_RESPONSE_CACHE")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "enabled"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn openrouter_response_cache_ttl_secs() -> u64 {
+        std::env::var("HERMES_OPENROUTER_RESPONSE_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(300)
+    }
+
+    fn openrouter_response_cache_max_entries() -> usize {
+        std::env::var("HERMES_OPENROUTER_RESPONSE_CACHE_MAX_ENTRIES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(256)
+    }
+
+    fn parse_response_cache_control(extra_body: Option<&Value>) -> OpenRouterResponseCacheControl {
+        let mut enabled = Self::openrouter_response_cache_enabled();
+        let mut clear = false;
+        let mut ttl_secs = Self::openrouter_response_cache_ttl_secs();
+
+        if let Some(Value::Object(map)) = extra_body {
+            if let Some(v) = map.get("response_cache_enabled").and_then(Value::as_bool) {
+                enabled = v;
+            }
+            if let Some(v) = map.get("response_cache_clear").and_then(Value::as_bool) {
+                clear = v;
+            }
+            if let Some(v) = map
+                .get("response_cache_ttl_secs")
+                .and_then(Value::as_u64)
+                .filter(|v| *v > 0)
+            {
+                ttl_secs = v;
+            }
+            if let Some(Value::Bool(flag)) = map.get("response_cache") {
+                enabled = *flag;
+            }
+            if let Some(Value::Object(cache_cfg)) = map.get("response_cache") {
+                if let Some(v) = cache_cfg.get("enabled").and_then(Value::as_bool) {
+                    enabled = v;
+                }
+                if let Some(v) = cache_cfg.get("clear").and_then(Value::as_bool) {
+                    clear = v;
+                }
+                if let Some(v) = cache_cfg
+                    .get("ttl_secs")
+                    .and_then(Value::as_u64)
+                    .filter(|v| *v > 0)
+                {
+                    ttl_secs = v;
+                }
+            }
+        }
+
+        OpenRouterResponseCacheControl {
+            enabled,
+            clear,
+            ttl_secs,
+        }
+    }
+
     /// Merge OpenRouter-specific parameters into extra_body.
     fn merge_extra_body(extra_body: Option<&Value>) -> Option<Value> {
-        // Pass through extra_body as-is; OpenRouter-specific fields like
-        // `transforms`, `provider`, `route` are already valid top-level keys
-        extra_body.cloned()
+        let Some(Value::Object(map)) = extra_body else {
+            return extra_body.cloned();
+        };
+        let mut cleaned = map.clone();
+        cleaned.remove("response_cache");
+        cleaned.remove("response_cache_enabled");
+        cleaned.remove("response_cache_ttl_secs");
+        cleaned.remove("response_cache_clear");
+        Some(Value::Object(cleaned))
+    }
+
+    fn response_cache_key(model: &str, body: &Value) -> Option<String> {
+        let encoded = serde_json::to_vec(body).ok()?;
+        let mut hasher = Sha256::new();
+        hasher.update(model.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(encoded);
+        Some(format!("{:x}", hasher.finalize()))
+    }
+
+    fn response_cache_get(key: &str) -> Option<LlmResponse> {
+        let cache = OPENROUTER_RESPONSE_CACHE
+            .get_or_init(|| Mutex::new(OpenRouterResponseCache::default()));
+        let mut guard = cache.lock().expect("openrouter cache lock poisoned");
+        let now = Instant::now();
+        if let Some(entry) = guard.entries.get(key) {
+            if now < entry.expires_at {
+                return Some(entry.response.clone());
+            }
+        }
+        guard.entries.remove(key);
+        guard.order.retain(|k| k != key);
+        None
+    }
+
+    fn response_cache_insert(key: String, response: &LlmResponse, ttl_secs: u64) {
+        let cache = OPENROUTER_RESPONSE_CACHE
+            .get_or_init(|| Mutex::new(OpenRouterResponseCache::default()));
+        let mut guard = cache.lock().expect("openrouter cache lock poisoned");
+        let now = Instant::now();
+        guard.entries.insert(
+            key.clone(),
+            OpenRouterResponseCacheEntry {
+                response: response.clone(),
+                expires_at: now + Duration::from_secs(ttl_secs.max(1)),
+            },
+        );
+        guard.order.retain(|k| k != &key);
+        guard.order.push_back(key);
+        while guard.entries.len() > Self::openrouter_response_cache_max_entries() {
+            if let Some(evict) = guard.order.pop_front() {
+                guard.entries.remove(&evict);
+            } else {
+                break;
+            }
+        }
     }
 
     /// Parse an OpenRouter response, extracting reasoning_details if present.
@@ -1479,6 +1629,17 @@ impl LlmProvider for OpenRouterProvider {
         // Build a provider clone with OpenRouter headers
         let mut provider = self.inner.clone();
         provider.extra_headers = self.build_headers();
+        let cache_control = Self::parse_response_cache_control(extra_body);
+        if cache_control.enabled {
+            provider
+                .extra_headers
+                .push(("X-OpenRouter-Cache".to_string(), "true".to_string()));
+            if cache_control.clear {
+                provider
+                    .extra_headers
+                    .push(("X-OpenRouter-Cache-Clear".to_string(), "true".to_string()));
+            }
+        }
 
         let merged_extra = Self::merge_extra_body(extra_body);
 
@@ -1514,6 +1675,17 @@ impl LlmProvider for OpenRouterProvider {
             }
         }
 
+        let cache_key = if cache_control.enabled && !cache_control.clear {
+            Self::response_cache_key(effective_model, &body)
+        } else {
+            None
+        };
+        if let Some(ref key) = cache_key {
+            if let Some(hit) = Self::response_cache_get(key) {
+                return Ok(hit);
+            }
+        }
+
         let url = format!(
             "{}/chat/completions",
             provider.base_url.trim_end_matches('/')
@@ -1540,8 +1712,11 @@ impl LlmProvider for OpenRouterProvider {
             .json()
             .await
             .map_err(|e| AgentError::LlmApi(format!("Failed to parse response: {e}")))?;
-
-        Self::parse_openrouter_response(&resp_json)
+        let parsed = Self::parse_openrouter_response(&resp_json)?;
+        if let Some(key) = cache_key {
+            Self::response_cache_insert(key, &parsed, cache_control.ttl_secs);
+        }
+        Ok(parsed)
     }
 
     fn chat_completion_stream(
@@ -2214,6 +2389,43 @@ mod tests {
             .iter()
             .any(|(k, v)| k == "HTTP-Referer" && v == "https://example.com"));
         assert!(headers.iter().any(|(k, v)| k == "X-Title" && v == "My App"));
+    }
+
+    #[test]
+    fn test_openrouter_parse_response_cache_control_from_extra_body() {
+        let extra = serde_json::json!({
+            "response_cache": {
+                "enabled": true,
+                "ttl_secs": 42,
+                "clear": false
+            }
+        });
+        let control = OpenRouterProvider::parse_response_cache_control(Some(&extra));
+        assert!(control.enabled);
+        assert_eq!(control.ttl_secs, 42);
+        assert!(!control.clear);
+    }
+
+    #[test]
+    fn test_openrouter_merge_extra_body_strips_local_cache_fields() {
+        let extra = serde_json::json!({
+            "response_cache": {"enabled": true},
+            "response_cache_enabled": true,
+            "response_cache_ttl_secs": 30,
+            "response_cache_clear": false,
+            "route": "fallback",
+            "provider": {"order": ["openai"]}
+        });
+        let merged = OpenRouterProvider::merge_extra_body(Some(&extra)).expect("merged body");
+        assert!(merged.get("response_cache").is_none());
+        assert!(merged.get("response_cache_enabled").is_none());
+        assert!(merged.get("response_cache_ttl_secs").is_none());
+        assert!(merged.get("response_cache_clear").is_none());
+        assert_eq!(
+            merged.get("route").and_then(|v| v.as_str()),
+            Some("fallback")
+        );
+        assert!(merged.get("provider").is_some());
     }
 
     #[test]

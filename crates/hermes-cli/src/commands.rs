@@ -134,6 +134,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/mcp", "List configured MCP servers"),
     ("/reload", "Reload runtime env/config values"),
     ("/reload-skills", "Refresh installed skill index/registry"),
+    ("/reload_skills", "Alias for /reload-skills"),
     ("/reload-mcp", "Reload MCP server metadata"),
     ("/reload_mcp", "Alias for /reload-mcp"),
     ("/cron", "Show cron scheduler status"),
@@ -213,6 +214,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/load", "Load a saved session"),
     ("/resume", "Resume the most recent or named saved session"),
     ("/background", "Run a task in the background"),
+    ("/bg", "Alias for /background"),
     ("/mouse", "Toggle mouse interactions in the TUI"),
     ("/verbose", "Toggle verbose mode"),
     ("/statusbar", "Toggle status bar visibility"),
@@ -2917,6 +2919,7 @@ fn canonical_command(cmd: &str) -> &str {
         "/scheduler" => "/background",
         "/gateway" => "/platforms",
         "/reload-skills" => "/reload",
+        "/reload_skills" => "/reload",
         "/reload_mcp" => "/reload-mcp",
         "/fork" => "/branch",
         "/snap" => "/snapshot",
@@ -2924,6 +2927,7 @@ fn canonical_command(cmd: &str) -> &str {
         "/footer" => "/statusbar",
         "/indicator" => "/statusbar",
         "/q" => "/queue",
+        "/bg" => "/background",
         "/goal" => "/objective",
         "/question" => "/ask",
         "/autocompress" => "/autocompact",
@@ -3483,6 +3487,17 @@ async fn guard_provider_model_selection(
     let provider = provider.trim().to_ascii_lowercase();
     if provider.is_empty() {
         return Ok((provider_model.to_string(), None));
+    }
+    if matches!(provider.as_str(), "openai-codex" | "codex")
+        || (provider == "openai" && model_id.to_ascii_lowercase().contains("codex"))
+    {
+        return Ok((
+            provider_model.to_string(),
+            Some(format!(
+                "Catalog guard soft-accepted unlisted Codex model `{}`.",
+                model_id.trim()
+            )),
+        ));
     }
     if !curated_provider_slugs()
         .iter()
@@ -13070,11 +13085,28 @@ mod tests {
     fn test_upstream_compat_aliases_are_mapped() {
         assert_eq!(canonical_command("/topic"), "/title");
         assert_eq!(canonical_command("/reload-skills"), "/reload");
+        assert_eq!(canonical_command("/reload_skills"), "/reload");
         assert_eq!(canonical_command("/footer"), "/statusbar");
         assert_eq!(canonical_command("/indicator"), "/statusbar");
         assert_eq!(canonical_command("/kanban"), "/agents");
         assert_eq!(canonical_command("/busy"), "/status");
+        assert_eq!(canonical_command("/bg"), "/background");
         assert_eq!(canonical_command("/curator"), "/skills");
+    }
+
+    #[tokio::test]
+    async fn guard_provider_model_selection_soft_accepts_unlisted_codex_models() {
+        let _guard = env_test_lock();
+        std::env::set_var("HERMES_MODEL_CATALOG_GUARD", "1");
+        let (guarded, note) = guard_provider_model_selection("openai-codex:gpt-9-codex-preview")
+            .await
+            .expect("codex soft-accept");
+        assert_eq!(guarded, "openai-codex:gpt-9-codex-preview");
+        assert!(note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("soft-accepted"));
+        std::env::remove_var("HERMES_MODEL_CATALOG_GUARD");
     }
 
     #[test]

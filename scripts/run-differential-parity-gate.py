@@ -133,12 +133,82 @@ def extract_top_level_cli_commands(cli_source: str) -> list[str]:
     return sorted(set(names))
 
 
+def extract_slash_commands_from_rust(source: str) -> list[str]:
+    commands: set[str] = set()
+    table_match = re.search(
+        r"pub\s+const\s+SLASH_COMMANDS\s*:[\s\S]*?=\s*&\[(?P<body>[\s\S]*?)\];",
+        source,
+    )
+    if table_match:
+        body = table_match.group("body")
+        commands.update(
+            m.group(1)
+            for m in re.finditer(r'\(\s*"/([A-Za-z0-9_-]+)"\s*,', body)
+        )
+    if not commands:
+        commands.update(
+            m.group(1)
+            for m in re.finditer(r'name:\s*"/([A-Za-z0-9_-]+)"', source)
+        )
+    return sorted(commands)
+
+
+def extract_slash_commands_from_python(source: str) -> list[str]:
+    commands: set[str] = set()
+    current_block: list[str] = []
+    in_entry = False
+    for raw in source.splitlines():
+        line = raw.rstrip()
+        if not in_entry:
+            if "CommandDef(" in line:
+                in_entry = True
+                current_block = [line]
+        else:
+            current_block.append(line)
+            if line.strip().endswith("),"):
+                block = "\n".join(current_block)
+                name_match = re.search(r'CommandDef\("([A-Za-z0-9_-]+)"', block)
+                if name_match:
+                    commands.add(name_match.group(1))
+                alias_match = re.search(r"aliases=\(([^)]*)\)", block, flags=re.DOTALL)
+                if alias_match:
+                    commands.update(
+                        m.group(1)
+                        for m in re.finditer(r'"([A-Za-z0-9_-]+)"', alias_match.group(1))
+                    )
+                in_entry = False
+                current_block = []
+    if not commands:
+        for hit in re.finditer(r'["\']\/([A-Za-z0-9_-]+)["\']', source):
+            commands.add(hit.group(1))
+    return sorted(commands)
+
+
+def collect_python_cli_surface(repo_root: pathlib.Path, ref: str) -> dict[str, Any] | None:
+    cli_py = git_show_file(repo_root, ref, "cli.py")
+    if not cli_py:
+        return None
+    commands_py = git_show_file(repo_root, ref, "hermes_cli/commands.py")
+    gateway_commands_py = git_show_file(repo_root, ref, "gateway/commands.py")
+    command_source = "\n".join(
+        part for part in [commands_py, gateway_commands_py, cli_py] if part
+    )
+    slash_commands = extract_slash_commands_from_python(command_source)
+    return {
+        "ref": ref,
+        "surface_kind": "python",
+        "slash_commands": slash_commands,
+        "top_level": [],
+        "actions": {},
+    }
+
+
 def collect_cli_surface(repo_root: pathlib.Path, ref: str) -> dict[str, Any] | None:
     cli_rs = git_show_file(repo_root, ref, "crates/hermes-cli/src/cli.rs")
     main_rs = git_show_file(repo_root, ref, "crates/hermes-cli/src/main.rs")
     commands_rs = git_show_file(repo_root, ref, "crates/hermes-cli/src/commands.rs")
     if not cli_rs or not main_rs or not commands_rs:
-        return None
+        return collect_python_cli_surface(repo_root, ref)
 
     fn_map: dict[str, tuple[str, str]] = {
         "tools": ("main", "run_tools"),
@@ -158,7 +228,9 @@ def collect_cli_surface(repo_root: pathlib.Path, ref: str) -> dict[str, Any] | N
 
     return {
         "ref": ref,
+        "surface_kind": "rust",
         "top_level": extract_top_level_cli_commands(cli_rs),
+        "slash_commands": extract_slash_commands_from_rust(commands_rs),
         "actions": actions,
     }
 
@@ -166,6 +238,25 @@ def collect_cli_surface(repo_root: pathlib.Path, ref: str) -> dict[str, Any] | N
 def compute_cli_surface_drift(
     local_surface: dict[str, Any], upstream_surface: dict[str, Any]
 ) -> dict[str, Any]:
+    local_kind = local_surface.get("surface_kind", "rust")
+    upstream_kind = upstream_surface.get("surface_kind", "rust")
+    if local_kind != upstream_kind:
+        local_slash = set(local_surface.get("slash_commands", []))
+        upstream_slash = set(upstream_surface.get("slash_commands", []))
+        missing_slash = sorted(upstream_slash - local_slash)
+        extra_slash = sorted(local_slash - upstream_slash)
+        return {
+            "has_drift": bool(missing_slash),
+            "surface_kind": f"{local_kind}_vs_{upstream_kind}",
+            "top_level": {"missing_in_local": [], "extra_in_local": []},
+            "slash_commands": {
+                "missing_in_local": missing_slash,
+                "extra_in_local": extra_slash,
+            },
+            "actions": {},
+            "missing_action_count": 0,
+        }
+
     local_top = set(local_surface.get("top_level", []))
     upstream_top = set(upstream_surface.get("top_level", []))
     top_missing = sorted(upstream_top - local_top)
@@ -191,9 +282,20 @@ def compute_cli_surface_drift(
     has_drift = bool(top_missing or missing_total > 0)
     return {
         "has_drift": has_drift,
+        "surface_kind": "rust",
         "top_level": {
             "missing_in_local": top_missing,
             "extra_in_local": top_extra,
+        },
+        "slash_commands": {
+            "missing_in_local": sorted(
+                set(upstream_surface.get("slash_commands", []))
+                - set(local_surface.get("slash_commands", []))
+            ),
+            "extra_in_local": sorted(
+                set(local_surface.get("slash_commands", []))
+                - set(upstream_surface.get("slash_commands", []))
+            ),
         },
         "actions": per_command,
         "missing_action_count": missing_total,

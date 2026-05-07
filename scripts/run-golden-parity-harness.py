@@ -21,14 +21,18 @@ REQUIRED_TUI_TESTS = [
     "test_completion_popup_hidden_when_slash_deleted",
     "test_completion_popup_hidden_when_modal_or_processing_active",
     "test_transcript_hides_system_messages",
+    "test_transcript_wrap_width_caps_at_80",
+    "test_find_anchor_line_index_prefers_near_expected_window",
+    "test_submit_shortcuts_are_detected",
     "test_stream_handle",
     "test_is_ctrl_c_detection",
 ]
 
 REQUIRED_COMMAND_CONTRACTS = {
-    "/model": ["capability", "explain"],
-    "/raw": ["trace", "deterministic"],
-    "/policy": ["profile"],
+    "/model": ["capability", "explain", "why-not"],
+    "/raw": ["trace", "deterministic", "verify", "export"],
+    "/policy": ["profile", "strict"],
+    "/objective": ["contract", "profile", "ledger"],
 }
 
 

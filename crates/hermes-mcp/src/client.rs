@@ -7,10 +7,12 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, info, warn};
@@ -71,6 +73,18 @@ impl Default for SamplingConfig {
 pub type LlmCallback = Box<
     dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<Value, McpError>> + Send>> + Send + Sync,
 >;
+
+const DEFAULT_MCP_CALL_TIMEOUT_SECS: u64 = 60;
+const MAX_MCP_CALL_TIMEOUT_SECS: u64 = 900;
+const STALE_TRANSPORT_MARKERS: &[&str] = &[
+    "closedresourceerror",
+    "closed resource",
+    "transport is closed",
+    "connection closed",
+    "broken pipe",
+    "end of file",
+    "eof",
+];
 
 // ---------------------------------------------------------------------------
 // Prompt types
@@ -283,6 +297,165 @@ struct ResourcesListResponse {
     pub resources: Vec<ResourceInfo>,
 }
 
+fn mcp_call_timeout_duration() -> Duration {
+    let secs = std::env::var("HERMES_MCP_CALL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_MCP_CALL_TIMEOUT_SECS)
+        .min(MAX_MCP_CALL_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+fn is_stale_transport_error(err: &McpError) -> bool {
+    if matches!(err, McpError::ConnectionClosed) {
+        return true;
+    }
+    let message = match err {
+        McpError::ConnectionError(m) => m,
+        McpError::Protocol { message, .. } => message,
+        McpError::Io(m) => m,
+        _ => return false,
+    };
+    let lower = message.to_ascii_lowercase();
+    STALE_TRANSPORT_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn mcp_home_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("HERMES_HOME") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join(".hermes-agent-ultra");
+        }
+    }
+    PathBuf::from(".hermes-agent-ultra")
+}
+
+fn mcp_image_cache_dir() -> PathBuf {
+    mcp_home_dir().join("cache").join("images")
+}
+
+fn mcp_image_extension_for_mime_type(mime_type: &str) -> &'static str {
+    match mime_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "image/jpeg" | "image/jpg" => ".jpg",
+        "image/gif" => ".gif",
+        "image/webp" => ".webp",
+        "image/bmp" => ".bmp",
+        "image/svg+xml" => ".svg",
+        _ => ".png",
+    }
+}
+
+fn looks_like_image_bytes(data: &[u8]) -> bool {
+    data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) // PNG
+        || data.starts_with(&[0xFF, 0xD8, 0xFF]) // JPEG
+        || data.starts_with(b"GIF87a")
+        || data.starts_with(b"GIF89a")
+        || (data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP")
+        || data.starts_with(b"BM")
+}
+
+fn cache_mcp_image_block(item: &Value) -> Option<String> {
+    let typ = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if !typ.eq_ignore_ascii_case("image") && !typ.eq_ignore_ascii_case("image_content") {
+        return None;
+    }
+    let data_b64 = item.get("data").and_then(|v| v.as_str())?;
+    let mime_type = item
+        .get("mimeType")
+        .or_else(|| item.get("mime_type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("image/png")
+        .trim();
+    if !mime_type.to_ascii_lowercase().starts_with("image/") {
+        return None;
+    }
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("MCP image block decode failed ({}): {}", mime_type, e);
+            return None;
+        }
+    };
+    if !looks_like_image_bytes(&bytes) {
+        warn!(
+            "MCP image block rejected by signature check ({})",
+            mime_type
+        );
+        return None;
+    }
+    let cache_dir = mcp_image_cache_dir();
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        warn!(
+            "MCP image cache mkdir failed ({}): {}",
+            cache_dir.display(),
+            e
+        );
+        return None;
+    }
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let ext = mcp_image_extension_for_mime_type(mime_type);
+    let file_name = format!("mcp-image-{}-{}{}", std::process::id(), ts, ext);
+    let file_path = cache_dir.join(file_name);
+    if let Err(e) = std::fs::write(&file_path, &bytes) {
+        warn!(
+            "MCP image cache write failed ({}): {}",
+            file_path.display(),
+            e
+        );
+        return None;
+    }
+    Some(format!("MEDIA:{}", file_path.display()))
+}
+
+fn extract_mcp_error_message(result: &Value) -> String {
+    if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
+        for item in content {
+            if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+    }
+    if let Some(message) = result.get("message").and_then(|m| m.as_str()) {
+        let trimmed = message.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Some(kind) = result
+        .get("errorType")
+        .or_else(|| result.get("error_type"))
+        .and_then(|v| v.as_str())
+    {
+        let trimmed = kind.trim();
+        if !trimmed.is_empty() {
+            return format!("{trimmed} (empty error message)");
+        }
+    }
+    "tool call returned error".to_string()
+}
+
 // ---------------------------------------------------------------------------
 // McpClient — single-server connection
 // ---------------------------------------------------------------------------
@@ -399,42 +572,47 @@ impl McpClient {
             "arguments": arguments,
         });
 
-        let result = self.send_request("tools/call", params).await?;
+        let timeout = mcp_call_timeout_duration();
+        let started = Instant::now();
+        let result =
+            match tokio::time::timeout(timeout, self.send_request("tools/call", params)).await {
+                Ok(res) => res?,
+                Err(_) => {
+                    let elapsed = started.elapsed().as_secs_f64();
+                    return Err(McpError::ConnectionError(format!(
+                        "MCP call timed out after {:.1}s (configured timeout: {:.1}s)",
+                        elapsed,
+                        timeout.as_secs_f64()
+                    )));
+                }
+            };
 
         if result
             .get("isError")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
         {
-            let message = result
-                .get("content")
-                .and_then(|c| c.as_array())
-                .and_then(|items| {
-                    items.iter().find_map(|item| {
-                        item.get("text")
-                            .and_then(|t| t.as_str())
-                            .map(str::to_string)
-                    })
-                })
-                .unwrap_or_else(|| "tool call returned error".to_string());
+            let message = extract_mcp_error_message(&result);
             return Err(Self::classify_protocol_error(-1, &message));
         }
 
         if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
-            let texts: Vec<String> = content
-                .iter()
-                .filter_map(|item| {
-                    if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        item.get("text")
-                            .and_then(|t| t.as_str())
-                            .map(|s| s.to_string())
-                    } else {
-                        None
+            let mut parts: Vec<String> = Vec::new();
+            for item in content {
+                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                        if !text.trim().is_empty() {
+                            parts.push(text.to_string());
+                        }
                     }
-                })
-                .collect();
-            if !texts.is_empty() {
-                return Ok(serde_json::json!(texts.join("\n")));
+                    continue;
+                }
+                if let Some(media_tag) = cache_mcp_image_block(item) {
+                    parts.push(media_tag);
+                }
+            }
+            if !parts.is_empty() {
+                return Ok(serde_json::json!(parts.join("\n")));
             }
         }
 
@@ -676,10 +854,12 @@ impl McpClient {
 
         if let Some(error) = response.get("error") {
             let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-            let message = error
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown error");
+            let raw_message = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            let message = if raw_message.trim().is_empty() {
+                format!("ProtocolError(code={code})")
+            } else {
+                raw_message.to_string()
+            };
             return Err(Self::classify_protocol_error(code, message));
         }
 
@@ -689,33 +869,39 @@ impl McpClient {
         })
     }
 
-    fn classify_protocol_error(code: i64, message: &str) -> McpError {
-        let msg_lc = message.to_ascii_lowercase();
+    fn classify_protocol_error(code: i64, message: impl AsRef<str>) -> McpError {
+        let message = message.as_ref().trim();
+        let normalized_message = if message.is_empty() {
+            format!("ProtocolError(code={code})")
+        } else {
+            message.to_string()
+        };
+        let msg_lc = normalized_message.to_ascii_lowercase();
         if code == -32601 {
-            return McpError::MethodNotFound(message.to_string());
+            return McpError::MethodNotFound(normalized_message);
         }
         if code == -32602 {
-            return McpError::InvalidParams(message.to_string());
+            return McpError::InvalidParams(normalized_message);
         }
         if code == -32600 || msg_lc.contains("forbidden") || msg_lc.contains("permission denied") {
-            return McpError::Forbidden(message.to_string());
+            return McpError::Forbidden(normalized_message);
         }
         if code == -32001 {
-            return McpError::NotConfigured(message.to_string());
+            return McpError::NotConfigured(normalized_message);
         }
         if msg_lc.contains("not configured")
             || msg_lc.contains("missing config")
             || msg_lc.contains("missing command")
             || msg_lc.contains("missing url")
         {
-            return McpError::NotConfigured(message.to_string());
+            return McpError::NotConfigured(normalized_message);
         }
         if msg_lc.contains("not found") || msg_lc.contains("unknown method") {
-            return McpError::ResourceNotFound(message.to_string());
+            return McpError::ResourceNotFound(normalized_message);
         }
         McpError::Protocol {
             code,
-            message: message.to_string(),
+            message: normalized_message,
         }
     }
 
@@ -864,6 +1050,29 @@ impl McpManager {
         tool_name: &str,
         args: Value,
     ) -> Result<Value, McpError> {
+        let reconnect_config: McpServerConfig = {
+            let client = self
+                .clients
+                .get_mut(server_name)
+                .ok_or_else(|| McpError::ServerNotFound(server_name.to_string()))?;
+            match client.call_tool(tool_name, args.clone()).await {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    if is_stale_transport_error(&err) {
+                        warn!(
+                            "MCP stale transport detected on '{}' ({}); reconnecting once",
+                            server_name, err
+                        );
+                        client.config.clone()
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
+        };
+        let config = reconnect_config;
+        let _ = self.disconnect(server_name).await;
+        self.connect(server_name, config).await?;
         let client = self
             .clients
             .get_mut(server_name)
@@ -1032,8 +1241,10 @@ impl McpManager {
 
 #[cfg(test)]
 mod tests {
-    use super::McpClient;
+    use super::{cache_mcp_image_block, is_stale_transport_error, McpClient};
     use crate::McpError;
+    use serde_json::json;
+    use tempfile::TempDir;
 
     #[test]
     fn classify_protocol_error_maps_forbidden() {
@@ -1051,5 +1262,52 @@ mod tests {
     fn classify_protocol_error_maps_not_found() {
         let err = McpClient::classify_protocol_error(-1, "resource not found");
         assert!(matches!(err, McpError::ResourceNotFound(_)));
+    }
+
+    #[test]
+    fn classify_protocol_error_falls_back_when_message_empty() {
+        let err = McpClient::classify_protocol_error(-32000, "");
+        match err {
+            McpError::Protocol { message, .. } => {
+                assert!(message.contains("ProtocolError(code=-32000)"));
+            }
+            _ => panic!("expected protocol error"),
+        }
+    }
+
+    #[test]
+    fn stale_transport_marker_detection_matches_known_variants() {
+        let err = McpError::ConnectionError("ClosedResourceError: ".to_string());
+        assert!(is_stale_transport_error(&err));
+        let err = McpError::ConnectionError("broken pipe while writing".to_string());
+        assert!(is_stale_transport_error(&err));
+        let err = McpError::ConnectionError("rate limited".to_string());
+        assert!(!is_stale_transport_error(&err));
+    }
+
+    #[test]
+    fn cache_mcp_image_block_writes_media_file() {
+        let td = TempDir::new().expect("tempdir");
+        let old_home = std::env::var("HERMES_HOME").ok();
+        std::env::set_var("HERMES_HOME", td.path().display().to_string());
+        // 1x1 PNG.
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5Xn8cAAAAASUVORK5CYII=";
+        let item = json!({
+            "type": "image",
+            "mimeType": "image/png",
+            "data": png_b64
+        });
+        let media = cache_mcp_image_block(&item).expect("expected media tag");
+        assert!(media.starts_with("MEDIA:"));
+        let path = media.trim_start_matches("MEDIA:");
+        assert!(
+            std::path::Path::new(path).exists(),
+            "cached media path should exist"
+        );
+        if let Some(prev) = old_home {
+            std::env::set_var("HERMES_HOME", prev);
+        } else {
+            std::env::remove_var("HERMES_HOME");
+        }
     }
 }

@@ -287,6 +287,18 @@ impl Default for ApprovalStore {
     }
 }
 
+fn coerce_u64(value: Option<&Value>, default: u64, minimum: u64, maximum: u64) -> u64 {
+    let parsed = match value {
+        Some(Value::Number(num)) => num
+            .as_u64()
+            .or_else(|| num.as_i64().map(|v| v.max(0) as u64)),
+        Some(Value::String(s)) => s.trim().parse::<u64>().ok(),
+        _ => None,
+    }
+    .unwrap_or(default);
+    parsed.clamp(minimum, maximum)
+}
+
 // ---------------------------------------------------------------------------
 // HermesMcpServe — the MCP server exposing session tools
 // ---------------------------------------------------------------------------
@@ -426,7 +438,7 @@ impl HermesMcpServe {
 
     fn tool_session_list(&self, args: Value) -> Result<Value, McpError> {
         let platform = args.get("platform").and_then(|v| v.as_str());
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+        let limit = coerce_u64(args.get("limit"), 50, 1, 200) as usize;
         let search = args.get("search").and_then(|v| v.as_str());
 
         let sessions = self.session_store.list_sessions();
@@ -454,7 +466,7 @@ impl HermesMcpServe {
             .get("session_key")
             .and_then(|v| v.as_str())
             .ok_or_else(|| McpError::InvalidParams("missing session_key".into()))?;
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+        let limit = coerce_u64(args.get("limit"), 50, 1, 200) as usize;
 
         let sessions = self.session_store.list_sessions();
         let entry = sessions
@@ -493,12 +505,9 @@ impl HermesMcpServe {
     }
 
     fn tool_events_poll(&self, args: Value) -> Result<Value, McpError> {
-        let after = args
-            .get("after_cursor")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let after = coerce_u64(args.get("after_cursor"), 0, 0, u64::MAX);
         let session_key = args.get("session_key").and_then(|v| v.as_str());
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+        let limit = coerce_u64(args.get("limit"), 20, 1, 200) as usize;
 
         let (events, next_cursor) = self.event_bridge.poll(after, session_key, limit);
 
@@ -509,16 +518,9 @@ impl HermesMcpServe {
     }
 
     async fn tool_events_wait(&self, args: Value) -> Result<Value, McpError> {
-        let after = args
-            .get("after_cursor")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let after = coerce_u64(args.get("after_cursor"), 0, 0, u64::MAX);
         let session_key = args.get("session_key").and_then(|v| v.as_str());
-        let timeout_ms = args
-            .get("timeout_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(30_000)
-            .min(300_000); // cap at 5 minutes
+        let timeout_ms = coerce_u64(args.get("timeout_ms"), 30_000, 0, 300_000); // cap at 5 minutes
 
         let timeout = Duration::from_millis(timeout_ms);
         let event = self.event_bridge.wait(after, session_key, timeout).await;
@@ -720,6 +722,19 @@ mod tests {
 
         let result = serve
             .handle_tool_call("events_poll", json!({"after_cursor": 0}))
+            .await
+            .unwrap();
+        assert_eq!(result["events"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_numeric_args_coerce_from_strings() {
+        let store = Arc::new(InMemorySessionStore::new());
+        let serve = HermesMcpServe::new(store);
+        serve.event_bridge.push("message", "s1", HashMap::new());
+
+        let result = serve
+            .handle_tool_call("events_poll", json!({"after_cursor": "0", "limit": "1"}))
             .await
             .unwrap();
         assert_eq!(result["events"].as_array().unwrap().len(), 1);

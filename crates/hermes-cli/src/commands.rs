@@ -259,7 +259,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/raw",
-        "RTK raw-mode controls + deterministic trace controls (status/on/off/toggle/once/trace)",
+        "RTK raw-mode controls + deterministic trace controls (status/on/off/toggle/once/trace with tail/verify/export/path)",
     ),
     (
         "/policy",
@@ -3395,6 +3395,15 @@ async fn handle_model_explain_command(
     let _ = writeln!(out, "vision: {}", capabilities.supports_vision);
     let _ = writeln!(out, "reasoning: {}", capabilities.supports_reasoning);
     let _ = writeln!(out, "context_window: {}", capabilities.context_window);
+    let _ = writeln!(
+        out,
+        "acp_multimodal_parts: {}",
+        if capabilities.supports_vision {
+            "supported"
+        } else {
+            "text-only fallback"
+        }
+    );
     if let Some(note) = remap_note.as_deref() {
         let _ = writeln!(out, "catalog_guard: {}", note);
     }
@@ -13836,6 +13845,59 @@ fn count_files_recursive(dir: &std::path::Path) -> usize {
     count
 }
 
+const ACP_MULTIMODAL_PREFIX: &str = "__hermes_acp_parts_json__:";
+
+fn looks_like_openai_parts(parts: &[serde_json::Value]) -> bool {
+    !parts.is_empty()
+        && parts.iter().all(|part| {
+            part.as_object()
+                .and_then(|obj| obj.get("type"))
+                .and_then(|v| v.as_str())
+                .is_some()
+        })
+}
+
+fn flatten_openai_parts_to_text(parts: &[serde_json::Value]) -> String {
+    let mut chunks: Vec<String> = Vec::new();
+    for part in parts {
+        let Some(obj) = part.as_object() else {
+            continue;
+        };
+        let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match kind {
+            "text" => {
+                if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        chunks.push(text.to_string());
+                    }
+                }
+            }
+            "image_url" | "input_image" => {
+                let url = obj
+                    .get("image_url")
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| obj.get("image_url").and_then(|v| v.as_str()))
+                    .or_else(|| obj.get("url").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !url.is_empty() {
+                    chunks.push(format!("[Attached image]\nURL: {url}"));
+                }
+            }
+            _ => {
+                if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        chunks.push(text.to_string());
+                    }
+                }
+            }
+        }
+    }
+    chunks.join("\n")
+}
+
 fn acp_history_to_messages(
     history: &[serde_json::Value],
     fallback_user_text: &str,
@@ -13844,12 +13906,26 @@ fn acp_history_to_messages(
 
     for item in history {
         let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        let content = item
-            .get("content")
-            .or_else(|| item.get("text"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let content_value = item.get("content").or_else(|| item.get("text"));
+        let content = match content_value {
+            Some(serde_json::Value::String(s)) => s.to_string(),
+            Some(serde_json::Value::Array(parts)) if looks_like_openai_parts(parts) => {
+                if role == "user" {
+                    match serde_json::to_string(parts) {
+                        Ok(serialized) => format!("{ACP_MULTIMODAL_PREFIX}{serialized}"),
+                        Err(_) => flatten_openai_parts_to_text(parts),
+                    }
+                } else {
+                    flatten_openai_parts_to_text(parts)
+                }
+            }
+            Some(serde_json::Value::Object(obj)) => obj
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            _ => String::new(),
+        };
 
         match role {
             "system" if !content.is_empty() => messages.push(hermes_core::Message::system(content)),
@@ -14136,6 +14212,37 @@ mod tests {
     fn test_autocomplete_partial() {
         let results = autocomplete("/m");
         assert!(results.contains(&"/model"));
+    }
+
+    #[test]
+    fn test_acp_history_to_messages_preserves_multimodal_user_content_marker() {
+        let history = vec![serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "check this"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}
+            ]
+        })];
+        let messages = acp_history_to_messages(&history, "");
+        assert_eq!(messages.len(), 1);
+        let content = messages[0].content.as_deref().unwrap_or("");
+        assert!(content.starts_with(ACP_MULTIMODAL_PREFIX));
+    }
+
+    #[test]
+    fn test_acp_history_to_messages_flattens_assistant_parts_to_text() {
+        let history = vec![serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "done"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}
+            ]
+        })];
+        let messages = acp_history_to_messages(&history, "");
+        assert_eq!(messages.len(), 1);
+        let content = messages[0].content.as_deref().unwrap_or("");
+        assert!(content.contains("done"));
+        assert!(content.contains("Attached image"));
     }
 
     #[test]

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -30,6 +30,8 @@ const MCP_PROTOCOL_VERSION_HEADER_VALUE: &str = "2025-03-26";
 const DEFAULT_MCP_MAX_MESSAGE_BYTES_STRICT: usize = 1 * 1024 * 1024;
 const DEFAULT_MCP_MAX_MESSAGE_BYTES_BALANCED: usize = 2 * 1024 * 1024;
 const DEFAULT_MCP_MAX_MESSAGE_BYTES_RELAXED: usize = 8 * 1024 * 1024;
+const DEFAULT_MCP_SSE_READ_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_MCP_SSE_CONNECT_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum McpSandboxProfile {
@@ -76,6 +78,26 @@ fn mcp_max_message_bytes(profile: McpSandboxProfile) -> usize {
 
 fn max_message_bytes_from_env() -> usize {
     mcp_max_message_bytes(sandbox_profile_from_env())
+}
+
+fn mcp_sse_read_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("HERMES_MCP_SSE_READ_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_MCP_SSE_READ_TIMEOUT_SECS),
+    )
+}
+
+fn mcp_sse_connect_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("HERMES_MCP_SSE_CONNECT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_MCP_SSE_CONNECT_TIMEOUT_SECS),
+    )
 }
 
 fn parse_allowlist(raw: &str) -> Vec<String> {
@@ -804,6 +826,10 @@ pub struct HttpSseTransport {
     pending_response: Option<Value>,
     /// The message endpoint URL discovered from the SSE stream, or default.
     message_endpoint: Option<String>,
+    /// Read timeout used for SSE and POST responses.
+    sse_read_timeout: Duration,
+    /// Connect timeout used for initial SSE handshake.
+    connect_timeout: Duration,
 }
 
 impl HttpSseTransport {
@@ -816,6 +842,8 @@ impl HttpSseTransport {
             started: false,
             pending_response: None,
             message_endpoint: None,
+            sse_read_timeout: mcp_sse_read_timeout(),
+            connect_timeout: mcp_sse_connect_timeout(),
         }
     }
 
@@ -842,6 +870,7 @@ impl HttpSseTransport {
         let mut builder = self.client.request(method, url);
         builder = builder.header("Content-Type", "application/json");
         builder = builder.header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION_HEADER_VALUE);
+        builder = builder.timeout(self.sse_read_timeout);
         if let Some(ref token) = self.auth_token {
             builder = builder.header("Authorization", format!("Bearer {}", token));
         }
@@ -862,23 +891,21 @@ impl McpTransport for HttpSseTransport {
         // If it fails, fall back to the base URL health check.
         let sse_url = self.endpoint_url("/sse");
         let mut sse_builder = self.client.get(&sse_url);
+        sse_builder = sse_builder.timeout(self.connect_timeout);
         if let Some(ref token) = self.auth_token {
             sse_builder = sse_builder.header("Authorization", format!("Bearer {}", token));
         }
 
         match sse_builder.send().await {
             Ok(resp) if resp.status().is_success() => {
-                // If the SSE endpoint returns an `endpoint` field in the
-                // first event, use it for POSTing messages.
-                let body = resp.text().await.unwrap_or_default();
-                for line in body.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(val) = serde_json::from_str::<Value>(data) {
-                            if let Some(ep) = val.get("endpoint").and_then(|v| v.as_str()) {
-                                self.message_endpoint = Some(ep.to_string());
-                            }
-                        }
-                    }
+                if let Some(ep) = resp
+                    .headers()
+                    .get("mcp-message-endpoint")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    self.message_endpoint = Some(ep.to_string());
                 }
                 info!("MCP HTTP+SSE transport connected to: {}", self.url);
             }

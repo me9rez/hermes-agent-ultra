@@ -23,6 +23,110 @@ use hermes_core::{
 use crate::credential_pool::CredentialPool;
 use crate::rate_limit::RateLimitTracker;
 
+const ACP_MULTIMODAL_PREFIX: &str = "__hermes_acp_parts_json__:";
+
+fn parse_acp_multimodal_parts(content: &str) -> Option<Vec<Value>> {
+    let payload = content.trim().strip_prefix(ACP_MULTIMODAL_PREFIX)?;
+    let parsed: Value = serde_json::from_str(payload).ok()?;
+    let parts = parsed.as_array()?.clone();
+    if parts.is_empty() {
+        return None;
+    }
+    if !parts.iter().all(|part| {
+        part.as_object()
+            .and_then(|obj| obj.get("type"))
+            .and_then(|v| v.as_str())
+            .is_some()
+    }) {
+        return None;
+    }
+    Some(parts)
+}
+
+fn flatten_multimodal_parts_text(parts: &[Value]) -> String {
+    let mut lines = Vec::new();
+    for part in parts {
+        let Some(obj) = part.as_object() else {
+            continue;
+        };
+        let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match kind {
+            "text" => {
+                if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        lines.push(text.to_string());
+                    }
+                }
+            }
+            "image_url" | "input_image" => {
+                let url = obj
+                    .get("image_url")
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| obj.get("image_url").and_then(|v| v.as_str()))
+                    .or_else(|| obj.get("url").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !url.is_empty() {
+                    lines.push(format!("[Attached image]\nURL: {url}"));
+                }
+            }
+            _ => {
+                if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        lines.push(text.to_string());
+                    }
+                }
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+fn anthropic_blocks_from_multimodal_parts(parts: &[Value]) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    for part in parts {
+        let Some(obj) = part.as_object() else {
+            continue;
+        };
+        let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match kind {
+            "text" => {
+                if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        blocks.push(serde_json::json!({"type": "text", "text": text}));
+                    }
+                }
+            }
+            "image_url" | "input_image" => {
+                let url = obj
+                    .get("image_url")
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| obj.get("image_url").and_then(|v| v.as_str()))
+                    .or_else(|| obj.get("url").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !url.is_empty() {
+                    let source =
+                        hermes_intelligence::anthropic_adapter::image_source_from_openai_url(&url);
+                    blocks.push(serde_json::json!({"type": "image", "source": source}));
+                }
+            }
+            _ => {
+                if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        blocks.push(serde_json::json!({"type": "text", "text": text}));
+                    }
+                }
+            }
+        }
+    }
+    blocks
+}
+
 // ---------------------------------------------------------------------------
 // GenericProvider — a flexible, config-driven provider
 // ---------------------------------------------------------------------------
@@ -246,12 +350,20 @@ impl GenericProvider {
     }
 
     fn sanitize_messages_for_strict_api(messages: &[Message], enabled: bool) -> Value {
-        if !enabled {
-            return serde_json::to_value(messages).unwrap_or_else(|_| serde_json::json!([]));
-        }
         let mut out = Vec::with_capacity(messages.len());
         for msg in messages {
             let mut api_msg = serde_json::to_value(msg).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(parts) = api_msg
+                .get("content")
+                .and_then(|v| v.as_str())
+                .and_then(parse_acp_multimodal_parts)
+            {
+                api_msg["content"] = Value::Array(parts);
+            }
+            if !enabled {
+                out.push(api_msg);
+                continue;
+            }
             if let Some(tool_calls) = api_msg.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
                 for tc in tool_calls.iter_mut() {
                     if let Some(obj) = tc.as_object_mut() {
@@ -872,11 +984,23 @@ impl AnthropicProvider {
                 MessageRole::User => {
                     let mut content_blocks = Vec::new();
                     if let Some(ref text) = msg.content {
-                        let mut block = serde_json::json!({"type": "text", "text": text});
-                        if let Some(ref cc) = msg.cache_control {
-                            block["cache_control"] = serde_json::json!({"type": format!("{:?}", cc.cache_type).to_lowercase()});
+                        if let Some(parts) = parse_acp_multimodal_parts(text) {
+                            content_blocks.extend(anthropic_blocks_from_multimodal_parts(&parts));
+                            if content_blocks.is_empty() {
+                                let fallback = flatten_multimodal_parts_text(&parts);
+                                if !fallback.is_empty() {
+                                    content_blocks.push(
+                                        serde_json::json!({"type": "text", "text": fallback}),
+                                    );
+                                }
+                            }
+                        } else {
+                            let mut block = serde_json::json!({"type": "text", "text": text});
+                            if let Some(ref cc) = msg.cache_control {
+                                block["cache_control"] = serde_json::json!({"type": format!("{:?}", cc.cache_type).to_lowercase()});
+                            }
+                            content_blocks.push(block);
                         }
-                        content_blocks.push(block);
                     }
                     anthropic_messages.push(serde_json::json!({
                         "role": "user",
@@ -1994,6 +2118,19 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_messages_for_strict_api_decodes_acp_multimodal_user_parts() {
+        let parts = serde_json::json!([
+            {"type": "text", "text": "inspect"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}
+        ]);
+        let marker = format!("{}{}", ACP_MULTIMODAL_PREFIX, parts);
+        let messages = vec![Message::user(marker)];
+        let sanitized = GenericProvider::sanitize_messages_for_strict_api(&messages, false);
+        assert!(sanitized[0]["content"].is_array());
+        assert_eq!(sanitized[0]["content"][1]["type"], "image_url");
+    }
+
+    #[test]
     fn test_parse_openai_response_basic() {
         let json = serde_json::json!({
             "choices": [{
@@ -2152,6 +2289,19 @@ mod tests {
         assert_eq!(msgs.len(), 2); // user + assistant, system extracted
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[1]["role"], "assistant");
+    }
+
+    #[test]
+    fn test_anthropic_convert_messages_decodes_acp_multimodal_user_parts() {
+        let parts = serde_json::json!([
+            {"type": "text", "text": "see attachment"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}
+        ]);
+        let messages = vec![Message::user(format!("{ACP_MULTIMODAL_PREFIX}{parts}"))];
+        let (_, msgs) = AnthropicProvider::convert_messages(&messages, None);
+        let blocks = msgs[0]["content"].as_array().expect("blocks");
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "image");
     }
 
     #[test]

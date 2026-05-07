@@ -1245,11 +1245,13 @@ name = "hermes-acp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "hermes-core",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -1555,6 +1557,7 @@ name = "hermes-mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "hermes-core",
  "hermes-tools",
  "jsonwebtoken",

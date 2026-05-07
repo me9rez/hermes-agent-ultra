@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
         help="Redaction regression tests",
     )
     parser.add_argument(
+        "--multimodal-tests-cmd",
+        default="cargo test -p hermes-agent decodes_acp_multimodal -- --nocapture",
+        help="ACP multimodal routing regression tests",
+    )
+    parser.add_argument(
         "--sbom-output",
         default=".sync-reports/release-sbom-metadata.json",
         help="SBOM output path",
@@ -141,6 +146,7 @@ def main() -> int:
         "sbom": generate_sbom(repo_root, sbom_output),
         "signature_tests": run_shell(args.signature_tests_cmd, repo_root),
         "redaction_tests": run_shell(args.redaction_tests_cmd, repo_root),
+        "multimodal_tests": run_shell(args.multimodal_tests_cmd, repo_root),
     }
 
     ok = all(bool(section.get("ok")) for section in sections.values())

@@ -26,6 +26,11 @@ def parse_args() -> argparse.Namespace:
         help="Eval trend command",
     )
     parser.add_argument(
+        "--mcp-cmd",
+        default="cargo test -p hermes-mcp stale_transport_marker_detection_matches_known_variants -- --nocapture",
+        help="MCP stale-transport recovery regression command",
+    )
+    parser.add_argument(
         "--output-json",
         default="",
         help="Optional JSON report path",
@@ -82,7 +87,9 @@ def parse_hotpath_ns(stdout: str) -> int | None:
     return int(value)
 
 
-def build_recommendations(hotpath: dict[str, Any], eval_gate: dict[str, Any]) -> list[dict[str, str]]:
+def build_recommendations(
+    hotpath: dict[str, Any], eval_gate: dict[str, Any], mcp_gate: dict[str, Any]
+) -> list[dict[str, str]]:
     recs: list[dict[str, str]] = []
     ns = parse_hotpath_ns((hotpath.get("stdout_tail") or "") + "\n" + (hotpath.get("stderr_tail") or ""))
 
@@ -112,6 +119,16 @@ def build_recommendations(hotpath: dict[str, Any], eval_gate: dict[str, Any]) ->
                 "severity": "P0",
                 "title": "Eval trend gate failed",
                 "recommendation": "Run `python3 scripts/run-self-evolution-loop.py --json` and address top recommendation before promotion.",
+            }
+        )
+
+    if not mcp_gate.get("ok"):
+        recs.append(
+            {
+                "id": "MCP_STALE_RECOVERY_FAIL",
+                "severity": "P1",
+                "title": "MCP stale transport recovery regression",
+                "recommendation": "Run `cargo test -p hermes-mcp` and restore reconnect-on-stale behavior before promotion.",
             }
         )
 
@@ -195,8 +212,9 @@ def main() -> int:
 
     hotpath = run_shell(args.hotpath_cmd, repo_root)
     eval_gate = run_shell(args.eval_cmd, repo_root)
-    recommendations = build_recommendations(hotpath, eval_gate)
-    ok = all(section.get("ok") for section in [hotpath, eval_gate])
+    mcp_gate = run_shell(args.mcp_cmd, repo_root)
+    recommendations = build_recommendations(hotpath, eval_gate, mcp_gate)
+    ok = all(section.get("ok") for section in [hotpath, eval_gate, mcp_gate])
 
     report = {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -205,6 +223,7 @@ def main() -> int:
         "sections": {
             "hotpath": hotpath,
             "eval_trend": eval_gate,
+            "mcp_stale_recovery": mcp_gate,
         },
         "recommendations": recommendations,
         "report_json": str(output_json),

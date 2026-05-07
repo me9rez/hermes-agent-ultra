@@ -227,6 +227,7 @@ const OBJECTIVE_DEEP_AUDIT_MIN_PATCH_ITEMS: usize = 2;
 const OBJECTIVE_DEEP_AUDIT_MIN_UNIQUE_FILES: usize = 5;
 const OBJECTIVE_DEEP_AUDIT_MIN_UNIQUE_COMMANDS: usize = 3;
 const OBJECTIVE_DEEP_AUDIT_MIN_WORKSTREAMS: usize = 3;
+const FINALIZER_EVIDENCE_MAX_RETRIES: u32 = 2;
 
 // Python `AIAgent._MEMORY_REVIEW_PROMPT` / `_SKILL_REVIEW_PROMPT` / `_COMBINED_REVIEW_PROMPT` (v2026.4.13)
 const MEMORY_REVIEW_PROMPT: &str = "Review the conversation above and consider saving to memory if appropriate.\n\n\
@@ -955,6 +956,8 @@ struct GovernorRuntimeState {
 struct RepoReviewBudgetState {
     last_discovery_signature: Option<String>,
     repeat_streak: u32,
+    low_signal_streak: u32,
+    last_signal_score: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3962,6 +3965,7 @@ impl AgentLoop {
         let mut governor_consecutive_error_turns: u32 = 0;
         let mut repo_review_budget_state = RepoReviewBudgetState::default();
         let mut objective_guard_retries: u32 = 0;
+        let mut finalizer_evidence_retries: u32 = 0;
         let governor_window_limit = governor_window_size();
 
         loop {
@@ -4057,6 +4061,31 @@ impl AgentLoop {
             );
             let llm_governor =
                 governor_for_turn(&self.config, &ctx, 0, Some(&turn_governor_runtime));
+            if forced_runtime_route.is_none()
+                && (turn_governor_runtime.consecutive_error_turns >= 2
+                    || turn_governor_runtime
+                        .avg_llm_latency_ms
+                        .map(|v| v >= governor_latency_warn_ms())
+                        .unwrap_or(false))
+                && (llm_governor.error_degraded || llm_governor.latency_degraded)
+            {
+                if let Some(model) = self
+                    .resolve_reliability_degrade_model(active_model, turn_runtime_route.as_ref())
+                {
+                    forced_runtime_route = Some(self.turn_route_reliability_guard(model.clone()));
+                    self.emit_status(
+                        "lifecycle",
+                        &format!(
+                            "Reliability guard switching route to `{}` after degradation.",
+                            model
+                        ),
+                    );
+                    ctx.add_message(Message::system(format!(
+                        "Reliability guard: runtime degradation detected. Switching next turns to `{}`.",
+                        model
+                    )));
+                }
+            }
             tracing::debug!(
                 turn = total_turns,
                 model = active_model,
@@ -4334,6 +4363,26 @@ impl AgentLoop {
                         }
                     }
                 }
+                if finalizer_claim_requires_evidence_retry(
+                    ctx.get_messages(),
+                    assistant_msg.content.as_deref().unwrap_or_default(),
+                    finalizer_evidence_retries,
+                ) {
+                    finalizer_evidence_retries = finalizer_evidence_retries.saturating_add(1);
+                    ctx.add_message(Message::system(
+                        "[SYSTEM] Finalizer evidence contract: include explicit evidence lines and confidence calibration.\n\
+                         Required format:\n\
+                         - confidence=<high|medium|low>\n\
+                         - file=<absolute-or-repo-path>\n\
+                         - cmd=<verification command or exact probe>\n\
+                         If evidence is missing, state `objective_state=unproven` and blockers.",
+                    ));
+                    ctx.add_message(Message::user(
+                        "Re-issue the final response with explicit evidence + confidence now.",
+                    ));
+                    continue;
+                }
+                finalizer_evidence_retries = 0;
                 let (objective_guard_active, requires_analytics, deep_audit_required) =
                     objective_guard_policy(ctx.get_messages());
                 if objective_guard_active {
@@ -4603,6 +4652,11 @@ impl AgentLoop {
                     "errors": turn_tool_error_count,
                     "error_rate": turn_tool_error_rate,
                 }),
+            );
+            update_repo_review_budget_state_from_results(
+                &mut repo_review_budget_state,
+                ctx.get_messages(),
+                &results,
             );
             if self.config.rollback_on_tool_error_threshold > 0
                 && turn_tool_error_count >= self.config.rollback_on_tool_error_threshold
@@ -4938,6 +4992,7 @@ impl AgentLoop {
         let mut governor_consecutive_error_turns: u32 = 0;
         let mut repo_review_budget_state = RepoReviewBudgetState::default();
         let mut objective_guard_retries: u32 = 0;
+        let mut finalizer_evidence_retries: u32 = 0;
         let governor_window_limit = governor_window_size();
 
         loop {
@@ -5028,6 +5083,31 @@ impl AgentLoop {
             );
             let llm_governor =
                 governor_for_turn(&self.config, &ctx, 0, Some(&turn_governor_runtime));
+            if forced_runtime_route.is_none()
+                && (turn_governor_runtime.consecutive_error_turns >= 2
+                    || turn_governor_runtime
+                        .avg_llm_latency_ms
+                        .map(|v| v >= governor_latency_warn_ms())
+                        .unwrap_or(false))
+                && (llm_governor.error_degraded || llm_governor.latency_degraded)
+            {
+                if let Some(model) = self
+                    .resolve_reliability_degrade_model(active_model, turn_runtime_route.as_ref())
+                {
+                    forced_runtime_route = Some(self.turn_route_reliability_guard(model.clone()));
+                    self.emit_status(
+                        "lifecycle",
+                        &format!(
+                            "Reliability guard switching route to `{}` after degradation.",
+                            model
+                        ),
+                    );
+                    ctx.add_message(Message::system(format!(
+                        "Reliability guard: runtime degradation detected. Switching next turns to `{}`.",
+                        model
+                    )));
+                }
+            }
             tracing::debug!(
                 turn = total_turns,
                 model = active_model,
@@ -5380,6 +5460,26 @@ impl AgentLoop {
                         }
                     }
                 }
+                if finalizer_claim_requires_evidence_retry(
+                    ctx.get_messages(),
+                    assistant_msg.content.as_deref().unwrap_or_default(),
+                    finalizer_evidence_retries,
+                ) {
+                    finalizer_evidence_retries = finalizer_evidence_retries.saturating_add(1);
+                    ctx.add_message(Message::system(
+                        "[SYSTEM] Finalizer evidence contract: include explicit evidence lines and confidence calibration.\n\
+                         Required format:\n\
+                         - confidence=<high|medium|low>\n\
+                         - file=<absolute-or-repo-path>\n\
+                         - cmd=<verification command or exact probe>\n\
+                         If evidence is missing, state `objective_state=unproven` and blockers.",
+                    ));
+                    ctx.add_message(Message::user(
+                        "Re-issue the final response with explicit evidence + confidence now.",
+                    ));
+                    continue;
+                }
+                finalizer_evidence_retries = 0;
                 let (objective_guard_active, requires_analytics, deep_audit_required) =
                     objective_guard_policy(ctx.get_messages());
                 if objective_guard_active {
@@ -5679,6 +5779,11 @@ impl AgentLoop {
                     "errors": turn_tool_error_count,
                     "error_rate": turn_tool_error_rate,
                 }),
+            );
+            update_repo_review_budget_state_from_results(
+                &mut repo_review_budget_state,
+                ctx.get_messages(),
+                &results,
             );
             if self.config.rollback_on_tool_error_threshold > 0
                 && turn_tool_error_count >= self.config.rollback_on_tool_error_threshold
@@ -5994,6 +6099,26 @@ impl AgentLoop {
         }
     }
 
+    fn turn_route_reliability_guard(&self, model: String) -> TurnRuntimeRoute {
+        let pri = self.primary_runtime_snapshot();
+        let mut sig = pri.to_signature();
+        sig.model = model.clone();
+        TurnRuntimeRoute {
+            model,
+            provider: None,
+            base_url: None,
+            api_key_env: None,
+            api_mode: None,
+            command: None,
+            args: Vec::new(),
+            credential_pool: self.primary_credential_pool.clone(),
+            credential_pool_fallback: true,
+            route_label: None,
+            routing_reason: Some("reliability_guard".to_string()),
+            signature: sig,
+        }
+    }
+
     fn try_build_cheap_runtime(
         &self,
         cheap: &CheapModelRouteConfig,
@@ -6294,6 +6419,39 @@ impl AgentLoop {
             }
         }
         if self.config.model.trim() != "openai:gpt-4o-mini" {
+            return Some("openai:gpt-4o-mini".to_string());
+        }
+        None
+    }
+
+    fn resolve_reliability_degrade_model(
+        &self,
+        active_model: &str,
+        route: Option<&TurnRuntimeRoute>,
+    ) -> Option<String> {
+        if let Some(ref fallback) = self.config.retry.fallback_model {
+            if !fallback.trim().is_empty() && !fallback.eq_ignore_ascii_case(active_model) {
+                return Some(fallback.trim().to_string());
+            }
+        }
+        let provider_hint = route
+            .and_then(|r| r.provider.as_deref())
+            .or(self.config.provider.as_deref())
+            .unwrap_or("openai");
+        let (_, active_model_id) = self.extract_provider_and_model(active_model);
+        if let Some(candidate) =
+            preferred_tool_payload_fallback_model(provider_hint, active_model_id)
+        {
+            let normalized = if candidate.contains(':') {
+                candidate
+            } else {
+                format!("{}:{}", provider_hint, candidate)
+            };
+            if !normalized.eq_ignore_ascii_case(active_model) {
+                return Some(normalized);
+            }
+        }
+        if !active_model.eq_ignore_ascii_case("openai:gpt-4o-mini") {
             return Some("openai:gpt-4o-mini".to_string());
         }
         None
@@ -7173,6 +7331,24 @@ fn is_discovery_tool_name(name: &str) -> bool {
         || lower == "execute_code"
 }
 
+fn is_execution_tool_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "terminal" | "execute_code" | "apply_patch" | "edit_file" | "run_command"
+    )
+}
+
+fn is_non_repo_tool_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        "weather", "sports", "tarot", "zillow", "shopping", "gmail", "calendar", "artwork", "deal",
+        "coursera", "datacamp", "jobkorea",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 fn is_messaging_tool_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     [
@@ -7230,21 +7406,32 @@ fn apply_repo_review_tool_profile_narrowing(
         return None;
     }
     let allow_messaging = detect_communication_intent(messages);
-    let mut filtered = 0usize;
+    let mut filtered_messaging = 0usize;
+    let mut filtered_non_repo = 0usize;
     tool_calls.retain(|tc| {
-        let should_filter = is_messaging_tool_name(&tc.function.name) && !allow_messaging;
+        let mut should_filter = false;
+        if is_messaging_tool_name(&tc.function.name) && !allow_messaging {
+            filtered_messaging += 1;
+            should_filter = true;
+        } else if is_non_repo_tool_name(&tc.function.name)
+            && !is_discovery_tool_name(&tc.function.name)
+            && !is_execution_tool_name(&tc.function.name)
+        {
+            filtered_non_repo += 1;
+            should_filter = true;
+        }
         if should_filter {
-            filtered += 1;
             return false;
         }
         true
     });
+    let filtered = filtered_messaging + filtered_non_repo;
     if filtered == 0 {
         return None;
     }
     Some(format!(
-        "[SYSTEM] Repo-review tool profile narrowed this turn: skipped {} messaging adapter call(s) to keep focus on code evidence. `todo` remains enabled for task organization. If notifications are required, request telegram/discord/slack explicitly.",
-        filtered
+        "[SYSTEM] Repo-review tool profile narrowed this turn: skipped {} low-signal call(s) (messaging={}, non-repo={}) to keep focus on code evidence. `todo` remains enabled for task organization. If notifications are required, request telegram/discord/slack explicitly.",
+        filtered, filtered_messaging, filtered_non_repo
     ))
 }
 
@@ -7275,18 +7462,21 @@ fn apply_repo_review_discovery_budget_policy(
     }
     state.last_discovery_signature = Some(signature);
 
-    if state.repeat_streak < 2 || !only_discovery_or_housekeeping {
+    let repeat_threshold_hit = state.repeat_streak >= 2;
+    let low_signal_threshold_hit = state.low_signal_streak >= 2;
+    if (!repeat_threshold_hit && !low_signal_threshold_hit) || !only_discovery_or_housekeeping {
         return None;
     }
 
     let mut kept_per_tool: HashMap<String, usize> = HashMap::new();
     let mut removed = 0usize;
+    let keep_limit = if low_signal_threshold_hit { 1 } else { 2 };
     tool_calls.retain(|tc| {
         if !is_discovery_tool_name(&tc.function.name) {
             return true;
         }
         let counter = kept_per_tool.entry(tc.function.name.clone()).or_insert(0);
-        if *counter < 2 {
+        if *counter < keep_limit {
             *counter += 1;
             true
         } else {
@@ -7296,10 +7486,111 @@ fn apply_repo_review_discovery_budget_policy(
     });
 
     Some(format!(
-        "[SYSTEM] Discovery budget policy engaged after repeated near-identical repo-discovery loops (streak={}). {} duplicate low-yield discovery call(s) were trimmed. Refine search scope/paths, then move to synthesis and concrete patch planning.",
+        "[SYSTEM] Discovery budget policy engaged (repeat_streak={}, low_signal_streak={}, last_signal_score={:.2}). {} duplicate low-yield discovery call(s) were trimmed (per-tool keep limit {}). Refine search scope with targeted paths/globs or context-pack query expansion, then move to synthesis and concrete patch planning.",
         state.repeat_streak + 1,
-        removed
+        state.low_signal_streak,
+        state.last_signal_score,
+        removed,
+        keep_limit
     ))
+}
+
+fn tool_result_signal_score(content: &str, is_error: bool) -> f64 {
+    if is_error {
+        return 0.0;
+    }
+    let lower = content.to_ascii_lowercase();
+    let mut score: f64 = 0.0;
+    if content.len() >= 160 {
+        score += 0.25;
+    } else if content.len() >= 80 {
+        score += 0.15;
+    }
+    if lower.contains("file=")
+        || lower.contains("path=")
+        || lower.contains(".rs")
+        || lower.contains(".py")
+    {
+        score += 0.35;
+    }
+    if lower.contains("cmd=")
+        || lower.contains("rg ")
+        || lower.contains("sed -n")
+        || lower.contains("cargo ")
+    {
+        score += 0.25;
+    }
+    if lower.contains("not found")
+        || lower.contains("no such file")
+        || lower.contains("\"entries\":[]")
+    {
+        score -= 0.15;
+    }
+    score.clamp(0.0, 1.0)
+}
+
+fn update_repo_review_budget_state_from_results(
+    state: &mut RepoReviewBudgetState,
+    messages: &[Message],
+    results: &[ToolResult],
+) {
+    if !detect_repo_review_intent(messages) {
+        *state = RepoReviewBudgetState::default();
+        return;
+    }
+    if results.is_empty() {
+        state.last_signal_score = 0.0;
+        state.low_signal_streak = state.low_signal_streak.saturating_add(1);
+        return;
+    }
+    let avg_signal = results
+        .iter()
+        .map(|r| tool_result_signal_score(&r.content, r.is_error))
+        .sum::<f64>()
+        / results.len() as f64;
+    state.last_signal_score = avg_signal;
+    if avg_signal < 0.22 {
+        state.low_signal_streak = state.low_signal_streak.saturating_add(1);
+    } else {
+        state.low_signal_streak = 0;
+    }
+}
+
+fn finalizer_claim_requires_evidence_retry(
+    messages: &[Message],
+    assistant_text: &str,
+    retry_count: u32,
+) -> bool {
+    if retry_count >= FINALIZER_EVIDENCE_MAX_RETRIES || !detect_repo_review_intent(messages) {
+        return false;
+    }
+    let lower = assistant_text.to_ascii_lowercase();
+    let claims_completion = [
+        "completed",
+        "implemented",
+        "fixed",
+        "done",
+        "resolved",
+        "ready",
+        "finished",
+        "shipped",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if !claims_completion {
+        return false;
+    }
+    let has_evidence = lower.contains("file=")
+        || lower.contains("path=")
+        || lower.contains("cmd=")
+        || lower.contains("exists_now=")
+        || lower.contains("`/users/")
+        || lower.contains("cargo test");
+    let has_confidence = lower.contains("confidence=high")
+        || lower.contains("confidence=medium")
+        || lower.contains("confidence=low")
+        || lower.contains("confidence:");
+    !(has_evidence && has_confidence)
 }
 
 fn detect_contextlattice_connect_intent(messages: &[Message]) -> bool {

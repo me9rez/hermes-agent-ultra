@@ -1,4 +1,4 @@
-//! Real web tool backends: Exa search, Firecrawl extract, and local fallbacks.
+//! Real web tool backends: Exa/Tavily/SearXNG search, Firecrawl extract, and local fallbacks.
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -43,7 +43,8 @@ impl WebSearchBackend for FallbackSearchBackend {
                 "Web search is not configured. To enable, set one of the following environment variables:\n\
                  - EXA_API_KEY (https://exa.ai)\n\
                  - TAVILY_API_KEY (https://tavily.com)\n\
-                 - SERPER_API_KEY (https://serper.dev)\n\n\
+                 - SERPER_API_KEY (https://serper.dev)\n\
+                 - SEARXNG_BASE_URL (https://docs.searxng.org/dev/search_api.html)\n\n\
                  Query was: {}", query
             ),
             "query": query,
@@ -57,6 +58,7 @@ impl WebSearchBackend for FallbackSearchBackend {
 
 const MAX_EXTRACT_BYTES: usize = 512_000; // 500 KB
 const TAVILY_BASE_URL_DEFAULT: &str = "https://api.tavily.com";
+const SEARXNG_SEARCH_PATH: &str = "/search";
 
 /// A web extraction backend that fetches HTML via reqwest with no external API dependency.
 pub struct SimpleExtractBackend {
@@ -422,12 +424,118 @@ impl WebSearchBackend for TavilySearchBackend {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SearXNGSearchBackend
+// ---------------------------------------------------------------------------
+
+/// Real SearXNG backend using `/search?format=json`.
+pub struct SearxngSearchBackend {
+    client: Client,
+    base_url: String,
+}
+
+impl SearxngSearchBackend {
+    pub fn new(base_url: String) -> Self {
+        Self {
+            client: Client::new(),
+            base_url: base_url.trim().trim_end_matches('/').to_string(),
+        }
+    }
+
+    /// Create from `SEARXNG_BASE_URL`.
+    pub fn from_env() -> Result<Self, ToolError> {
+        let base_url = std::env::var("SEARXNG_BASE_URL").map_err(|_| {
+            ToolError::ExecutionFailed("SEARXNG_BASE_URL environment variable not set".into())
+        })?;
+        let base_url = base_url.trim();
+        if base_url.is_empty() {
+            return Err(ToolError::ExecutionFailed(
+                "SEARXNG_BASE_URL environment variable is empty".into(),
+            ));
+        }
+        Ok(Self::new(base_url.to_string()))
+    }
+
+    fn endpoint(&self) -> String {
+        format!("{}{}", self.base_url, SEARXNG_SEARCH_PATH)
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+}
+
+#[async_trait]
+impl WebSearchBackend for SearxngSearchBackend {
+    async fn search(
+        &self,
+        query: &str,
+        num_results: usize,
+        category: Option<&str>,
+    ) -> Result<String, ToolError> {
+        let mut req = self.client.get(self.endpoint()).query(&[
+            ("q", query),
+            ("format", "json"),
+            ("pageno", "1"),
+        ]);
+        if let Some(cat) = category.map(str::trim).filter(|v| !v.is_empty()) {
+            req = req.query(&[("categories", cat)]);
+        }
+
+        let resp = req.send().await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("SearXNG API request failed: {}", e))
+        })?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to read SearXNG response: {}", e))
+        })?;
+
+        if !status.is_success() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "SearXNG API error ({}): {}",
+                status, text
+            )));
+        }
+
+        let data: Value = serde_json::from_str(&text).map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to parse SearXNG response: {}", e))
+        })?;
+        let formatted: Vec<Value> = data
+            .get("results")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .take(num_results)
+                    .map(|r| {
+                        json!({
+                            "title": r.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                            "url": r.get("url").and_then(|v| v.as_str()).unwrap_or(""),
+                            "text": r
+                                .get("content")
+                                .or_else(|| r.get("snippet"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(""),
+                            "score": r.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        serde_json::to_string_pretty(&json!({ "results": formatted }))
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to serialize results: {}", e)))
+    }
+}
+
 /// Resolve preferred web-search backend from environment.
 ///
 /// Priority:
-/// 1. Exa (`EXA_API_KEY`)
-/// 2. Tavily (`TAVILY_API_KEY`, optional `TAVILY_BASE_URL`)
-/// 3. Fallback helpful message backend
+/// 1. Explicit `HERMES_WEB_SEARCH_BACKEND` override
+///    - `exa`, `tavily`, `searxng`, `fallback`
+/// 2. Exa (`EXA_API_KEY`)
+/// 3. Tavily (`TAVILY_API_KEY`, optional `TAVILY_BASE_URL`)
+/// 4. SearXNG (`SEARXNG_BASE_URL`)
+/// 5. Fallback helpful message backend
 pub fn search_backend_from_env_or_fallback() -> Box<dyn WebSearchBackend> {
     match search_backend_choice_from_env() {
         "exa" => ExaSearchBackend::from_env()
@@ -436,26 +544,40 @@ pub fn search_backend_from_env_or_fallback() -> Box<dyn WebSearchBackend> {
         "tavily" => TavilySearchBackend::from_env()
             .map(|b| Box::new(b) as Box<dyn WebSearchBackend>)
             .unwrap_or_else(|_| Box::new(FallbackSearchBackend::new())),
+        "searxng" => SearxngSearchBackend::from_env()
+            .map(|b| Box::new(b) as Box<dyn WebSearchBackend>)
+            .unwrap_or_else(|_| Box::new(FallbackSearchBackend::new())),
         _ => Box::new(FallbackSearchBackend::new()),
     }
 }
 
 fn search_backend_choice_from_env() -> &'static str {
-    if std::env::var("EXA_API_KEY")
-        .ok()
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
-    {
+    if let Ok(choice) = std::env::var("HERMES_WEB_SEARCH_BACKEND") {
+        match choice.trim().to_ascii_lowercase().as_str() {
+            "exa" => return "exa",
+            "tavily" => return "tavily",
+            "searxng" | "searx" => return "searxng",
+            "fallback" | "none" | "off" | "disabled" => return "fallback",
+            _ => {}
+        }
+    }
+
+    if env_present_nonempty("EXA_API_KEY") {
         "exa"
-    } else if std::env::var("TAVILY_API_KEY")
-        .ok()
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
-    {
+    } else if env_present_nonempty("TAVILY_API_KEY") {
         "tavily"
+    } else if env_present_nonempty("SEARXNG_BASE_URL") {
+        "searxng"
     } else {
         "fallback"
     }
+}
+
+fn env_present_nonempty(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -652,7 +774,13 @@ mod web_search_env_tests {
     impl EnvScope {
         fn new() -> Self {
             let g = test_lock::lock();
-            let keys = ["EXA_API_KEY", "TAVILY_API_KEY", "TAVILY_BASE_URL"];
+            let keys = [
+                "EXA_API_KEY",
+                "TAVILY_API_KEY",
+                "TAVILY_BASE_URL",
+                "SEARXNG_BASE_URL",
+                "HERMES_WEB_SEARCH_BACKEND",
+            ];
             let original = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
             for k in &keys {
                 std::env::remove_var(k);
@@ -702,6 +830,29 @@ mod web_search_env_tests {
         let _scope = EnvScope::new();
         std::env::set_var("TAVILY_API_KEY", "tavily-key");
         assert_eq!(search_backend_choice_from_env(), "tavily");
+    }
+
+    #[test]
+    fn searxng_from_env_normalizes_base_url() {
+        let _scope = EnvScope::new();
+        std::env::set_var("SEARXNG_BASE_URL", "https://search.example.com/");
+        let backend = SearxngSearchBackend::from_env().expect("searxng backend from env");
+        assert_eq!(backend.base_url(), "https://search.example.com");
+    }
+
+    #[test]
+    fn search_backend_choice_uses_searxng_when_only_base_url_available() {
+        let _scope = EnvScope::new();
+        std::env::set_var("SEARXNG_BASE_URL", "https://search.example.com");
+        assert_eq!(search_backend_choice_from_env(), "searxng");
+    }
+
+    #[test]
+    fn search_backend_choice_honors_explicit_override() {
+        let _scope = EnvScope::new();
+        std::env::set_var("HERMES_WEB_SEARCH_BACKEND", "searxng");
+        std::env::set_var("EXA_API_KEY", "exa-key");
+        assert_eq!(search_backend_choice_from_env(), "searxng");
     }
 
     #[tokio::test]

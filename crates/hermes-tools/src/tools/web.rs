@@ -1,4 +1,4 @@
-//! Web tools: web_search (Exa) and web_extract (Firecrawl)
+//! Web tools: web_search (Exa/Tavily/SearXNG) and web_extract (Firecrawl)
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -33,7 +33,7 @@ pub trait WebExtractBackend: Send + Sync {
 // WebSearchHandler
 // ---------------------------------------------------------------------------
 
-/// Web search tool using Exa API.
+/// Web search tool using the configured backend (Exa/Tavily/SearXNG).
 pub struct WebSearchHandler {
     backend: Box<dyn WebSearchBackend>,
 }
@@ -87,7 +87,7 @@ impl ToolHandler for WebSearchHandler {
 
         tool_schema(
             "web_search",
-            "Search the web using Exa API. Returns relevant results with titles, URLs, and snippets.",
+            "Search the web using the configured provider (Exa/Tavily/SearXNG). Returns relevant results with titles, URLs, and snippets.",
             JsonSchema::object(props, vec!["query".into()]),
         )
     }

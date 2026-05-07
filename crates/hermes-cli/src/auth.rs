@@ -473,7 +473,22 @@ pub fn read_provider_auth_state(provider: &str) -> Result<Option<Value>, AgentEr
     let provider = provider.trim().to_ascii_lowercase();
     let path = auth_json_path();
     let store = load_auth_store(&path)?;
-    Ok(store.providers.get(&provider).cloned())
+    if let Some(found) = store.providers.get(&provider).cloned() {
+        return Ok(Some(found));
+    }
+
+    // Compatibility with upstream profile behavior: if the active auth store
+    // does not include the provider, scan global/root auth stores before
+    // reporting "missing".
+    for candidate in hermes_auth_store_discovery_paths() {
+        if candidate == path {
+            continue;
+        }
+        if let Some(found) = read_provider_auth_state_from_store_path(&candidate, &provider) {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
 }
 
 pub fn clear_provider_auth_state(provider: &str) -> Result<bool, AgentError> {
@@ -3269,6 +3284,80 @@ mod tests {
             Some("nous-agent-key")
         );
         std::env::remove_var("HERMES_AUTH_FILE");
+    }
+
+    #[test]
+    fn read_provider_auth_state_falls_back_to_global_store_when_primary_missing_provider() {
+        let _guard = NOUS_ENV_LOCK.lock().expect("lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var("HOME").ok();
+        let prev_hermes_home = std::env::var("HERMES_HOME").ok();
+        let prev_auth_file = std::env::var("HERMES_AUTH_FILE").ok();
+
+        std::env::set_var("HOME", tmp.path());
+        std::env::remove_var("HERMES_HOME");
+
+        let primary_store = tmp.path().join("profile-auth.json");
+        let primary_raw = serde_json::json!({
+            "version": 1,
+            "providers": {
+                "openai": { "access_token": "primary-openai" }
+            }
+        });
+        std::fs::write(
+            &primary_store,
+            serde_json::to_string_pretty(&primary_raw).expect("serialize primary auth"),
+        )
+        .expect("write primary auth");
+        std::env::set_var(
+            "HERMES_AUTH_FILE",
+            primary_store.to_string_lossy().to_string(),
+        );
+
+        let fallback_store = tmp.path().join(".hermes-agent-ultra").join("auth.json");
+        std::fs::create_dir_all(
+            fallback_store
+                .parent()
+                .expect("fallback store should have parent"),
+        )
+        .expect("mkdir fallback parent");
+        let fallback_raw = serde_json::json!({
+            "version": 1,
+            "providers": {
+                "nous": {
+                    "access_token": "fallback-nous-access"
+                }
+            }
+        });
+        std::fs::write(
+            &fallback_store,
+            serde_json::to_string_pretty(&fallback_raw).expect("serialize fallback auth"),
+        )
+        .expect("write fallback auth");
+
+        let found = read_provider_auth_state("nous")
+            .expect("read provider auth state")
+            .expect("fallback provider should resolve");
+        assert_eq!(
+            found
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            "fallback-nous-access"
+        );
+
+        match prev_auth_file {
+            Some(v) => std::env::set_var("HERMES_AUTH_FILE", v),
+            None => std::env::remove_var("HERMES_AUTH_FILE"),
+        }
+        match prev_hermes_home {
+            Some(v) => std::env::set_var("HERMES_HOME", v),
+            None => std::env::remove_var("HERMES_HOME"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

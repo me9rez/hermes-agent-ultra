@@ -48,6 +48,10 @@ fork-specific history.
 - `scripts/run-differential-parity-gate.py`
   - Compares local CLI command/action surface with `upstream/main`
   - Emits gate artifact under `.sync-reports/differential-parity-gate-<timestamp>.json`
+- `scripts/run-upstream-slash-parity-gate.py`
+  - Compares upstream `/` command surface (`hermes_cli/commands.py`) against Rust `SLASH_COMMANDS`
+  - Fails on missing upstream commands unless explicitly allowlisted in `docs/parity/slash-command-divergence.json`
+  - Emits gate artifact under `.sync-reports/upstream-slash-parity-gate-<timestamp>.json`
 - `scripts/run-eval-trend-gate.py`
   - Compares eval run baselines and enforces regression thresholds
   - Emits gate artifact under `.sync-reports/eval-trend-gate-<timestamp>.json`

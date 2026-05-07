@@ -9,6 +9,7 @@ use std::{
     collections::HashSet,
     fmt::Write as _,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use bytes::Bytes;
@@ -90,6 +91,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/undo", "Undo the last exchange"),
     ("/history", "Show recent conversation history"),
     ("/title", "Set or show session title metadata"),
+    ("/topic", "Session topic metadata controls"),
     (
         "/branch",
         "Create a branch/fork marker for the current session",
@@ -118,6 +120,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/skills", "List available skills"),
     ("/skill", "Alias for /skills"),
+    (
+        "/curator",
+        "Skill curator/control-plane compatibility surface",
+    ),
     ("/tools", "List registered tools"),
     (
         "/toolcards",
@@ -127,6 +133,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/plugins", "List plugin bundles and status"),
     ("/mcp", "List configured MCP servers"),
     ("/reload", "Reload runtime env/config values"),
+    ("/reload-skills", "Refresh installed skill index/registry"),
     ("/reload-mcp", "Reload MCP server metadata"),
     ("/reload_mcp", "Alias for /reload-mcp"),
     ("/cron", "Show cron scheduler status"),
@@ -167,6 +174,8 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/usage", "Show token usage statistics"),
     ("/insights", "Show local usage/session insights"),
     ("/stop", "Stop current agent execution"),
+    ("/busy", "Busy/processing status compatibility surface"),
+    ("/kanban", "Task board compatibility surface"),
     ("/status", "Show session status (model, turns, token count)"),
     ("/agent", "Alias for /status"),
     (
@@ -186,6 +195,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/gateway", "Alias for /platforms"),
     ("/commands", "Show categorized slash command catalog"),
     ("/log", "Show recent runtime log files"),
+    ("/debug", "Generate local debug-report guidance"),
     ("/debug-dump", "Dump local debug/session details"),
     ("/dump-format", "Show transcript export format"),
     ("/experiment", "Show experiment toggle surface"),
@@ -201,12 +211,20 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/update", "Check update policy/status"),
     ("/save", "Save current session to disk"),
     ("/load", "Load a saved session"),
+    ("/resume", "Resume the most recent or named saved session"),
     ("/background", "Run a task in the background"),
     ("/mouse", "Toggle mouse interactions in the TUI"),
     ("/verbose", "Toggle verbose mode"),
     ("/statusbar", "Toggle status bar visibility"),
+    ("/footer", "Footer visibility compatibility surface"),
+    ("/indicator", "Status indicator compatibility surface"),
     ("/sb", "Alias for /statusbar"),
     ("/yolo", "Toggle auto-approve mode"),
+    (
+        "/browser",
+        "Manage local Chrome CDP bridge (`status|connect [ws/http-url]|disconnect`)",
+    ),
+    ("/redraw", "Force TUI redraw compatibility surface"),
     (
         "/reasoning",
         "Reasoning controls (display + effort: status/on/off/set <low|medium|high|xhigh>)",
@@ -2890,20 +2908,28 @@ fn canonical_command(cmd: &str) -> &str {
         "/clear" => "/new",
         "/compact" => "/compress",
         "/skill" => "/skills",
+        "/curator" => "/skills",
         "/agent" => "/status",
         "/tasks" => "/agents",
+        "/kanban" => "/agents",
+        "/busy" => "/status",
+        "/topic" => "/title",
         "/scheduler" => "/background",
         "/gateway" => "/platforms",
+        "/reload-skills" => "/reload",
         "/reload_mcp" => "/reload-mcp",
         "/fork" => "/branch",
         "/snap" => "/snapshot",
         "/set-home" => "/sethome",
+        "/footer" => "/statusbar",
+        "/indicator" => "/statusbar",
         "/q" => "/queue",
         "/goal" => "/objective",
         "/question" => "/ask",
         "/autocompress" => "/autocompact",
         "/skins" => "/skin",
         "/sb" => "/statusbar",
+        "/debug" => "/debug-dump",
         "/exit" => "/quit",
         other => other,
     }
@@ -2987,16 +3013,18 @@ pub async fn handle_slash_command(
         }
         "/log" => handle_log_command(app),
         "/debug-dump" | "/dump-format" | "/experiment" | "/feedback" | "/copy" | "/paste"
-        | "/gquota" | "/restart" | "/approve" | "/deny" | "/update" => {
+        | "/gquota" | "/restart" | "/approve" | "/deny" | "/update" | "/redraw" => {
             handle_compatibility_notice_command(app, canonical_command(cmd), args)
         }
         "/save" => handle_save_command(app, args),
         "/load" => handle_load_command(app, args),
+        "/resume" => handle_resume_command(app, args),
         "/background" => handle_background_command(app, args),
         "/mouse" => handle_mouse_command(app, args),
         "/verbose" => handle_verbose_command(app),
         "/statusbar" => handle_statusbar_command(app),
         "/yolo" => handle_yolo_command(app),
+        "/browser" => handle_browser_command(app, args).await,
         "/reasoning" => handle_reasoning_command(app, args),
         "/raw" => handle_raw_command(app, args),
         "/policy" => handle_policy_command(app, args),
@@ -5515,41 +5543,135 @@ fn handle_save_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Ag
     Ok(CommandResult::Handled)
 }
 
+fn enumerate_saved_sessions(sessions_dir: &Path) -> Vec<(String, PathBuf, SystemTime)> {
+    let mut entries: Vec<(String, PathBuf, SystemTime)> = std::fs::read_dir(sessions_dir)
+        .ok()
+        .into_iter()
+        .flat_map(|rd| rd.filter_map(|e| e.ok()))
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                return None;
+            }
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if stem.trim().is_empty() {
+                return None;
+            }
+            let modified = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            Some((stem, path, modified))
+        })
+        .collect();
+    entries.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    entries
+}
+
+fn load_session_from_path(
+    app: &mut App,
+    session_name: &str,
+    path: &Path,
+    resume_mode: bool,
+) -> Result<CommandResult, AgentError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| AgentError::Io(format!("Failed to read session: {}", e)))?;
+    let data: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| AgentError::Config(format!("Failed to parse session: {}", e)))?;
+
+    let Some(messages) = data.get("messages").and_then(|m| m.as_array()) else {
+        emit_command_output(app, "Session file has no messages array.");
+        return Ok(CommandResult::Handled);
+    };
+
+    app.messages.clear();
+    app.ui_messages.clear();
+    for msg in messages {
+        let role_str = msg.get("role").and_then(|r| r.as_str()).unwrap_or("User");
+        let content_str = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        let message = match role_str {
+            "Assistant" => hermes_core::Message::assistant(content_str),
+            "System" => hermes_core::Message::system(content_str),
+            _ => hermes_core::Message::user(content_str),
+        };
+        app.messages.push(message);
+    }
+
+    let session_info = data.get("session_info");
+    if resume_mode {
+        if let Some(restored_id) = session_info
+            .and_then(|s| s.get("session_id"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            app.session_id = restored_id.to_string();
+        }
+    }
+
+    let mut model_note = String::new();
+    if let Some(restored_model) = session_info
+        .and_then(|s| s.get("model"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if !restored_model.eq_ignore_ascii_case(&app.current_model) {
+            let previous = app.current_model.clone();
+            app.switch_model(restored_model);
+            model_note = format!("\nModel restored: {} -> {}", previous, app.current_model);
+        }
+    }
+
+    if let Some(personality) = session_info
+        .and_then(|s| s.get("personality"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        app.current_personality = Some(personality.to_string());
+    }
+
+    let verb = if resume_mode { "Resumed" } else { "Loaded" };
+    emit_command_output(
+        app,
+        format!(
+            "{} session '{}' ({} messages; session_id={}){}",
+            verb,
+            session_name,
+            app.messages.len(),
+            app.session_id,
+            model_note
+        ),
+    );
+    Ok(CommandResult::Handled)
+}
+
 fn handle_load_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
     let sessions_dir = hermes_config::hermes_home().join("sessions");
 
     if args.is_empty() {
-        // List available sessions
         if !sessions_dir.exists() {
             emit_command_output(app, "No saved sessions found.");
             return Ok(CommandResult::Handled);
         }
-        let entries: Vec<String> = std::fs::read_dir(&sessions_dir)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.path()
-                            .extension()
-                            .map(|ext| ext == "json")
-                            .unwrap_or(false)
-                    })
-                    .filter_map(|e| {
-                        e.path()
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().into_owned())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
+        let entries = enumerate_saved_sessions(&sessions_dir);
         if entries.is_empty() {
             emit_command_output(app, "No saved sessions found.");
         } else {
             let mut out = String::from("Saved sessions:\n");
-            for name in &entries {
-                out.push_str(&format!("- `{}`\n", name));
+            for (idx, (name, _, _)) in entries.iter().enumerate() {
+                if idx == 0 {
+                    out.push_str(&format!("- `{}` (latest)\n", name));
+                } else {
+                    out.push_str(&format!("- `{}`\n", name));
+                }
             }
-            out.push_str("\nUsage: `/load <session-name>`");
+            out.push_str("\nUsage: `/load <session-name>` or `/resume [session-name]`");
             emit_command_output(app, out.trim_end());
         }
         return Ok(CommandResult::Handled);
@@ -5564,37 +5686,209 @@ fn handle_load_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Ag
         );
         return Ok(CommandResult::Handled);
     }
+    load_session_from_path(app, name, &path, false)
+}
 
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| AgentError::Io(format!("Failed to read session: {}", e)))?;
-    let data: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| AgentError::Config(format!("Failed to parse session: {}", e)))?;
-
-    if let Some(messages) = data.get("messages").and_then(|m| m.as_array()) {
-        app.messages.clear();
-        for msg in messages {
-            let role_str = msg.get("role").and_then(|r| r.as_str()).unwrap_or("User");
-            let content_str = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-            let message = match role_str {
-                "Assistant" => hermes_core::Message::assistant(content_str),
-                "System" => hermes_core::Message::system(content_str),
-                _ => hermes_core::Message::user(content_str),
-            };
-            app.messages.push(message);
-        }
-        emit_command_output(
-            app,
-            format!(
-                "Loaded session '{}' ({} messages)",
-                name,
-                app.messages.len()
-            ),
-        );
-    } else {
-        emit_command_output(app, "Session file has no messages array.");
+fn handle_resume_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let sessions_dir = hermes_config::hermes_home().join("sessions");
+    if !sessions_dir.exists() {
+        emit_command_output(app, "No saved sessions found.");
+        return Ok(CommandResult::Handled);
+    }
+    let entries = enumerate_saved_sessions(&sessions_dir);
+    if entries.is_empty() {
+        emit_command_output(app, "No saved sessions found.");
+        return Ok(CommandResult::Handled);
     }
 
-    Ok(CommandResult::Handled)
+    if args.is_empty() {
+        let (name, path, _) = &entries[0];
+        return load_session_from_path(app, name, path, true);
+    }
+
+    let requested = args[0];
+    if let Some((name, path, _)) = entries
+        .iter()
+        .find(|(name, _, _)| name.eq_ignore_ascii_case(requested))
+    {
+        return load_session_from_path(app, name, path, true);
+    }
+
+    let prefix_matches: Vec<&(String, PathBuf, SystemTime)> = entries
+        .iter()
+        .filter(|(name, _, _)| name.starts_with(requested))
+        .collect();
+    match prefix_matches.as_slice() {
+        [] => {
+            emit_command_output(
+                app,
+                format!(
+                    "Session '{}' not found. Use `/load` to list saved sessions.",
+                    requested
+                ),
+            );
+            Ok(CommandResult::Handled)
+        }
+        [entry] => load_session_from_path(app, &entry.0, &entry.1, true),
+        many => {
+            let names = many
+                .iter()
+                .map(|entry| format!("`{}`", entry.0))
+                .collect::<Vec<_>>()
+                .join(", ");
+            emit_command_output(
+                app,
+                format!(
+                    "Session name '{}' is ambiguous. Matches: {}",
+                    requested, names
+                ),
+            );
+            Ok(CommandResult::Handled)
+        }
+    }
+}
+
+fn persist_browser_cdp_url(url: Option<&str>) -> Result<(), AgentError> {
+    let env_path = hermes_config::hermes_home().join(".env");
+    let mut lines: Vec<String> = std::fs::read_to_string(&env_path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.to_string())
+        .collect();
+    let key = "CHROME_CDP_URL=";
+    lines.retain(|line| !line.starts_with(key));
+    if let Some(value) = url.map(str::trim).filter(|v| !v.is_empty()) {
+        lines.push(format!("CHROME_CDP_URL={}", value));
+    }
+    if let Some(parent) = env_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AgentError::Io(format!("Failed to create {}: {}", parent.display(), e)))?;
+    }
+    let mut payload = lines.join("\n");
+    if !payload.is_empty() {
+        payload.push('\n');
+    }
+    std::fs::write(&env_path, payload)
+        .map_err(|e| AgentError::Io(format!("Failed to write {}: {}", env_path.display(), e)))?;
+    Ok(())
+}
+
+fn browser_http_probe_base(endpoint: &str) -> String {
+    let trimmed = endpoint.trim();
+    if let Some(rest) = trimmed.strip_prefix("ws://") {
+        format!("http://{}", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("wss://") {
+        format!("https://{}", rest)
+    } else {
+        trimmed.to_string()
+    }
+}
+
+async fn browser_probe(endpoint: &str) -> Result<String, AgentError> {
+    let base = browser_http_probe_base(endpoint)
+        .trim_end_matches('/')
+        .to_string();
+    let url = format!("{}/json/version", base);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .map_err(|e| AgentError::Io(format!("Failed to create browser probe client: {}", e)))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| AgentError::Io(format!("Browser probe failed at {}: {}", url, e)))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .unwrap_or_else(|_| String::from("<unavailable>"));
+    if !status.is_success() {
+        return Err(AgentError::Io(format!(
+            "Browser probe failed at {} with status {}",
+            url, status
+        )));
+    }
+    let payload: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| AgentError::Config(format!("Browser probe parse failed: {}", e)))?;
+    let browser = payload
+        .get("Browser")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let ws_url = payload
+        .get("webSocketDebuggerUrl")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing>");
+    Ok(format!(
+        "Connected CDP endpoint: {}\nBrowser: {}\nWebSocket target: {}",
+        endpoint.trim(),
+        browser,
+        ws_url
+    ))
+}
+
+async fn handle_browser_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let action = args
+        .first()
+        .copied()
+        .unwrap_or("status")
+        .to_ascii_lowercase();
+    match action.as_str() {
+        "status" | "show" => {
+            let endpoint = std::env::var("CHROME_CDP_URL")
+                .unwrap_or_else(|_| "http://localhost:9222".to_string());
+            match browser_probe(&endpoint).await {
+                Ok(summary) => emit_command_output(app, summary),
+                Err(err) => emit_command_output(
+                    app,
+                    format!(
+                        "Browser status (configured endpoint: {})\nProbe error: {}\nTip: `/browser connect [ws://host:port or http://host:port]`",
+                        endpoint, err
+                    ),
+                ),
+            }
+            Ok(CommandResult::Handled)
+        }
+        "connect" => {
+            let endpoint = args.get(1).copied().unwrap_or("http://localhost:9222");
+            std::env::set_var("CHROME_CDP_URL", endpoint);
+            persist_browser_cdp_url(Some(endpoint))?;
+            match browser_probe(endpoint).await {
+                Ok(summary) => emit_command_output(
+                    app,
+                    format!(
+                        "{}\n\nSaved CHROME_CDP_URL to {}/.env",
+                        summary,
+                        hermes_config::hermes_home().display()
+                    ),
+                ),
+                Err(err) => emit_command_output(
+                    app,
+                    format!(
+                        "Saved CHROME_CDP_URL={}, but probe failed: {}\nStart Chrome with --remote-debugging-port=9222 and retry `/browser status`.",
+                        endpoint, err
+                    ),
+                ),
+            }
+            Ok(CommandResult::Handled)
+        }
+        "disconnect" => {
+            std::env::remove_var("CHROME_CDP_URL");
+            persist_browser_cdp_url(None)?;
+            emit_command_output(
+                app,
+                "Browser CDP override removed. Runtime will fall back to default local endpoint (http://localhost:9222) unless configured elsewhere.",
+            );
+            Ok(CommandResult::Handled)
+        }
+        _ => {
+            emit_command_output(
+                app,
+                "Usage: /browser [status|connect [ws://host:port|http://host:port]|disconnect]",
+            );
+            Ok(CommandResult::Handled)
+        }
+    }
 }
 
 fn handle_background_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
@@ -7496,6 +7790,7 @@ fn handle_compatibility_notice_command(
         "/approve" => "Approve is gateway workflow only (pending approval queue).".to_string(),
         "/deny" => "Deny is gateway workflow only (pending approval queue).".to_string(),
         "/update" => "Update compatibility command: use `hermes update` for updater workflow.".to_string(),
+        "/redraw" => "Manual redraw acknowledged. Hermes Ultra uses continuous redraw scheduling; if the UI looks stale press `Ctrl+L` to toggle the activity lane and force a repaint.".to_string(),
         _ => "Compatibility command acknowledged.".to_string(),
     };
     emit_command_output(app, msg);
@@ -12750,6 +13045,36 @@ mod tests {
     fn test_skins_alias_maps_to_skin() {
         assert_eq!(canonical_command("/skins"), "/skin");
         assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/skins"));
+    }
+
+    #[test]
+    fn test_resume_command_is_registered_and_completable() {
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/resume"));
+        let results = autocomplete("/res");
+        assert!(results.contains(&"/resume"));
+    }
+
+    #[test]
+    fn test_browser_command_is_registered_and_completable() {
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/browser"));
+        let results = autocomplete("/bro");
+        assert!(results.contains(&"/browser"));
+    }
+
+    #[test]
+    fn test_debug_alias_maps_to_debug_dump() {
+        assert_eq!(canonical_command("/debug"), "/debug-dump");
+    }
+
+    #[test]
+    fn test_upstream_compat_aliases_are_mapped() {
+        assert_eq!(canonical_command("/topic"), "/title");
+        assert_eq!(canonical_command("/reload-skills"), "/reload");
+        assert_eq!(canonical_command("/footer"), "/statusbar");
+        assert_eq!(canonical_command("/indicator"), "/statusbar");
+        assert_eq!(canonical_command("/kanban"), "/agents");
+        assert_eq!(canonical_command("/busy"), "/status");
+        assert_eq!(canonical_command("/curator"), "/skills");
     }
 
     #[test]

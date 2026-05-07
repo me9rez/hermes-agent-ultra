@@ -2624,6 +2624,79 @@ impl AgentLoop {
             .join("objective_runtime_ledger.jsonl")
     }
 
+    fn objective_eval_trend_path(&self) -> PathBuf {
+        let hermes_home = self
+            .config
+            .hermes_home
+            .as_deref()
+            .map(PathBuf::from)
+            .or_else(|| std::env::var("HERMES_HOME").ok().map(PathBuf::from))
+            .or_else(|| dirs::home_dir().map(|h| h.join(".hermes")))
+            .unwrap_or_else(|| PathBuf::from(".hermes"));
+        hermes_home.join("alpha").join("objective_eval_trend.json")
+    }
+
+    fn append_objective_eval_sample(
+        &self,
+        objective_id: &str,
+        objective_state: &str,
+        note: &str,
+    ) -> Result<(), AgentError> {
+        let path = self.objective_eval_trend_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AgentError::Io(format!("create {} failed: {}", parent.display(), e))
+            })?;
+        }
+        let mut root: serde_json::Value = if path.exists() {
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .unwrap_or_else(
+                    || serde_json::json!({"updated_at": Utc::now().to_rfc3339(), "samples": []}),
+                )
+        } else {
+            serde_json::json!({"updated_at": Utc::now().to_rfc3339(), "samples": []})
+        };
+        let Some(samples) = root.get_mut("samples").and_then(|v| v.as_array_mut()) else {
+            root = serde_json::json!({"updated_at": Utc::now().to_rfc3339(), "samples": []});
+            let samples = root
+                .get_mut("samples")
+                .and_then(|v| v.as_array_mut())
+                .ok_or_else(|| {
+                    AgentError::Config("objective_eval_trend samples field missing".to_string())
+                })?;
+            samples.push(serde_json::json!({
+                "recorded_at": Utc::now().to_rfc3339(),
+                "objective_id": objective_id,
+                "objective_state": objective_state,
+                "score": objective_eval_score(objective_state),
+                "note": note,
+            }));
+            root["updated_at"] = serde_json::json!(Utc::now().to_rfc3339());
+            let payload = serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".to_string());
+            std::fs::write(&path, payload)
+                .map_err(|e| AgentError::Io(format!("write {} failed: {}", path.display(), e)))?;
+            return Ok(());
+        };
+        samples.push(serde_json::json!({
+            "recorded_at": Utc::now().to_rfc3339(),
+            "objective_id": objective_id,
+            "objective_state": objective_state,
+            "score": objective_eval_score(objective_state),
+            "note": note,
+        }));
+        if samples.len() > 512 {
+            let drain = samples.len().saturating_sub(512);
+            samples.drain(0..drain);
+        }
+        root["updated_at"] = serde_json::json!(Utc::now().to_rfc3339());
+        let payload = serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".to_string());
+        std::fs::write(&path, payload)
+            .map_err(|e| AgentError::Io(format!("write {} failed: {}", path.display(), e)))?;
+        Ok(())
+    }
+
     fn append_objective_runtime_ledger(
         &self,
         messages: &[Message],
@@ -2674,6 +2747,11 @@ impl AgentLoop {
             .map_err(|e| AgentError::Io(format!("open {} failed: {}", path.display(), e)))?;
         writeln!(file, "{}", entry)
             .map_err(|e| AgentError::Io(format!("append {} failed: {}", path.display(), e)))?;
+        self.append_objective_eval_sample(
+            &format!("obj-{}", objective_id),
+            &objective_state,
+            &format!("decision={decision} turns={total_turns}"),
+        )?;
         Ok(())
     }
 
@@ -7643,11 +7721,51 @@ fn update_repo_review_budget_state_from_results(
     }
 }
 
+fn objective_eval_score(state: &str) -> f64 {
+    match state.trim().to_ascii_lowercase().as_str() {
+        "advancing" => 1.0,
+        "flat" => 0.5,
+        "regressing" => 0.0,
+        "unproven" => 0.25,
+        _ => 0.4,
+    }
+}
+
+fn claim_verifier_enabled_runtime() -> bool {
+    if let Ok(raw) = std::env::var("HERMES_CLAIM_VERIFIER_ENABLED") {
+        return !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        );
+    }
+    let hermes_home = std::env::var("HERMES_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".hermes")))
+        .unwrap_or_else(|| PathBuf::from(".hermes"));
+    let path = hermes_home.join("alpha").join("claim_verifier_policy.json");
+    let raw = match std::fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    let parsed: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    parsed
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
 fn finalizer_claim_requires_evidence_retry(
     messages: &[Message],
     assistant_text: &str,
     retry_count: u32,
 ) -> bool {
+    if !claim_verifier_enabled_runtime() {
+        return false;
+    }
     if retry_count >= FINALIZER_EVIDENCE_MAX_RETRIES || !detect_repo_review_intent(messages) {
         return false;
     }

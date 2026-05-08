@@ -15719,6 +15719,7 @@ mod tests {
         assert_eq!(canonical_command("/topic"), "/title");
         assert_eq!(canonical_command("/reload-skills"), "/reload");
         assert_eq!(canonical_command("/reload_skills"), "/reload");
+        assert_eq!(canonical_command("/summary"), "/recap");
         assert_eq!(canonical_command("/footer"), "/statusbar");
         assert_eq!(canonical_command("/indicator"), "/statusbar");
         assert_eq!(canonical_command("/tasks"), "/kanban");
@@ -15726,6 +15727,16 @@ mod tests {
         assert_eq!(canonical_command("/busy"), "/status");
         assert_eq!(canonical_command("/bg"), "/background");
         assert_eq!(canonical_command("/curator"), "/skills");
+    }
+
+    #[test]
+    fn test_recap_and_context_commands_are_registered() {
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/recap"));
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/context"));
+        let recap = autocomplete("/rec");
+        assert!(recap.contains(&"/recap"));
+        let context = autocomplete("/cont");
+        assert!(context.contains(&"/context"));
     }
 
     #[tokio::test]
@@ -15962,6 +15973,12 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some(SENTRUX_MCP_ARG)
         );
+        assert_eq!(
+            sentrux
+                .get("supports_parallel_tool_calls")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
 
         let cfg = hermes_config::load_user_config_file(&config_dir.join("config.yaml"))
             .expect("load config.yaml");
@@ -15969,7 +15986,8 @@ mod tests {
             cfg.mcp_servers
                 .iter()
                 .any(|entry| entry.name == SENTRUX_MCP_SERVER_NAME
-                    && entry.command.as_deref() == Some("sentrux --mcp")),
+                    && entry.command.as_deref() == Some("sentrux --mcp")
+                    && entry.supports_parallel_tool_calls),
             "config.yaml mcp_servers should include sentrux command"
         );
     }

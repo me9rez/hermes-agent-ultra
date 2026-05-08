@@ -8401,6 +8401,71 @@ mod tests {
     }
 
     #[test]
+    fn hook_context_spill_writes_file_for_oversized_payload() {
+        use futures::stream::BoxStream;
+
+        struct DummyProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for DummyProvider {
+            async fn chat_completion(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> Result<hermes_core::LlmResponse, AgentError> {
+                Ok(hermes_core::LlmResponse {
+                    message: Message::assistant("dummy"),
+                    usage: None,
+                    model: "dummy".into(),
+                    finish_reason: Some("stop".into()),
+                })
+            }
+
+            fn chat_completion_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> BoxStream<'static, Result<StreamChunk, AgentError>> {
+                futures::stream::empty().boxed()
+            }
+        }
+
+        let prev = std::env::var("HERMES_HOOK_CONTEXT_SPILL_CHARS").ok();
+        std::env::set_var("HERMES_HOOK_CONTEXT_SPILL_CHARS", "1024");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = AgentConfig {
+            hermes_home: Some(tmp.path().display().to_string()),
+            ..AgentConfig::default()
+        };
+        let agent = AgentLoop::new(cfg, Arc::new(ToolRegistry::new()), Arc::new(DummyProvider));
+        let large = "x".repeat(2_048);
+        let spilled = agent
+            .spill_hook_context_if_oversized(&large)
+            .expect("spill should write file");
+        assert!(spilled.exists(), "spill file should exist");
+        let read_back = std::fs::read_to_string(&spilled).expect("read spill file");
+        assert_eq!(read_back.len(), large.len());
+        assert!(
+            agent
+                .spill_hook_context_if_oversized("small payload")
+                .is_none(),
+            "small payload must not spill"
+        );
+        if let Some(v) = prev {
+            std::env::set_var("HERMES_HOOK_CONTEXT_SPILL_CHARS", v);
+        } else {
+            std::env::remove_var("HERMES_HOOK_CONTEXT_SPILL_CHARS");
+        }
+    }
+
+    #[test]
     fn preflight_compression_status_reports_skipped_when_under_threshold() {
         use futures::stream::BoxStream;
 

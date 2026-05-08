@@ -1239,6 +1239,16 @@ mod tests {
         assert_eq!(out, SUMMARY_PREFIX);
     }
 
+    #[test]
+    fn redact_sensitive_summary_text_masks_common_secrets() {
+        let raw = "api_key=sk-abc123456789\nAuthorization: Bearer tok_super_secret_123456\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----";
+        let redacted = redact_sensitive_summary_text(raw);
+        assert!(!redacted.contains("sk-abc123456789"));
+        assert!(!redacted.contains("tok_super_secret_123456"));
+        assert!(!redacted.contains("BEGIN PRIVATE KEY"));
+        assert!(redacted.contains("[redacted]"));
+    }
+
     // ---------- threshold + budget ----------
 
     #[test]

@@ -4679,6 +4679,7 @@ impl From<mpsc::UnboundedSender<Event>> for StreamHandle {
 mod tests {
     use super::*;
     use hermes_core::Message;
+    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn test_input_mode_display() {
@@ -4800,6 +4801,17 @@ mod tests {
             state.recent_activity.last().map(String::as_str),
             Some("event-29")
         );
+    }
+
+    #[test]
+    fn test_fit_status_line_pads_and_respects_display_width() {
+        let fitted = fit_status_line("ok", 6);
+        assert_eq!(UnicodeWidthStr::width(fitted.as_str()), 6);
+        assert!(fitted.starts_with("ok"));
+
+        let wide = fit_status_line("界abc", 4);
+        assert_eq!(UnicodeWidthStr::width(wide.as_str()), 4);
+        assert!(wide.starts_with('界'));
     }
 
     #[test]

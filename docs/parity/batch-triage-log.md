@@ -1,5 +1,7 @@
 # Batch Triage Log
 
+- 2026-05-09: closed upstream tranche items 1-36 with Rust parity dispositions and targeted ports (`docs/parity/tranche-items-1-36-2026-05-09.md`).
+
 ## 2026-04-21 batch-01 (50 commits)
 - Scope: first 50 `pending` entries in `docs/parity/upstream-missing-queue.json` at triage time.
 - SHA range (ordered): `21d80ca68346` -> `f81395975025`.

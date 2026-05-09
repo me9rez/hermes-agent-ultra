@@ -262,6 +262,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/save", "Save current session to disk"),
     ("/load", "Load a saved session"),
     ("/resume", "Resume the most recent or named saved session"),
+    (
+        "/sessions",
+        "Browse saved sessions, or resume one by name (`/sessions [name]`)",
+    ),
     ("/background", "Run a task in the background"),
     ("/bg", "Alias for /background"),
     ("/mouse", "Toggle mouse interactions in the TUI"),
@@ -3096,6 +3100,7 @@ pub async fn handle_slash_command(
         "/save" => handle_save_command(app, args),
         "/load" => handle_load_command(app, args),
         "/resume" => handle_resume_command(app, args),
+        "/sessions" => handle_sessions_command(app, args),
         "/background" => handle_background_command(app, args),
         "/mouse" => handle_mouse_command(app, args),
         "/verbose" => handle_verbose_command(app),
@@ -6251,6 +6256,13 @@ fn handle_resume_command(app: &mut App, args: &[&str]) -> Result<CommandResult, 
             Ok(CommandResult::Handled)
         }
     }
+}
+
+fn handle_sessions_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    if args.is_empty() {
+        return handle_load_command(app, args);
+    }
+    handle_resume_command(app, args)
 }
 
 fn persist_browser_cdp_url(url: Option<&str>) -> Result<(), AgentError> {
@@ -16885,6 +16897,13 @@ mod tests {
         assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/resume"));
         let results = autocomplete("/res");
         assert!(results.contains(&"/resume"));
+    }
+
+    #[test]
+    fn test_sessions_command_is_registered_and_completable() {
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/sessions"));
+        let results = autocomplete("/sess");
+        assert!(results.contains(&"/sessions"));
     }
 
     #[test]

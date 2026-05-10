@@ -110,35 +110,93 @@ fn auth_error_message(err: &AgentError) -> Option<String> {
     }
 }
 
-fn oneshot_should_auto_verify_nous(
-    err: &AgentError,
-    provider_override: Option<&str>,
-    model_override: Option<&str>,
-) -> bool {
-    let Some(message) = auth_error_message(err) else {
-        return false;
-    };
-
-    let is_auth_like = message.contains("401")
+fn oneshot_auth_is_refreshable(message: &str) -> bool {
+    message.contains("401")
+        || message.contains("403")
         || message.contains("unauthorized")
         || message.contains("invalid token")
         || message.contains("token expired")
-        || message.contains("authentication failed");
-    if !is_auth_like {
-        return false;
+        || message.contains("authentication failed")
+        || message.contains("invalid_grant")
+        || message.contains("expired")
+}
+
+fn infer_oauth_provider_from_error_message(message: &str) -> Option<String> {
+    if message.contains("portal.nousresearch.com")
+        || message.contains("inference-api.nousresearch.com")
+        || message.contains(" provider nous")
+        || message.contains("nous:")
+    {
+        return Some("nous".to_string());
+    }
+    if message.contains("console.anthropic.com")
+        || message.contains("claude.ai")
+        || message.contains("anthropic")
+    {
+        return Some("anthropic".to_string());
+    }
+    if message.contains("chat.qwen.ai") || message.contains("dashscope") || message.contains("qwen")
+    {
+        return Some("qwen-oauth".to_string());
+    }
+    if message.contains("oauth2.googleapis.com")
+        || message.contains("googleapis.com")
+        || message.contains("gemini")
+        || message.contains("google")
+    {
+        return Some("google-gemini-cli".to_string());
+    }
+    if message.contains("auth.openai.com")
+        || message.contains("chatgpt.com")
+        || message.contains("openai")
+        || message.contains("codex")
+    {
+        if message.contains("codex") || message.contains("chatgpt.com") {
+            return Some("openai-codex".to_string());
+        }
+        return Some("openai".to_string());
+    }
+    None
+}
+
+fn oneshot_auto_verify_oauth_provider(
+    err: &AgentError,
+    provider_override: Option<&str>,
+    model_override: Option<&str>,
+) -> Option<String> {
+    let Some(message) = auth_error_message(err) else {
+        return None;
+    };
+
+    if !oneshot_auth_is_refreshable(&message) {
+        return None;
     }
 
-    let provider_is_nous = provider_override
-        .map(str::trim)
-        .is_some_and(|p| p.eq_ignore_ascii_case("nous"));
-    let model_is_nous = model_override
-        .map(str::trim)
-        .is_some_and(|m| m.to_ascii_lowercase().starts_with("nous:"));
-    let message_is_nous = message.contains("nous")
-        || message.contains("portal.nousresearch.com")
-        || message.contains("inference-api.nousresearch.com");
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(raw_provider) = provider_override.map(str::trim).filter(|v| !v.is_empty()) {
+        candidates.push(normalize_auth_provider(raw_provider));
+    }
+    if let Some(raw_model_provider) = model_override
+        .and_then(|m| m.split_once(':').map(|(provider, _)| provider.trim()))
+        .filter(|v| !v.is_empty())
+    {
+        candidates.push(normalize_auth_provider(raw_model_provider));
+    }
+    if let Some(from_message) = infer_oauth_provider_from_error_message(&message) {
+        candidates.push(from_message);
+    }
 
-    provider_is_nous || model_is_nous || message_is_nous
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        let normalized = normalize_auth_provider(&candidate);
+        if !seen.insert(normalized.clone()) {
+            continue;
+        }
+        if provider_supports_oauth(&normalized) {
+            return Some(normalized);
+        }
+    }
+    None
 }
 
 #[tokio::main]
@@ -198,18 +256,19 @@ async fn main() {
         )
         .await;
         if let Err(err) = &result {
-            if oneshot_should_auto_verify_nous(
+            if let Some(provider) = oneshot_auto_verify_oauth_provider(
                 err,
                 global_provider_override.as_deref(),
                 global_model_override.as_deref(),
             ) {
                 eprintln!(
-                    "Detected Nous auth failure in one-shot mode; running `hermes-ultra auth verify nous` and retrying once..."
+                    "Detected OAuth auth failure for provider '{}' in one-shot mode; running `hermes-ultra auth verify {}` and retrying once...",
+                    provider, provider
                 );
                 if let Err(verify_err) = run_auth(
                     cli.clone(),
                     Some("verify".to_string()),
-                    Some("nous".to_string()),
+                    Some(provider.clone()),
                     None,
                     None,
                     None,
@@ -219,8 +278,8 @@ async fn main() {
                 .await
                 {
                     eprintln!(
-                        "Warning: automatic `auth verify nous` failed: {}",
-                        verify_err
+                        "Warning: automatic `auth verify {}` failed: {}",
+                        provider, verify_err
                     );
                 }
                 result = hermes_cli::commands::handle_cli_chat(
@@ -12931,40 +12990,133 @@ mod tests {
     }
 
     #[test]
-    fn oneshot_auto_verify_nous_detects_nous_401_errors() {
+    fn oneshot_auto_verify_provider_detects_nous_401_errors() {
         let err = AgentError::LlmApi(
             "API error 401 Unauthorized: https://portal.nousresearch.com".to_string(),
         );
-        assert!(oneshot_should_auto_verify_nous(
-            &err,
-            Some("nous"),
-            Some("nous:openai/gpt-5.5")
-        ));
-        assert!(oneshot_should_auto_verify_nous(
-            &err,
-            None,
-            Some("nous:moonshotai/kimi-k2.6")
-        ));
-        assert!(oneshot_should_auto_verify_nous(&err, None, None));
+        assert_eq!(
+            oneshot_auto_verify_oauth_provider(&err, Some("nous"), Some("nous:openai/gpt-5.5")),
+            Some("nous".to_string())
+        );
+        assert_eq!(
+            oneshot_auto_verify_oauth_provider(&err, None, Some("nous:moonshotai/kimi-k2.6")),
+            Some("nous".to_string())
+        );
+        assert_eq!(
+            oneshot_auto_verify_oauth_provider(&err, None, None),
+            Some("nous".to_string())
+        );
     }
 
     #[test]
-    fn oneshot_auto_verify_nous_ignores_non_nous_or_non_auth_errors() {
+    fn oneshot_auto_verify_provider_supports_core_oauth_providers() {
+        let openai = AgentError::LlmApi("API error 401 Unauthorized: auth.openai.com".to_string());
+        assert_eq!(
+            oneshot_auto_verify_oauth_provider(&openai, Some("openai"), Some("openai:gpt-5.5")),
+            Some("openai".to_string())
+        );
+        let codex = AgentError::LlmApi("API error 401 Unauthorized: chatgpt.com codex".to_string());
+        assert_eq!(
+            oneshot_auto_verify_oauth_provider(&codex, None, Some("openai-codex:codex-mini")),
+            Some("openai-codex".to_string())
+        );
+        let anthropic = AgentError::LlmApi(
+            "API error 401 Unauthorized: console.anthropic.com token expired".to_string(),
+        );
+        assert_eq!(
+            oneshot_auto_verify_oauth_provider(&anthropic, Some("claude"), None),
+            Some("anthropic".to_string())
+        );
+        let gemini = AgentError::LlmApi(
+            "API error 401 Unauthorized: oauth2.googleapis.com invalid_grant".to_string(),
+        );
+        assert_eq!(
+            oneshot_auto_verify_oauth_provider(&gemini, Some("gemini-cli"), None),
+            Some("google-gemini-cli".to_string())
+        );
+        let qwen = AgentError::LlmApi(
+            "API error 401 Unauthorized: chat.qwen.ai token expired".to_string(),
+        );
+        assert_eq!(
+            oneshot_auto_verify_oauth_provider(&qwen, Some("qwen-cli"), None),
+            Some("qwen-oauth".to_string())
+        );
+    }
+
+    #[test]
+    fn oneshot_auto_verify_provider_ignores_non_oauth_or_non_auth_errors() {
         let not_auth = AgentError::LlmApi("API error 404 Not Found".to_string());
-        assert!(!oneshot_should_auto_verify_nous(
-            &not_auth,
-            Some("nous"),
-            Some("nous:openai/gpt-5.5")
-        ));
+        assert_eq!(
+            oneshot_auto_verify_oauth_provider(
+                &not_auth,
+                Some("nous"),
+                Some("nous:openai/gpt-5.5")
+            ),
+            None
+        );
 
         let other_provider = AgentError::LlmApi(
             "API error 401 Unauthorized: provider openrouter token expired".to_string(),
         );
-        assert!(!oneshot_should_auto_verify_nous(
-            &other_provider,
-            Some("openrouter"),
-            Some("openrouter:openai/gpt-4o")
+        assert_eq!(
+            oneshot_auto_verify_oauth_provider(
+                &other_provider,
+                Some("openrouter"),
+                Some("openrouter:openai/gpt-4o")
+            ),
+            None
+        );
+
+        let missing_signal = AgentError::LlmApi("API error 500 Internal Server Error".to_string());
+        assert_eq!(
+            oneshot_auto_verify_oauth_provider(
+                &missing_signal,
+                Some("openai"),
+                Some("openai:gpt-5.5")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn oneshot_auth_is_refreshable_detects_auth_signals() {
+        assert!(oneshot_auth_is_refreshable(
+            "api error 401 unauthorized token expired"
         ));
+        assert!(oneshot_auth_is_refreshable("invalid_grant"));
+        assert!(!oneshot_auth_is_refreshable("api error 404 not found"));
+    }
+
+    #[test]
+    fn infer_oauth_provider_from_error_message_maps_known_hosts() {
+        assert_eq!(
+            infer_oauth_provider_from_error_message("portal.nousresearch.com unauthorized"),
+            Some("nous".to_string())
+        );
+        assert_eq!(
+            infer_oauth_provider_from_error_message("auth.openai.com unauthorized"),
+            Some("openai".to_string())
+        );
+        assert_eq!(
+            infer_oauth_provider_from_error_message("chatgpt.com codex token expired"),
+            Some("openai-codex".to_string())
+        );
+        assert_eq!(
+            infer_oauth_provider_from_error_message("console.anthropic.com invalid token"),
+            Some("anthropic".to_string())
+        );
+        assert_eq!(
+            infer_oauth_provider_from_error_message("oauth2.googleapis.com invalid_grant"),
+            Some("google-gemini-cli".to_string())
+        );
+        assert_eq!(
+            infer_oauth_provider_from_error_message("chat.qwen.ai invalid token"),
+            Some("qwen-oauth".to_string())
+        );
+        assert_eq!(
+            infer_oauth_provider_from_error_message("openrouter.ai unauthorized"),
+            None
+        );
     }
 
     #[test]

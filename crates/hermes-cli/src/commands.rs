@@ -119,6 +119,11 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "Create a branch/fork marker for the current session",
     ),
     ("/fork", "Alias for /branch"),
+    (
+        "/timetravel",
+        "Session time-travel controls (`list|latest|goto <snapshot>|undo [n]|branch [label]`)",
+    ),
+    ("/tt", "Alias for /timetravel"),
     ("/snapshot", "Create/list snapshot checkpoints"),
     ("/snap", "Alias for /snapshot"),
     ("/rollback", "List rollback checkpoints"),
@@ -182,6 +187,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "Optional multi-voter deep-reasoning mode (`status|on|off|models|run`)",
     ),
     (
+        "/simulate",
+        "Simulate tool-policy decisions without executing tools (`status|<tool> [json-params]`)",
+    ),
+    (
         "/specpatch",
         "Speculative patch executor (`/specpatch <verify_cmd> | <candidate_cmd_1> | ...`)",
     ),
@@ -207,6 +216,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/lsp", "Show code-index/LSP context status and controls"),
     ("/graph", "Show graph-memory and ContextLattice status"),
+    (
+        "/qos",
+        "Provider QoS router controls (`status|health|autotune [plan|apply]`)",
+    ),
     ("/image", "Attach/clear an image hint consumed by next prompt"),
     ("/config", "Show or modify configuration"),
     (
@@ -232,6 +245,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "Show build/parity/upstream snapshot and enabled Ultra features",
     ),
     ("/ops", "Operator control plane (status + quick controls)"),
+    (
+        "/eval",
+        "Run/show live session evaluation harness (`status|run|latest`)",
+    ),
     (
         "/autopilot",
         "Adaptive intelligence-performance autopilot (`status|run|recommend|apply|profile|mode|clear`)",
@@ -2977,6 +2994,7 @@ fn canonical_command(cmd: &str) -> &str {
         "/reload_skills" => "/reload",
         "/reload_mcp" => "/reload-mcp",
         "/fork" => "/branch",
+        "/tt" => "/timetravel",
         "/snap" => "/snapshot",
         "/set-home" => "/sethome",
         "/footer" => "/statusbar",
@@ -3033,6 +3051,7 @@ pub async fn handle_slash_command(
         "/recap" => handle_recap_command(app, args),
         "/context" => handle_context_command(app, args),
         "/title" | "/branch" => handle_session_compat_command(app, canonical_command(cmd), args),
+        "/timetravel" => handle_timetravel_command(app, args),
         "/snapshot" => handle_snapshot_command(app, args),
         "/rollback" => handle_rollback_command(app, args),
         "/queue" => handle_queue_command(app, args),
@@ -3043,6 +3062,7 @@ pub async fn handle_slash_command(
         "/objective" => handle_objective_command(app, args),
         "/claims" => handle_claims_command(app, args),
         "/quorum" => handle_quorum_command(app, args).await,
+        "/simulate" => handle_simulate_command(app, args),
         "/specpatch" => handle_specpatch_command(app, args).await,
         "/heatmap" => handle_heatmap_command(app, args).await,
         "/studio" => handle_studio_command(app, args).await,
@@ -3068,6 +3088,7 @@ pub async fn handle_slash_command(
         "/plan" => handle_plan_command(app, args),
         "/lsp" => handle_lsp_command(app, args),
         "/graph" => handle_graph_command(app, args),
+        "/qos" => handle_qos_command(app, args).await,
         "/image" => handle_image_command(app, args),
         "/config" => handle_config_command(app, args),
         "/autocompact" => handle_autocompact_command(app, args),
@@ -3079,6 +3100,7 @@ pub async fn handle_slash_command(
         "/status" => handle_status_command(app),
         "/about" => handle_about_command(app),
         "/ops" => handle_ops_command(app, args).await,
+        "/eval" => handle_ops_eval_command(app, args).await,
         "/autopilot" => handle_ops_autopilot_command(app, args).await,
         "/mission" => handle_mission_command(app, args).await,
         "/dashboard" => handle_dashboard_command(app, args).await,
@@ -4957,6 +4979,124 @@ fn skills_action_blocked_by_tier(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoReviewBudgetProfile {
+    Balanced,
+    Aggressive,
+    Relaxed,
+    Off,
+}
+
+impl RepoReviewBudgetProfile {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "balanced" => Some(Self::Balanced),
+            "aggressive" => Some(Self::Aggressive),
+            "relaxed" => Some(Self::Relaxed),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::Aggressive => "aggressive",
+            Self::Relaxed => "relaxed",
+            Self::Off => "off",
+        }
+    }
+}
+
+const REPO_REVIEW_BUDGET_ENV_REPEAT_THRESHOLD: &str = "HERMES_REPO_REVIEW_REPEAT_STREAK_THRESHOLD";
+const REPO_REVIEW_BUDGET_ENV_LOW_SIGNAL_THRESHOLD: &str =
+    "HERMES_REPO_REVIEW_LOW_SIGNAL_STREAK_THRESHOLD";
+const REPO_REVIEW_BUDGET_ENV_KEEP_REPEAT: &str = "HERMES_REPO_REVIEW_KEEP_LIMIT_REPEAT";
+const REPO_REVIEW_BUDGET_ENV_KEEP_LOW_SIGNAL: &str = "HERMES_REPO_REVIEW_KEEP_LIMIT_LOW_SIGNAL";
+const REPO_REVIEW_BUDGET_ENV_MIN_SIGNAL_SCORE: &str = "HERMES_REPO_REVIEW_MIN_SIGNAL_SCORE";
+const REPO_REVIEW_BUDGET_ENV_PROFILE: &str = "HERMES_REPO_REVIEW_BUDGET_PROFILE";
+
+#[derive(Debug, Clone, PartialEq)]
+struct RepoReviewBudgetRuntime {
+    repeat_threshold: usize,
+    low_signal_threshold: usize,
+    keep_repeat: usize,
+    keep_low_signal: usize,
+    min_signal_score: f64,
+    profile: RepoReviewBudgetProfile,
+}
+
+impl RepoReviewBudgetRuntime {
+    fn from_env() -> Self {
+        let repeat_threshold = std::env::var(REPO_REVIEW_BUDGET_ENV_REPEAT_THRESHOLD)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(2)
+            .clamp(1, 12);
+        let low_signal_threshold = std::env::var(REPO_REVIEW_BUDGET_ENV_LOW_SIGNAL_THRESHOLD)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(2)
+            .clamp(1, 12);
+        let keep_repeat = std::env::var(REPO_REVIEW_BUDGET_ENV_KEEP_REPEAT)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(2)
+            .clamp(1, 12);
+        let keep_low_signal = std::env::var(REPO_REVIEW_BUDGET_ENV_KEEP_LOW_SIGNAL)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 12);
+        let min_signal_score = std::env::var(REPO_REVIEW_BUDGET_ENV_MIN_SIGNAL_SCORE)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(0.22)
+            .clamp(0.0, 1.0);
+        let profile = std::env::var(REPO_REVIEW_BUDGET_ENV_PROFILE)
+            .ok()
+            .as_deref()
+            .and_then(RepoReviewBudgetProfile::parse)
+            .unwrap_or(RepoReviewBudgetProfile::Balanced);
+        Self {
+            repeat_threshold,
+            low_signal_threshold,
+            keep_repeat,
+            keep_low_signal,
+            min_signal_score,
+            profile,
+        }
+    }
+}
+
+fn apply_repo_review_budget_profile(profile: RepoReviewBudgetProfile) {
+    let (repeat_threshold, low_signal_threshold, keep_repeat, keep_low_signal, min_signal_score) =
+        match profile {
+            RepoReviewBudgetProfile::Balanced => (2usize, 2usize, 2usize, 1usize, 0.22f64),
+            RepoReviewBudgetProfile::Aggressive => (1usize, 1usize, 1usize, 1usize, 0.35f64),
+            RepoReviewBudgetProfile::Relaxed => (3usize, 3usize, 3usize, 2usize, 0.15f64),
+            RepoReviewBudgetProfile::Off => (12usize, 12usize, 12usize, 12usize, 0.01f64),
+        };
+    std::env::set_var(
+        REPO_REVIEW_BUDGET_ENV_REPEAT_THRESHOLD,
+        repeat_threshold.to_string(),
+    );
+    std::env::set_var(
+        REPO_REVIEW_BUDGET_ENV_LOW_SIGNAL_THRESHOLD,
+        low_signal_threshold.to_string(),
+    );
+    std::env::set_var(REPO_REVIEW_BUDGET_ENV_KEEP_REPEAT, keep_repeat.to_string());
+    std::env::set_var(
+        REPO_REVIEW_BUDGET_ENV_KEEP_LOW_SIGNAL,
+        keep_low_signal.to_string(),
+    );
+    std::env::set_var(
+        REPO_REVIEW_BUDGET_ENV_MIN_SIGNAL_SCORE,
+        format!("{:.3}", min_signal_score),
+    );
+    std::env::set_var(REPO_REVIEW_BUDGET_ENV_PROFILE, profile.as_str());
+}
+
 fn latest_json_report(report_dir: &Path, prefix: &str) -> Option<PathBuf> {
     let mut reports: Vec<PathBuf> = std::fs::read_dir(report_dir)
         .ok()?
@@ -5311,6 +5451,374 @@ async fn run_ops_shell_command(command: &str) -> Result<String, AgentError> {
         msg = format!("(exit: {})\n{}", output.status, msg);
     }
     Ok(msg)
+}
+
+async fn run_current_hermes_cli_command(args: &[&str]) -> Result<String, AgentError> {
+    let exe = std::env::current_exe()
+        .map_err(|e| AgentError::Io(format!("resolve current executable: {e}")))?;
+    let output = tokio::process::Command::new(exe)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| AgentError::Io(format!("run current hermes command failed: {e}")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut msg = String::new();
+    if !stdout.is_empty() {
+        msg.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !msg.is_empty() {
+            msg.push_str("\n\n");
+        }
+        msg.push_str("stderr:\n");
+        msg.push_str(&stderr);
+    }
+    if msg.is_empty() {
+        msg = format!("(exit: {})", output.status);
+    } else if !output.status.success() {
+        msg = format!("(exit: {})\n{}", output.status, msg);
+    }
+    Ok(msg)
+}
+
+fn handle_simulate_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
+        let counters = app.tool_registry.policy_counters();
+        emit_command_output(
+            app,
+            format!(
+                "Tool-policy simulation\n\
+                 usage: /simulate <tool_name> [json-params]\n\
+                 examples:\n  /simulate terminal {{\"cmd\":\"ls\"}}\n  /simulate skill_manage {{\"action\":\"view\",\"skill\":\"contextlattice-agent-contract\"}}\n\
+                 counters: allow={} deny={} audit_only={} simulate={} would_block={}",
+                counters.allow, counters.deny, counters.audit_only, counters.simulate, counters.would_block
+            ),
+        );
+        return Ok(CommandResult::Handled);
+    }
+
+    let tool_name = args[0].trim();
+    if tool_name.is_empty() {
+        emit_command_output(app, "Usage: /simulate <tool_name> [json-params]");
+        return Ok(CommandResult::Handled);
+    }
+    let params = if args.len() > 1 {
+        let raw = args[1..].join(" ");
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(v) if v.is_object() => v,
+            Ok(_) => {
+                emit_command_output(app, "simulate params must be a JSON object.");
+                return Ok(CommandResult::Handled);
+            }
+            Err(err) => {
+                emit_command_output(
+                    app,
+                    format!("simulate params parse error: {}\nraw={}", err, raw),
+                );
+                return Ok(CommandResult::Handled);
+            }
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    let decision = app
+        .tool_registry
+        .evaluate_policy_preview(tool_name, &params);
+    let payload = serde_json::json!({
+        "tool": tool_name,
+        "params": params,
+        "decision": {
+            "allow": decision.allow,
+            "mode": decision.mode.as_str(),
+            "audited_only": decision.audited_only,
+            "simulated": decision.simulated,
+            "would_block": decision.would_block,
+            "code": decision.code,
+            "reason": decision.reason,
+        }
+    });
+    emit_command_output(
+        app,
+        serde_json::to_string_pretty(&payload)
+            .map_err(|e| AgentError::Config(format!("serialize simulate result: {e}")))?,
+    );
+    Ok(CommandResult::Handled)
+}
+
+fn route_learning_state_path() -> PathBuf {
+    hermes_config::hermes_home().join("route-learning.json")
+}
+
+fn route_health_state_path() -> PathBuf {
+    hermes_config::hermes_home().join("route-health.json")
+}
+
+fn route_autotune_state_path() -> PathBuf {
+    hermes_config::hermes_home().join("route-autotune.json")
+}
+
+fn route_autotune_env_path() -> PathBuf {
+    hermes_config::hermes_home().join("route-autotune.env")
+}
+
+fn summarize_route_health_state(path: &Path) -> String {
+    let Some(report) = read_json_file(path) else {
+        return "route_health=unknown".to_string();
+    };
+    let overall = report
+        .get("overall")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let score = report
+        .get("summary")
+        .and_then(|v| v.get("health_score"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let generated = report
+        .get("generated_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    format!(
+        "route_health={} score={:.2} @ {}",
+        overall, score, generated
+    )
+}
+
+fn handle_ops_budget_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
+        let budget = RepoReviewBudgetRuntime::from_env();
+        emit_command_output(
+            app,
+            format!(
+                "repo_review_budget profile={}\n\
+                 repeat_threshold={} low_signal_threshold={} keep_repeat={} keep_low_signal={} min_signal_score={:.2}",
+                budget.profile.as_str(),
+                budget.repeat_threshold,
+                budget.low_signal_threshold,
+                budget.keep_repeat,
+                budget.keep_low_signal,
+                budget.min_signal_score
+            ),
+        );
+        return Ok(CommandResult::Handled);
+    }
+    match args[0].to_ascii_lowercase().as_str() {
+        "list" => emit_command_output(
+            app,
+            "Repo-review budget profiles:\n- balanced: default trim cadence\n- aggressive: trim repetitive discovery quickly\n- relaxed: allow broader exploration before trimming\n- off: effectively disable trimming",
+        ),
+        "clear" => {
+            for key in [
+                REPO_REVIEW_BUDGET_ENV_REPEAT_THRESHOLD,
+                REPO_REVIEW_BUDGET_ENV_LOW_SIGNAL_THRESHOLD,
+                REPO_REVIEW_BUDGET_ENV_KEEP_REPEAT,
+                REPO_REVIEW_BUDGET_ENV_KEEP_LOW_SIGNAL,
+                REPO_REVIEW_BUDGET_ENV_MIN_SIGNAL_SCORE,
+                REPO_REVIEW_BUDGET_ENV_PROFILE,
+            ] {
+                std::env::remove_var(key);
+            }
+            emit_command_output(app, "Cleared repo-review budget runtime overrides.");
+        }
+        profile_raw => {
+            let Some(profile) = RepoReviewBudgetProfile::parse(profile_raw) else {
+                emit_command_output(
+                    app,
+                    "Usage: /ops budget [status|list|balanced|aggressive|relaxed|off|clear]",
+                );
+                return Ok(CommandResult::Handled);
+            };
+            apply_repo_review_budget_profile(profile);
+            let budget = RepoReviewBudgetRuntime::from_env();
+            emit_command_output(
+                app,
+                format!(
+                    "repo_review_budget set to '{}' (repeat={} low_signal={} keep_repeat={} keep_low_signal={} min_signal={:.2})",
+                    profile.as_str(),
+                    budget.repeat_threshold,
+                    budget.low_signal_threshold,
+                    budget.keep_repeat,
+                    budget.keep_low_signal,
+                    budget.min_signal_score
+                ),
+            );
+        }
+    }
+    Ok(CommandResult::Handled)
+}
+
+async fn handle_ops_eval_command(
+    app: &mut App,
+    args: &[&str],
+) -> Result<CommandResult, AgentError> {
+    let sub = args
+        .first()
+        .copied()
+        .unwrap_or("status")
+        .to_ascii_lowercase();
+    let Some(repo_root) = discover_repo_root_for_about() else {
+        emit_command_output(
+            app,
+            "Eval controls are unavailable outside source checkout.",
+        );
+        return Ok(CommandResult::Handled);
+    };
+    let report_dir = repo_root.join(".sync-reports");
+    match sub.as_str() {
+        "status" => {
+            let latest = latest_json_report(&report_dir, "session-eval-harness-")
+                .or_else(|| latest_json_report(&report_dir, "eval-trend-gate-"));
+            if let Some(path) = latest {
+                let summary = summarize_gate_report(&path, "eval")
+                    .unwrap_or_else(|| format!("latest eval report: {}", path.display()));
+                emit_command_output(
+                    app,
+                    format!(
+                        "{summary}\nRun `/ops eval run` to generate a fresh session-backed report."
+                    ),
+                );
+            } else {
+                emit_command_output(
+                    app,
+                    "No eval reports found yet. Run `/ops eval run` to generate one.",
+                );
+            }
+            Ok(CommandResult::Handled)
+        }
+        "run" => {
+            let out = run_ops_shell_command(
+                "python3 scripts/run-session-eval-harness.py --repo-root . --json",
+            )
+            .await?;
+            emit_command_output(app, out);
+            Ok(CommandResult::Handled)
+        }
+        "latest" => {
+            let Some(path) = latest_json_report(&report_dir, "session-eval-harness-")
+                .or_else(|| latest_json_report(&report_dir, "eval-trend-gate-"))
+            else {
+                emit_command_output(app, "No eval reports found.");
+                return Ok(CommandResult::Handled);
+            };
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| AgentError::Io(format!("read {}: {}", path.display(), e)))?;
+            emit_command_output(
+                app,
+                format!(
+                    "Latest eval report: {}\n{}",
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string()),
+                    raw
+                ),
+            );
+            Ok(CommandResult::Handled)
+        }
+        _ => {
+            emit_command_output(app, "Usage: /ops eval [status|run|latest]");
+            Ok(CommandResult::Handled)
+        }
+    }
+}
+
+async fn handle_qos_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let sub = args
+        .first()
+        .copied()
+        .unwrap_or("status")
+        .to_ascii_lowercase();
+    match sub.as_str() {
+        "status" | "show" => {
+            let learning_path = route_learning_state_path();
+            let health_path = route_health_state_path();
+            let autotune_path = route_autotune_state_path();
+            let autotune_env = route_autotune_env_path();
+            let learning_entries = read_json_file(&learning_path)
+                .and_then(|v| {
+                    v.get("entries")
+                        .and_then(|e| e.as_array())
+                        .map(|arr| arr.len())
+                })
+                .unwrap_or(0usize);
+            let health_summary = summarize_route_health_state(&health_path);
+            let mut out = String::new();
+            let _ = writeln!(out, "Provider QoS router");
+            let _ = writeln!(
+                out,
+                "  route_learning_entries={} ({})",
+                learning_entries,
+                learning_path.display()
+            );
+            let _ = writeln!(out, "  {} ({})", health_summary, health_path.display());
+            let _ = writeln!(
+                out,
+                "  route_autotune_state={} ({})",
+                if autotune_path.exists() {
+                    "present"
+                } else {
+                    "missing"
+                },
+                autotune_path.display()
+            );
+            let _ = writeln!(
+                out,
+                "  route_autotune_env={} ({})",
+                if autotune_env.exists() {
+                    "present"
+                } else {
+                    "missing"
+                },
+                autotune_env.display()
+            );
+            let _ = writeln!(
+                out,
+                "  actions: /qos health | /qos autotune plan | /qos autotune apply"
+            );
+            emit_command_output(app, out.trim_end());
+            Ok(CommandResult::Handled)
+        }
+        "health" => {
+            let out = run_current_hermes_cli_command(&["route-health", "--json"]).await?;
+            emit_command_output(app, out);
+            Ok(CommandResult::Handled)
+        }
+        "autotune" => {
+            let action = args.get(1).copied().unwrap_or("plan").to_ascii_lowercase();
+            let out = match action.as_str() {
+                "plan" => {
+                    run_current_hermes_cli_command(&["route-autotune", "plan", "--json"]).await?
+                }
+                "apply" => {
+                    run_current_hermes_cli_command(&[
+                        "route-autotune",
+                        "apply",
+                        "--apply",
+                        "--json",
+                    ])
+                    .await?
+                }
+                _ => {
+                    emit_command_output(app, "Usage: /qos autotune [plan|apply]");
+                    return Ok(CommandResult::Handled);
+                }
+            };
+            emit_command_output(app, out);
+            Ok(CommandResult::Handled)
+        }
+        "help" => {
+            emit_command_output(app, "Usage: /qos [status|health|autotune [plan|apply]]");
+            Ok(CommandResult::Handled)
+        }
+        _ => {
+            emit_command_output(app, "Usage: /qos [status|health|autotune [plan|apply]]");
+            Ok(CommandResult::Handled)
+        }
+    }
 }
 
 fn handle_ops_skills_tier_command(
@@ -5702,12 +6210,25 @@ async fn handle_ops_cockpit_command(
     _args: &[&str],
 ) -> Result<CommandResult, AgentError> {
     let counters = app.tool_registry.policy_counters();
+    let budget = RepoReviewBudgetRuntime::from_env();
     let board = render_mission_board(
         &app.current_model,
         app.session_objective.as_deref(),
         background_job_counts(),
     )
     .await?;
+    let route_health = summarize_route_health_state(&route_health_state_path());
+    let eval_summary = if let Some(repo_root) = discover_repo_root_for_about() {
+        let report_dir = repo_root.join(".sync-reports");
+        latest_json_report(&report_dir, "session-eval-harness-")
+            .or_else(|| latest_json_report(&report_dir, "eval-trend-gate-"))
+            .and_then(|p| summarize_gate_report(&p, "eval"))
+            .unwrap_or_else(|| "eval=unknown".to_string())
+    } else {
+        "eval=unavailable".to_string()
+    };
+    let snapshot_count =
+        enumerate_saved_sessions(&hermes_config::hermes_home().join("sessions")).len();
     let mut out = String::new();
     out.push_str("Ops Cockpit\n");
     out.push_str("===========\n");
@@ -5735,9 +6256,32 @@ async fn handle_ops_cockpit_command(
     );
     let _ = writeln!(
         out,
+        "repo_review_budget: profile={} repeat={} low_signal={} keep_repeat={} keep_low_signal={} min_signal={:.2}",
+        budget.profile.as_str(),
+        budget.repeat_threshold,
+        budget.low_signal_threshold,
+        budget.keep_repeat,
+        budget.keep_low_signal,
+        budget.min_signal_score
+    );
+    let _ = writeln!(
+        out,
         "policy_counters: allow={} deny={} audit_only={} simulate={} would_block={}",
         counters.allow, counters.deny, counters.audit_only, counters.simulate, counters.would_block
     );
+    let _ = writeln!(
+        out,
+        "qos: {} | learning_entries={} | snapshots={}",
+        route_health,
+        read_json_file(&route_learning_state_path())
+            .and_then(|v| v
+                .get("entries")
+                .and_then(|e| e.as_array())
+                .map(|arr| arr.len()))
+            .unwrap_or(0usize),
+        snapshot_count
+    );
+    let _ = writeln!(out, "eval: {}", eval_summary);
     out.push('\n');
     out.push_str(&board);
     emit_command_output(app, out.trim_end());
@@ -5797,6 +6341,7 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| "balanced".to_string());
+        let repo_review_budget = RepoReviewBudgetRuntime::from_env();
 
         let out = format!(
             "Operator Control Plane\n\
@@ -5817,6 +6362,7 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
              Policy/Gates:\n\
                tool_policy:  mode={} preset={}\n\
                autopilot:    mode={} profile={}\n\
+               repo_budget:  profile={} repeat={} low_signal={} keep_repeat={} keep_low_signal={} min_signal={:.2}\n\
                policy_counts allow={} deny={} audit_only={} simulate={} would_block={}\n\
                skills_tier:  {} (bypass={})\n\
                {}\n\
@@ -5833,7 +6379,9 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
                /ops verbose\n\
                /ops dashboard [status|on|off|url] [host] [port]\n\
                /ops skills-tier [status|trusted|balanced|open]\n\
+               /ops budget [status|list|balanced|aggressive|relaxed|off|clear]\n\
                /ops evolve [status|run|recommend]\n\
+               /ops eval [status|run|latest]\n\
                /ops autopilot [status|run|recommend|apply|profile|mode|clear]\n\
                /ops gate [status|eval|elite|slo]\n\
                /ops cockpit\n\
@@ -5848,6 +6396,12 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
             policy_preset,
             autopilot_mode,
             autopilot_profile,
+            repo_review_budget.profile.as_str(),
+            repo_review_budget.repeat_threshold,
+            repo_review_budget.low_signal_threshold,
+            repo_review_budget.keep_repeat,
+            repo_review_budget.keep_low_signal,
+            repo_review_budget.min_signal_score,
             counters.allow,
             counters.deny,
             counters.audit_only,
@@ -5883,7 +6437,9 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
                  - /ops statusbar\n\
                  - /ops dashboard [status|on|off|url] [host] [port]\n\
                  - /ops skills-tier [status|trusted|balanced|open]\n\
+                 - /ops budget [status|list|balanced|aggressive|relaxed|off|clear]\n\
                  - /ops evolve [status|run|recommend]\n\
+                 - /ops eval [status|run|latest]\n\
                  - /ops autopilot [status|run|recommend|apply|profile|mode|clear]\n\
                  - /ops gate [status|eval|elite|slo]\n\
                  - /ops cockpit\n\
@@ -5902,7 +6458,9 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
         "statusbar" => handle_statusbar_command(app),
         "dashboard" => handle_dashboard_command(app, &args[1..]).await,
         "skills-tier" => handle_ops_skills_tier_command(app, &args[1..]),
+        "budget" => handle_ops_budget_command(app, &args[1..]),
         "evolve" => handle_ops_evolve_command(app, &args[1..]).await,
+        "eval" => handle_ops_eval_command(app, &args[1..]).await,
         "autopilot" => handle_ops_autopilot_command(app, &args[1..]).await,
         "gate" => handle_ops_gate_command(app, &args[1..]).await,
         "cockpit" => handle_ops_cockpit_command(app, &args[1..]).await,
@@ -9356,6 +9914,128 @@ fn handle_lsp_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Age
     Ok(CommandResult::Handled)
 }
 
+fn collect_graph_candidate_files(
+    root: &Path,
+    max_files: usize,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), AgentError> {
+    if out.len() >= max_files {
+        return Ok(());
+    }
+    let rd = std::fs::read_dir(root)
+        .map_err(|e| AgentError::Io(format!("read_dir {}: {}", root.display(), e)))?;
+    for entry in rd {
+        if out.len() >= max_files {
+            break;
+        }
+        let entry = match entry {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if path.is_dir() {
+            if matches!(
+                name,
+                ".git"
+                    | "target"
+                    | "node_modules"
+                    | ".venv"
+                    | "venv"
+                    | "__pycache__"
+                    | ".mypy_cache"
+                    | ".pytest_cache"
+            ) {
+                continue;
+            }
+            collect_graph_candidate_files(&path, max_files, out)?;
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if matches!(ext.as_str(), "rs" | "py" | "ts" | "tsx" | "js" | "jsx") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn extract_semantic_refs_for_file(ext: &str, content: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    match ext {
+        "rs" => {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("use ") {
+                    let target = rest.split(';').next().unwrap_or_default().trim();
+                    if !target.is_empty() {
+                        refs.push(target.to_string());
+                    }
+                }
+                if let Some(rest) = trimmed.strip_prefix("mod ") {
+                    let target = rest.split(';').next().unwrap_or_default().trim();
+                    if !target.is_empty() {
+                        refs.push(target.to_string());
+                    }
+                }
+            }
+        }
+        "py" => {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("import ") {
+                    for item in rest.split(',') {
+                        let target = item.split_whitespace().next().unwrap_or_default().trim();
+                        if !target.is_empty() {
+                            refs.push(target.to_string());
+                        }
+                    }
+                } else if let Some(rest) = trimmed.strip_prefix("from ") {
+                    let target = rest.split_whitespace().next().unwrap_or_default().trim();
+                    if !target.is_empty() {
+                        refs.push(target.to_string());
+                    }
+                }
+            }
+        }
+        "ts" | "tsx" | "js" | "jsx" => {
+            let re = Regex::new(r#"(?m)from\s+["']([^"']+)["']"#).expect("valid import regex");
+            for caps in re.captures_iter(content) {
+                if let Some(m) = caps.get(1) {
+                    refs.push(m.as_str().trim().to_string());
+                }
+            }
+            let re_req = Regex::new(r#"(?m)require\(\s*["']([^"']+)["']\s*\)"#)
+                .expect("valid require regex");
+            for caps in re_req.captures_iter(content) {
+                if let Some(m) = caps.get(1) {
+                    refs.push(m.as_str().trim().to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+    refs
+}
+
+fn sanitize_graph_node(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn handle_graph_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
     let sub = args
         .first()
@@ -9398,8 +10078,107 @@ fn handle_graph_command(app: &mut App, args: &[&str]) -> Result<CommandResult, A
             }
             emit_command_output(app, out.trim_end());
         }
-        "help" => emit_command_output(app, "Usage: /graph [status]"),
-        _ => emit_command_output(app, "Usage: /graph [status]"),
+        "repo" | "semantic" => {
+            let mut max_files = 220usize;
+            let mut repo_arg: Option<&str> = None;
+            let mut idx = 1usize;
+            while idx < args.len() {
+                if args[idx] == "--max-files" {
+                    if let Some(raw) = args.get(idx + 1).copied() {
+                        if let Ok(parsed) = raw.parse::<usize>() {
+                            max_files = parsed.clamp(20, 1500);
+                        }
+                        idx += 2;
+                        continue;
+                    }
+                }
+                repo_arg = Some(args[idx]);
+                idx += 1;
+            }
+            let repo_root = if let Some(raw) = repo_arg {
+                PathBuf::from(raw)
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| AgentError::Io(format!("current_dir: {}", e)))?
+            };
+            if !repo_root.exists() {
+                emit_command_output(
+                    app,
+                    format!("Repo path does not exist: {}", repo_root.display()),
+                );
+                return Ok(CommandResult::Handled);
+            }
+
+            let mut files = Vec::new();
+            collect_graph_candidate_files(&repo_root, max_files, &mut files)?;
+            if files.is_empty() {
+                emit_command_output(
+                    app,
+                    format!(
+                        "No candidate source files found under {} (max_files={}).",
+                        repo_root.display(),
+                        max_files
+                    ),
+                );
+                return Ok(CommandResult::Handled);
+            }
+
+            let mut edges: HashMap<(String, String), usize> = HashMap::new();
+            let mut node_degree: HashMap<String, usize> = HashMap::new();
+            for path in &files {
+                let rel = path
+                    .strip_prefix(&repo_root)
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string_lossy().to_string());
+                let ext = path
+                    .extension()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let content = std::fs::read_to_string(path).unwrap_or_default();
+                for rf in extract_semantic_refs_for_file(&ext, &content) {
+                    let key = (rel.clone(), rf.clone());
+                    *edges.entry(key).or_insert(0usize) += 1;
+                    *node_degree.entry(rel.clone()).or_insert(0usize) += 1;
+                    *node_degree.entry(rf).or_insert(0usize) += 1;
+                }
+            }
+
+            let mut degree_ranked: Vec<(String, usize)> = node_degree.into_iter().collect();
+            degree_ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let mut edge_ranked: Vec<((String, String), usize)> = edges.into_iter().collect();
+            edge_ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+            let mut out = String::new();
+            let _ = writeln!(out, "Semantic repo graph");
+            let _ = writeln!(out, "  repo_root={}", repo_root.display());
+            let _ = writeln!(out, "  files_scanned={} (cap={})", files.len(), max_files);
+            let _ = writeln!(out, "  semantic_edges={}", edge_ranked.len());
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Top hubs (degree):");
+            for (idx, (node, degree)) in degree_ranked.iter().take(12).enumerate() {
+                let _ = writeln!(out, "  {}. {} ({})", idx + 1, node, degree);
+            }
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Top semantic edges:");
+            for (idx, ((src, dst), weight)) in edge_ranked.iter().take(16).enumerate() {
+                let _ = writeln!(out, "  {}. {} -> {} ({})", idx + 1, src, dst, weight);
+            }
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Mermaid preview:");
+            let _ = writeln!(out, "```mermaid");
+            let _ = writeln!(out, "graph LR");
+            for ((src, dst), _) in edge_ranked.iter().take(32) {
+                let src_n = sanitize_graph_node(src);
+                let dst_n = sanitize_graph_node(dst);
+                let _ = writeln!(out, "  {}[\"{}\"] --> {}[\"{}\"]", src_n, src, dst_n, dst);
+            }
+            let _ = writeln!(out, "```");
+            emit_command_output(app, out.trim_end());
+        }
+        "help" => emit_command_output(app, "Usage: /graph [status|repo [path] [--max-files N]]"),
+        _ => emit_command_output(app, "Usage: /graph [status|repo [path] [--max-files N]]"),
     }
     Ok(CommandResult::Handled)
 }
@@ -10973,6 +11752,54 @@ fn handle_rollback_command(app: &mut App, args: &[&str]) -> Result<CommandResult
     }
 
     handle_load_command(app, &[sub])
+}
+
+fn handle_timetravel_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    if args.is_empty() {
+        return handle_snapshot_command(app, &["list"]);
+    }
+    match args[0].to_ascii_lowercase().as_str() {
+        "help" => {
+            emit_command_output(
+                app,
+                "Usage: /timetravel [list|latest|goto <snapshot>|undo [n]|branch [label]]\n\
+                 - list: show snapshot checkpoints\n\
+                 - latest: jump to latest snapshot\n\
+                 - goto <snapshot>: jump to named snapshot\n\
+                 - undo [n]: undo latest exchange(s)\n\
+                 - branch [label]: create a branch checkpoint marker",
+            );
+            Ok(CommandResult::Handled)
+        }
+        "list" | "ls" | "show" => handle_snapshot_command(app, &["list"]),
+        "latest" => handle_rollback_command(app, &["latest"]),
+        "goto" | "jump" => {
+            let Some(name) = args.get(1).copied() else {
+                emit_command_output(app, "Usage: /timetravel goto <snapshot-name>");
+                return Ok(CommandResult::Handled);
+            };
+            handle_load_command(app, &[name])
+        }
+        "undo" => handle_rollback_command(app, args),
+        "branch" | "fork" => {
+            let label = args.get(1).copied().unwrap_or("timetravel");
+            handle_session_compat_command(app, "/branch", &[label])
+        }
+        other => {
+            if other.parse::<usize>().is_ok() {
+                handle_rollback_command(app, args)
+            } else {
+                emit_command_output(
+                    app,
+                    format!(
+                        "Unknown /timetravel action '{}'. Use `/timetravel help`.",
+                        other
+                    ),
+                );
+                Ok(CommandResult::Handled)
+            }
+        }
+    }
 }
 
 fn handle_queue_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
@@ -17613,6 +18440,34 @@ mod tests {
     }
 
     #[test]
+    fn test_timetravel_command_and_alias_are_registered() {
+        assert!(SLASH_COMMANDS
+            .iter()
+            .any(|(name, _)| *name == "/timetravel"));
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/tt"));
+        assert_eq!(canonical_command("/tt"), "/timetravel");
+        let results = autocomplete("/time");
+        assert!(results.contains(&"/timetravel"));
+    }
+
+    #[test]
+    fn test_simulate_command_is_registered_and_completable() {
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/simulate"));
+        let results = autocomplete("/sim");
+        assert!(results.contains(&"/simulate"));
+    }
+
+    #[test]
+    fn test_qos_and_eval_commands_are_registered() {
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/qos"));
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/eval"));
+        let qos = autocomplete("/qo");
+        assert!(qos.contains(&"/qos"));
+        let eval = autocomplete("/eva");
+        assert!(eval.contains(&"/eval"));
+    }
+
+    #[test]
     fn test_sessions_command_is_registered_and_completable() {
         assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/sessions"));
         let results = autocomplete("/sess");
@@ -17644,6 +18499,26 @@ mod tests {
         assert_eq!(canonical_command("/busy"), "/status");
         assert_eq!(canonical_command("/bg"), "/background");
         assert_eq!(canonical_command("/curator"), "/skills");
+        assert_eq!(canonical_command("/tt"), "/timetravel");
+    }
+
+    #[test]
+    fn repo_review_budget_profile_application_sets_expected_env() {
+        let _guard = env_test_lock();
+        apply_repo_review_budget_profile(RepoReviewBudgetProfile::Aggressive);
+        let runtime = RepoReviewBudgetRuntime::from_env();
+        assert_eq!(runtime.profile, RepoReviewBudgetProfile::Aggressive);
+        assert_eq!(runtime.repeat_threshold, 1);
+        assert_eq!(runtime.low_signal_threshold, 1);
+        assert_eq!(runtime.keep_repeat, 1);
+        assert_eq!(runtime.keep_low_signal, 1);
+        assert!(runtime.min_signal_score >= 0.34);
+
+        apply_repo_review_budget_profile(RepoReviewBudgetProfile::Balanced);
+        let runtime_balanced = RepoReviewBudgetRuntime::from_env();
+        assert_eq!(runtime_balanced.profile, RepoReviewBudgetProfile::Balanced);
+        assert_eq!(runtime_balanced.repeat_threshold, 2);
+        assert_eq!(runtime_balanced.low_signal_threshold, 2);
     }
 
     #[test]

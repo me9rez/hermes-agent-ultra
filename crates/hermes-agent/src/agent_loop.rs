@@ -2259,6 +2259,82 @@ impl AgentLoop {
             .filter(|s| !s.is_empty())
     }
 
+    fn runtime_skills_tier() -> &'static str {
+        match std::env::var("HERMES_SKILLS_EXECUTION_TIER")
+            .ok()
+            .unwrap_or_else(|| "balanced".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "trusted" => "trusted",
+            "open" | "permissive" => "open",
+            _ => "balanced",
+        }
+    }
+
+    fn runtime_skills_tier_bypass_enabled() -> bool {
+        std::env::var("HERMES_SKILLS_TIER_BYPASS")
+            .ok()
+            .is_some_and(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+    }
+
+    fn skill_trust_score(cmd: &str, name: &str, description: &str) -> i32 {
+        let corpus = format!(
+            "{} {} {}",
+            cmd.to_ascii_lowercase(),
+            name.to_ascii_lowercase(),
+            description.to_ascii_lowercase()
+        );
+        let mut score = 70i32;
+        let high_risk_terms = [
+            "trade",
+            "money",
+            "wallet",
+            "deploy",
+            "delete",
+            "shell",
+            "execute",
+            "terminal",
+            "browser automation",
+            "computer use",
+            "send email",
+            "gmail",
+            "calendar",
+        ];
+        for term in high_risk_terms {
+            if corpus.contains(term) {
+                score -= 12;
+            }
+        }
+        let medium_risk_terms = ["write", "modify", "edit", "publish", "install", "webhook"];
+        for term in medium_risk_terms {
+            if corpus.contains(term) {
+                score -= 6;
+            }
+        }
+        let trusted_terms = ["search", "read", "summarize", "analyze", "query", "list"];
+        for term in trusted_terms {
+            if corpus.contains(term) {
+                score += 4;
+            }
+        }
+        score.clamp(0, 100)
+    }
+
+    fn skill_allowed_for_tier(tier: &str, score: i32) -> bool {
+        match tier {
+            "trusted" => score >= 62,
+            "balanced" => score >= 34,
+            _ => true,
+        }
+    }
+
     fn skills_system_prompt(&self, tool_names: &HashSet<&str>) -> Option<String> {
         let has_skills_tools = ["skills_list", "skill_view", "skill_manage"]
             .iter()
@@ -2275,11 +2351,35 @@ impl AgentLoop {
                     .to_string(),
             );
         }
-        let mut rows: Vec<_> = commands.iter().collect();
+        let tier = Self::runtime_skills_tier();
+        let bypass = Self::runtime_skills_tier_bypass_enabled();
+        let mut rows: Vec<_> = commands
+            .iter()
+            .filter(|(cmd, info)| {
+                if bypass || tier == "open" {
+                    return true;
+                }
+                let score = Self::skill_trust_score(cmd, &info.name, &info.description);
+                Self::skill_allowed_for_tier(tier, score)
+            })
+            .collect();
         rows.sort_by(|a, b| a.0.cmp(b.0));
+        let filtered = commands.len().saturating_sub(rows.len());
+        if rows.is_empty() {
+            return Some(format!(
+                "## Skills (mandatory)\nSkills tools are enabled but current skills tier '{}' filtered all candidates. Use `/ops skills-tier balanced` or `/ops skills-tier open` for broader access.",
+                tier
+            ));
+        }
         let mut body = String::from(
             "## Skills (mandatory)\nBefore replying, check whether an existing skill applies. If yes, inspect it with `skill_view` and follow it.\n<available_skills>\n",
         );
+        body.push_str(&format!(
+            "<skills_tier mode=\"{}\" bypass=\"{}\" filtered=\"{}\" />\n",
+            tier,
+            if bypass { "on" } else { "off" },
+            filtered
+        ));
         for (cmd, info) in rows.into_iter().take(80) {
             body.push_str(&format!(
                 "- {}: {} ({})\n",
@@ -7894,6 +7994,46 @@ fn apply_repo_review_tool_profile_narrowing(
     ))
 }
 
+fn repo_review_repeat_threshold() -> u32 {
+    std::env::var("HERMES_REPO_REVIEW_REPEAT_STREAK_THRESHOLD")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(2)
+        .clamp(1, 12)
+}
+
+fn repo_review_low_signal_threshold() -> u32 {
+    std::env::var("HERMES_REPO_REVIEW_LOW_SIGNAL_STREAK_THRESHOLD")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(2)
+        .clamp(1, 12)
+}
+
+fn repo_review_keep_limit_repeat() -> usize {
+    std::env::var("HERMES_REPO_REVIEW_KEEP_LIMIT_REPEAT")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(2)
+        .clamp(1, 12)
+}
+
+fn repo_review_keep_limit_low_signal() -> usize {
+    std::env::var("HERMES_REPO_REVIEW_KEEP_LIMIT_LOW_SIGNAL")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, 12)
+}
+
+fn repo_review_min_signal_score() -> f64 {
+    std::env::var("HERMES_REPO_REVIEW_MIN_SIGNAL_SCORE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or(0.22)
+        .clamp(0.0, 1.0)
+}
+
 fn apply_repo_review_discovery_budget_policy(
     tool_calls: &mut Vec<ToolCall>,
     messages: &[Message],
@@ -7921,15 +8061,24 @@ fn apply_repo_review_discovery_budget_policy(
     }
     state.last_discovery_signature = Some(signature);
 
-    let repeat_threshold_hit = state.repeat_streak >= 2;
-    let low_signal_threshold_hit = state.low_signal_streak >= 2;
+    let repeat_threshold = repo_review_repeat_threshold();
+    let low_signal_threshold = repo_review_low_signal_threshold();
+    let keep_limit_repeat = repo_review_keep_limit_repeat();
+    let keep_limit_low_signal = repo_review_keep_limit_low_signal();
+
+    let repeat_threshold_hit = state.repeat_streak >= repeat_threshold;
+    let low_signal_threshold_hit = state.low_signal_streak >= low_signal_threshold;
     if (!repeat_threshold_hit && !low_signal_threshold_hit) || !only_discovery_or_housekeeping {
         return None;
     }
 
     let mut kept_per_tool: HashMap<String, usize> = HashMap::new();
     let mut removed = 0usize;
-    let keep_limit = if low_signal_threshold_hit { 1 } else { 2 };
+    let keep_limit = if low_signal_threshold_hit {
+        keep_limit_low_signal
+    } else {
+        keep_limit_repeat
+    };
     tool_calls.retain(|tc| {
         if !is_discovery_tool_name(&tc.function.name) {
             return true;
@@ -7945,10 +8094,13 @@ fn apply_repo_review_discovery_budget_policy(
     });
 
     Some(format!(
-        "[SYSTEM] Discovery budget policy engaged (repeat_streak={}, low_signal_streak={}, last_signal_score={:.2}). {} duplicate low-yield discovery call(s) were trimmed (per-tool keep limit {}). Refine search scope with targeted paths/globs or context-pack query expansion, then move to synthesis and concrete patch planning.",
+        "[SYSTEM] Discovery budget policy engaged (repeat_streak={} threshold={} low_signal_streak={} threshold={} last_signal_score={:.2} min_signal={:.2}). {} duplicate low-yield discovery call(s) were trimmed (per-tool keep limit {}). Refine search scope with targeted paths/globs or context-pack query expansion, then move to synthesis and concrete patch planning.",
         state.repeat_streak + 1,
+        repeat_threshold,
         state.low_signal_streak,
+        low_signal_threshold,
         state.last_signal_score,
+        repo_review_min_signal_score(),
         removed,
         keep_limit
     ))
@@ -8008,7 +8160,7 @@ fn update_repo_review_budget_state_from_results(
         .sum::<f64>()
         / results.len() as f64;
     state.last_signal_score = avg_signal;
-    if avg_signal < 0.22 {
+    if avg_signal < repo_review_min_signal_score() {
         state.low_signal_streak = state.low_signal_streak.saturating_add(1);
     } else {
         state.low_signal_streak = 0;

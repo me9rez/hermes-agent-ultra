@@ -119,6 +119,12 @@ impl ToolRegistry {
         inner.policy_counters.clone()
     }
 
+    /// Preview the current policy decision for a tool call without executing it.
+    pub fn evaluate_policy_preview(&self, name: &str, params: &Value) -> ToolPolicyDecision {
+        let inner = self.inner.lock().unwrap();
+        inner.policy.evaluate(name, params)
+    }
+
     /// Enable or disable session-wide raw pass-through mode.
     pub fn set_raw_mode(&self, enabled: bool) {
         let mut inner = self.inner.lock().unwrap();
@@ -806,6 +812,17 @@ mod tests {
         assert_eq!(counters.simulate, 1);
         assert_eq!(counters.audit_only, 1);
         assert_eq!(counters.would_block, 2);
+    }
+
+    #[test]
+    fn evaluate_policy_preview_reports_decision_without_dispatch() {
+        let registry = ToolRegistry::new();
+        registry
+            .set_policy(ToolPolicyEngine::new(ToolPolicyMode::Enforce).with_denylist(&["echo"]));
+        let decision = registry.evaluate_policy_preview("echo", &json!({"msg":"preview"}));
+        assert!(!decision.allow);
+        assert_eq!(decision.mode.as_str(), "enforce");
+        assert_eq!(decision.code.as_deref(), Some("tool_denylisted"));
     }
 
     #[test]

@@ -115,6 +115,10 @@ run_gate() {
   echo "[elite-gate] running performance autopilot"
   python3 "${REPO_ROOT}/scripts/run-performance-autopilot.py" --repo-root "${REPO_ROOT}" || return $?
 
+  FAILED_STEP="upstream_surface_coverage"
+  echo "[elite-gate] running upstream surface coverage gate"
+  python3 "${REPO_ROOT}/scripts/run-upstream-surface-coverage-gate.py" --repo-root "${REPO_ROOT}" --upstream-ref upstream/main || return $?
+
   FAILED_STEP="background_queue_audit"
   echo "[elite-gate] auditing background queue health"
   python3 "${REPO_ROOT}/scripts/audit_background_queue.py" || return $?
@@ -134,6 +138,7 @@ run_gate() {
     "scripts/run-deterministic-replay-suite.sh",
     "scripts/run-security-release-gate-v2.py",
     "scripts/run-performance-autopilot.py",
+    "scripts/run-upstream-surface-coverage-gate.py",
     "scripts/audit_background_queue.py"
   ]
 }
@@ -166,6 +171,7 @@ if [[ "${RUN_RC}" -ne 0 ]]; then
     "scripts/run-deterministic-replay-suite.sh",
     "scripts/run-security-release-gate-v2.py",
     "scripts/run-performance-autopilot.py",
+    "scripts/run-upstream-surface-coverage-gate.py",
     "scripts/audit_background_queue.py"
   ]
 }
@@ -184,6 +190,7 @@ Nightly elite gate completed.
   - \`scripts/run-deterministic-replay-suite.sh\`
   - \`scripts/run-security-release-gate-v2.py\`
   - \`scripts/run-performance-autopilot.py\`
+  - \`scripts/run-upstream-surface-coverage-gate.py\`
   - \`scripts/audit_background_queue.py\`
 EOF
 
@@ -199,6 +206,7 @@ cat > "${SUMMARY_META_PATH}" <<EOF
     "scripts/run-deterministic-replay-suite.sh",
     "scripts/run-security-release-gate-v2.py",
     "scripts/run-performance-autopilot.py",
+    "scripts/run-upstream-surface-coverage-gate.py",
     "scripts/audit_background_queue.py"
   ]
 }

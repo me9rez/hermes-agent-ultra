@@ -48,6 +48,11 @@ fork-specific history.
 - `scripts/run-differential-parity-gate.py`
   - Compares local CLI command/action surface with `upstream/main`
   - Emits gate artifact under `.sync-reports/differential-parity-gate-<timestamp>.json`
+- `scripts/run-upstream-surface-coverage-gate.py`
+  - Verifies required upstream surfaces are present locally (`skills`, `optional-skills`, `plugins`, `tests`, `website`, `ui-tui`, `docs`)
+  - Fails on any missing upstream file under those prefixes
+  - Supports `--local-mode worktree` for pre-commit validation while changes are still unstaged/uncommitted
+  - Emits gate artifact under `.sync-reports/upstream-surface-coverage-gate-<timestamp>.json`
 - `scripts/run-upstream-slash-parity-gate.py`
   - Compares upstream `/` command surface (`hermes_cli/commands.py`) against Rust `SLASH_COMMANDS`
   - Fails on missing upstream commands unless explicitly allowlisted in `docs/parity/slash-command-divergence.json`
@@ -85,6 +90,7 @@ bash scripts/sync-upstream.sh --redteam-cmd "python3 scripts/run-redteam-gate.py
 python3 scripts/run-adapter-chaos-harness.py --repo-root .
 python3 scripts/run-zero-copy-hotpath-bench.py --repo-root .
 python3 scripts/run-elite-sync-gate.py --repo-root .
+python3 scripts/run-upstream-surface-coverage-gate.py --repo-root . --upstream-ref upstream/main --local-mode worktree
 python3 scripts/run-self-evolution-loop.py --repo-root . --json
 python3 scripts/generate-parity-dashboard.py --repo-root .
 python3 scripts/generate-readme-sync-status.py --repo-root .

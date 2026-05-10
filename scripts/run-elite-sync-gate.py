@@ -39,6 +39,14 @@ def parse_args() -> argparse.Namespace:
         help="Differential parity command",
     )
     parser.add_argument(
+        "--surface-coverage-cmd",
+        default=(
+            "python3 scripts/run-upstream-surface-coverage-gate.py "
+            "--upstream-ref upstream/main"
+        ),
+        help="Required upstream surface coverage command",
+    )
+    parser.add_argument(
         "--eval-trend-cmd",
         default="python3 scripts/run-eval-trend-gate.py --allow-missing-baseline",
         help="Eval trend gate command",
@@ -141,6 +149,7 @@ def main() -> int:
     chaos_raw = run_shell(args.chaos_cmd, repo_root)
     hotpath_raw = run_shell(args.hotpath_cmd, repo_root)
     parity_raw = run_shell(args.parity_diff_cmd, repo_root)
+    surface_raw = run_shell(args.surface_coverage_cmd, repo_root)
     eval_raw = run_shell(args.eval_trend_cmd, repo_root)
     release_security_raw = run_shell(args.release_security_cmd, repo_root)
     perf_autopilot_raw = run_shell(args.performance_autopilot_cmd, repo_root)
@@ -149,6 +158,7 @@ def main() -> int:
     chaos = slim(chaos_raw)
     hotpath = slim(hotpath_raw)
     parity = slim(parity_raw)
+    surface = slim(surface_raw)
     eval_trend = slim(eval_raw)
     release_security = slim(release_security_raw)
     perf_autopilot = slim(perf_autopilot_raw)
@@ -157,6 +167,7 @@ def main() -> int:
         "chaos": chaos,
         "hotpath": hotpath,
         "parity_differential": parity,
+        "surface_coverage": surface,
         "eval_trend": eval_trend,
         "release_security": release_security,
         "performance_autopilot": perf_autopilot,

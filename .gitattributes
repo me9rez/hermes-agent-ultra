@@ -1,0 +1,12 @@
+# Hermes Agent Ultra is Rust-first at runtime.
+# Keep GitHub language stats aligned with the Rust product core by excluding
+# auxiliary Python surfaces (legacy tests, optional skills, plugin shims, ops scripts)
+# from Linguist language breakdown.
+
+crates/** linguist-detectable=true
+
+tests/**/*.py linguist-vendored
+scripts/**/*.py linguist-vendored
+skills/**/*.py linguist-vendored
+optional-skills/**/*.py linguist-vendored
+plugins/**/*.py linguist-vendored

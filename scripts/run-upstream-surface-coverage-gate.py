@@ -19,6 +19,12 @@ DEFAULT_PREFIXES = [
     "ui-tui",
     "docs",
 ]
+RUST_ONLY_DENY_PREFIXES = (
+    "tests",
+    "tests/",
+    "test",
+    "test/",
+)
 
 
 def run_git(repo_root: pathlib.Path, args: list[str], check: bool = True) -> str:
@@ -60,6 +66,14 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional explicit report output path",
     )
+    parser.add_argument(
+        "--allow-python-test-surfaces",
+        action="store_true",
+        help=(
+            "Allow parity coverage checks over upstream test prefixes. "
+            "Default is strict Rust-only parity mode (tests blocked)."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON report")
     return parser.parse_args()
 
@@ -85,6 +99,26 @@ def ref_has_path(repo_root: pathlib.Path, ref: str, path: str) -> bool:
         check=False,
     )
     return proc.returncode == 0
+
+
+def normalize_prefix(prefix: str) -> str:
+    value = prefix.strip().lstrip("./")
+    while "//" in value:
+        value = value.replace("//", "/")
+    return value
+
+
+def rust_only_prefix_violations(prefixes: list[str]) -> list[str]:
+    violations: list[str] = []
+    for raw in prefixes:
+        prefix = normalize_prefix(raw)
+        if not prefix:
+            continue
+        for deny in RUST_ONLY_DENY_PREFIXES:
+            if prefix == deny or prefix.startswith(deny):
+                violations.append(raw)
+                break
+    return sorted(set(violations))
 
 
 def build_report(
@@ -141,7 +175,49 @@ def main() -> int:
         raise SystemExit(f"repo root does not exist: {repo_root}")
 
     prefixes = args.prefix if args.prefix else list(DEFAULT_PREFIXES)
+    violations = (
+        []
+        if args.allow_python_test_surfaces
+        else rust_only_prefix_violations(prefixes)
+    )
+    if violations:
+        report = {
+            "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "repo_root": str(repo_root),
+            "local_ref": args.local_ref,
+            "local_mode": args.local_mode,
+            "upstream_ref": args.upstream_ref,
+            "ok": False,
+            "reason": "rust_only_parity_guard_blocked_prefix",
+            "policy": {
+                "rust_only": True,
+                "allow_python_test_surfaces": bool(args.allow_python_test_surfaces),
+                "blocked_prefixes": violations,
+            },
+        }
+        report_path = (
+            pathlib.Path(args.report_path).expanduser().resolve()
+            if args.report_path
+            else default_report_path(repo_root)
+        )
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        report["report_path"] = str(report_path)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(
+                "[upstream-surface-coverage] FAILED "
+                "(rust-only parity guard blocked test prefixes)"
+            )
+            print(f"[upstream-surface-coverage] Report: {report_path}")
+        return 1
     report = build_report(repo_root, args.local_ref, args.local_mode, args.upstream_ref, prefixes)
+    report["policy"] = {
+        "rust_only": True,
+        "allow_python_test_surfaces": bool(args.allow_python_test_surfaces),
+        "blocked_prefixes": [],
+    }
 
     report_path = (
         pathlib.Path(args.report_path).expanduser().resolve()

@@ -40,6 +40,10 @@ TICKET_NAME = {
     25: "GPAR-06 packaging/docs/install parity",
     26: "GPAR-07 upstream queue backfill",
 }
+PYTHON_TEST_SURFACE_PREFIXES: tuple[str, ...] = (
+    "tests/",
+    "test/",
+)
 
 
 def run_git(repo_root: Path, args: list[str], check: bool = True) -> str:
@@ -68,6 +72,17 @@ def classify_ticket(files: list[str]) -> int:
     if not votes:
         return 26
     return votes.most_common(1)[0][0]
+
+
+def is_python_test_surface(path: str) -> bool:
+    normalized = path.strip().lstrip("./")
+    return any(normalized.startswith(prefix) for prefix in PYTHON_TEST_SURFACE_PREFIXES)
+
+
+def commit_is_python_test_only(files: list[str]) -> bool:
+    if not files:
+        return False
+    return all(is_python_test_surface(path) for path in files)
 
 
 def parse_log_blocks(raw: str) -> list[dict[str, Any]]:
@@ -142,6 +157,14 @@ def main() -> int:
         type=Path,
         help="Queue markdown summary path (relative to repo root)",
     )
+    parser.add_argument(
+        "--allow-python-test-surfaces",
+        action="store_true",
+        help=(
+            "Allow upstream Python test-only commits to remain pending. "
+            "Default behavior marks them superseded under Rust-only parity policy."
+        ),
+    )
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
@@ -173,6 +196,14 @@ def main() -> int:
         ticket = classify_ticket(files)
         prev = prior.get(sha, {})
         disposition = str(prev.get("disposition", "pending")) or "pending"
+        notes = str(prev.get("notes", ""))
+        python_test_only = commit_is_python_test_only(files)
+        rust_only_superseded = python_test_only and not args.allow_python_test_surfaces
+        if rust_only_superseded and disposition in {"", "pending"}:
+            disposition = "superseded"
+            if notes:
+                notes += " | "
+            notes += "rust-only parity guard: upstream Python test-only commit not ported"
         row = {
             "sha": sha,
             "subject": block["subject"],
@@ -182,7 +213,12 @@ def main() -> int:
             "files_sample": files[:20],
             "disposition": disposition,
             "owner": str(prev.get("owner", "")),
-            "notes": str(prev.get("notes", "")),
+            "notes": notes,
+            "rust_only_guard": {
+                "python_test_only_commit": python_test_only,
+                "superseded_by_guard": rust_only_superseded,
+                "allow_python_test_surfaces": bool(args.allow_python_test_surfaces),
+            },
         }
         rows.append(row)
         by_ticket[ticket] += 1

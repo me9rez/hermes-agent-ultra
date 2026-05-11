@@ -9,8 +9,11 @@ while keeping Rust-first implementation ownership.
 2. If Rust implementation is blocked, FFI fallback is allowed only with explicit rationale and
    a follow-up Rust-native migration issue.
 3. Python/TS runtime file imports are not used as the parity mechanism.
-4. Divergences must be declared in `docs/parity/intentional-divergence.json`.
-5. Upstream commit deltas are processed through the parity upkeep queue before release.
+4. Upstream Python test-only surfaces (`tests/`, `test/`) are `superseded` by default under
+   Rust-only parity guard and are not opened as actionable parity implementation work unless
+   explicitly approved.
+5. Divergences must be declared in `docs/parity/intentional-divergence.json`.
+6. Upstream commit deltas are processed through the parity upkeep queue before release.
 
 ## Compatibility Tiers
 1. `rust-native`: feature implemented and validated in Rust crates.

@@ -52,6 +52,10 @@ LOG = logging.getLogger("upstream-webhook-sync")
 
 DEFAULT_UPSTREAM_REPO = "NousResearch/hermes-agent"
 DEFAULT_UPSTREAM_REF = "refs/heads/main"
+PYTHON_TEST_SURFACE_PREFIXES: tuple[str, ...] = (
+    "tests/",
+    "test/",
+)
 
 
 def utc_now_iso() -> str:
@@ -611,6 +615,17 @@ def classify_commit_workstream(paths: list[str]) -> str:
     return "WS8 compatibility/divergence policy"
 
 
+def is_python_test_surface(path: str) -> bool:
+    normalized = path.strip().lstrip("./")
+    return any(normalized.startswith(prefix) for prefix in PYTHON_TEST_SURFACE_PREFIXES)
+
+
+def commit_is_python_test_only(paths: list[str]) -> bool:
+    if not paths:
+        return False
+    return all(is_python_test_surface(path) for path in paths)
+
+
 def commit_paths(repo_root: str, sha: str) -> list[str]:
     rc, out, _ = run_git(
         repo_root,
@@ -664,6 +679,7 @@ def maybe_create_upkeep_commit_issues(
     parent_issue: int,
     state_path: str,
     max_commits_per_event: int,
+    allow_python_test_surfaces: bool,
 ) -> dict[str, Any]:
     if not enabled:
         return {"enabled": False, "created": 0, "skipped_seen": 0, "total_candidates": 0}
@@ -681,6 +697,7 @@ def maybe_create_upkeep_commit_issues(
     seen: dict[str, Any] = state.setdefault("seen_commits", {})
     created: list[dict[str, Any]] = []
     skipped_seen = 0
+    skipped_rust_only = 0
 
     for sha in commits:
         if sha in seen:
@@ -698,6 +715,17 @@ def maybe_create_upkeep_commit_issues(
             continue
         commit_sha, author, authored_at, subject = raw
         paths = commit_paths(repo_root, commit_sha)
+        if commit_is_python_test_only(paths) and not allow_python_test_surfaces:
+            seen[commit_sha] = {
+                "issue_url": "",
+                "created_at": utc_now_iso(),
+                "subject": subject,
+                "workstream": "superseded-rust-only-python-tests",
+                "disposition": "superseded",
+                "reason": "rust_only_parity_guard_python_tests",
+            }
+            skipped_rust_only += 1
+            continue
         workstream = classify_commit_workstream(paths)
         short_sha = commit_sha[:12]
         title = f"[UPKEEP][{short_sha}] parity task: {subject}".strip()
@@ -760,6 +788,7 @@ def maybe_create_upkeep_commit_issues(
         "created": created,
         "created_count": len(created),
         "skipped_seen_count": skipped_seen,
+        "skipped_rust_only_python_tests_count": skipped_rust_only,
         "total_candidates": len(commits),
         "state_path": state_path,
     }
@@ -774,6 +803,7 @@ def maybe_create_upkeep_commit_issues(
             f"- delivery_id: `{event.delivery_id}`",
             f"- created: `{len(created)}`",
             f"- skipped_seen: `{skipped_seen}`",
+            f"- skipped_rust_only_python_tests: `{skipped_rust_only}`",
             f"- artifact: `{artifact_path}`",
         ]
         for row in created[:20]:
@@ -784,6 +814,7 @@ def maybe_create_upkeep_commit_issues(
         "enabled": True,
         "created": len(created),
         "skipped_seen": skipped_seen,
+        "skipped_rust_only_python_tests": skipped_rust_only,
         "total_candidates": len(commits),
         "artifact_path": artifact_path,
     }
@@ -1465,6 +1496,7 @@ def worker_loop(args: argparse.Namespace) -> int:
                 parent_issue=args.upkeep_commit_parent_issue,
                 state_path=upkeep_state_path,
                 max_commits_per_event=args.upkeep_commit_max_per_event,
+                allow_python_test_surfaces=args.allow_python_test_surfaces,
             )
             if rc == 0:
                 upstream_ref = (
@@ -1597,6 +1629,7 @@ def worker_loop(args: argparse.Namespace) -> int:
                 parent_issue=args.upkeep_commit_parent_issue,
                 state_path=upkeep_state_path,
                 max_commits_per_event=args.upkeep_commit_max_per_event,
+                allow_python_test_surfaces=args.allow_python_test_surfaces,
             )
             drift_result: dict[str, Any] | None = None
             global_drift_result: dict[str, Any] | None = None
@@ -1725,6 +1758,7 @@ def worker_loop(args: argparse.Namespace) -> int:
             parent_issue=args.upkeep_commit_parent_issue,
             state_path=upkeep_state_path,
             max_commits_per_event=args.upkeep_commit_max_per_event,
+            allow_python_test_surfaces=args.allow_python_test_surfaces,
         )
         drift_result: dict[str, Any] | None = None
         global_drift_result: dict[str, Any] | None = None
@@ -1944,6 +1978,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Max commits for generated upstream queue artifact (0 means full range)",
+    )
+    worker.add_argument(
+        "--allow-python-test-surfaces",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow upkeep queue issues for upstream Python test-only commits. "
+            "Default is strict Rust-only parity guard (auto-supersede these commits)."
+        ),
     )
     worker.add_argument(
         "--assist-cmd",

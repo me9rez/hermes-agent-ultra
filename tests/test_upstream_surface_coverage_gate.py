@@ -51,3 +51,19 @@ def test_build_report_passes_when_all_present(monkeypatch):
     assert report["ok"] is True
     assert report["summary"]["missing_total"] == 0
     assert report["summary"]["present_locally"] == 2
+
+
+def test_rust_only_prefix_violations_blocks_test_prefixes():
+    gate = _load_gate_module()
+    violations = gate.rust_only_prefix_violations(
+        ["skills", "tests", "tests/cli", "./test/helpers", "docs"]
+    )
+    assert violations == ["./test/helpers", "tests", "tests/cli"]
+
+
+def test_rust_only_prefix_violations_allows_core_prefixes():
+    gate = _load_gate_module()
+    violations = gate.rust_only_prefix_violations(
+        ["skills", "optional-skills", "plugins", "website", "ui-tui", "docs"]
+    )
+    assert violations == []

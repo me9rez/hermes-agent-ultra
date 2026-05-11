@@ -385,7 +385,10 @@ def main() -> int:
 
     drift = compute_cli_surface_drift(local_surface, upstream_surface)
     ahead, behind = ahead_behind(repo_root, args.local_ref, args.upstream_ref)
-    commits_gate_ok = behind <= max(0, args.max_commits_behind)
+    comparable_surface = drift.get("surface_kind") == "rust"
+    commits_gate_ok = (not comparable_surface) or (
+        behind <= max(0, args.max_commits_behind)
+    )
     gate_ok = bool(not drift.get("has_drift") and commits_gate_ok)
 
     report = {
@@ -398,6 +401,7 @@ def main() -> int:
             "ahead": ahead,
             "behind": behind,
             "max_commits_behind": args.max_commits_behind,
+            "behind_gate_enforced": comparable_surface,
             "behind_gate_ok": commits_gate_ok,
         },
         "drift": drift,

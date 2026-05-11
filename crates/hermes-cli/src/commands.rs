@@ -171,8 +171,16 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/queue", "Queue a follow-up prompt"),
     ("/q", "Alias for /queue"),
     (
+        "/handoff",
+        "Queue a session handoff request to a configured gateway platform (`/handoff <platform>`)",
+    ),
+    (
         "/evolve",
         "Run or inspect the self-evolution intelligence loop",
+    ),
+    (
+        "/subgoal",
+        "Objective checklist controls (`show|<text>|complete|impossible|undo|remove|clear`)",
     ),
     (
         "/objective",
@@ -3055,8 +3063,10 @@ pub async fn handle_slash_command(
         "/snapshot" => handle_snapshot_command(app, args),
         "/rollback" => handle_rollback_command(app, args),
         "/queue" => handle_queue_command(app, args),
+        "/handoff" => handle_handoff_command(app, args),
         "/steer" => handle_steer_command(app, args),
         "/btw" => handle_btw_command(app, args),
+        "/subgoal" => handle_subgoal_command(app, args),
         "/sethome" => handle_sethome_command(app, args),
         "/evolve" => handle_ops_evolve_command(app, args).await,
         "/objective" => handle_objective_command(app, args),
@@ -11603,6 +11613,40 @@ fn handle_interactive_question_command(
 
 const SESSION_STEER_PREFIX: &str = "[SESSION_STEER] ";
 const HOME_SESSION_MARKER_FILE: &str = "home-session.json";
+const SUBGOAL_DIR: &str = "subgoals";
+const HANDOFF_REQUESTS_DIR: &str = "handoff_requests";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubgoalItem {
+    text: String,
+    status: String,
+    created_at: String,
+    updated_at: String,
+    source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubgoalChecklist {
+    session_id: String,
+    objective: Option<String>,
+    updated_at: String,
+    items: Vec<SubgoalItem>,
+}
+
+impl SubgoalChecklist {
+    fn for_session(session_id: &str, objective: Option<&str>) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            session_id: session_id.to_string(),
+            objective: objective
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+            updated_at: now,
+            items: Vec::new(),
+        }
+    }
+}
 
 fn home_session_marker_path() -> PathBuf {
     hermes_config::hermes_home().join(HOME_SESSION_MARKER_FILE)
@@ -11612,6 +11656,63 @@ fn load_home_session_marker() -> Option<serde_json::Value> {
     let path = home_session_marker_path();
     let body = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&body).ok()
+}
+
+fn subgoal_checklist_path(session_id: &str) -> PathBuf {
+    hermes_config::hermes_home()
+        .join(SUBGOAL_DIR)
+        .join(format!("{session_id}.json"))
+}
+
+fn load_subgoal_checklist(session_id: &str) -> Option<SubgoalChecklist> {
+    let path = subgoal_checklist_path(session_id);
+    let body = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&body).ok()
+}
+
+fn save_subgoal_checklist(checklist: &SubgoalChecklist) -> Result<PathBuf, AgentError> {
+    let path = subgoal_checklist_path(&checklist.session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AgentError::Io(format!("Failed to create {}: {}", parent.display(), e)))?;
+    }
+    let body = serde_json::to_string_pretty(checklist)
+        .map_err(|e| AgentError::Config(format!("serialize subgoal checklist: {e}")))?;
+    std::fs::write(&path, body)
+        .map_err(|e| AgentError::Io(format!("Failed to write {}: {}", path.display(), e)))?;
+    Ok(path)
+}
+
+fn render_subgoal_checklist(checklist: &SubgoalChecklist) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Subgoal checklist");
+    let _ = writeln!(out, "session: {}", checklist.session_id);
+    if let Some(objective) = checklist.objective.as_deref() {
+        let _ = writeln!(out, "objective: {}", truncate_chars(objective, 200));
+    }
+    if checklist.items.is_empty() {
+        out.push_str("items: (none)\n");
+    } else {
+        for (idx, item) in checklist.items.iter().enumerate() {
+            let marker = match item.status.as_str() {
+                "completed" => "[x]",
+                "impossible" => "[!]",
+                _ => "[ ]",
+            };
+            let _ = writeln!(
+                out,
+                "{} {}. {} ({})",
+                marker,
+                idx + 1,
+                item.text,
+                item.status
+            );
+        }
+    }
+    out.push_str(
+        "\nUsage: /subgoal <text> | /subgoal complete <n> | /subgoal impossible <n> | /subgoal undo <n> | /subgoal remove <n> | /subgoal clear",
+    );
+    out.trim_end().to_string()
 }
 
 fn set_session_steer(app: &mut App, steer: Option<String>) {
@@ -11882,6 +11983,234 @@ fn handle_btw_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Age
             job.log_path.display()
         ),
     );
+    Ok(CommandResult::Handled)
+}
+
+fn handle_handoff_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let mut configured: Vec<_> = app.config.platforms.keys().cloned().collect();
+    configured.sort();
+    if args.is_empty() {
+        let configured_text = if configured.is_empty() {
+            "(none configured)".to_string()
+        } else {
+            configured.join(", ")
+        };
+        emit_command_output(
+            app,
+            format!(
+                "Usage: /handoff <platform>\nConfigured platforms: {}\nThis queues a handoff request under ~/.hermes-agent-ultra/handoff_requests for gateway pickup.",
+                configured_text
+            ),
+        );
+        return Ok(CommandResult::Handled);
+    }
+
+    let platform = args[0].trim().to_ascii_lowercase();
+    let Some(platform_cfg) = app.config.platforms.get(&platform) else {
+        emit_command_output(
+            app,
+            format!(
+                "Unknown platform '{}'. Configured platforms: {}",
+                platform,
+                if configured.is_empty() {
+                    "(none configured)".to_string()
+                } else {
+                    configured.join(", ")
+                }
+            ),
+        );
+        return Ok(CommandResult::Handled);
+    };
+    if !platform_cfg.enabled {
+        emit_command_output(
+            app,
+            format!(
+                "Platform '{}' is configured but disabled. Enable it in config.yaml before handoff.",
+                platform
+            ),
+        );
+        return Ok(CommandResult::Handled);
+    }
+
+    let home_channel = platform_cfg
+        .home_channel
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            load_home_session_marker().and_then(|value| {
+                value
+                    .get("home")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .filter(|v| !v.trim().is_empty())
+            })
+        });
+    let Some(home_channel) = home_channel else {
+        emit_command_output(
+            app,
+            format!(
+                "No home channel marker for '{}'. Run `/sethome <channel-or-thread>` first, then retry `/handoff {}`.",
+                platform, platform
+            ),
+        );
+        return Ok(CommandResult::Handled);
+    };
+
+    let dir = hermes_config::hermes_home().join(HANDOFF_REQUESTS_DIR);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AgentError::Io(format!("Failed to create {}: {}", dir.display(), e)))?;
+    let request_path = dir.join(format!("{}-{}.json", app.session_id, platform));
+    let payload = serde_json::json!({
+        "session_id": app.session_id,
+        "platform": platform,
+        "home_channel": home_channel,
+        "requested_at": chrono::Utc::now().to_rfc3339(),
+        "requested_by": "cli",
+        "state": "pending",
+    });
+    std::fs::write(
+        &request_path,
+        serde_json::to_string_pretty(&payload)
+            .map_err(|e| AgentError::Config(format!("serialize handoff request: {e}")))?,
+    )
+    .map_err(|e| AgentError::Io(format!("Failed to write {}: {}", request_path.display(), e)))?;
+
+    emit_command_output(
+        app,
+        format!(
+            "Queued handoff request.\n  session: {}\n  platform: {}\n  home_channel: {}\n  request_file: {}\n\nGateway workers can pick this up immediately when running.",
+            app.session_id,
+            payload["platform"].as_str().unwrap_or_default(),
+            payload["home_channel"].as_str().unwrap_or_default(),
+            request_path.display(),
+        ),
+    );
+    Ok(CommandResult::Handled)
+}
+
+fn handle_subgoal_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let objective = app
+        .session_objective
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut checklist = load_subgoal_checklist(&app.session_id)
+        .unwrap_or_else(|| SubgoalChecklist::for_session(&app.session_id, objective));
+    checklist.objective = objective.map(ToOwned::to_owned);
+
+    if args.is_empty()
+        || matches!(
+            args[0].to_ascii_lowercase().as_str(),
+            "show" | "status" | "list"
+        )
+    {
+        checklist.updated_at = chrono::Utc::now().to_rfc3339();
+        let _ = save_subgoal_checklist(&checklist)?;
+        emit_command_output(app, render_subgoal_checklist(&checklist));
+        return Ok(CommandResult::Handled);
+    }
+
+    let action = args[0].to_ascii_lowercase();
+    if action == "clear" {
+        checklist.items.clear();
+        checklist.updated_at = chrono::Utc::now().to_rfc3339();
+        let path = save_subgoal_checklist(&checklist)?;
+        emit_command_output(
+            app,
+            format!(
+                "Subgoal checklist cleared.\nPath: {}\nUse `/subgoal <text>` to add a new item.",
+                path.display()
+            ),
+        );
+        return Ok(CommandResult::Handled);
+    }
+
+    if matches!(
+        action.as_str(),
+        "complete" | "done" | "impossible" | "undo" | "remove"
+    ) {
+        let Some(raw_idx) = args.get(1) else {
+            emit_command_output(app, format!("Usage: /subgoal {} <n>", action));
+            return Ok(CommandResult::Handled);
+        };
+        let Ok(idx_one_based) = raw_idx.trim().parse::<usize>() else {
+            emit_command_output(
+                app,
+                format!(
+                    "/subgoal {}: <n> must be an integer (1-based index).",
+                    action
+                ),
+            );
+            return Ok(CommandResult::Handled);
+        };
+        if idx_one_based == 0 || idx_one_based > checklist.items.len() {
+            emit_command_output(
+                app,
+                format!(
+                    "/subgoal {}: index {} is out of range (1..={}).",
+                    action,
+                    idx_one_based,
+                    checklist.items.len()
+                ),
+            );
+            return Ok(CommandResult::Handled);
+        }
+        let idx = idx_one_based - 1;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        if action == "remove" {
+            let removed = checklist.items.remove(idx);
+            checklist.updated_at = now;
+            let _ = save_subgoal_checklist(&checklist)?;
+            emit_command_output(
+                app,
+                format!(
+                    "Removed subgoal {}: {}\n\n{}",
+                    idx_one_based,
+                    removed.text,
+                    render_subgoal_checklist(&checklist)
+                ),
+            );
+            return Ok(CommandResult::Handled);
+        }
+
+        checklist.items[idx].status = match action.as_str() {
+            "complete" | "done" => "completed".to_string(),
+            "impossible" => "impossible".to_string(),
+            "undo" => "pending".to_string(),
+            _ => checklist.items[idx].status.clone(),
+        };
+        checklist.items[idx].updated_at = now.clone();
+        checklist.updated_at = now;
+        let _ = save_subgoal_checklist(&checklist)?;
+        emit_command_output(
+            app,
+            format!(
+                "Updated subgoal {} -> {}\n\n{}",
+                idx_one_based,
+                checklist.items[idx].status,
+                render_subgoal_checklist(&checklist)
+            ),
+        );
+        return Ok(CommandResult::Handled);
+    }
+
+    let text = args.join(" ").trim().to_string();
+    if text.is_empty() {
+        emit_command_output(app, "Usage: /subgoal <text>");
+        return Ok(CommandResult::Handled);
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    checklist.items.push(SubgoalItem {
+        text,
+        status: "pending".to_string(),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        source: "user".to_string(),
+    });
+    checklist.updated_at = now;
+    let _ = save_subgoal_checklist(&checklist)?;
+    emit_command_output(app, render_subgoal_checklist(&checklist));
     Ok(CommandResult::Handled)
 }
 
@@ -18383,6 +18712,16 @@ mod tests {
     }
 
     #[test]
+    fn test_handoff_and_subgoal_commands_are_registered_and_completable() {
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/handoff"));
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/subgoal"));
+        let handoff_results = autocomplete("/han");
+        assert!(handoff_results.contains(&"/handoff"));
+        let subgoal_results = autocomplete("/sub");
+        assert!(subgoal_results.contains(&"/subgoal"));
+    }
+
+    #[test]
     fn test_kanban_command_is_registered_and_completable() {
         assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/kanban"));
         assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/tasks"));
@@ -18425,6 +18764,30 @@ mod tests {
     #[test]
     fn test_goal_alias_maps_to_objective() {
         assert_eq!(canonical_command("/goal"), "/objective");
+    }
+
+    #[tokio::test]
+    async fn promoted_subgoal_command_supports_add_update_and_clear() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TempHomeGuard::new(tmp.path());
+        let mut app = build_test_app_with_stream(tmp.path()).await;
+        app.set_session_objective(Some("stabilize alpha".to_string()));
+
+        handle_subgoal_command(&mut app, &["inspect", "wallet", "drift"]).expect("subgoal add");
+        let output = latest_ui_assistant_text(&app);
+        assert!(output.contains("Subgoal checklist"));
+        assert!(output.contains("inspect wallet drift"));
+        assert!(output.contains("[ ] 1."));
+
+        handle_subgoal_command(&mut app, &["complete", "1"]).expect("subgoal complete");
+        let output = latest_ui_assistant_text(&app);
+        assert!(output.contains("Updated subgoal 1 -> completed"));
+        assert!(output.contains("[x] 1."));
+
+        handle_subgoal_command(&mut app, &["clear"]).expect("subgoal clear");
+        let output = latest_ui_assistant_text(&app);
+        assert!(output.contains("Subgoal checklist cleared."));
     }
 
     #[test]

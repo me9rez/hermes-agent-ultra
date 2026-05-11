@@ -15,7 +15,6 @@ DEFAULT_PREFIXES = [
     "skills",
     "optional-skills",
     "plugins",
-    "tests",
     "website",
     "ui-tui",
     "docs",

@@ -18790,6 +18790,22 @@ mod tests {
         assert!(output.contains("Subgoal checklist cleared."));
     }
 
+    #[tokio::test]
+    async fn promoted_handoff_command_surfaces_usage_and_unknown_platform() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TempHomeGuard::new(tmp.path());
+        let mut app = build_test_app_with_stream(tmp.path()).await;
+
+        handle_handoff_command(&mut app, &[]).expect("handoff usage");
+        let usage = latest_ui_assistant_text(&app);
+        assert!(usage.contains("Usage: /handoff <platform>"));
+
+        handle_handoff_command(&mut app, &["telegram"]).expect("handoff unknown platform");
+        let unknown = latest_ui_assistant_text(&app);
+        assert!(unknown.contains("Unknown platform 'telegram'"));
+    }
+
     #[test]
     fn test_mission_command_is_registered_and_completable() {
         assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/mission"));

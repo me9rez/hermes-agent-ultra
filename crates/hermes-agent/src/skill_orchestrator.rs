@@ -133,6 +133,50 @@ pub struct SkillOrchestrator {
     disabled: HashSet<String>,
 }
 
+fn record_security_skip(skips: &mut HashMap<String, Vec<String>>, skill_name: &str, reason: &str) {
+    let reason = reason
+        .replace('\n', " ")
+        .replace('\r', " ")
+        .trim()
+        .to_string();
+    skips
+        .entry(reason)
+        .or_default()
+        .push(skill_name.to_string());
+}
+
+fn emit_security_skip_summary(skips: &HashMap<String, Vec<String>>) {
+    if skips.is_empty() {
+        return;
+    }
+    let total: usize = skips.values().map(Vec::len).sum();
+    let mut buckets: Vec<(&String, &Vec<String>)> = skips.iter().collect();
+    buckets.sort_by(|(reason_a, names_a), (reason_b, names_b)| {
+        names_b
+            .len()
+            .cmp(&names_a.len())
+            .then_with(|| reason_a.cmp(reason_b))
+    });
+    let mut details = Vec::new();
+    for (reason, names) in buckets.iter().take(4) {
+        let mut sample: Vec<String> = names.iter().take(3).cloned().collect();
+        if names.len() > 3 {
+            sample.push(format!("+{} more", names.len() - 3));
+        }
+        details.push(format!(
+            "{}x {} [{}]",
+            names.len(),
+            reason,
+            sample.join(", ")
+        ));
+    }
+    tracing::warn!(
+        "Skipped {} skill(s) due to security policy. {}",
+        total,
+        details.join(" | ")
+    );
+}
+
 impl SkillOrchestrator {
     /// Create a new orchestrator with the given skills directory.
     pub fn new(skills_dir: impl Into<PathBuf>) -> Self {
@@ -161,8 +205,14 @@ impl SkillOrchestrator {
         }
 
         let mut seen_names = std::collections::HashSet::new();
+        let mut security_skips: HashMap<String, Vec<String>> = HashMap::new();
 
-        self.scan_directory(&self.skills_dir.clone(), &mut seen_names);
+        self.scan_directory(
+            &self.skills_dir.clone(),
+            &mut seen_names,
+            &mut security_skips,
+        );
+        emit_security_skip_summary(&security_skips);
 
         &self.commands
     }
@@ -201,7 +251,12 @@ impl SkillOrchestrator {
     }
 
     /// Recursively scan a directory for SKILL.md files.
-    fn scan_directory(&mut self, dir: &Path, seen_names: &mut std::collections::HashSet<String>) {
+    fn scan_directory(
+        &mut self,
+        dir: &Path,
+        seen_names: &mut std::collections::HashSet<String>,
+        security_skips: &mut HashMap<String, Vec<String>>,
+    ) {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
@@ -221,10 +276,10 @@ impl SkillOrchestrator {
                 // Check for SKILL.md in this directory
                 let skill_md = path.join("SKILL.md");
                 if skill_md.exists() {
-                    self.register_skill(&skill_md, seen_names);
+                    self.register_skill(&skill_md, seen_names, security_skips);
                 }
                 // Also recurse into subdirectories
-                self.scan_directory(&path, seen_names);
+                self.scan_directory(&path, seen_names, security_skips);
             }
         }
     }
@@ -234,6 +289,7 @@ impl SkillOrchestrator {
         &mut self,
         skill_md_path: &Path,
         seen_names: &mut std::collections::HashSet<String>,
+        security_skips: &mut HashMap<String, Vec<String>>,
     ) {
         let content = match std::fs::read_to_string(skill_md_path) {
             Ok(c) => c,
@@ -274,7 +330,7 @@ impl SkillOrchestrator {
             return;
         }
         if let Err(err) = security_gate_skill_content(&name, body) {
-            tracing::warn!("Skipping skill '{}' due to security policy: {}", name, err);
+            record_security_skip(security_skips, &name, &err);
             return;
         }
 
@@ -595,5 +651,14 @@ mod tests {
         orch.scan_skill_commands();
         assert!(!orch.commands.contains_key("/alpha"));
         assert!(orch.commands.contains_key("/beta"));
+    }
+
+    #[test]
+    fn test_record_security_skip_sanitizes_multiline_reason() {
+        let mut skips: HashMap<String, Vec<String>> = HashMap::new();
+        record_security_skip(&mut skips, "alpha", "line one\nline two\rline three");
+        let (reason, names) = skips.into_iter().next().expect("entry");
+        assert_eq!(reason, "line one line two line three");
+        assert_eq!(names, vec!["alpha".to_string()]);
     }
 }

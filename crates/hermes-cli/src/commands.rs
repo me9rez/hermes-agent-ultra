@@ -11543,12 +11543,19 @@ async fn contextlattice_embedding_diagnostics_lines() -> Vec<String> {
                 }
             } else {
                 lines.push(format!(
-                    "embedding_diagnostics: endpoint_status={} (fallback to recall telemetry)",
-                    status
+                    "embedding_diagnostics: unavailable (telemetry/embeddings status={})",
+                    status.as_u16()
                 ));
+                lines.push("embedding_diagnostics: fallback=recall_telemetry".to_string());
             }
         }
-        Err(err) => lines.push(format!("embedding_diagnostics: unreachable ({})", err)),
+        Err(err) => {
+            lines.push(format!(
+                "embedding_diagnostics: unavailable (unreachable: {})",
+                err
+            ));
+            lines.push("embedding_diagnostics: fallback=recall_telemetry".to_string());
+        }
     }
 
     let mut recall_req = client.get(format!(

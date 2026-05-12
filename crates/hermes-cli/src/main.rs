@@ -159,6 +159,19 @@ fn infer_oauth_provider_from_error_message(message: &str) -> Option<String> {
     None
 }
 
+fn query_is_local_slash_command(query: &str) -> bool {
+    query.trim_start().starts_with('/')
+}
+
+async fn handle_local_slash_query(cli: Cli, query: &str) -> Result<bool, AgentError> {
+    if !query_is_local_slash_command(query) {
+        return Ok(false);
+    }
+    let mut app = App::new(cli).await?;
+    app.handle_input(query).await?;
+    Ok(true)
+}
+
 fn oneshot_auto_verify_oauth_provider(
     err: &AgentError,
     provider_override: Option<&str>,
@@ -246,6 +259,14 @@ async fn main() {
     tracing::debug!("Hermes Agent starting");
 
     if let Some(prompt) = cli.oneshot.clone() {
+        match handle_local_slash_query(cli.clone(), &prompt).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(err) => {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
+            }
+        }
         let mut result = hermes_cli::commands::handle_cli_chat(
             Some(prompt),
             None,
@@ -307,15 +328,33 @@ async fn main() {
             preload_skill,
             yolo,
         } => {
-            hermes_cli::commands::handle_cli_chat(
-                query,
-                preload_skill,
-                yolo,
-                global_model_override.clone(),
-                global_provider_override.clone(),
-                global_allow_tools_override,
-            )
-            .await
+            if let Some(prompt) = query.clone() {
+                match handle_local_slash_query(cli.clone(), &prompt).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => {
+                        hermes_cli::commands::handle_cli_chat(
+                            query,
+                            preload_skill,
+                            yolo,
+                            global_model_override.clone(),
+                            global_provider_override.clone(),
+                            global_allow_tools_override,
+                        )
+                        .await
+                    }
+                    Err(err) => Err(err),
+                }
+            } else {
+                hermes_cli::commands::handle_cli_chat(
+                    query,
+                    preload_skill,
+                    yolo,
+                    global_model_override.clone(),
+                    global_provider_override.clone(),
+                    global_allow_tools_override,
+                )
+                .await
+            }
         }
         CliCommand::Model { provider_model } => run_model(cli, provider_model).await,
         CliCommand::Tools {
@@ -635,8 +674,101 @@ fn init_tracing(verbose: bool, interactive_tui: bool) {
     init_telemetry_from_env("hermes-cli", default);
 }
 
+const INTERACTIVE_SESSION_LOCK_FILE: &str = "interactive.session.lock";
+const INTERACTIVE_SESSION_LOCK_BYPASS_ENV: &str = "HERMES_ALLOW_PARALLEL_INTERACTIVE";
+
+fn interactive_lock_path_for_cli(cli: &Cli) -> PathBuf {
+    hermes_state_root(cli).join(INTERACTIVE_SESSION_LOCK_FILE)
+}
+
+fn read_interactive_lock_pid(path: &Path) -> Option<u32> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(pid) = trimmed.parse::<u32>() {
+        return Some(pid);
+    }
+    let json: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let pid = json.get("pid")?.as_u64()?;
+    u32::try_from(pid).ok()
+}
+
+#[cfg(unix)]
+fn process_pid_is_alive(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM)
+    )
+}
+
+#[cfg(not(unix))]
+fn process_pid_is_alive(_pid: u32) -> bool {
+    false
+}
+
+struct InteractiveSessionLockGuard {
+    lock_path: PathBuf,
+    pid: u32,
+}
+
+impl InteractiveSessionLockGuard {
+    fn acquire(cli: &Cli) -> Result<Option<Self>, AgentError> {
+        if hermes_config::env_var_enabled(INTERACTIVE_SESSION_LOCK_BYPASS_ENV) {
+            return Ok(None);
+        }
+        let lock_path = interactive_lock_path_for_cli(cli);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AgentError::Io(format!(
+                    "failed to create lock parent {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
+        }
+        let own_pid = std::process::id();
+        if let Some(existing_pid) = read_interactive_lock_pid(&lock_path) {
+            if existing_pid != own_pid && process_pid_is_alive(existing_pid) {
+                return Err(AgentError::Config(format!(
+                    "Another Hermes interactive session is running (PID {}). Close it first or set {}=1 to allow parallel sessions.",
+                    existing_pid, INTERACTIVE_SESSION_LOCK_BYPASS_ENV
+                )));
+            }
+            let _ = std::fs::remove_file(&lock_path);
+        }
+        std::fs::write(&lock_path, format!("{}\n", own_pid)).map_err(|e| {
+            AgentError::Io(format!(
+                "failed to write interactive lock {}: {}",
+                lock_path.display(),
+                e
+            ))
+        })?;
+        Ok(Some(Self {
+            lock_path,
+            pid: own_pid,
+        }))
+    }
+}
+
+impl Drop for InteractiveSessionLockGuard {
+    fn drop(&mut self) {
+        if let Some(current_pid) = read_interactive_lock_pid(&self.lock_path) {
+            if current_pid == self.pid {
+                let _ = std::fs::remove_file(&self.lock_path);
+            }
+        }
+    }
+}
+
 /// Run the interactive REPL (default command).
 async fn run_interactive(cli: Cli) -> Result<(), AgentError> {
+    let _session_lock = InteractiveSessionLockGuard::acquire(&cli)?;
     let app = App::new(cli).await?;
     hermes_cli::tui::run(app).await
 }
@@ -652,6 +784,7 @@ struct ResumeSessionPayload {
 }
 
 async fn run_resume(cli: Cli, requested_session_id: Option<String>) -> Result<(), AgentError> {
+    let _session_lock = InteractiveSessionLockGuard::acquire(&cli)?;
     let requested = requested_session_id.as_deref();
     let payload = match load_resume_payload(&cli, requested) {
         Ok(payload) => payload,
@@ -13869,6 +14002,45 @@ max_turns: 50
         let invalid = tmp.path().join("invalid.pid");
         std::fs::write(&invalid, "{bad").expect("write invalid pid");
         assert_eq!(read_gateway_pid(&invalid), None);
+    }
+
+    #[test]
+    fn read_interactive_lock_pid_supports_plain_and_json_records() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plain = tmp.path().join("interactive.lock");
+        std::fs::write(&plain, "12345\n").expect("write plain lock");
+        assert_eq!(read_interactive_lock_pid(&plain), Some(12345));
+
+        let json = tmp.path().join("interactive.json");
+        std::fs::write(&json, r#"{"pid":23456}"#).expect("write json lock");
+        assert_eq!(read_interactive_lock_pid(&json), Some(23456));
+    }
+
+    #[test]
+    fn query_is_local_slash_command_detects_prefixed_queries() {
+        assert!(query_is_local_slash_command("/model list"));
+        assert!(query_is_local_slash_command("   /graph status"));
+        assert!(!query_is_local_slash_command("hello world"));
+    }
+
+    #[test]
+    fn interactive_session_lock_guard_replaces_stale_pid_and_cleans_up() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cli = cli_for_temp_state_root(tmp.path());
+        let lock_path = interactive_lock_path_for_cli(&cli);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir lock parent");
+        }
+        std::fs::write(&lock_path, "999999").expect("write stale lock");
+        let guard = InteractiveSessionLockGuard::acquire(&cli)
+            .expect("acquire lock")
+            .expect("guard enabled");
+        assert_eq!(
+            read_interactive_lock_pid(&lock_path),
+            Some(std::process::id())
+        );
+        drop(guard);
+        assert!(!lock_path.exists(), "lock file should be removed on drop");
     }
 
     #[test]

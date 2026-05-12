@@ -74,6 +74,16 @@ pub struct ObjectiveContract {
     pub created_at: String,
     pub updated_at: String,
     pub objective_text: String,
+    #[serde(default = "default_objective_lifecycle_status")]
+    pub lifecycle_status: String,
+    #[serde(default)]
+    pub status_reason: String,
+    #[serde(default = "default_objective_behavior_mode")]
+    pub behavior_mode: String,
+    #[serde(default = "default_objective_behavior_directives")]
+    pub behavior_directives: Vec<String>,
+    #[serde(default)]
+    pub success_criteria: Vec<String>,
     pub utility: UtilityFunctionSpec,
     pub horizons: Vec<HorizonPlan>,
     pub promotion_gate: EvidencePromotionGate,
@@ -457,6 +467,72 @@ fn default_objective_profile() -> ObjectiveProfile {
     }
 }
 
+fn default_objective_lifecycle_status() -> String {
+    "active".to_string()
+}
+
+fn default_objective_behavior_mode() -> String {
+    "balanced".to_string()
+}
+
+fn objective_behavior_directives_for_mode(mode: &str) -> Vec<String> {
+    match canonical_objective_behavior_mode(mode).as_str() {
+        "strict" => vec![
+            "retrieve context before inference".to_string(),
+            "verify facts from direct artifacts before claiming state".to_string(),
+            "mark unresolved claims as unproven".to_string(),
+            "run contradiction checks across code/process/runtime layers".to_string(),
+        ],
+        "autonomous" => vec![
+            "proactively continue objective loops until blocked".to_string(),
+            "prefer smallest reversible patches with immediate verification".to_string(),
+            "only ask operator when a hard decision boundary is reached".to_string(),
+            "always end loops with concrete next actions".to_string(),
+        ],
+        "minimal" => vec![
+            "keep responses concise and action-first".to_string(),
+            "avoid speculative detours".to_string(),
+            "report blockers in one line plus next action".to_string(),
+        ],
+        _ => vec![
+            "decompose objective into measurable checkpoints".to_string(),
+            "prefer evidence-backed decisions over inference".to_string(),
+            "verify changes before claiming completion".to_string(),
+            "escalate contradictions instead of guessing".to_string(),
+        ],
+    }
+}
+
+fn default_objective_behavior_directives() -> Vec<String> {
+    objective_behavior_directives_for_mode(&default_objective_behavior_mode())
+}
+
+pub fn canonical_objective_lifecycle_status(status: &str) -> String {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "active" | "pursuing" | "in_progress" | "running" => "active".to_string(),
+        "paused" | "pause" => "paused".to_string(),
+        "budget_limited" | "budget-limited" | "budgetlimited" | "limited" => {
+            "budget_limited".to_string()
+        }
+        "complete" | "completed" | "achieved" | "done" | "success" => "complete".to_string(),
+        "unmet" | "failed" | "blocked_terminal" => "unmet".to_string(),
+        _ => "active".to_string(),
+    }
+}
+
+pub fn objective_lifecycle_is_active(status: &str) -> bool {
+    canonical_objective_lifecycle_status(status) == "active"
+}
+
+pub fn canonical_objective_behavior_mode(mode: &str) -> String {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "strict" | "evidence" | "evidence-first" => "strict".to_string(),
+        "autonomous" | "proactive" | "loop" | "agentic" => "autonomous".to_string(),
+        "minimal" | "concise" | "lean" => "minimal".to_string(),
+        _ => "balanced".to_string(),
+    }
+}
+
 pub fn objective_profile_specialized_for(operator_hint: &str) -> ObjectiveProfile {
     let normalized = operator_hint.trim().to_ascii_lowercase();
     if normalized == "sheawinkler" {
@@ -598,6 +674,11 @@ fn score_for_objective_state(state: &str) -> f64 {
         "flat" => 0.5,
         "regressing" => 0.0,
         "unproven" => 0.25,
+        "active" | "pursuing" => 0.6,
+        "paused" => 0.45,
+        "budget_limited" | "budget-limited" => 0.2,
+        "complete" | "achieved" => 1.0,
+        "unmet" => 0.0,
         _ => 0.4,
     }
 }
@@ -971,6 +1052,47 @@ pub fn upsert_objective_contract(
         .as_ref()
         .map(|v| v.created_at.clone())
         .unwrap_or_else(now_rfc3339);
+    let existing_objective = existing
+        .as_ref()
+        .map(|v| v.objective_text.trim().to_string())
+        .unwrap_or_default();
+    let existing_status = existing
+        .as_ref()
+        .map(|v| canonical_objective_lifecycle_status(&v.lifecycle_status))
+        .unwrap_or_else(default_objective_lifecycle_status);
+    let lifecycle_status = if existing_objective.eq_ignore_ascii_case(objective_text.trim()) {
+        existing_status
+    } else {
+        "active".to_string()
+    };
+    let status_reason = existing
+        .as_ref()
+        .map(|v| v.status_reason.trim().to_string())
+        .unwrap_or_default();
+    let behavior_mode = existing
+        .as_ref()
+        .map(|v| canonical_objective_behavior_mode(&v.behavior_mode))
+        .unwrap_or_else(default_objective_behavior_mode);
+    let behavior_directives = existing
+        .as_ref()
+        .map(|v| {
+            if v.behavior_directives.is_empty() {
+                objective_behavior_directives_for_mode(&behavior_mode)
+            } else {
+                v.behavior_directives.clone()
+            }
+        })
+        .unwrap_or_else(|| objective_behavior_directives_for_mode(&behavior_mode));
+    let success_criteria = existing
+        .as_ref()
+        .map(|v| v.success_criteria.clone())
+        .unwrap_or_else(|| {
+            vec![
+                "verified patch list with concrete file paths".to_string(),
+                "objective analytics state captured with explicit metrics".to_string(),
+                "contradictions either resolved or explicitly marked unproven".to_string(),
+            ]
+        });
     let counterfactual_journal = existing
         .as_ref()
         .map(|v| v.counterfactual_journal.clone())
@@ -980,6 +1102,11 @@ pub fn upsert_objective_contract(
         created_at,
         updated_at: now_rfc3339(),
         objective_text: objective_text.trim().to_string(),
+        lifecycle_status,
+        status_reason,
+        behavior_mode,
+        behavior_directives,
+        success_criteria,
         utility: UtilityFunctionSpec {
             objective: "maximize objective utility under hard constraints".to_string(),
             terms: extract_utility_terms(objective_text),
@@ -1014,6 +1141,44 @@ pub fn append_counterfactual(
         scenario: scenario.trim().to_string(),
         expected_delta: expected_delta.trim().to_string(),
     });
+    contract.updated_at = now_rfc3339();
+    write_json_file(&objective_contract_path(), &contract)?;
+    Ok(contract)
+}
+
+pub fn set_objective_contract_lifecycle_status(
+    status: &str,
+    reason: Option<&str>,
+) -> Result<ObjectiveContract, AgentError> {
+    let mut contract = load_objective_contract()?.ok_or_else(|| {
+        AgentError::Config(
+            "objective contract is not initialized; run `/objective <text>` first".to_string(),
+        )
+    })?;
+    contract.lifecycle_status = canonical_objective_lifecycle_status(status);
+    if let Some(reason) = reason {
+        let trimmed = reason.trim();
+        if !trimmed.is_empty() {
+            contract.status_reason = trimmed.to_string();
+        }
+    }
+    if contract.status_reason.trim().is_empty() {
+        contract.status_reason = "operator update".to_string();
+    }
+    contract.updated_at = now_rfc3339();
+    write_json_file(&objective_contract_path(), &contract)?;
+    Ok(contract)
+}
+
+pub fn set_objective_contract_behavior_mode(mode: &str) -> Result<ObjectiveContract, AgentError> {
+    let mut contract = load_objective_contract()?.ok_or_else(|| {
+        AgentError::Config(
+            "objective contract is not initialized; run `/objective <text>` first".to_string(),
+        )
+    })?;
+    let canonical = canonical_objective_behavior_mode(mode);
+    contract.behavior_mode = canonical.clone();
+    contract.behavior_directives = objective_behavior_directives_for_mode(&canonical);
     contract.updated_at = now_rfc3339();
     write_json_file(&objective_contract_path(), &contract)?;
     Ok(contract)
@@ -1695,8 +1860,10 @@ pub fn summarize_objective_contract(contract: &ObjectiveContract) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "objective_id: {}\nconfidence: {:.2}\nutility_terms: {}\nhard_constraints: {}\nhorizons: {}",
+        "objective_id: {}\nlifecycle_status: {}\nbehavior_mode: {}\nconfidence: {:.2}\nutility_terms: {}\nhard_constraints: {}\nhorizons: {}",
         contract.id,
+        canonical_objective_lifecycle_status(&contract.lifecycle_status),
+        canonical_objective_behavior_mode(&contract.behavior_mode),
         contract.confidence,
         terms,
         constraints,
@@ -3294,8 +3461,59 @@ mod tests {
             assert!(!contract.utility.terms.is_empty());
             assert!(!contract.utility.hard_constraints.is_empty());
             assert_eq!(contract.horizons.len(), 3);
+            assert_eq!(
+                canonical_objective_lifecycle_status(&contract.lifecycle_status),
+                "active"
+            );
+            assert_eq!(
+                canonical_objective_behavior_mode(&contract.behavior_mode),
+                "balanced"
+            );
+            assert!(!contract.behavior_directives.is_empty());
             let updated = append_counterfactual("if we defer tests", "risk rises").expect("append");
             assert_eq!(updated.counterfactual_journal.len(), 1);
+        });
+    }
+
+    #[test]
+    fn objective_lifecycle_and_behavior_updates_are_persisted() {
+        with_test_hermes_home(|| {
+            let initial = upsert_objective_contract("stabilize runtime telemetry", false)
+                .expect("objective set");
+            assert_eq!(
+                canonical_objective_lifecycle_status(&initial.lifecycle_status),
+                "active"
+            );
+
+            let paused = set_objective_contract_lifecycle_status("pause", Some("waiting on oauth"))
+                .expect("pause");
+            assert_eq!(
+                canonical_objective_lifecycle_status(&paused.lifecycle_status),
+                "paused"
+            );
+            assert_eq!(paused.status_reason, "waiting on oauth");
+
+            let strict = set_objective_contract_behavior_mode("strict").expect("behavior strict");
+            assert_eq!(
+                canonical_objective_behavior_mode(&strict.behavior_mode),
+                "strict"
+            );
+            assert!(!strict.behavior_directives.is_empty());
+
+            let same = upsert_objective_contract("stabilize runtime telemetry", false)
+                .expect("upsert same objective");
+            assert_eq!(
+                canonical_objective_lifecycle_status(&same.lifecycle_status),
+                "paused"
+            );
+
+            let replaced =
+                upsert_objective_contract("stabilize runtime telemetry plus recovery gates", false)
+                    .expect("upsert new objective");
+            assert_eq!(
+                canonical_objective_lifecycle_status(&replaced.lifecycle_status),
+                "active"
+            );
         });
     }
 

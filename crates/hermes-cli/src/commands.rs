@@ -25,16 +25,18 @@ use sha2::{Digest, Sha256};
 
 use crate::alpha_runtime::{
     append_counterfactual, append_objective_learning_entry, build_objective_dag_from_contract,
+    canonical_objective_behavior_mode, canonical_objective_lifecycle_status,
     clear_objective_contract, clear_objective_dag, clear_objective_learning_ledger,
     enqueue_loop_event, ensure_alpha_runtime_bootstrap, ensure_trading_runtime_bootstrap,
     load_alpha_loops, load_claim_verifier_policy, load_contextlattice_policy,
     load_last_trading_alpha_report, load_objective_contract, load_objective_dag,
     load_objective_ensemble_policy, load_objective_eval_trend, load_objective_learning_ledger,
     load_objective_profile, load_objective_simulation_policy, load_quorum_policy,
-    objective_profile_specialized_for, recover_orphan_loop_events, refresh_trading_alpha_report,
-    render_mission_board, render_trading_alpha_board, replay_loop_queue,
-    reset_objective_profile_generalized, set_claim_verifier_enabled,
-    set_contextlattice_policy_mode, set_objective_ensemble_mode, set_objective_profile,
+    objective_lifecycle_is_active, objective_profile_specialized_for, recover_orphan_loop_events,
+    refresh_trading_alpha_report, render_mission_board, render_trading_alpha_board,
+    replay_loop_queue, reset_objective_profile_generalized, set_claim_verifier_enabled,
+    set_contextlattice_policy_mode, set_objective_contract_behavior_mode,
+    set_objective_contract_lifecycle_status, set_objective_ensemble_mode, set_objective_profile,
     set_objective_simulation_mode, set_quorum_policy, summarize_objective_contract,
     upsert_objective_contract, utility_terms_from_contract, ObjectiveLearningLedgerEntry,
 };
@@ -10953,11 +10955,227 @@ fn handle_image_command(app: &mut App, args: &[&str]) -> Result<CommandResult, A
     Ok(CommandResult::Handled)
 }
 
+fn apply_objective_lifecycle_update(
+    app: &mut App,
+    raw_status: &str,
+    reason: Option<&str>,
+) -> Result<CommandResult, AgentError> {
+    let reason_owned = reason
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let updated = set_objective_contract_lifecycle_status(raw_status, reason_owned.as_deref())?;
+    let status = canonical_objective_lifecycle_status(&updated.lifecycle_status);
+    let objective_injected = objective_lifecycle_is_active(&status);
+    if objective_injected {
+        app.set_session_objective(Some(updated.objective_text.clone()));
+    } else {
+        app.set_session_objective(None);
+    }
+    let _ = append_objective_learning_entry(ObjectiveLearningLedgerEntry {
+        recorded_at: String::new(),
+        objective_id: updated.id.clone(),
+        objective_state: status.clone(),
+        decision: format!("objective_status_{}", status),
+        evidence_files: vec!["alpha/objective_contract.json".to_string()],
+        evidence_commands: vec![format!("/objective lifecycle {}", status)],
+        notes: format!(
+            "Objective lifecycle set to {}. reason={}",
+            status, updated.status_reason
+        ),
+    });
+    let mut out = String::new();
+    out.push_str("Objective lifecycle updated\n");
+    out.push_str("-------------------------\n");
+    let _ = writeln!(out, "objective_id={}", updated.id);
+    let _ = writeln!(out, "status={}", status);
+    let _ = writeln!(out, "reason={}", updated.status_reason);
+    let _ = writeln!(out, "objective_injected={}", yes_no(objective_injected));
+    let _ = writeln!(
+        out,
+        "behavior_mode={}",
+        canonical_objective_behavior_mode(&updated.behavior_mode)
+    );
+    emit_command_output(app, out.trim_end());
+    Ok(CommandResult::Handled)
+}
+
 fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
-    let objective_usage = "Usage: `/objective <text>` or `/objective status|verify|plan|constraints|counterfactual <scenario> | <expected_delta>|profile [status|list|general|me|set <id>]|context [status|list|max|balanced|fast]|simulator [status|balanced|strict|aggressive]|ensemble [status|committee|single|debate]|ledger [status|tail [n]|clear]|dag [status|rebuild|clear]|eval [status|tail [n]]|clear`.";
+    let objective_usage = "Usage: `/objective <text>` or `/objective status|verify|plan|constraints|counterfactual <scenario> | <expected_delta>|lifecycle [status|active|pause|resume|budget-limited|achieved|unmet]|behavior [status|list|balanced|strict|autonomous|minimal]|profile [status|list|general|me|set <id>]|context [status|list|max|balanced|fast]|simulator [status|balanced|strict|aggressive]|ensemble [status|committee|single|debate]|ledger [status|tail [n]|clear]|dag [status|rebuild|clear]|eval [status|tail [n]]|clear`.";
 
     if let Some(first) = args.first() {
         let cmd = first.trim().to_ascii_lowercase();
+
+        let lifecycle_alias = match cmd.as_str() {
+            "pause" => Some("paused"),
+            "resume" => Some("active"),
+            "active" | "pursuing" => Some("active"),
+            "budget" | "budget-limited" | "budget_limited" | "limited" => Some("budget_limited"),
+            "achieved" | "complete" | "done" => Some("complete"),
+            "unmet" | "failed" => Some("unmet"),
+            _ => None,
+        };
+        if let Some(status) = lifecycle_alias {
+            let reason = if args.len() > 1 {
+                Some(args[1..].join(" "))
+            } else {
+                None
+            };
+            return apply_objective_lifecycle_update(app, status, reason.as_deref());
+        }
+
+        if cmd == "lifecycle" || cmd == "state" {
+            let sub = args
+                .get(1)
+                .map(|v| v.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "status".to_string());
+            if sub == "status" || sub == "show" {
+                let Some(contract) = load_objective_contract()? else {
+                    emit_command_output(
+                        app,
+                        "No objective contract. Set one with `/objective <text>`.",
+                    );
+                    return Ok(CommandResult::Handled);
+                };
+                let status = canonical_objective_lifecycle_status(&contract.lifecycle_status);
+                let objective_injected = objective_lifecycle_is_active(&status);
+                let mut out = String::new();
+                out.push_str("Objective lifecycle\n");
+                out.push_str("-------------------\n");
+                let _ = writeln!(out, "objective_id={}", contract.id);
+                let _ = writeln!(out, "status={}", status);
+                let _ = writeln!(out, "reason={}", contract.status_reason);
+                let _ = writeln!(out, "objective_injected={}", yes_no(objective_injected));
+                let _ = writeln!(
+                    out,
+                    "behavior_mode={}",
+                    canonical_objective_behavior_mode(&contract.behavior_mode)
+                );
+                emit_command_output(app, out.trim_end());
+                return Ok(CommandResult::Handled);
+            }
+            if sub == "list" {
+                emit_command_output(
+                    app,
+                    "Lifecycle states:\n- active (alias: pursuing, resume)\n- paused (alias: pause)\n- budget_limited (alias: budget, limited)\n- complete (alias: achieved, done)\n- unmet (hard-blocked objective)",
+                );
+                return Ok(CommandResult::Handled);
+            }
+            if matches!(
+                sub.as_str(),
+                "active"
+                    | "pursuing"
+                    | "pause"
+                    | "paused"
+                    | "resume"
+                    | "budget"
+                    | "budget-limited"
+                    | "budget_limited"
+                    | "limited"
+                    | "complete"
+                    | "achieved"
+                    | "done"
+                    | "unmet"
+                    | "failed"
+            ) {
+                let reason = if args.len() > 2 {
+                    Some(args[2..].join(" "))
+                } else {
+                    None
+                };
+                return apply_objective_lifecycle_update(app, &sub, reason.as_deref());
+            }
+            emit_command_output(
+                app,
+                "Usage: /objective lifecycle [status|list|active|pause|resume|budget-limited|achieved|unmet] [reason...]",
+            );
+            return Ok(CommandResult::Handled);
+        }
+
+        if cmd == "behavior" || cmd == "mode" {
+            let sub = args
+                .get(1)
+                .map(|v| v.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "status".to_string());
+            if sub == "status" || sub == "show" {
+                let Some(contract) = load_objective_contract()? else {
+                    emit_command_output(
+                        app,
+                        "No objective contract. Set one with `/objective <text>`.",
+                    );
+                    return Ok(CommandResult::Handled);
+                };
+                let mut out = String::new();
+                out.push_str("Objective behavior mode\n");
+                out.push_str("-----------------------\n");
+                let _ = writeln!(out, "objective_id={}", contract.id);
+                let _ = writeln!(
+                    out,
+                    "mode={}",
+                    canonical_objective_behavior_mode(&contract.behavior_mode)
+                );
+                if !contract.behavior_directives.is_empty() {
+                    out.push_str("directives:\n");
+                    for directive in &contract.behavior_directives {
+                        let _ = writeln!(out, "- {}", directive);
+                    }
+                }
+                if !contract.success_criteria.is_empty() {
+                    out.push_str("success_criteria:\n");
+                    for criterion in &contract.success_criteria {
+                        let _ = writeln!(out, "- {}", criterion);
+                    }
+                }
+                emit_command_output(app, out.trim_end());
+                return Ok(CommandResult::Handled);
+            }
+            if sub == "list" {
+                emit_command_output(
+                    app,
+                    "Behavior modes:\n- balanced: generalized execution with evidence checkpoints\n- strict: strongest evidence-first + contradiction discipline\n- autonomous: proactive loop execution until blocked\n- minimal: concise operator-facing output with decisive actions",
+                );
+                return Ok(CommandResult::Handled);
+            }
+            if !matches!(
+                sub.as_str(),
+                "balanced" | "strict" | "autonomous" | "minimal"
+            ) {
+                emit_command_output(
+                    app,
+                    "Usage: /objective behavior [status|list|balanced|strict|autonomous|minimal]",
+                );
+                return Ok(CommandResult::Handled);
+            }
+            let updated = set_objective_contract_behavior_mode(&sub)?;
+            let _ = append_objective_learning_entry(ObjectiveLearningLedgerEntry {
+                recorded_at: String::new(),
+                objective_id: updated.id.clone(),
+                objective_state: canonical_objective_lifecycle_status(&updated.lifecycle_status),
+                decision: format!(
+                    "objective_behavior_{}",
+                    canonical_objective_behavior_mode(&updated.behavior_mode)
+                ),
+                evidence_files: vec!["alpha/objective_contract.json".to_string()],
+                evidence_commands: vec![format!("/objective behavior {}", sub)],
+                notes: "Objective behavior mode updated by operator command.".to_string(),
+            });
+            let mut out = String::new();
+            out.push_str("Objective behavior updated\n");
+            out.push_str("-------------------------\n");
+            let _ = writeln!(out, "objective_id={}", updated.id);
+            let _ = writeln!(
+                out,
+                "mode={}",
+                canonical_objective_behavior_mode(&updated.behavior_mode)
+            );
+            out.push_str("directives:\n");
+            for directive in &updated.behavior_directives {
+                let _ = writeln!(out, "- {}", directive);
+            }
+            emit_command_output(app, out.trim_end());
+            return Ok(CommandResult::Handled);
+        }
+
         if cmd == "context" || cmd == "contextlattice" {
             let sub = args
                 .get(1)
@@ -11541,6 +11759,22 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
                 let _ = writeln!(out, "\nObjective contract");
                 let _ = writeln!(out, "------------------");
                 let _ = writeln!(out, "{}", summarize_objective_contract(&contract));
+                let _ = writeln!(
+                    out,
+                    "status_reason: {}",
+                    if contract.status_reason.trim().is_empty() {
+                        "(none)"
+                    } else {
+                        contract.status_reason.trim()
+                    }
+                );
+                if !contract.behavior_directives.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "behavior_directives: {}",
+                        contract.behavior_directives.join(" | ")
+                    );
+                }
             } else {
                 let _ = writeln!(out, "\nNo persisted objective contract yet.");
             }
@@ -11710,11 +11944,16 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
     .any(|needle| objective_lc.contains(needle));
     let contract = upsert_objective_contract(&objective, trading_sensitive)?;
     let _ = build_objective_dag_from_contract();
-    app.set_session_objective(Some(objective.clone()));
+    let lifecycle = canonical_objective_lifecycle_status(&contract.lifecycle_status);
+    if objective_lifecycle_is_active(&lifecycle) {
+        app.set_session_objective(Some(objective.clone()));
+    } else {
+        app.set_session_objective(None);
+    }
     let _ = append_objective_learning_entry(ObjectiveLearningLedgerEntry {
         recorded_at: String::new(),
         objective_id: contract.id.clone(),
-        objective_state: "configured".to_string(),
+        objective_state: lifecycle.clone(),
         decision: "objective_set".to_string(),
         evidence_files: vec!["alpha/objective_contract.json".to_string()],
         evidence_commands: vec!["/objective <text>".to_string()],
@@ -11727,9 +11966,12 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
     emit_command_output(
         app,
         format!(
-            "Session objective set:\n{}\n\nObjective contract persisted:\n{}\n\nThis objective is now injected as system context for future turns.",
+            "Session objective set:\n{}\n\nObjective contract persisted:\n{}\n\nlifecycle_status={}\nbehavior_mode={}\nobjective_injected={}\n\nThis objective is now injected as system context for future turns when lifecycle is active.",
             objective,
-            summarize_objective_contract(&contract)
+            summarize_objective_contract(&contract),
+            lifecycle,
+            canonical_objective_behavior_mode(&contract.behavior_mode),
+            yes_no(objective_lifecycle_is_active(&lifecycle))
         ),
     );
     Ok(CommandResult::Handled)
@@ -19830,6 +20072,55 @@ mod tests {
     #[test]
     fn test_goal_alias_maps_to_objective() {
         assert_eq!(canonical_command("/goal"), "/objective");
+    }
+
+    #[tokio::test]
+    async fn objective_lifecycle_pause_resume_updates_session_injection() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TempHomeGuard::new(tmp.path());
+        let mut app = build_test_app_with_stream(tmp.path()).await;
+
+        let set_result = handle_slash_command(&mut app, "/objective", &["stabilize", "indexing"])
+            .await
+            .expect("set objective");
+        assert_eq!(set_result, CommandResult::Handled);
+        assert_eq!(app.session_objective.as_deref(), Some("stabilize indexing"));
+
+        let pause_result =
+            handle_slash_command(&mut app, "/objective", &["pause", "manual", "hold"])
+                .await
+                .expect("pause objective");
+        assert_eq!(pause_result, CommandResult::Handled);
+        assert!(app.session_objective.is_none());
+        assert!(latest_ui_assistant_text(&app).contains("status=paused"));
+
+        let resume_result = handle_slash_command(&mut app, "/objective", &["resume", "continue"])
+            .await
+            .expect("resume objective");
+        assert_eq!(resume_result, CommandResult::Handled);
+        assert_eq!(app.session_objective.as_deref(), Some("stabilize indexing"));
+        assert!(latest_ui_assistant_text(&app).contains("status=active"));
+    }
+
+    #[tokio::test]
+    async fn objective_behavior_mode_can_be_switched() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TempHomeGuard::new(tmp.path());
+        let mut app = build_test_app_with_stream(tmp.path()).await;
+
+        handle_slash_command(&mut app, "/objective", &["improve", "planner", "quality"])
+            .await
+            .expect("set objective");
+
+        let mode_result = handle_slash_command(&mut app, "/objective", &["behavior", "strict"])
+            .await
+            .expect("set behavior");
+        assert_eq!(mode_result, CommandResult::Handled);
+        let output = latest_ui_assistant_text(&app);
+        assert!(output.contains("mode=strict"));
+        assert!(output.contains("directives:"));
     }
 
     #[tokio::test]

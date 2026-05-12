@@ -31,7 +31,7 @@ use ratatui::widgets::{
 use ratatui::Frame;
 use tokio::sync::mpsc;
 use tui_textarea::{CursorMove, TextArea};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use hermes_auth::FileTokenStore;
 use hermes_core::{AgentError, AgentResult, Message, StreamChunk};
@@ -437,6 +437,10 @@ pub struct TuiState {
     pub live_thinking: String,
     /// Last known token usage (prompt, completion, total).
     pub last_usage: Option<(u64, u64, u64)>,
+    /// Last total-token value emitted into activity lane.
+    last_usage_total_emitted: Option<u64>,
+    /// Monotonic sequence for activity-timeline rows.
+    timeline_seq: u64,
     /// Sticky prompt hint shown while scrolling history.
     pub sticky_prompt: String,
     /// Number of queued/running background jobs.
@@ -479,6 +483,8 @@ pub struct TuiState {
     processing_degraded: bool,
     /// Degraded lifecycle notes captured during current cycle.
     degraded_notes: Vec<String>,
+    /// Stream finished, waiting for `AgentRunComplete` to commit transcript.
+    awaiting_run_complete: bool,
 }
 
 /// A section of tool output that can be folded/expanded.
@@ -548,6 +554,8 @@ impl Default for TuiState {
             active_tools: Vec::new(),
             live_thinking: String::new(),
             last_usage: None,
+            last_usage_total_emitted: None,
+            timeline_seq: 0,
             sticky_prompt: String::new(),
             background_jobs_running: 0,
             activity_lane_open: true,
@@ -569,6 +577,7 @@ impl Default for TuiState {
             processing_phase_progress: 0,
             processing_degraded: false,
             degraded_notes: Vec::new(),
+            awaiting_run_complete: false,
         }
     }
 }
@@ -596,7 +605,9 @@ impl TuiState {
         if trimmed.is_empty() {
             return;
         }
-        self.recent_activity.push(trimmed);
+        self.timeline_seq = self.timeline_seq.saturating_add(1);
+        self.recent_activity
+            .push(format!("{:02}. {}", self.timeline_seq, trimmed));
         const MAX_EVENTS: usize = 16;
         if self.recent_activity.len() > MAX_EVENTS {
             let remove = self.recent_activity.len() - MAX_EVENTS;
@@ -630,6 +641,7 @@ impl TuiState {
 
     fn begin_processing_cycle(&mut self, model: &str) {
         self.processing = true;
+        self.awaiting_run_complete = true;
         self.processing_started_at = Some(Instant::now());
         self.last_progress_pulse_at = None;
         self.stream_chunk_count = 0;
@@ -641,6 +653,8 @@ impl TuiState {
         self.stream_muted = false;
         self.stream_needs_break = false;
         self.active_tools.clear();
+        self.last_usage_total_emitted = None;
+        self.timeline_seq = 0;
         self.live_thinking.clear();
         self.processing_phase = "preflight".to_string();
         self.processing_phase_label = "preparing request".to_string();
@@ -682,6 +696,7 @@ impl TuiState {
         self.processing_phase_progress = 0;
         self.processing_degraded = false;
         self.degraded_notes.clear();
+        self.awaiting_run_complete = false;
         self.jump_to_latest();
     }
 
@@ -2211,6 +2226,16 @@ fn looks_like_internal_scaffold_line(line: &str) -> bool {
         || lowered.contains("</arguments>")
         || lowered.contains("<name>")
         || lowered.contains("</name>")
+        || lowered.contains("<argument name=")
+        || lowered.contains("</argument>")
+        || lowered.contains("&lt;tool_use")
+        || lowered.contains("&lt;/tool_use")
+        || lowered.contains("&lt;tool_call")
+        || lowered.contains("&lt;/tool_call")
+        || lowered.contains("\\u003ctool_use")
+        || lowered.contains("\\u003c/tool_use")
+        || lowered.contains("\\u003ctool_call")
+        || lowered.contains("\\u003c/tool_call")
         || lowered.contains("invoke_result")
         || lowered.contains("invokn_result")
         || lowered.contains("to=functions.")
@@ -2264,6 +2289,23 @@ fn sanitize_line_to_default_language_ascii(line: &str, compact_ws: bool) -> Opti
         body.trim_end().to_string()
     };
     if body.trim().is_empty() {
+        return None;
+    }
+    let ascii_letters = body.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    let ascii_graphics = body.chars().filter(|c| c.is_ascii_graphic()).count();
+    if ascii_graphics > 0 && ascii_letters == 0 {
+        let symbolic_ratio = body.chars().filter(|c| !c.is_ascii_alphanumeric()).count() as f64
+            / ascii_graphics as f64;
+        if symbolic_ratio > 0.85 {
+            return None;
+        }
+    }
+    let lower = body.to_ascii_lowercase();
+    if lower.contains("<tool_call")
+        || lower.contains("</tool_call")
+        || lower.contains("<tool_use>")
+        || lower.contains("</tool_use>")
+    {
         return None;
     }
     Some(format!("{leading}{body}"))
@@ -2594,6 +2636,12 @@ fn format_tool_message_lines(content: &str) -> Vec<String> {
                 push_block(&mut lines, key, value);
             }
         }
+        if let Some(remediation) = tool_policy_remediation_from_payload(obj) {
+            lines.push("[remediation]".to_string());
+            for row in remediation {
+                lines.push(format!("- {}", row));
+            }
+        }
 
         let mut extras = serde_json::Map::new();
         for (k, v) in obj.iter() {
@@ -2624,6 +2672,69 @@ fn format_tool_message_lines(content: &str) -> Vec<String> {
                 .map(std::string::ToString::to_string)
                 .collect()
         })
+}
+
+fn tool_policy_remediation_from_payload(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<String>> {
+    let code = obj
+        .get("policy")
+        .and_then(|p| p.get("code"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let error_text = obj
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let blocked = error_text.contains("blocked by tool policy")
+        || error_text.contains("denied by security policy")
+        || !code.is_empty();
+    if !blocked {
+        return None;
+    }
+
+    let mut rows = Vec::new();
+    match code.as_str() {
+        "params_pattern_denied" => {
+            rows.push(
+                "Remove secret-like parameter names from tool args; pass secrets via local env/vault.".to_string(),
+            );
+            rows.push(
+                "Retry with sanitized args that reference variable names, not credential material."
+                    .to_string(),
+            );
+        }
+        "params_too_large" => {
+            rows.push(
+                "Reduce payload size and pass only minimal fields required by the tool."
+                    .to_string(),
+            );
+        }
+        "tool_denylisted" | "tool_not_allowlisted" => {
+            rows.push(
+                "Switch to an approved tool surface (`/tools`) for this operation.".to_string(),
+            );
+        }
+        "sandbox_profile_violation" => {
+            rows.push(
+                "Command matched sandbox denial pattern; use a safer equivalent command path."
+                    .to_string(),
+            );
+            rows.push(
+                "If necessary, change runtime sandbox policy explicitly before retrying."
+                    .to_string(),
+            );
+        }
+        _ => {
+            rows.push(
+                "Review policy decision details in `/ops status` and retry with safer parameters."
+                    .to_string(),
+            );
+        }
+    }
+    Some(rows)
 }
 
 fn append_transcript_message_lines(
@@ -3078,8 +3189,8 @@ fn approximate_visual_rows(lines: &[Line<'static>], wrap_width: u16) -> usize {
     lines
         .iter()
         .map(|line| {
-            let chars = line.to_string().chars().count().max(1);
-            ((chars - 1) / width) + 1
+            let display_width = UnicodeWidthStr::width(line.to_string().as_str()).max(1);
+            ((display_width - 1) / width) + 1
         })
         .sum::<usize>()
         .max(1)
@@ -4280,6 +4391,39 @@ fn handle_agent_run_complete(
     state.stream_muted = false;
     state.stream_needs_break = false;
     state.active_tools.clear();
+    state.awaiting_run_complete = false;
+}
+
+fn extract_file_like_hints(text: &str, limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in text.split_whitespace() {
+        if out.len() >= limit {
+            break;
+        }
+        let cleaned = token
+            .trim_matches(|c: char| {
+                c == '"' || c == '\'' || c == ',' || c == ';' || c == ')' || c == '('
+            })
+            .to_string();
+        if cleaned.len() < 4 {
+            continue;
+        }
+        let looks_like_path = cleaned.contains('/')
+            || cleaned.ends_with(".rs")
+            || cleaned.ends_with(".py")
+            || cleaned.ends_with(".toml")
+            || cleaned.ends_with(".md")
+            || cleaned.ends_with(".json")
+            || cleaned.ends_with(".yaml")
+            || cleaned.ends_with(".yml");
+        if !looks_like_path {
+            continue;
+        }
+        if !out.iter().any(|v| v == &cleaned) {
+            out.push(cleaned);
+        }
+    }
+    out
 }
 
 fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) -> bool {
@@ -4348,6 +4492,10 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
                                 } else {
                                     state.push_activity(format!("▶ {} {}", tool, args_preview));
                                 }
+                                state.push_activity(format!(
+                                    "Δtools active={}",
+                                    state.active_tools.len()
+                                ));
                             }
                             "tool_complete" => {
                                 let tool = extra
@@ -4370,6 +4518,13 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
                                     state.push_activity(format!("✓ {}", tool));
                                 } else {
                                     state.push_activity(format!("✓ {} {}", tool, result_preview));
+                                    let file_hints = extract_file_like_hints(result_preview, 3);
+                                    if !file_hints.is_empty() {
+                                        state.push_activity(format!(
+                                            "Δfiles {}",
+                                            file_hints.join(", ")
+                                        ));
+                                    }
                                 }
                             }
                             "status" => {
@@ -4454,6 +4609,9 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
                                 .unwrap_or_default();
                             state.push_activity(format!("↧ first token in {}ms", first_token_ms));
                         }
+                        if state.auto_follow_transcript {
+                            state.scroll_offset = 0;
+                        }
                     }
                 }
             }
@@ -4463,16 +4621,35 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
                     usage.completion_tokens,
                     usage.total_tokens,
                 ));
+                let previous = state.last_usage_total_emitted.unwrap_or(0);
+                if usage.total_tokens >= previous.saturating_add(64)
+                    || state.last_usage_total_emitted.is_none()
+                {
+                    let delta_total = usage.total_tokens.saturating_sub(previous);
+                    state.push_activity(format!(
+                        "Δtokens p={} c={} t={} (+{})",
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        usage.total_tokens,
+                        delta_total
+                    ));
+                    state.last_usage_total_emitted = Some(usage.total_tokens);
+                }
             }
             true
         }
         Event::AgentDone => {
-            state.finish_processing_cycle("✔ completed in");
-            state.stream_buffer.clear();
-            state.stream_muted = false;
-            state.stream_needs_break = false;
-            state.active_tools.clear();
-            state.status_message.clear();
+            if state.awaiting_run_complete {
+                state.push_activity("finalizing transcript writeback…".to_string());
+                state.status_message = "Finalizing response…".to_string();
+            } else {
+                state.finish_processing_cycle("✔ completed in");
+                state.stream_buffer.clear();
+                state.stream_muted = false;
+                state.stream_needs_break = false;
+                state.active_tools.clear();
+                state.status_message.clear();
+            }
             true
         }
         Event::AgentRunComplete {
@@ -5341,6 +5518,18 @@ mod tests {
     }
 
     #[test]
+    fn test_format_tool_message_lines_adds_policy_remediation_block() {
+        let payload = r#"{
+  "error":"Blocked by tool policy: tool params matched deny pattern '(?i)api[_-]?key'",
+  "policy":{"code":"params_pattern_denied","mode":"enforce"}
+}"#;
+        let lines = format_tool_message_lines(payload);
+        let joined = lines.join("\n");
+        assert!(joined.contains("[remediation]"));
+        assert!(joined.contains("Remove secret-like parameter names"));
+    }
+
+    #[test]
     fn test_approximate_visual_rows_wraps_long_lines() {
         let lines = vec![Line::from("x".repeat(120))];
         assert_eq!(approximate_visual_rows(&lines, 40), 3);
@@ -5454,6 +5643,12 @@ mod tests {
     #[test]
     fn test_scaffold_detector_matches_embedded_tool_tags() {
         let line = "random prefix <tool_use><name>terminal</name></tool_use> suffix";
+        assert!(looks_like_internal_scaffold_line(line));
+    }
+
+    #[test]
+    fn test_scaffold_detector_matches_escaped_tool_tags() {
+        let line = "noise \\u003ctool_use\\u003e <argument name=\"skill\">x</argument>";
         assert!(looks_like_internal_scaffold_line(line));
     }
 

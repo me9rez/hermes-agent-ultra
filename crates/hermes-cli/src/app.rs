@@ -1055,6 +1055,42 @@ impl App {
         tracing::info!("Switched personality to: {}", name);
     }
 
+    /// Return the normalized runtime provider for the active model.
+    pub fn current_runtime_provider(&self) -> String {
+        let (provider_name, _) = resolve_provider_and_model(&self.config, &self.current_model);
+        normalize_runtime_provider_name(provider_name.as_str())
+    }
+
+    /// Refresh and verify runtime credentials for the active provider.
+    ///
+    /// This is the command-surface lifecycle helper used by `/auth`.
+    pub async fn verify_runtime_auth(&mut self, force_refresh: bool) -> Result<String, AgentError> {
+        let provider = self.current_runtime_provider();
+        let before_present = provider_api_key_from_env(&provider).is_some();
+        self.refresh_runtime_provider_credentials_if_needed(force_refresh)
+            .await;
+        let after = provider_api_key_from_env(&provider);
+        let after_present = after.is_some();
+        let status = if let Some(key) = after {
+            format!(
+                "present (masked={} chars)",
+                key.chars().count().max(1).saturating_sub(8).max(1)
+            )
+        } else {
+            "missing".to_string()
+        };
+        let refresh_mode = if force_refresh { "forced" } else { "passive" };
+        let changed = if before_present == after_present {
+            "unchanged"
+        } else {
+            "updated"
+        };
+        Ok(format!(
+            "Auth verify\nprovider: {}\nmode: {}\ncredential: {}\nstate: {}\nmodel: {}",
+            provider, refresh_mode, status, changed, self.current_model
+        ))
+    }
+
     /// Run the agent on the current message history.
     ///
     /// Sends all messages to the agent loop and appends the result.

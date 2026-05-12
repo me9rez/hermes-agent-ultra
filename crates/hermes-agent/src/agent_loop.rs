@@ -7547,6 +7547,54 @@ fn detect_communication_intent(messages: &[Message]) -> bool {
     comm_terms.iter().any(|needle| text.contains(needle))
 }
 
+fn detect_tool_profile_escape_hatch(messages: &[Message]) -> bool {
+    let text = latest_user_content(messages)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let escape_terms = [
+        "allow all tools",
+        "disable narrowing",
+        "open tool profile",
+        "no tool filtering",
+        "bypass tool profile",
+    ];
+    escape_terms.iter().any(|needle| text.contains(needle))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoReviewToolProfileMode {
+    Off,
+    Balanced,
+    Focus,
+}
+
+impl RepoReviewToolProfileMode {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" | "open" => Some(Self::Off),
+            "balanced" | "default" => Some(Self::Balanced),
+            "focus" | "strict" => Some(Self::Focus),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Balanced => "balanced",
+            Self::Focus => "focus",
+        }
+    }
+}
+
+fn repo_review_tool_profile_mode() -> RepoReviewToolProfileMode {
+    std::env::var("HERMES_REPO_REVIEW_TOOL_PROFILE_MODE")
+        .ok()
+        .as_deref()
+        .and_then(RepoReviewToolProfileMode::parse)
+        .unwrap_or(RepoReviewToolProfileMode::Balanced)
+}
+
 fn exploratory_problem_solving_system_hint(messages: &[Message]) -> Option<String> {
     if !detect_repo_review_intent(messages) {
         return None;
@@ -7980,9 +8028,20 @@ fn apply_repo_review_tool_profile_narrowing(
     if !detect_repo_review_intent(messages) {
         return None;
     }
+    if detect_tool_profile_escape_hatch(messages) {
+        return Some(
+            "[SYSTEM] Repo-review tool profile narrowing bypassed by explicit operator escape hatch."
+                .to_string(),
+        );
+    }
+    let mode = repo_review_tool_profile_mode();
+    if mode == RepoReviewToolProfileMode::Off {
+        return None;
+    }
     let allow_messaging = detect_communication_intent(messages);
     let mut filtered_messaging = 0usize;
     let mut filtered_non_repo = 0usize;
+    let mut filtered_focus = 0usize;
     tool_calls.retain(|tc| {
         let mut should_filter = false;
         if is_messaging_tool_name(&tc.function.name) && !allow_messaging {
@@ -7994,19 +8053,31 @@ fn apply_repo_review_tool_profile_narrowing(
         {
             filtered_non_repo += 1;
             should_filter = true;
+        } else if mode == RepoReviewToolProfileMode::Focus
+            && !is_discovery_tool_name(&tc.function.name)
+            && !is_execution_tool_name(&tc.function.name)
+            && !is_housekeeping_tool_name(&tc.function.name)
+            && !tc
+                .function
+                .name
+                .to_ascii_lowercase()
+                .contains("contextlattice")
+        {
+            filtered_focus += 1;
+            should_filter = true;
         }
         if should_filter {
             return false;
         }
         true
     });
-    let filtered = filtered_messaging + filtered_non_repo;
+    let filtered = filtered_messaging + filtered_non_repo + filtered_focus;
     if filtered == 0 {
         return None;
     }
     Some(format!(
-        "[SYSTEM] Repo-review tool profile narrowed this turn: skipped {} low-signal call(s) (messaging={}, non-repo={}) to keep focus on code evidence. `todo` remains enabled for task organization. If notifications are required, request telegram/discord/slack explicitly.",
-        filtered, filtered_messaging, filtered_non_repo
+        "[SYSTEM] Repo-review tool profile narrowed this turn (mode={}): skipped {} low-signal call(s) (messaging={}, non-repo={}, focus={}) to keep focus on code evidence. `todo` remains enabled for task organization. If notifications are required, request telegram/discord/slack explicitly.",
+        mode.as_str(), filtered, filtered_messaging, filtered_non_repo, filtered_focus
     ))
 }
 
@@ -12470,6 +12541,44 @@ mod tests {
         assert!(note.is_some());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "todo");
+    }
+
+    #[test]
+    fn test_repo_review_tool_profile_escape_hatch_disables_filtering() {
+        std::env::set_var("HERMES_REPO_REVIEW_TOOL_PROFILE_MODE", "focus");
+        let msgs = vec![Message::user(
+            "review repo at /tmp/app and diagnose issue; allow all tools",
+        )];
+        let mut calls = vec![ToolCall {
+            id: "b".to_string(),
+            function: hermes_core::FunctionCall {
+                name: "telegram_send".to_string(),
+                arguments: r#"{"text":"status"}"#.to_string(),
+            },
+            extra_content: None,
+        }];
+        let note = apply_repo_review_tool_profile_narrowing(&mut calls, &msgs);
+        assert!(note.is_some());
+        assert_eq!(calls.len(), 1, "escape hatch should bypass filtering");
+        std::env::remove_var("HERMES_REPO_REVIEW_TOOL_PROFILE_MODE");
+    }
+
+    #[test]
+    fn test_repo_review_tool_profile_off_mode_disables_filtering() {
+        std::env::set_var("HERMES_REPO_REVIEW_TOOL_PROFILE_MODE", "off");
+        let msgs = vec![Message::user("review repo at /tmp/app and diagnose issue")];
+        let mut calls = vec![ToolCall {
+            id: "b".to_string(),
+            function: hermes_core::FunctionCall {
+                name: "telegram_send".to_string(),
+                arguments: r#"{"text":"status"}"#.to_string(),
+            },
+            extra_content: None,
+        }];
+        let note = apply_repo_review_tool_profile_narrowing(&mut calls, &msgs);
+        assert!(note.is_none());
+        assert_eq!(calls.len(), 1, "off mode should keep all calls");
+        std::env::remove_var("HERMES_REPO_REVIEW_TOOL_PROFILE_MODE");
     }
 
     #[test]

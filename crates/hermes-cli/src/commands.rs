@@ -131,12 +131,17 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/model",
         "Show/switch models, run capability diagnostics (`/model explain`, `why-not`, `--cap`), or configure failover (`/model failover`)",
     ),
+    (
+        "/auth",
+        "Auth lifecycle controls (`status|verify|refresh`) for active provider credentials",
+    ),
     ("/provider", "List configured providers and availability"),
     (
         "/personality",
         "Show current personality, list built-ins, or switch mode",
     ),
     ("/profile", "Show active profile and Hermes home path"),
+    ("/whoami", "Alias for /profile"),
     ("/fast", "Toggle fast-mode hints"),
     ("/skin", "Show available skin/theme options"),
     ("/skins", "Alias for /skin"),
@@ -184,7 +189,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/objective",
-        "Set/show objective contract + profile/policies (`status|plan|constraints|counterfactual|profile|context|simulator|ensemble|ledger|dag|eval|clear`)",
+        "Set/show objective contract + profile/policies (`status|verify|plan|constraints|counterfactual|profile|context|simulator|ensemble|ledger|dag|eval|clear`)",
     ),
     (
         "/claims",
@@ -220,7 +225,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/btw", "Run an ephemeral side-question"),
     (
         "/plan",
-        "Queue planning work or inspect planner queue status (`/plan caps ...` optional)",
+        "Queue planning work or inspect planner queue status (`/plan caps ...`, `/plan depth ...`)",
     ),
     ("/lsp", "Show code-index/LSP context status and controls"),
     ("/graph", "Show graph-memory and ContextLattice status"),
@@ -253,6 +258,14 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "Show build/parity/upstream snapshot and enabled Ultra features",
     ),
     ("/ops", "Operator control plane (status + quick controls)"),
+    (
+        "/telemetry",
+        "Live telemetry snapshot (`status|lane`) for runtime health and gate signals",
+    ),
+    (
+        "/runbook",
+        "Failure-first remediation runbooks (`list|show <name>`)",
+    ),
     (
         "/eval",
         "Run/show live session evaluation harness (`status|run|latest`)",
@@ -3014,8 +3027,10 @@ fn canonical_command(cmd: &str) -> &str {
         "/autocompress" => "/autocompact",
         "/skins" => "/skin",
         "/summary" => "/recap",
+        "/whoami" => "/profile",
         "/sb" => "/statusbar",
         "/pilot" => "/autopilot",
+        "/rb" => "/runbook",
         "/debug" => "/debug-dump",
         "/exit" => "/quit",
         other => other,
@@ -3058,7 +3073,8 @@ pub async fn handle_slash_command(
         "/history" => handle_history_command(app),
         "/recap" => handle_recap_command(app, args),
         "/context" => handle_context_command(app, args),
-        "/title" | "/branch" => handle_session_compat_command(app, canonical_command(cmd), args),
+        "/title" => handle_session_compat_command(app, canonical_command(cmd), args),
+        "/branch" => handle_branch_command(app, args),
         "/timetravel" => handle_timetravel_command(app, args),
         "/snapshot" => handle_snapshot_command(app, args),
         "/rollback" => handle_rollback_command(app, args),
@@ -3078,9 +3094,10 @@ pub async fn handle_slash_command(
         "/studio" => handle_studio_command(app, args).await,
         "/ask" => handle_interactive_question_command(app, args),
         "/model" => handle_model_command(app, args).await,
+        "/auth" => handle_auth_command(app, args).await,
         "/provider" => handle_provider_command(app).await,
         "/personality" => handle_personality_command(app, args),
-        "/profile" => handle_profile_command(app),
+        "/profile" | "/whoami" => handle_profile_command(app),
         "/fast" | "/skin" | "/voice" => {
             handle_runtime_ui_mode_command(app, canonical_command(cmd), args)
         }
@@ -3110,6 +3127,8 @@ pub async fn handle_slash_command(
         "/status" => handle_status_command(app),
         "/about" => handle_about_command(app),
         "/ops" => handle_ops_command(app, args).await,
+        "/telemetry" => handle_telemetry_command(app, args),
+        "/runbook" => handle_runbook_command(app, args),
         "/eval" => handle_ops_eval_command(app, args).await,
         "/autopilot" => handle_ops_autopilot_command(app, args).await,
         "/mission" => handle_mission_command(app, args).await,
@@ -5599,6 +5618,57 @@ fn summarize_route_health_state(path: &Path) -> String {
     )
 }
 
+fn summarize_route_health_details(path: &Path) -> Option<String> {
+    let report = read_json_file(path)?;
+    let entries = report.get("entries")?.as_array()?;
+    if entries.is_empty() {
+        return Some("route_health_trace=no_entries".to_string());
+    }
+    let mut ranked = entries
+        .iter()
+        .filter_map(|entry| {
+            let key = entry.get("key").and_then(|v| v.as_str())?;
+            let tier = entry
+                .get("tier")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let health = entry
+                .get("health_score")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let reasons = entry
+                .get("reasons")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Some((key.to_string(), tier.to_string(), health, reasons))
+        })
+        .collect::<Vec<_>>();
+    if ranked.is_empty() {
+        return Some("route_health_trace=no_parseable_entries".to_string());
+    }
+    ranked.sort_by(|a, b| a.2.total_cmp(&b.2));
+    let hottest = ranked
+        .iter()
+        .take(3)
+        .map(|(key, tier, health, reasons)| {
+            let reason_text = if reasons.is_empty() {
+                "no_reasons".to_string()
+            } else {
+                reasons.join("|")
+            };
+            format!("{key} tier={tier} score={health:.2} reasons={reason_text}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ; ");
+    Some(format!("route_health_trace={}", hottest))
+}
+
 fn handle_ops_budget_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
     if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
         let budget = RepoReviewBudgetRuntime::from_env();
@@ -5659,6 +5729,59 @@ fn handle_ops_budget_command(app: &mut App, args: &[&str]) -> Result<CommandResu
             );
         }
     }
+    Ok(CommandResult::Handled)
+}
+
+fn handle_ops_tool_profile_command(
+    app: &mut App,
+    args: &[&str],
+) -> Result<CommandResult, AgentError> {
+    let mode = std::env::var("HERMES_REPO_REVIEW_TOOL_PROFILE_MODE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "balanced".to_string());
+    if args.is_empty()
+        || args
+            .first()
+            .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "status" | "show"))
+    {
+        emit_command_output(
+            app,
+            format!(
+                "repo_review_tool_profile mode={}\nUse `/ops tool-profile [off|balanced|focus]`.\nEscape hatch: include `allow all tools` or `disable narrowing` in your request.",
+                mode
+            ),
+        );
+        return Ok(CommandResult::Handled);
+    }
+    if args[0].eq_ignore_ascii_case("list") {
+        emit_command_output(
+            app,
+            "Repo-review tool profile modes:\n- off: disable narrowing (open tool lane)\n- balanced: filter messaging/non-repo noise only\n- focus: balanced + stricter repo-first filtering",
+        );
+        return Ok(CommandResult::Handled);
+    }
+    if args[0].eq_ignore_ascii_case("clear") {
+        std::env::remove_var("HERMES_REPO_REVIEW_TOOL_PROFILE_MODE");
+        emit_command_output(
+            app,
+            "Cleared repo-review tool profile override (default=balanced).",
+        );
+        return Ok(CommandResult::Handled);
+    }
+    let next = args[0].to_ascii_lowercase();
+    if !matches!(next.as_str(), "off" | "balanced" | "focus") {
+        emit_command_output(
+            app,
+            "Usage: /ops tool-profile [status|list|off|balanced|focus|clear]",
+        );
+        return Ok(CommandResult::Handled);
+    }
+    std::env::set_var("HERMES_REPO_REVIEW_TOOL_PROFILE_MODE", next.as_str());
+    emit_command_output(
+        app,
+        format!("repo_review_tool_profile mode set to `{}`", next),
+    );
     Ok(CommandResult::Handled)
 }
 
@@ -5765,6 +5888,9 @@ async fn handle_qos_command(app: &mut App, args: &[&str]) -> Result<CommandResul
                 learning_path.display()
             );
             let _ = writeln!(out, "  {} ({})", health_summary, health_path.display());
+            if let Some(trace) = summarize_route_health_details(&health_path) {
+                let _ = writeln!(out, "  {}", trace);
+            }
             let _ = writeln!(
                 out,
                 "  route_autotune_state={} ({})",
@@ -6352,6 +6478,10 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| "balanced".to_string());
         let repo_review_budget = RepoReviewBudgetRuntime::from_env();
+        let tool_profile_mode = std::env::var("HERMES_REPO_REVIEW_TOOL_PROFILE_MODE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "balanced".to_string());
 
         let out = format!(
             "Operator Control Plane\n\
@@ -6372,7 +6502,9 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
              Policy/Gates:\n\
                tool_policy:  mode={} preset={}\n\
                autopilot:    mode={} profile={}\n\
+               tool_profile: {}\n\
                repo_budget:  profile={} repeat={} low_signal={} keep_repeat={} keep_low_signal={} min_signal={:.2}\n\
+               task_depth:   {}\n\
                policy_counts allow={} deny={} audit_only={} simulate={} would_block={}\n\
                skills_tier:  {} (bypass={})\n\
                {}\n\
@@ -6389,6 +6521,7 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
                /ops verbose\n\
                /ops dashboard [status|on|off|url] [host] [port]\n\
                /ops skills-tier [status|trusted|balanced|open]\n\
+               /ops tool-profile [status|list|off|balanced|focus]\n\
                /ops budget [status|list|balanced|aggressive|relaxed|off|clear]\n\
                /ops evolve [status|run|recommend]\n\
                /ops eval [status|run|latest]\n\
@@ -6406,12 +6539,14 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
             policy_preset,
             autopilot_mode,
             autopilot_profile,
+            tool_profile_mode,
             repo_review_budget.profile.as_str(),
             repo_review_budget.repeat_threshold,
             repo_review_budget.low_signal_threshold,
             repo_review_budget.keep_repeat,
             repo_review_budget.keep_low_signal,
             repo_review_budget.min_signal_score,
+            task_depth_runtime_summary(),
             counters.allow,
             counters.deny,
             counters.audit_only,
@@ -6447,6 +6582,7 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
                  - /ops statusbar\n\
                  - /ops dashboard [status|on|off|url] [host] [port]\n\
                  - /ops skills-tier [status|trusted|balanced|open]\n\
+                 - /ops tool-profile [status|list|off|balanced|focus]\n\
                  - /ops budget [status|list|balanced|aggressive|relaxed|off|clear]\n\
                  - /ops evolve [status|run|recommend]\n\
                  - /ops eval [status|run|latest]\n\
@@ -6468,6 +6604,9 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
         "statusbar" => handle_statusbar_command(app),
         "dashboard" => handle_dashboard_command(app, &args[1..]).await,
         "skills-tier" => handle_ops_skills_tier_command(app, &args[1..]),
+        "tool-profile" | "toolprofile" | "tool_profile" => {
+            handle_ops_tool_profile_command(app, &args[1..])
+        }
         "budget" => handle_ops_budget_command(app, &args[1..]),
         "evolve" => handle_ops_evolve_command(app, &args[1..]).await,
         "eval" => handle_ops_eval_command(app, &args[1..]).await,
@@ -6882,6 +7021,181 @@ fn enumerate_saved_sessions(sessions_dir: &Path) -> Vec<(String, PathBuf, System
     entries
 }
 
+#[derive(Debug, Clone)]
+struct SnapshotIntegrity {
+    valid: bool,
+    reason: Option<String>,
+    session_id: Option<String>,
+    message_count: usize,
+}
+
+fn inspect_snapshot_integrity(path: &Path) -> SnapshotIntegrity {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(err) => {
+            return SnapshotIntegrity {
+                valid: false,
+                reason: Some(format!("read_failed: {}", err)),
+                session_id: None,
+                message_count: 0,
+            };
+        }
+    };
+    let data: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(err) => {
+            return SnapshotIntegrity {
+                valid: false,
+                reason: Some(format!("json_invalid: {}", err)),
+                session_id: None,
+                message_count: 0,
+            };
+        }
+    };
+    let messages = match data.get("messages").and_then(|m| m.as_array()) {
+        Some(arr) => arr,
+        None => {
+            return SnapshotIntegrity {
+                valid: false,
+                reason: Some("missing_messages_array".to_string()),
+                session_id: data
+                    .get("session_info")
+                    .and_then(|v| v.get("session_id"))
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                message_count: 0,
+            };
+        }
+    };
+    SnapshotIntegrity {
+        valid: true,
+        reason: None,
+        session_id: data
+            .get("session_info")
+            .and_then(|v| v.get("session_id"))
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string()),
+        message_count: messages.len(),
+    }
+}
+
+fn resolve_saved_session_entry<'a>(
+    entries: &'a [(String, PathBuf, SystemTime)],
+    requested: &str,
+) -> Result<&'a (String, PathBuf, SystemTime), String> {
+    if let Some(entry) = entries
+        .iter()
+        .find(|(name, _, _)| name.eq_ignore_ascii_case(requested))
+    {
+        return Ok(entry);
+    }
+
+    let prefix_matches: Vec<&(String, PathBuf, SystemTime)> = entries
+        .iter()
+        .filter(|(name, _, _)| name.starts_with(requested))
+        .collect();
+    match prefix_matches.as_slice() {
+        [entry] => Ok(*entry),
+        [] => Err(format!("not_found: {}", requested)),
+        many => Err(format!(
+            "ambiguous: {}",
+            many.iter()
+                .map(|entry| format!("`{}`", entry.0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn message_from_snapshot_entry(entry: &serde_json::Value) -> hermes_core::Message {
+    let role_str = entry.get("role").and_then(|r| r.as_str()).unwrap_or("User");
+    let content_str = entry.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    match role_str {
+        "Assistant" => hermes_core::Message::assistant(content_str),
+        "System" => hermes_core::Message::system(content_str),
+        "Tool" => hermes_core::Message::assistant(content_str),
+        _ => hermes_core::Message::user(content_str),
+    }
+}
+
+fn load_messages_from_snapshot(path: &Path) -> Result<Vec<hermes_core::Message>, AgentError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| AgentError::Io(format!("Failed to read session: {}", e)))?;
+    let data: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| AgentError::Config(format!("Failed to parse session: {}", e)))?;
+    let messages = data
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .ok_or_else(|| AgentError::Config("Session file has no messages array.".to_string()))?;
+    Ok(messages.iter().map(message_from_snapshot_entry).collect())
+}
+
+fn message_signature(message: &hermes_core::Message) -> String {
+    let role = match message.role {
+        hermes_core::MessageRole::System => "system",
+        hermes_core::MessageRole::User => "user",
+        hermes_core::MessageRole::Assistant => "assistant",
+        hermes_core::MessageRole::Tool => "tool",
+    };
+    format!(
+        "{}|{}",
+        role,
+        message.content.as_deref().unwrap_or_default()
+    )
+}
+
+fn summarize_branch_diff(
+    left_name: &str,
+    left_messages: &[hermes_core::Message],
+    right_name: &str,
+    right_messages: &[hermes_core::Message],
+) -> String {
+    let left_set: HashSet<String> = left_messages.iter().map(message_signature).collect();
+    let right_set: HashSet<String> = right_messages.iter().map(message_signature).collect();
+    let only_left = left_set.difference(&right_set).count();
+    let only_right = right_set.difference(&left_set).count();
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Branch diff: `{}` vs `{}`",
+        left_name.trim(),
+        right_name.trim()
+    );
+    let _ = writeln!(
+        out,
+        "  messages: {} vs {}",
+        left_messages.len(),
+        right_messages.len()
+    );
+    let _ = writeln!(out, "  unique_to_{}: {}", left_name.trim(), only_left);
+    let _ = writeln!(out, "  unique_to_{}: {}", right_name.trim(), only_right);
+    let left_last = left_messages
+        .iter()
+        .rev()
+        .find(|m| m.role == hermes_core::MessageRole::Assistant)
+        .and_then(|m| m.content.as_deref())
+        .unwrap_or("");
+    let right_last = right_messages
+        .iter()
+        .rev()
+        .find(|m| m.role == hermes_core::MessageRole::Assistant)
+        .and_then(|m| m.content.as_deref())
+        .unwrap_or("");
+    let _ = writeln!(
+        out,
+        "  last_assistant_{}: {}",
+        left_name.trim(),
+        truncate_chars(left_last, 120)
+    );
+    let _ = writeln!(
+        out,
+        "  last_assistant_{}: {}",
+        right_name.trim(),
+        truncate_chars(right_last, 120)
+    );
+    out.trim_end().to_string()
+}
+
 fn load_session_from_path(
     app: &mut App,
     session_name: &str,
@@ -6901,14 +7215,7 @@ fn load_session_from_path(
     app.messages.clear();
     app.ui_messages.clear();
     for msg in messages {
-        let role_str = msg.get("role").and_then(|r| r.as_str()).unwrap_or("User");
-        let content_str = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-        let message = match role_str {
-            "Assistant" => hermes_core::Message::assistant(content_str),
-            "System" => hermes_core::Message::system(content_str),
-            _ => hermes_core::Message::user(content_str),
-        };
-        app.messages.push(message);
+        app.messages.push(message_from_snapshot_entry(msg));
     }
 
     let session_info = data.get("session_info");
@@ -6975,10 +7282,23 @@ fn handle_load_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Ag
         } else {
             let mut out = String::from("Saved sessions:\n");
             for (idx, (name, _, _)) in entries.iter().enumerate() {
-                if idx == 0 {
-                    out.push_str(&format!("- `{}` (latest)\n", name));
+                let integrity = inspect_snapshot_integrity(&entries[idx].1);
+                let marker = if integrity.valid { "✓" } else { "⚠" };
+                let detail = if integrity.valid {
+                    format!(
+                        "session_id={} messages={}",
+                        integrity.session_id.unwrap_or_else(|| "?".to_string()),
+                        integrity.message_count
+                    )
                 } else {
-                    out.push_str(&format!("- `{}`\n", name));
+                    integrity
+                        .reason
+                        .unwrap_or_else(|| "invalid snapshot".to_string())
+                };
+                if idx == 0 {
+                    out.push_str(&format!("- {} `{}` (latest) — {}\n", marker, name, detail));
+                } else {
+                    out.push_str(&format!("- {} `{}` — {}\n", marker, name, detail));
                 }
             }
             out.push_str("\nUsage: `/load <session-name>` or `/resume [session-name]`");
@@ -7012,24 +7332,39 @@ fn handle_resume_command(app: &mut App, args: &[&str]) -> Result<CommandResult, 
     }
 
     if args.is_empty() {
-        let (name, path, _) = &entries[0];
-        return load_session_from_path(app, name, path, true);
+        if let Some((name, path, _)) = entries
+            .iter()
+            .find(|(_, path, _)| inspect_snapshot_integrity(path).valid)
+        {
+            return load_session_from_path(app, name, path, true);
+        }
+        emit_command_output(
+            app,
+            "No valid saved sessions found (all snapshots are malformed). Use `/sessions` to inspect and `/save` to create a fresh checkpoint.",
+        );
+        return Ok(CommandResult::Handled);
     }
 
     let requested = args[0];
-    if let Some((name, path, _)) = entries
-        .iter()
-        .find(|(name, _, _)| name.eq_ignore_ascii_case(requested))
-    {
-        return load_session_from_path(app, name, path, true);
-    }
-
-    let prefix_matches: Vec<&(String, PathBuf, SystemTime)> = entries
-        .iter()
-        .filter(|(name, _, _)| name.starts_with(requested))
-        .collect();
-    match prefix_matches.as_slice() {
-        [] => {
+    match resolve_saved_session_entry(&entries, requested) {
+        Ok((name, path, _)) => {
+            let integrity = inspect_snapshot_integrity(path);
+            if !integrity.valid {
+                emit_command_output(
+                    app,
+                    format!(
+                        "Session '{}' is present but invalid: {}.\nUse `/sessions` to inspect snapshot health.",
+                        requested,
+                        integrity
+                            .reason
+                            .unwrap_or_else(|| "malformed session snapshot".to_string())
+                    ),
+                );
+                return Ok(CommandResult::Handled);
+            }
+            load_session_from_path(app, name, path, true)
+        }
+        Err(err) if err.starts_with("not_found:") => {
             emit_command_output(
                 app,
                 format!(
@@ -7039,18 +7374,13 @@ fn handle_resume_command(app: &mut App, args: &[&str]) -> Result<CommandResult, 
             );
             Ok(CommandResult::Handled)
         }
-        [entry] => load_session_from_path(app, &entry.0, &entry.1, true),
-        many => {
-            let names = many
-                .iter()
-                .map(|entry| format!("`{}`", entry.0))
-                .collect::<Vec<_>>()
-                .join(", ");
+        Err(err) => {
             emit_command_output(
                 app,
                 format!(
                     "Session name '{}' is ambiguous. Matches: {}",
-                    requested, names
+                    requested,
+                    err.trim_start_matches("ambiguous: ")
                 ),
             );
             Ok(CommandResult::Handled)
@@ -7061,6 +7391,57 @@ fn handle_resume_command(app: &mut App, args: &[&str]) -> Result<CommandResult, 
 fn handle_sessions_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
     if args.is_empty() {
         return handle_load_command(app, args);
+    }
+    let action = args[0].to_ascii_lowercase();
+    if action == "doctor" || action == "verify" {
+        let sessions_dir = hermes_config::hermes_home().join("sessions");
+        let entries = enumerate_saved_sessions(&sessions_dir);
+        if entries.is_empty() {
+            emit_command_output(app, "No saved sessions found.");
+            return Ok(CommandResult::Handled);
+        }
+        let mut invalid = Vec::new();
+        let mut by_session_id: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, path, _) in entries {
+            let integrity = inspect_snapshot_integrity(&path);
+            if integrity.valid {
+                if let Some(id) = integrity.session_id {
+                    by_session_id.entry(id).or_default().push(name);
+                }
+            } else {
+                invalid.push((
+                    name,
+                    integrity
+                        .reason
+                        .unwrap_or_else(|| "invalid snapshot".to_string()),
+                ));
+            }
+        }
+        let split = by_session_id
+            .iter()
+            .filter(|(_, names)| names.len() > 1)
+            .map(|(session_id, names)| format!("{} => {}", session_id, names.join(", ")))
+            .collect::<Vec<_>>();
+        let mut out = String::new();
+        out.push_str("Session snapshot doctor\n");
+        out.push_str("-----------------------\n");
+        let _ = writeln!(out, "invalid_snapshots={}", invalid.len());
+        let _ = writeln!(out, "split_session_ids={}", split.len());
+        if !invalid.is_empty() {
+            out.push_str("invalid_details:\n");
+            for (name, reason) in invalid.into_iter().take(20) {
+                let _ = writeln!(out, "- {}: {}", name, reason);
+            }
+        }
+        if !split.is_empty() {
+            out.push_str("split_details:\n");
+            for row in split.into_iter().take(20) {
+                let _ = writeln!(out, "- {}", row);
+            }
+        }
+        out.push_str("Recommendation: `/save` now to create a fresh canonical checkpoint.");
+        emit_command_output(app, out.trim_end());
+        return Ok(CommandResult::Handled);
     }
     handle_resume_command(app, args)
 }
@@ -8678,6 +9059,176 @@ async fn handle_provider_command(app: &mut App) -> Result<CommandResult, AgentEr
     Ok(CommandResult::Handled)
 }
 
+async fn handle_auth_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let action = args
+        .first()
+        .copied()
+        .unwrap_or("status")
+        .to_ascii_lowercase();
+    match action.as_str() {
+        "status" => {
+            let provider = app.current_runtime_provider();
+            let credential_present = crate::app::provider_api_key_from_env(&provider).is_some();
+            let state = if credential_present {
+                "present"
+            } else {
+                "missing"
+            };
+            emit_command_output(
+                app,
+                format!(
+                    "Auth status\nprovider: {}\nmodel: {}\ncredential: {}\nnext: `/auth verify` (passive refresh check) or `/auth refresh` (forced token refresh)",
+                    provider, app.current_model, state
+                ),
+            );
+        }
+        "verify" => {
+            let summary = app.verify_runtime_auth(false).await?;
+            emit_command_output(
+                app,
+                format!(
+                    "{}\nnext: if provider rejects again, run `/auth refresh` then retry.",
+                    summary
+                ),
+            );
+        }
+        "refresh" | "force" => {
+            let summary = app.verify_runtime_auth(true).await?;
+            emit_command_output(
+                app,
+                format!(
+                    "{}\nforced refresh complete; retry your request now.",
+                    summary
+                ),
+            );
+        }
+        _ => emit_command_output(
+            app,
+            "Usage: /auth [status|verify|refresh]\n- status: show active provider auth state\n- verify: passive credential hydration + verification\n- refresh: force OAuth/session token refresh",
+        ),
+    }
+    Ok(CommandResult::Handled)
+}
+
+fn handle_telemetry_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let action = args
+        .first()
+        .copied()
+        .unwrap_or("status")
+        .to_ascii_lowercase();
+    let provider = app
+        .current_model
+        .split_once(':')
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_else(|| "openai".to_string());
+    let provider_health = provider_health_snapshot(&provider);
+    let session = app.session_info();
+    let mut out = String::new();
+    let _ = writeln!(out, "Telemetry snapshot");
+    let _ = writeln!(out, "session: {}", session.session_id);
+    let _ = writeln!(out, "model: {}", app.current_model);
+    let _ = writeln!(out, "messages: {}", session.message_count);
+    let _ = writeln!(out, "provider health: {}", provider_health);
+
+    if let Some(repo_root) = detect_repo_root_from_cwd() {
+        let report_dir = repo_root.join(".sync-reports");
+        let eval = latest_json_report(&report_dir, "eval-trend-gate-")
+            .and_then(|p| summarize_gate_report(&p, "eval"))
+            .unwrap_or_else(|| "eval=unknown".to_string());
+        let autopilot = latest_json_report(&report_dir, "performance-autopilot-")
+            .and_then(|p| summarize_performance_autopilot_report(&p, "autopilot"))
+            .unwrap_or_else(|| "autopilot=unknown".to_string());
+        let replay = latest_json_report(&report_dir, "deterministic-replay-")
+            .and_then(|p| summarize_gate_report(&p, "replay"))
+            .unwrap_or_else(|| "replay=unknown".to_string());
+        let _ = writeln!(out, "gates: {}; {}; {}", eval, autopilot, replay);
+    }
+
+    if action == "lane" {
+        let _ = writeln!(
+            out,
+            "lane hints:\n- Ctrl+L toggle activity lane\n- Ctrl+O switch lane mode (live/cockpit)\n- Ctrl+G force transcript refresh + jump latest"
+        );
+    } else if action != "status" {
+        emit_command_output(
+            app,
+            "Usage: /telemetry [status|lane]\n- status: session/provider + gate snapshots\n- lane: status plus TUI activity-lane controls",
+        );
+        return Ok(CommandResult::Handled);
+    }
+
+    emit_command_output(app, out.trim_end());
+    Ok(CommandResult::Handled)
+}
+
+fn handle_runbook_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let action = args.first().copied().unwrap_or("list").to_ascii_lowercase();
+    if action == "list" || action == "status" {
+        emit_command_output(
+            app,
+            "Runbooks\n- auth-refresh: provider auth/session rejected\n- model-not-found: catalog drift / unknown model\n- contextlattice-connect: local memory integration bootstrap\n- tool-policy-deny: blocked by policy or sandbox profile\n- stream-finalization: stream done but transcript not finalized\n\nUse `/runbook show <name>`.",
+        );
+        return Ok(CommandResult::Handled);
+    }
+    if action == "show" {
+        let Some(name) = args.get(1).map(|v| v.to_ascii_lowercase()) else {
+            emit_command_output(app, "Usage: /runbook show <name>");
+            return Ok(CommandResult::Handled);
+        };
+        let body = match name.as_str() {
+            "auth-refresh" => {
+                "Runbook: auth-refresh\n1) `/auth status`\n2) `/auth refresh`\n3) retry prompt\n4) if still failing, run `/model` and confirm provider/model pair is valid for your account."
+            }
+            "model-not-found" => {
+                "Runbook: model-not-found\n1) `/model` and select a valid catalog model\n2) retry request\n3) if provider alias was stale, run `/auth verify` and re-check."
+            }
+            "contextlattice-connect" => {
+                "Runbook: contextlattice-connect\n1) ensure contextlattice tools are registered via `/tools`\n2) ask agent to run `contextlattice_search` first (not shell command `contextlattice`)\n3) checkpoint verified integration via `contextlattice_write`."
+            }
+            "tool-policy-deny" => {
+                "Runbook: tool-policy-deny\n1) inspect denial reason in tool card `[remediation]` section\n2) remove secret-like args from inline command payload\n3) retry with safer params or approved tool route (`/tools`)."
+            }
+            "stream-finalization" => {
+                "Runbook: stream-finalization\n1) wait for final transcript writeback (status shows `Finalizing response…`)\n2) avoid submitting a new prompt until finalization completes\n3) if UI appears stale, use Ctrl+G to refresh and jump latest."
+            }
+            _ => {
+                emit_command_output(
+                    app,
+                    format!(
+                        "Unknown runbook `{}`. Use `/runbook list` for available entries.",
+                        name
+                    ),
+                );
+                return Ok(CommandResult::Handled);
+            }
+        };
+        emit_command_output(app, body);
+        return Ok(CommandResult::Handled);
+    }
+    emit_command_output(app, "Usage: /runbook [list|show <name>]");
+    Ok(CommandResult::Handled)
+}
+
+fn provider_health_snapshot(provider: &str) -> &'static str {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "nous" | "google-gemini-cli" | "gemini-cli" | "gemini-oauth" | "qwen-oauth" => {
+            "oauth-capable"
+        }
+        "openai" | "anthropic" | "openrouter" => "api-key/session",
+        _ => "unknown",
+    }
+}
+
+fn detect_repo_root_from_cwd() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    for candidate in cwd.ancestors() {
+        if candidate.join(".git").exists() {
+            return Some(candidate.to_path_buf());
+        }
+    }
+    None
+}
+
 fn handle_profile_command(app: &mut App) -> Result<CommandResult, AgentError> {
     let home = hermes_config::hermes_home();
     let selected = app.config.profile.current.as_deref().unwrap_or("default");
@@ -9777,6 +10328,112 @@ fn plan_capability_preflight(app: &App, task: &str) -> (Option<String>, bool) {
     (Some(message), allowed)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskDepthProfile {
+    Shallow,
+    Balanced,
+    Deep,
+    Max,
+}
+
+impl TaskDepthProfile {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "shallow" | "fast" => Some(Self::Shallow),
+            "balanced" | "default" => Some(Self::Balanced),
+            "deep" | "thorough" => Some(Self::Deep),
+            "max" | "exhaustive" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Shallow => "shallow",
+            Self::Balanced => "balanced",
+            Self::Deep => "deep",
+            Self::Max => "max",
+        }
+    }
+}
+
+fn set_env_var_u64(key: &str, value: u64) {
+    std::env::set_var(key, value.to_string());
+}
+
+fn set_env_var_f64(key: &str, value: f64) {
+    std::env::set_var(key, format!("{value:.2}"));
+}
+
+fn apply_task_depth_profile(profile: TaskDepthProfile) {
+    std::env::set_var("HERMES_TASK_DEPTH_PROFILE", profile.as_str());
+    match profile {
+        TaskDepthProfile::Shallow => {
+            set_env_var_u64("HERMES_MAX_ITERATIONS", 18);
+            set_env_var_u64("HERMES_TOOL_CALL_MAX_CONCURRENCY", 10);
+            set_env_var_u64("HERMES_MAX_DELEGATE_DEPTH", 1);
+            set_env_var_u64("HERMES_PERF_GOV_WINDOW", 6);
+            set_env_var_f64("HERMES_PERF_GOV_LATENCY_WARN_MS", 2800.0);
+            set_env_var_f64("HERMES_PERF_GOV_LATENCY_CRITICAL_MS", 5200.0);
+            std::env::set_var("HERMES_REPO_REVIEW_BUDGET_PROFILE", "aggressive");
+        }
+        TaskDepthProfile::Balanced => {
+            set_env_var_u64("HERMES_MAX_ITERATIONS", 50);
+            set_env_var_u64("HERMES_TOOL_CALL_MAX_CONCURRENCY", 8);
+            set_env_var_u64("HERMES_MAX_DELEGATE_DEPTH", 2);
+            set_env_var_u64("HERMES_PERF_GOV_WINDOW", 8);
+            set_env_var_f64("HERMES_PERF_GOV_LATENCY_WARN_MS", 3500.0);
+            set_env_var_f64("HERMES_PERF_GOV_LATENCY_CRITICAL_MS", 6500.0);
+            std::env::set_var("HERMES_REPO_REVIEW_BUDGET_PROFILE", "balanced");
+        }
+        TaskDepthProfile::Deep => {
+            set_env_var_u64("HERMES_MAX_ITERATIONS", 120);
+            set_env_var_u64("HERMES_TOOL_CALL_MAX_CONCURRENCY", 6);
+            set_env_var_u64("HERMES_MAX_DELEGATE_DEPTH", 3);
+            set_env_var_u64("HERMES_PERF_GOV_WINDOW", 10);
+            set_env_var_f64("HERMES_PERF_GOV_LATENCY_WARN_MS", 4800.0);
+            set_env_var_f64("HERMES_PERF_GOV_LATENCY_CRITICAL_MS", 9000.0);
+            std::env::set_var("HERMES_REPO_REVIEW_BUDGET_PROFILE", "relaxed");
+        }
+        TaskDepthProfile::Max => {
+            set_env_var_u64("HERMES_MAX_ITERATIONS", 250);
+            set_env_var_u64("HERMES_TOOL_CALL_MAX_CONCURRENCY", 5);
+            set_env_var_u64("HERMES_MAX_DELEGATE_DEPTH", 4);
+            set_env_var_u64("HERMES_PERF_GOV_WINDOW", 12);
+            set_env_var_f64("HERMES_PERF_GOV_LATENCY_WARN_MS", 6500.0);
+            set_env_var_f64("HERMES_PERF_GOV_LATENCY_CRITICAL_MS", 12000.0);
+            std::env::set_var("HERMES_REPO_REVIEW_BUDGET_PROFILE", "off");
+        }
+    }
+}
+
+fn current_task_depth_profile() -> TaskDepthProfile {
+    std::env::var("HERMES_TASK_DEPTH_PROFILE")
+        .ok()
+        .as_deref()
+        .and_then(TaskDepthProfile::parse)
+        .unwrap_or(TaskDepthProfile::Balanced)
+}
+
+fn task_depth_runtime_summary() -> String {
+    let profile = current_task_depth_profile();
+    let max_iters = std::env::var("HERMES_MAX_ITERATIONS").unwrap_or_else(|_| "50".to_string());
+    let tool_concurrency =
+        std::env::var("HERMES_TOOL_CALL_MAX_CONCURRENCY").unwrap_or_else(|_| "8".to_string());
+    let delegate_depth =
+        std::env::var("HERMES_MAX_DELEGATE_DEPTH").unwrap_or_else(|_| "2".to_string());
+    let repo_budget = std::env::var("HERMES_REPO_REVIEW_BUDGET_PROFILE")
+        .unwrap_or_else(|_| "balanced".to_string());
+    format!(
+        "task_depth profile={} max_iterations={} tool_concurrency={} max_delegate_depth={} repo_budget_profile={}",
+        profile.as_str(),
+        max_iters,
+        tool_concurrency,
+        delegate_depth,
+        repo_budget
+    )
+}
+
 fn handle_plan_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
     if args.is_empty()
         || args
@@ -9785,7 +10442,7 @@ fn handle_plan_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Ag
     {
         emit_command_output(
             app,
-            "Planner controls:\n  /plan <task>          Queue a planning/research task in background\n  /plan status          Show queue health + active steering\n  /plan list            Show queue health + active steering\n  /plan clear           Clear queued/running status records\n  /plan caps [mode]     Optional capability router (`off|advisory|enforce`)",
+            "Planner controls:\n  /plan <task>          Queue a planning/research task in background\n  /plan status          Show queue health + active steering\n  /plan list            Show queue health + active steering\n  /plan clear           Clear queued/running status records\n  /plan caps [mode]     Optional capability router (`off|advisory|enforce`)\n  /plan depth [profile] Task-depth governor (`status|list|shallow|balanced|deep|max|clear`)",
         );
         return Ok(CommandResult::Handled);
     }
@@ -9820,6 +10477,58 @@ fn handle_plan_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Ag
         }
         return Ok(CommandResult::Handled);
     }
+    if sub == "depth" {
+        let next = args
+            .get(1)
+            .copied()
+            .unwrap_or("status")
+            .to_ascii_lowercase();
+        match next.as_str() {
+            "status" | "show" => emit_command_output(app, task_depth_runtime_summary()),
+            "list" => emit_command_output(
+                app,
+                "Task depth profiles:\n- shallow: quickest turn cadence; strict exploration trim\n- balanced: default profile for most sessions\n- deep: larger turn budget + lower concurrency for heavier analysis\n- max: exhaustive mode for very complex objective work\nUse `/plan depth <profile>` to apply.",
+            ),
+            "clear" => {
+                std::env::remove_var("HERMES_TASK_DEPTH_PROFILE");
+                for key in [
+                    "HERMES_MAX_ITERATIONS",
+                    "HERMES_TOOL_CALL_MAX_CONCURRENCY",
+                    "HERMES_MAX_DELEGATE_DEPTH",
+                    "HERMES_PERF_GOV_WINDOW",
+                    "HERMES_PERF_GOV_LATENCY_WARN_MS",
+                    "HERMES_PERF_GOV_LATENCY_CRITICAL_MS",
+                    "HERMES_REPO_REVIEW_BUDGET_PROFILE",
+                ] {
+                    std::env::remove_var(key);
+                }
+                apply_task_depth_profile(TaskDepthProfile::Balanced);
+                emit_command_output(
+                    app,
+                    format!("Task depth reset to defaults.\n{}", task_depth_runtime_summary()),
+                );
+            }
+            _ => {
+                let Some(profile) = TaskDepthProfile::parse(&next) else {
+                    emit_command_output(
+                        app,
+                        "Usage: /plan depth [status|list|shallow|balanced|deep|max|clear]",
+                    );
+                    return Ok(CommandResult::Handled);
+                };
+                apply_task_depth_profile(profile);
+                emit_command_output(
+                    app,
+                    format!(
+                        "Task depth profile set to `{}`.\n{}",
+                        profile.as_str(),
+                        task_depth_runtime_summary()
+                    ),
+                );
+            }
+        }
+        return Ok(CommandResult::Handled);
+    }
     if sub == "status" || sub == "list" {
         let (queued, running, completed, failed) = background_job_counts();
         let mut out = String::new();
@@ -9844,6 +10553,7 @@ fn handle_plan_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Ag
             "  capability_router={}",
             plan_capability_mode().as_str()
         );
+        let _ = writeln!(out, "  {}", task_depth_runtime_summary());
         emit_command_output(app, out.trim_end());
         return Ok(CommandResult::Handled);
     }
@@ -10244,7 +10954,7 @@ fn handle_image_command(app: &mut App, args: &[&str]) -> Result<CommandResult, A
 }
 
 fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
-    let objective_usage = "Usage: `/objective <text>` or `/objective status|plan|constraints|counterfactual <scenario> | <expected_delta>|profile [status|list|general|me|set <id>]|context [status|list|max|balanced|fast]|simulator [status|balanced|strict|aggressive]|ensemble [status|committee|single|debate]|ledger [status|tail [n]|clear]|dag [status|rebuild|clear]|eval [status|tail [n]]|clear`.";
+    let objective_usage = "Usage: `/objective <text>` or `/objective status|verify|plan|constraints|counterfactual <scenario> | <expected_delta>|profile [status|list|general|me|set <id>]|context [status|list|max|balanced|fast]|simulator [status|balanced|strict|aggressive]|ensemble [status|committee|single|debate]|ledger [status|tail [n]|clear]|dag [status|rebuild|clear]|eval [status|tail [n]]|clear`.";
 
     if let Some(first) = args.first() {
         let cmd = first.trim().to_ascii_lowercase();
@@ -10713,6 +11423,107 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
                     trend.updated_at
                 ),
             );
+            return Ok(CommandResult::Handled);
+        }
+
+        if cmd == "verify" {
+            let Some(contract) = load_objective_contract()? else {
+                emit_command_output(
+                    app,
+                    "No objective contract. Set one with `/objective <text>` before verify.",
+                );
+                return Ok(CommandResult::Handled);
+            };
+            let trend = load_objective_eval_trend()?;
+            let ledger = load_objective_learning_ledger()?;
+            let latest = trend.samples.last().map(|s| s.score).unwrap_or(0.0);
+            let prev = if trend.samples.len() >= 2 {
+                trend
+                    .samples
+                    .get(trend.samples.len().saturating_sub(2))
+                    .map(|s| s.score)
+                    .unwrap_or(latest)
+            } else {
+                latest
+            };
+            let delta = latest - prev;
+            let avg = if trend.samples.is_empty() {
+                0.0
+            } else {
+                trend.samples.iter().map(|s| s.score).sum::<f64>() / trend.samples.len() as f64
+            };
+            let ledger_tail = ledger.entries.last();
+            let last_ledger_state = ledger_tail
+                .map(|entry| entry.objective_state.as_str())
+                .unwrap_or("unknown");
+            let has_contract = !contract.id.trim().is_empty();
+            let outcome = if !has_contract {
+                "unproven"
+            } else if latest >= 0.75 && delta >= -0.01 {
+                "advancing"
+            } else if latest <= 0.35 || delta < -0.05 {
+                "regressing"
+            } else if trend.samples.len() < 2 {
+                "unproven"
+            } else {
+                "flat"
+            };
+            let mut evidence_files: Vec<String> = Vec::new();
+            let mut verified_existing = 0usize;
+            if let Some(last_assistant) = app
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == hermes_core::MessageRole::Assistant)
+                .and_then(|m| m.content.as_deref())
+            {
+                if let Ok(path_re) = Regex::new(r"path=([^\s]+)") {
+                    for cap in path_re.captures_iter(last_assistant) {
+                        if let Some(path) = cap.get(1).map(|m| m.as_str().trim()) {
+                            if path.is_empty() {
+                                continue;
+                            }
+                            if !evidence_files.iter().any(|v| v == path) {
+                                let exists = Path::new(path).exists();
+                                if exists {
+                                    verified_existing += 1;
+                                }
+                                evidence_files.push(path.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            let mut out = String::new();
+            out.push_str("Objective outcome verifier\n");
+            out.push_str("-------------------------\n");
+            let _ = writeln!(out, "objective_id={}", contract.id);
+            let _ = writeln!(out, "objective_state={}", outcome);
+            let _ = writeln!(out, "latest_score={:.3}", latest);
+            let _ = writeln!(out, "delta_vs_prev={:+.3}", delta);
+            let _ = writeln!(out, "avg_score={:.3}", avg);
+            let _ = writeln!(out, "trend_samples={}", trend.samples.len());
+            let _ = writeln!(out, "ledger_entries={}", ledger.entries.len());
+            let _ = writeln!(out, "ledger_last_state={}", last_ledger_state);
+            let _ = writeln!(out, "verified_files_present={}", verified_existing);
+            let _ = writeln!(out, "verified_files_total={}", evidence_files.len());
+            if evidence_files.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "note=no PATCH_VERIFIED path markers found in last assistant turn; file verification is unproven."
+                );
+            } else {
+                out.push_str("verified_paths:\n");
+                for path in evidence_files.iter().take(12) {
+                    let _ = writeln!(
+                        out,
+                        "- {} exists_now={}",
+                        path,
+                        yes_no(Path::new(path).exists())
+                    );
+                }
+            }
+            emit_command_output(app, out.trim_end());
             return Ok(CommandResult::Handled);
         }
 
@@ -11884,7 +12695,7 @@ fn handle_timetravel_command(app: &mut App, args: &[&str]) -> Result<CommandResu
         "undo" => handle_rollback_command(app, args),
         "branch" | "fork" => {
             let label = args.get(1).copied().unwrap_or("timetravel");
-            handle_session_compat_command(app, "/branch", &[label])
+            handle_branch_command(app, &[label])
         }
         other => {
             if other.parse::<usize>().is_ok() {
@@ -12276,6 +13087,261 @@ fn handle_sethome_command(app: &mut App, args: &[&str]) -> Result<CommandResult,
     Ok(CommandResult::Handled)
 }
 
+fn branch_checkpoint_name(session_id: &str, label: Option<&str>) -> String {
+    let requested = label.unwrap_or("branch").trim();
+    let sanitized = requested
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    format!(
+        "branch-{}-{}",
+        &session_id[..8.min(session_id.len())],
+        if sanitized.is_empty() {
+            "checkpoint"
+        } else {
+            sanitized.as_str()
+        }
+    )
+}
+
+fn handle_branch_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    let sessions_dir = hermes_config::hermes_home().join("sessions");
+    let entries = enumerate_saved_sessions(&sessions_dir);
+    let action = args
+        .first()
+        .map(|v| v.to_ascii_lowercase())
+        .unwrap_or_else(|| "save".to_string());
+
+    match action.as_str() {
+        "help" => {
+            emit_command_output(
+                app,
+                "Usage: /branch [label]\n\
+                       /branch list\n\
+                       /branch diff <left> [right]\n\
+                       /branch merge <source> [target]\n\
+                 Notes:\n\
+                 - save: creates a branch checkpoint snapshot\n\
+                 - diff: compares message footprints between snapshots\n\
+                 - merge: appends unique messages from source into target/current session",
+            );
+            return Ok(CommandResult::Handled);
+        }
+        "list" | "ls" | "show" => {
+            if entries.is_empty() {
+                emit_command_output(app, "No snapshots found. Use `/branch <label>` first.");
+                return Ok(CommandResult::Handled);
+            }
+            let mut out = String::from("Branch checkpoints:\n");
+            let mut shown = 0usize;
+            for (name, path, _) in entries.iter() {
+                if !name.starts_with("branch-") {
+                    continue;
+                }
+                let integrity = inspect_snapshot_integrity(path);
+                let marker = if integrity.valid { "✓" } else { "⚠" };
+                let detail = if integrity.valid {
+                    format!("messages={}", integrity.message_count)
+                } else {
+                    integrity
+                        .reason
+                        .unwrap_or_else(|| "invalid snapshot".to_string())
+                };
+                let _ = writeln!(out, "  - {} `{}` ({})", marker, name, detail);
+                shown += 1;
+                if shown >= 25 {
+                    break;
+                }
+            }
+            if shown == 0 {
+                out.push_str("  (no branch-* checkpoints found)\n");
+            }
+            out.push_str(
+                "\nUse `/branch diff <left> [right]` or `/branch merge <source> [target]`.",
+            );
+            emit_command_output(app, out.trim_end());
+            return Ok(CommandResult::Handled);
+        }
+        "diff" => {
+            let Some(left_name) = args.get(1).copied() else {
+                emit_command_output(app, "Usage: /branch diff <left> [right]");
+                return Ok(CommandResult::Handled);
+            };
+            let right_name = args.get(2).copied().unwrap_or("latest");
+            let left_entry = match resolve_saved_session_entry(&entries, left_name) {
+                Ok(entry) => entry,
+                Err(err) if err.starts_with("not_found:") => {
+                    emit_command_output(app, format!("Snapshot '{}' not found.", left_name));
+                    return Ok(CommandResult::Handled);
+                }
+                Err(err) => {
+                    emit_command_output(
+                        app,
+                        format!(
+                            "Snapshot '{}' is ambiguous. Matches: {}",
+                            left_name,
+                            err.trim_start_matches("ambiguous: ")
+                        ),
+                    );
+                    return Ok(CommandResult::Handled);
+                }
+            };
+            let right_entry = if right_name.eq_ignore_ascii_case("latest") {
+                match entries.first() {
+                    Some(entry) => entry,
+                    None => {
+                        emit_command_output(app, "No snapshots found.");
+                        return Ok(CommandResult::Handled);
+                    }
+                }
+            } else {
+                match resolve_saved_session_entry(&entries, right_name) {
+                    Ok(entry) => entry,
+                    Err(err) if err.starts_with("not_found:") => {
+                        emit_command_output(app, format!("Snapshot '{}' not found.", right_name));
+                        return Ok(CommandResult::Handled);
+                    }
+                    Err(err) => {
+                        emit_command_output(
+                            app,
+                            format!(
+                                "Snapshot '{}' is ambiguous. Matches: {}",
+                                right_name,
+                                err.trim_start_matches("ambiguous: ")
+                            ),
+                        );
+                        return Ok(CommandResult::Handled);
+                    }
+                }
+            };
+            let left_messages = load_messages_from_snapshot(&left_entry.1)?;
+            let right_messages = load_messages_from_snapshot(&right_entry.1)?;
+            emit_command_output(
+                app,
+                summarize_branch_diff(
+                    &left_entry.0,
+                    &left_messages,
+                    &right_entry.0,
+                    &right_messages,
+                ),
+            );
+            return Ok(CommandResult::Handled);
+        }
+        "merge" => {
+            let Some(source_name) = args.get(1).copied() else {
+                emit_command_output(app, "Usage: /branch merge <source> [target]");
+                return Ok(CommandResult::Handled);
+            };
+            let source_entry = match resolve_saved_session_entry(&entries, source_name) {
+                Ok(entry) => entry,
+                Err(err) if err.starts_with("not_found:") => {
+                    emit_command_output(app, format!("Snapshot '{}' not found.", source_name));
+                    return Ok(CommandResult::Handled);
+                }
+                Err(err) => {
+                    emit_command_output(
+                        app,
+                        format!(
+                            "Snapshot '{}' is ambiguous. Matches: {}",
+                            source_name,
+                            err.trim_start_matches("ambiguous: ")
+                        ),
+                    );
+                    return Ok(CommandResult::Handled);
+                }
+            };
+
+            let mut target_label = "current".to_string();
+            let mut merged_messages = app.messages.clone();
+            if let Some(target_name) = args.get(2).copied() {
+                let target_entry = match resolve_saved_session_entry(&entries, target_name) {
+                    Ok(entry) => entry,
+                    Err(err) if err.starts_with("not_found:") => {
+                        emit_command_output(app, format!("Snapshot '{}' not found.", target_name));
+                        return Ok(CommandResult::Handled);
+                    }
+                    Err(err) => {
+                        emit_command_output(
+                            app,
+                            format!(
+                                "Snapshot '{}' is ambiguous. Matches: {}",
+                                target_name,
+                                err.trim_start_matches("ambiguous: ")
+                            ),
+                        );
+                        return Ok(CommandResult::Handled);
+                    }
+                };
+                target_label = target_entry.0.clone();
+                merged_messages = load_messages_from_snapshot(&target_entry.1)?;
+            }
+
+            let source_messages = load_messages_from_snapshot(&source_entry.1)?;
+            let mut seen: HashSet<String> = merged_messages.iter().map(message_signature).collect();
+            let mut appended = 0usize;
+            for msg in source_messages {
+                let sig = message_signature(&msg);
+                if seen.insert(sig) {
+                    merged_messages.push(msg);
+                    appended += 1;
+                }
+            }
+            let merged_total = merged_messages.len();
+            app.messages = merged_messages;
+            app.ui_messages
+                .retain(|msg| msg.insert_at <= app.messages.len());
+            let stem = branch_checkpoint_name(
+                &app.session_id,
+                Some(&format!("merge-{}-into-{}", source_entry.0, target_label)),
+            );
+            let path = app.persist_session_snapshot(Some(&stem))?;
+            emit_command_output(
+                app,
+                format!(
+                    "Branch merge complete.\n  source: {}\n  target: {}\n  appended_unique_messages: {}\n  merged_total_messages: {}\n  snapshot: {}",
+                    source_entry.0,
+                    target_label,
+                    appended,
+                    merged_total,
+                    path.display()
+                ),
+            );
+            return Ok(CommandResult::Handled);
+        }
+        _ => {}
+    }
+
+    let label = if args.is_empty() {
+        None
+    } else {
+        Some(args.join(" "))
+    };
+    let stem = branch_checkpoint_name(&app.session_id, label.as_deref());
+    match app.persist_session_snapshot(Some(&stem)) {
+        Ok(path) => emit_command_output(
+            app,
+            format!(
+                "Branch checkpoint saved: {}\nContinue in current session or run `/resume {}`.",
+                path.display(),
+                stem
+            ),
+        ),
+        Err(err) => emit_command_output(
+            app,
+            format!("Branch marker requested, but snapshot failed: {}", err),
+        ),
+    }
+    Ok(CommandResult::Handled)
+}
+
 fn handle_session_compat_command(
     app: &mut App,
     cmd: &str,
@@ -12290,42 +13356,7 @@ fn handle_session_compat_command(
                 format!("Session title marker set to: {}", arg_joined.trim())
             }
         }
-        "/branch" => {
-            let label = if arg_joined.trim().is_empty() {
-                "branch".to_string()
-            } else {
-                arg_joined.trim().to_string()
-            };
-            let sanitized = label
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                        c
-                    } else {
-                        '-'
-                    }
-                })
-                .collect::<String>()
-                .trim_matches('-')
-                .to_string();
-            let stem = format!(
-                "branch-{}-{}",
-                &app.session_id[..8.min(app.session_id.len())],
-                if sanitized.is_empty() {
-                    "checkpoint"
-                } else {
-                    sanitized.as_str()
-                }
-            );
-            match app.persist_session_snapshot(Some(&stem)) {
-                Ok(path) => format!(
-                    "Branch checkpoint saved: {}\nContinue in current session or run `/resume {}`.",
-                    path.display(),
-                    stem
-                ),
-                Err(err) => format!("Branch marker requested, but snapshot failed: {}", err),
-            }
-        }
+        "/branch" => "Use `/branch` (native) for list/diff/merge/save controls.".to_string(),
         _ => "Compatibility command acknowledged.".to_string(),
     };
     emit_command_output(app, msg);
@@ -18500,6 +19531,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slash_auth_status_command_is_handled() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TempHomeGuard::new(tmp.path());
+        let mut app = build_test_app_with_stream(tmp.path()).await;
+
+        let result = handle_slash_command(&mut app, "/auth", &["status"])
+            .await
+            .expect("auth status");
+        assert_eq!(result, CommandResult::Handled);
+        let output = latest_ui_assistant_text(&app);
+        assert!(output.contains("Auth status"));
+    }
+
+    #[tokio::test]
+    async fn slash_runbook_and_telemetry_commands_are_handled() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TempHomeGuard::new(tmp.path());
+        let mut app = build_test_app_with_stream(tmp.path()).await;
+
+        let runbook = handle_slash_command(&mut app, "/runbook", &["list"])
+            .await
+            .expect("runbook list");
+        assert_eq!(runbook, CommandResult::Handled);
+        assert!(latest_ui_assistant_text(&app).contains("Runbooks"));
+
+        let telemetry = handle_slash_command(&mut app, "/telemetry", &["status"])
+            .await
+            .expect("telemetry status");
+        assert_eq!(telemetry, CommandResult::Handled);
+        assert!(latest_ui_assistant_text(&app).contains("Telemetry snapshot"));
+    }
+
+    #[tokio::test]
     async fn promoted_sethome_command_sets_status_and_clears_marker() {
         let _guard = env_test_lock();
         let tmp = tempdir().expect("tempdir");
@@ -18820,6 +19886,14 @@ mod tests {
     }
 
     #[test]
+    fn test_whoami_alias_maps_to_profile() {
+        assert_eq!(canonical_command("/whoami"), "/profile");
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/whoami"));
+        let results = autocomplete("/who");
+        assert!(results.contains(&"/whoami"));
+    }
+
+    #[test]
     fn test_resume_command_is_registered_and_completable() {
         assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/resume"));
         let results = autocomplete("/res");
@@ -18879,6 +19953,7 @@ mod tests {
         assert_eq!(canonical_command("/reload-skills"), "/reload");
         assert_eq!(canonical_command("/reload_skills"), "/reload");
         assert_eq!(canonical_command("/summary"), "/recap");
+        assert_eq!(canonical_command("/whoami"), "/profile");
         assert_eq!(canonical_command("/footer"), "/statusbar");
         assert_eq!(canonical_command("/indicator"), "/statusbar");
         assert_eq!(canonical_command("/tasks"), "/kanban");
@@ -18887,6 +19962,7 @@ mod tests {
         assert_eq!(canonical_command("/bg"), "/background");
         assert_eq!(canonical_command("/curator"), "/skills");
         assert_eq!(canonical_command("/tt"), "/timetravel");
+        assert_eq!(canonical_command("/rb"), "/runbook");
     }
 
     #[test]
@@ -18909,13 +19985,52 @@ mod tests {
     }
 
     #[test]
+    fn task_depth_profile_application_sets_expected_env() {
+        let _guard = env_test_lock();
+        apply_task_depth_profile(TaskDepthProfile::Max);
+        assert_eq!(
+            std::env::var("HERMES_TASK_DEPTH_PROFILE").ok().as_deref(),
+            Some("max")
+        );
+        assert_eq!(
+            std::env::var("HERMES_MAX_ITERATIONS").ok().as_deref(),
+            Some("250")
+        );
+        assert_eq!(
+            std::env::var("HERMES_REPO_REVIEW_BUDGET_PROFILE")
+                .ok()
+                .as_deref(),
+            Some("off")
+        );
+
+        apply_task_depth_profile(TaskDepthProfile::Balanced);
+        assert_eq!(
+            std::env::var("HERMES_TASK_DEPTH_PROFILE").ok().as_deref(),
+            Some("balanced")
+        );
+        assert_eq!(
+            std::env::var("HERMES_MAX_ITERATIONS").ok().as_deref(),
+            Some("50")
+        );
+    }
+
+    #[test]
     fn test_recap_and_context_commands_are_registered() {
         assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/recap"));
         assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/context"));
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/auth"));
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/telemetry"));
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/runbook"));
         let recap = autocomplete("/rec");
         assert!(recap.contains(&"/recap"));
         let context = autocomplete("/cont");
         assert!(context.contains(&"/context"));
+        let auth = autocomplete("/au");
+        assert!(auth.contains(&"/auth"));
+        let telemetry = autocomplete("/tele");
+        assert!(telemetry.contains(&"/telemetry"));
+        let runbook = autocomplete("/runb");
+        assert!(runbook.contains(&"/runbook"));
     }
 
     #[tokio::test]

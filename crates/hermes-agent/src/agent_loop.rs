@@ -580,6 +580,26 @@ fn default_max_turns() -> u32 {
     250
 }
 
+fn unlimited_turns_enabled() -> bool {
+    std::env::var("HERMES_MAX_TURNS_UNLIMITED")
+        .ok()
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn effective_max_turns(config_max_turns: u32) -> Option<u32> {
+    if unlimited_turns_enabled() || config_max_turns == 0 {
+        None
+    } else {
+        Some(config_max_turns)
+    }
+}
+
 fn default_model() -> String {
     "gpt-4o".to_string()
 }
@@ -4465,6 +4485,7 @@ impl AgentLoop {
             self.preflight_context_compress_with_status(&mut ctx);
         }
         let replay = ReplayRecorder::for_session(&self.config, session_id);
+        let max_turns_limit = effective_max_turns(self.config.max_turns);
         replay.record(
             "session_start",
             serde_json::json!({
@@ -4472,6 +4493,8 @@ impl AgentLoop {
                 "mode": "run",
                 "model": self.config.model,
                 "max_turns": self.config.max_turns,
+                "max_turns_effective": max_turns_limit,
+                "max_turns_unlimited": max_turns_limit.is_none(),
             }),
         );
 
@@ -4511,34 +4534,36 @@ impl AgentLoop {
                 ));
             }
 
-            if total_turns >= self.config.max_turns {
-                tracing::warn!(
-                    "Max turns ({}) exceeded, requesting final summary",
-                    self.config.max_turns
-                );
-                let summary_msg = self.handle_max_iterations(&mut ctx).await?;
-                if let Some(msg) = summary_msg {
-                    ctx.add_message(msg);
+            if let Some(max_turns) = max_turns_limit {
+                if total_turns >= max_turns {
+                    tracing::warn!(
+                        "Max turns ({}) exceeded, requesting final summary",
+                        max_turns
+                    );
+                    let summary_msg = self.handle_max_iterations(&mut ctx).await?;
+                    if let Some(msg) = summary_msg {
+                        ctx.add_message(msg);
+                    }
+                    self.memory_on_session_end(ctx.get_messages());
+                    replay.record(
+                        "session_end",
+                        serde_json::json!({
+                            "reason": "max_turns",
+                            "total_turns": total_turns,
+                            "session_cost_usd": session_cost_usd,
+                        }),
+                    );
+                    return Ok(AgentResult {
+                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
+                        finished_naturally: false,
+                        total_turns,
+                        tool_errors,
+                        usage: accumulated_usage,
+                        interrupted: false,
+                        session_cost_usd: Some(session_cost_usd),
+                        session_started_hooks_fired,
+                    });
                 }
-                self.memory_on_session_end(ctx.get_messages());
-                replay.record(
-                    "session_end",
-                    serde_json::json!({
-                        "reason": "max_turns",
-                        "total_turns": total_turns,
-                        "session_cost_usd": session_cost_usd,
-                    }),
-                );
-                return Ok(AgentResult {
-                    messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                    finished_naturally: false,
-                    total_turns,
-                    tool_errors,
-                    usage: accumulated_usage,
-                    interrupted: false,
-                    session_cost_usd: Some(session_cost_usd),
-                    session_started_hooks_fired,
-                });
             }
 
             total_turns += 1;
@@ -5533,6 +5558,7 @@ impl AgentLoop {
             self.preflight_context_compress_with_status(&mut ctx);
         }
         let replay = ReplayRecorder::for_session(&self.config, session_id);
+        let max_turns_limit = effective_max_turns(self.config.max_turns);
         replay.record(
             "session_start",
             serde_json::json!({
@@ -5540,6 +5566,8 @@ impl AgentLoop {
                 "mode": "stream",
                 "model": self.config.model,
                 "max_turns": self.config.max_turns,
+                "max_turns_effective": max_turns_limit,
+                "max_turns_unlimited": max_turns_limit.is_none(),
             }),
         );
 
@@ -5578,34 +5606,36 @@ impl AgentLoop {
                 ));
             }
 
-            if total_turns >= self.config.max_turns {
-                tracing::warn!(
-                    "Max turns ({}) exceeded, requesting final summary",
-                    self.config.max_turns
-                );
-                let summary_msg = self.handle_max_iterations(&mut ctx).await?;
-                if let Some(msg) = summary_msg {
-                    ctx.add_message(msg);
+            if let Some(max_turns) = max_turns_limit {
+                if total_turns >= max_turns {
+                    tracing::warn!(
+                        "Max turns ({}) exceeded, requesting final summary",
+                        max_turns
+                    );
+                    let summary_msg = self.handle_max_iterations(&mut ctx).await?;
+                    if let Some(msg) = summary_msg {
+                        ctx.add_message(msg);
+                    }
+                    self.memory_on_session_end(ctx.get_messages());
+                    replay.record(
+                        "session_end",
+                        serde_json::json!({
+                            "reason": "max_turns",
+                            "total_turns": total_turns,
+                            "session_cost_usd": session_cost_usd,
+                        }),
+                    );
+                    return Ok(AgentResult {
+                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
+                        finished_naturally: false,
+                        total_turns,
+                        tool_errors,
+                        usage: accumulated_usage,
+                        interrupted: false,
+                        session_cost_usd: Some(session_cost_usd),
+                        session_started_hooks_fired,
+                    });
                 }
-                self.memory_on_session_end(ctx.get_messages());
-                replay.record(
-                    "session_end",
-                    serde_json::json!({
-                        "reason": "max_turns",
-                        "total_turns": total_turns,
-                        "session_cost_usd": session_cost_usd,
-                    }),
-                );
-                return Ok(AgentResult {
-                    messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                    finished_naturally: false,
-                    total_turns,
-                    tool_errors,
-                    usage: accumulated_usage,
-                    interrupted: false,
-                    session_cost_usd: Some(session_cost_usd),
-                    session_started_hooks_fired,
-                });
             }
 
             total_turns += 1;
@@ -7503,7 +7533,11 @@ impl AgentLoop {
         cfg.skill_creation_nudge_interval = 0;
         cfg.max_concurrent_delegates = 0;
         cfg.quiet_mode = true;
-        cfg.max_turns = cfg.max_turns.min(16);
+        cfg.max_turns = if cfg.max_turns == 0 {
+            16
+        } else {
+            cfg.max_turns.min(16)
+        };
         let tools = self.tool_registry.clone();
         let provider = self.llm_provider.clone();
         let review_cb = self.callbacks.background_review_callback.clone();

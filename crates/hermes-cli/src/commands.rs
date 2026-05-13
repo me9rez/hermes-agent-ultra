@@ -13076,7 +13076,7 @@ async fn handle_quorum_command(app: &mut App, args: &[&str]) -> Result<CommandRe
             install_quorum_system_hint(app, policy.voters, &policy.models);
             emit_command_output(
                 app,
-                "Quorum deep-reasoning hint injected for subsequent turns.\nNow ask your decision/problem prompt and Hermes will respond with competing hypotheses + synthesis.",
+                "Quorum deep-reasoning armed for subsequent turns.\nNext user prompt will run multi-voter fan-out across configured models and return synthesis (plus persisted quorum artifact).",
             );
         }
         _ => emit_command_output(

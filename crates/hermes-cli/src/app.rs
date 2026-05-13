@@ -31,7 +31,9 @@ use hermes_cron::cron_scheduler_for_data_dir;
 use hermes_skills::{FileSkillStore, SkillManager};
 use hermes_tools::ToolRegistry;
 
-use crate::alpha_runtime::{load_objective_contract, objective_lifecycle_is_active};
+use crate::alpha_runtime::{
+    load_objective_contract, load_quorum_policy, objective_lifecycle_is_active, QuorumPolicy,
+};
 use crate::auth::{
     resolve_gemini_oauth_runtime_credentials, resolve_nous_runtime_credentials,
     resolve_qwen_runtime_credentials, DEFAULT_NOUS_AGENT_KEY_MIN_TTL_SECONDS,
@@ -47,12 +49,25 @@ use crate::tui::StreamHandle;
 const SESSION_SNAPSHOT_MAX_FILES_DEFAULT: usize = 1500;
 const SESSION_SNAPSHOT_MAX_TOTAL_BYTES_DEFAULT: u64 = 1536 * 1024 * 1024;
 const SESSION_SNAPSHOT_MIN_FREE_BYTES_DEFAULT: u64 = 128 * 1024 * 1024;
+const QUORUM_HINT_PREFIX: &str = "[QUORUM_MODE] ";
+const QUORUM_MAX_VOTER_OUTPUT_CHARS: usize = 20_000;
 
 #[derive(Debug, Clone)]
 struct SessionSnapshotEntry {
     path: PathBuf,
     modified: SystemTime,
     size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct QuorumVoterOutcome {
+    model: String,
+    status: String,
+    duration_ms: u64,
+    total_turns: u32,
+    tool_errors: usize,
+    output: String,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -768,6 +783,170 @@ impl App {
         (messages, true)
     }
 
+    fn quorum_mode_armed_for_turn(&self) -> Option<QuorumPolicy> {
+        let policy = load_quorum_policy().ok()?;
+        if !policy.enabled {
+            return None;
+        }
+        let has_hint = self.messages.iter().any(|message| {
+            message.role == hermes_core::MessageRole::System
+                && message
+                    .content
+                    .as_deref()
+                    .unwrap_or_default()
+                    .starts_with(QUORUM_HINT_PREFIX)
+        });
+        if !has_hint {
+            return None;
+        }
+        let has_user_turn = self
+            .messages
+            .iter()
+            .any(|m| m.role == hermes_core::MessageRole::User);
+        if !has_user_turn {
+            return None;
+        }
+        Some(policy)
+    }
+
+    fn collect_quorum_models(policy: &QuorumPolicy, current_model: &str) -> Vec<String> {
+        let mut models: Vec<String> = Vec::new();
+        let push_unique = |target: &mut Vec<String>, raw: &str| {
+            let candidate = raw.trim();
+            if candidate.is_empty() {
+                return;
+            }
+            if target.iter().any(|existing| existing == candidate) {
+                return;
+            }
+            target.push(candidate.to_string());
+        };
+        for model in &policy.models {
+            push_unique(&mut models, model);
+        }
+        if models.is_empty() {
+            push_unique(&mut models, current_model);
+        }
+        let max_voters = policy.voters.clamp(2, 5);
+        if models.len() < max_voters {
+            push_unique(&mut models, current_model);
+        }
+        if models.len() > max_voters {
+            models.truncate(max_voters);
+        }
+        models
+    }
+
+    fn extract_last_assistant_output(messages: &[hermes_core::Message]) -> String {
+        for message in messages.iter().rev() {
+            if message.role != hermes_core::MessageRole::Assistant {
+                continue;
+            }
+            if let Some(content) = message.content.as_deref() {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+            if let Some(reasoning) = message.reasoning_content.as_deref() {
+                let trimmed = reasoning.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+        String::new()
+    }
+
+    fn truncate_for_quorum(text: &str, max_chars: usize) -> String {
+        if text.chars().count() <= max_chars {
+            return text.to_string();
+        }
+        let keep = max_chars.saturating_sub(1);
+        let mut out = String::with_capacity(max_chars + 24);
+        for ch in text.chars().take(keep) {
+            out.push(ch);
+        }
+        out.push('…');
+        out
+    }
+
+    fn build_quorum_synthesis_prompt(
+        policy: &QuorumPolicy,
+        voter_outcomes: &[QuorumVoterOutcome],
+    ) -> String {
+        let required_success = Self::required_quorum_success(voter_outcomes.len());
+        let mut prompt = String::new();
+        prompt.push_str(
+            "[QUORUM_SYNTHESIS] You must synthesize across independent model voters.\n\
+             Rules:\n\
+             1) Use only the voter outputs below as evidence.\n\
+             2) Call out disagreements explicitly.\n\
+             3) If a voter failed, mark it failed and continue.\n\
+             4) Return: (a) strongest case, (b) strongest counter-case, (c) final synthesis with confidence.\n\
+             5) Do not claim quorum executed unless voter outputs are present.\n",
+        );
+        prompt.push_str(&format!(
+            "Configured voters: {} | mode={} | enabled={} | required_success={}\n\n",
+            policy.voters, policy.mode, policy.enabled, required_success
+        ));
+        for (idx, voter) in voter_outcomes.iter().enumerate() {
+            prompt.push_str(&format!(
+                "=== VOTER {} ===\nmodel: {}\nstatus: {}\nduration_ms: {}\nturns: {}\ntool_errors: {}\n",
+                idx + 1,
+                voter.model,
+                voter.status,
+                voter.duration_ms,
+                voter.total_turns,
+                voter.tool_errors
+            ));
+            if let Some(err) = &voter.error {
+                prompt.push_str("error:\n");
+                prompt.push_str(err);
+                prompt.push('\n');
+            }
+            prompt.push_str("output:\n");
+            prompt.push_str(&voter.output);
+            prompt.push_str("\n\n");
+        }
+        prompt
+    }
+
+    fn persist_quorum_artifact(
+        &self,
+        policy: &QuorumPolicy,
+        voter_outcomes: &[QuorumVoterOutcome],
+    ) -> Result<PathBuf, AgentError> {
+        let dir = self.state_root.join("quorum");
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            AgentError::Io(format!(
+                "Failed to create quorum artifact dir {}: {}",
+                dir.display(),
+                e
+            ))
+        })?;
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
+        let file_name = format!("{}-{}.json", self.session_id, timestamp);
+        let path = dir.join(file_name);
+        let payload = serde_json::json!({
+            "session_id": self.session_id,
+            "saved_at": chrono::Utc::now().to_rfc3339(),
+            "policy": policy,
+            "model_at_start": self.current_model,
+            "voters": voter_outcomes,
+        });
+        let raw = serde_json::to_string_pretty(&payload)
+            .map_err(|e| AgentError::Config(format!("Failed to serialize quorum artifact: {e}")))?;
+        std::fs::write(&path, raw).map_err(|e| {
+            AgentError::Io(format!(
+                "Failed to write quorum artifact {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        Ok(path)
+    }
+
     /// Create a new `App` from the parsed CLI arguments.
     ///
     /// This loads (or creates) the gateway configuration, builds a tool
@@ -1224,6 +1403,231 @@ impl App {
         ))
     }
 
+    async fn run_messages_with_current_agent(
+        &self,
+        messages: Vec<hermes_core::Message>,
+        stream_enabled: bool,
+    ) -> Result<hermes_core::AgentResult, AgentError> {
+        if stream_enabled && self.config.streaming.enabled {
+            let stream_handle = self.stream_handle.clone();
+            let stream_cb: Option<Box<dyn Fn(hermes_core::StreamChunk) + Send + Sync>> =
+                stream_handle.map(|h| {
+                    Box::new(move |chunk: hermes_core::StreamChunk| {
+                        h.send_chunk(chunk);
+                    }) as Box<dyn Fn(hermes_core::StreamChunk) + Send + Sync>
+                });
+            self.agent
+                .run_stream(messages, Some(self.tool_schemas.clone()), stream_cb)
+                .await
+        } else {
+            self.agent
+                .run(messages, Some(self.tool_schemas.clone()))
+                .await
+        }
+    }
+
+    async fn run_quorum_fanout_turn(
+        &mut self,
+        run_started_at: Instant,
+        policy: QuorumPolicy,
+    ) -> Result<bool, AgentError> {
+        let voter_models = Self::collect_quorum_models(&policy, &self.current_model);
+        if voter_models.len() < 2 {
+            Self::emit_lifecycle_event(
+                &self.stream_handle_shared,
+                format!(
+                    "quorum armed but only {} distinct model configured; falling back to normal run",
+                    voter_models.len()
+                ),
+            );
+            return Ok(false);
+        }
+
+        let (base_messages, reformulated) = self.build_inference_messages();
+        if reformulated {
+            Self::emit_lifecycle_event(
+                &self.stream_handle_shared,
+                "runtime prompt reformulation injected (anti-scheming + context + tool routing + contradiction self-check)",
+            );
+        }
+        let original_model = self.current_model.clone();
+        let mut outcomes: Vec<QuorumVoterOutcome> = Vec::new();
+        let mut succeeded = 0usize;
+
+        Self::emit_phase_event(
+            &self.stream_handle_shared,
+            "quorum",
+            "multi-voter fan-out dispatch",
+            30,
+        );
+
+        for (idx, model) in voter_models.iter().enumerate() {
+            let display_index = idx + 1;
+            Self::emit_lifecycle_event(
+                &self.stream_handle_shared,
+                format!(
+                    "quorum voter {}/{} dispatch -> {}",
+                    display_index,
+                    voter_models.len(),
+                    model
+                ),
+            );
+            if self.current_model != *model {
+                self.switch_model(model);
+            }
+            let provider = self.current_runtime_provider();
+            let force_refresh = Self::should_force_preflight_auth_refresh(provider.as_str());
+            self.refresh_runtime_provider_credentials_if_needed(force_refresh)
+                .await;
+
+            let started = Instant::now();
+            let mut attempts = 0usize;
+            let max_attempts = 2usize;
+            let mut last_err: Option<AgentError> = None;
+            let mut maybe_result: Option<hermes_core::AgentResult> = None;
+            while attempts < max_attempts {
+                attempts += 1;
+                match self
+                    .run_messages_with_current_agent(base_messages.clone(), false)
+                    .await
+                {
+                    Ok(result) => {
+                        maybe_result = Some(result);
+                        break;
+                    }
+                    Err(err) => {
+                        if Self::is_provider_auth_or_session_error(&err) && attempts < max_attempts
+                        {
+                            let refreshed = self.force_auth_refresh_after_error().await;
+                            if refreshed {
+                                continue;
+                            }
+                        }
+                        last_err = Some(err);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(result) = maybe_result {
+                let output = Self::truncate_for_quorum(
+                    &Self::extract_last_assistant_output(&result.messages),
+                    QUORUM_MAX_VOTER_OUTPUT_CHARS,
+                );
+                let status = if output.trim().is_empty() {
+                    "empty"
+                } else {
+                    succeeded += 1;
+                    "ok"
+                };
+                let error = if output.trim().is_empty() {
+                    Some("voter returned empty assistant output".to_string())
+                } else {
+                    None
+                };
+                outcomes.push(QuorumVoterOutcome {
+                    model: model.clone(),
+                    status: status.to_string(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    total_turns: result.total_turns,
+                    tool_errors: result.tool_errors.len(),
+                    output,
+                    error,
+                });
+            } else {
+                let err_text = last_err
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "unknown voter error".to_string());
+                outcomes.push(QuorumVoterOutcome {
+                    model: model.clone(),
+                    status: "error".to_string(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    total_turns: 0,
+                    tool_errors: 0,
+                    output: String::new(),
+                    error: Some(err_text),
+                });
+            }
+        }
+
+        if self.current_model != original_model {
+            self.switch_model(&original_model);
+        }
+        let artifact_path = self.persist_quorum_artifact(&policy, &outcomes)?;
+        Self::emit_lifecycle_event(
+            &self.stream_handle_shared,
+            format!("quorum voter artifact saved: {}", artifact_path.display()),
+        );
+
+        let required_success = Self::required_quorum_success(voter_models.len());
+        if succeeded < required_success {
+            let error_summary = outcomes
+                .iter()
+                .map(|o| {
+                    format!(
+                        "{} => {}",
+                        o.model,
+                        match (o.status.as_str(), o.error.as_deref()) {
+                            ("ok", _) => "ok".to_string(),
+                            ("empty", Some(e)) => format!("empty ({})", e),
+                            (_, Some(e)) => e.to_string(),
+                            _ => "unknown error".to_string(),
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            return Err(AgentError::LlmApi(format!(
+                "Quorum fan-out did not meet success threshold (required={}, got={}): {}",
+                required_success, succeeded, error_summary
+            )));
+        }
+
+        let synthesis_system = Self::build_quorum_synthesis_prompt(&policy, &outcomes);
+        let mut synthesis_messages = base_messages;
+        synthesis_messages.push(hermes_core::Message::system(synthesis_system));
+
+        Self::emit_phase_event(
+            &self.stream_handle_shared,
+            "synthesis",
+            "quorum synthesis from voter outputs",
+            75,
+        );
+        let result = self
+            .run_messages_with_current_agent(synthesis_messages, true)
+            .await?;
+        let total_turns = result.total_turns;
+        if let Err(err) = self.apply_agent_result_and_persist(result) {
+            tracing::warn!("session autosave skipped: {}", err);
+        }
+        Self::emit_lifecycle_event(
+            &self.stream_handle_shared,
+            format!(
+                "quorum run finished in {:.2}s (voters={} succeeded={} total_turns={})",
+                run_started_at.elapsed().as_secs_f64(),
+                voter_models.len(),
+                succeeded,
+                total_turns
+            ),
+        );
+        Self::emit_phase_event(
+            &self.stream_handle_shared,
+            "finalize",
+            "transcript finalization + persistence",
+            100,
+        );
+        if let Some(handle) = &self.stream_handle {
+            handle.send_done();
+        }
+        Ok(true)
+    }
+
+    fn required_quorum_success(voter_count: usize) -> usize {
+        let n = voter_count.max(1);
+        (n / 2) + 1
+    }
+
     /// Run the agent on the current message history.
     ///
     /// Sends all messages to the agent loop and appends the result.
@@ -1246,6 +1650,14 @@ impl App {
                 &self.stream_handle_shared,
                 format!("preflight auth refresh forced for provider {}", provider),
             );
+        }
+        if let Some(policy) = self.quorum_mode_armed_for_turn() {
+            self.interrupt_controller.clear_interrupt();
+            match self.run_quorum_fanout_turn(run_started_at, policy).await {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(err) => return Err(err),
+            }
         }
         Self::emit_phase_event(
             &self.stream_handle_shared,
@@ -1279,23 +1691,7 @@ impl App {
                     "runtime prompt reformulation injected (anti-scheming + context + tool routing + contradiction self-check)",
                 );
             }
-            let result = if self.config.streaming.enabled {
-                let stream_handle = self.stream_handle.clone();
-                let stream_cb: Option<Box<dyn Fn(hermes_core::StreamChunk) + Send + Sync>> =
-                    stream_handle.map(|h| {
-                        Box::new(move |chunk: hermes_core::StreamChunk| {
-                            h.send_chunk(chunk);
-                        })
-                            as Box<dyn Fn(hermes_core::StreamChunk) + Send + Sync>
-                    });
-                self.agent
-                    .run_stream(messages, Some(self.tool_schemas.clone()), stream_cb)
-                    .await
-            } else {
-                self.agent
-                    .run(messages, Some(self.tool_schemas.clone()))
-                    .await
-            };
+            let result = self.run_messages_with_current_agent(messages, true).await;
 
             match result {
                 Ok(result) => {
@@ -1960,6 +2356,51 @@ mod tests {
         let back: SessionInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back.session_id, "test-123");
         assert_eq!(back.model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_collect_quorum_models_dedup_and_limit() {
+        let policy = QuorumPolicy {
+            enabled: true,
+            voters: 3,
+            models: vec![
+                "nous:openai/gpt-5.5-pro".to_string(),
+                "nous:openai/gpt-5.5-pro".to_string(),
+                "nous:anthropic/claude-opus-4.7".to_string(),
+                "nous:deepseek/deepseek-v4-pro".to_string(),
+            ],
+            mode: "balanced".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let models = App::collect_quorum_models(&policy, "nous:openai/gpt-5.5-pro");
+        assert_eq!(
+            models,
+            vec![
+                "nous:openai/gpt-5.5-pro".to_string(),
+                "nous:anthropic/claude-opus-4.7".to_string(),
+                "nous:deepseek/deepseek-v4-pro".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extract_last_assistant_output_prefers_non_empty_assistant_text() {
+        let messages = vec![
+            hermes_core::Message::user("hello"),
+            hermes_core::Message::assistant(""),
+            hermes_core::Message::assistant("final answer"),
+        ];
+        let output = App::extract_last_assistant_output(&messages);
+        assert_eq!(output, "final answer");
+    }
+
+    #[test]
+    fn test_required_quorum_success_majority() {
+        assert_eq!(App::required_quorum_success(1), 1);
+        assert_eq!(App::required_quorum_success(2), 2);
+        assert_eq!(App::required_quorum_success(3), 2);
+        assert_eq!(App::required_quorum_success(4), 3);
+        assert_eq!(App::required_quorum_success(5), 3);
     }
 
     #[test]

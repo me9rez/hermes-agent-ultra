@@ -297,24 +297,24 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/gateway", "Alias for /platforms"),
     (
         "/integrations",
-        "Integration control plane (`status|auth|providers|gateway|memory|all`)",
+        "Integration control plane (`status|auth|providers|gateway|memory|all|repair|snapshot`)",
     ),
     ("/commands", "Show categorized slash command catalog"),
     (
         "/boot",
-        "Startup readiness gate (`status|quick`) with pass/warn/fail remediation",
+        "Startup readiness gate (`status|quick|profile`) with pass/warn/fail remediation",
     ),
     (
         "/walkthrough",
-        "Guided onboarding walkthrough (`status|start|next|done|reset`)",
+        "Guided onboarding walkthrough (`status|start|next|done|reset|insights`)",
     ),
     (
         "/triage",
-        "External trigger triage (`status|list|eval <source> <payload>|queue <source> <payload>`)",
+        "External trigger triage (`status|list|eval|queue|feedback`)",
     ),
     (
         "/subconscious",
-        "Background subconscious queue (`status|add|approve|reject|run|clear`)",
+        "Background subconscious queue (`status|add|approve|reject|run|profile|clear`)",
     ),
     ("/log", "Show recent runtime log files"),
     ("/debug", "Generate local debug-report guidance"),
@@ -5101,7 +5101,9 @@ fn render_compression_policy_status() -> String {
         merged.max_tool_output_total_chars
     );
     out.push_str(
-        "\nUse `/compress rules apply` to push merged settings into live runtime env.\n\
+        "\nUse `/compress rules recommend` to generate heuristics from current transcript shape.\n\
+         Use `/compress rules autotune` for dry-run tuning, or `/compress rules autotune apply [user|project]` to persist + apply.\n\
+         Use `/compress rules apply` to push merged settings into live runtime env.\n\
          Use `/compress rules set user <key> <value>` or `/compress rules set project <key> <value>`.\n\
          Keys: assistant_lines | tool_lines | tool_line_chars | tool_total_chars",
     );
@@ -5141,6 +5143,133 @@ fn set_compression_rule_field(
     Ok(())
 }
 
+fn resolve_compression_plane_path(target: &str) -> Result<PathBuf, AgentError> {
+    let normalized = target.trim().to_ascii_lowercase();
+    if normalized == "user" {
+        return Ok(compression_user_rules_path());
+    }
+    if normalized == "project" {
+        return compression_project_rules_path().ok_or_else(|| {
+            AgentError::Config(
+                "Project plane unavailable: run inside a repository checkout.".to_string(),
+            )
+        });
+    }
+    Err(AgentError::Config(
+        "Plane must be `user` or `project`.".to_string(),
+    ))
+}
+
+fn recommend_compression_policy_for_app(
+    app: &App,
+    base: &CompressionRenderPolicy,
+) -> CompressionRenderPolicy {
+    let mut next = base.clone();
+    let mut assistant_msgs = 0usize;
+    let mut assistant_lines = 0usize;
+    let mut assistant_peak_line_chars = 0usize;
+    let mut tool_msgs = 0usize;
+    let mut tool_lines = 0usize;
+    let mut tool_peak_line_chars = 0usize;
+    let mut tool_total_chars = 0usize;
+
+    for msg in &app.messages {
+        let Some(content) = msg.content.as_ref() else {
+            continue;
+        };
+        let lines = content.lines().count().max(1);
+        let peak_line_chars = content
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or_else(|| content.chars().count());
+        match msg.role {
+            hermes_core::MessageRole::Assistant => {
+                assistant_msgs = assistant_msgs.saturating_add(1);
+                assistant_lines = assistant_lines.saturating_add(lines);
+                assistant_peak_line_chars = assistant_peak_line_chars.max(peak_line_chars);
+            }
+            hermes_core::MessageRole::Tool => {
+                tool_msgs = tool_msgs.saturating_add(1);
+                tool_lines = tool_lines.saturating_add(lines);
+                tool_peak_line_chars = tool_peak_line_chars.max(peak_line_chars);
+                tool_total_chars = tool_total_chars.saturating_add(content.chars().count());
+            }
+            _ => {}
+        }
+    }
+
+    if assistant_msgs >= 6 {
+        let avg = assistant_lines / assistant_msgs.max(1);
+        if avg > 60 {
+            next.max_assistant_render_lines = next.max_assistant_render_lines.max(320).min(4000);
+        } else if avg < 24 {
+            next.max_assistant_render_lines = next.max_assistant_render_lines.min(220).max(40);
+        }
+        if assistant_peak_line_chars > 160 {
+            next.max_tool_output_line_chars = next.max_tool_output_line_chars.max(720).min(4000);
+        }
+    }
+
+    if tool_msgs >= 2 {
+        let avg_tool_lines = tool_lines / tool_msgs.max(1);
+        if avg_tool_lines > 120 {
+            next.max_tool_output_lines = next.max_tool_output_lines.max(260).min(5000);
+        } else if avg_tool_lines < 40 {
+            next.max_tool_output_lines = next.max_tool_output_lines.min(160).max(20);
+        }
+        if tool_peak_line_chars > 720 {
+            next.max_tool_output_line_chars = next.max_tool_output_line_chars.max(920).min(4000);
+        }
+        if tool_total_chars > 120_000 {
+            next.max_tool_output_total_chars =
+                next.max_tool_output_total_chars.max(96_000).min(500_000);
+        } else if tool_total_chars < 24_000 {
+            next.max_tool_output_total_chars =
+                next.max_tool_output_total_chars.min(40_000).max(2000);
+        }
+    }
+
+    if app.messages.len() >= 140 {
+        next.max_assistant_render_lines = next.max_assistant_render_lines.min(240).max(40);
+        next.max_tool_output_total_chars = next.max_tool_output_total_chars.min(64_000).max(2000);
+    }
+    next
+}
+
+fn render_compression_recommendation(
+    current: &CompressionRenderPolicy,
+    recommended: &CompressionRenderPolicy,
+) -> String {
+    let mut out = String::new();
+    out.push_str("Compression policy recommendation\n");
+    out.push_str("---------------------------------\n");
+    let _ = writeln!(
+        out,
+        "assistant_lines: {} -> {}",
+        current.max_assistant_render_lines, recommended.max_assistant_render_lines
+    );
+    let _ = writeln!(
+        out,
+        "tool_lines: {} -> {}",
+        current.max_tool_output_lines, recommended.max_tool_output_lines
+    );
+    let _ = writeln!(
+        out,
+        "tool_line_chars: {} -> {}",
+        current.max_tool_output_line_chars, recommended.max_tool_output_line_chars
+    );
+    let _ = writeln!(
+        out,
+        "tool_total_chars: {} -> {}",
+        current.max_tool_output_total_chars, recommended.max_tool_output_total_chars
+    );
+    out.push_str(
+        "\nApply with `/compress rules autotune apply` (user plane) or `/compress rules autotune apply project`.",
+    );
+    out
+}
+
 fn handle_compress_rules_command(
     app: &mut App,
     args: &[&str],
@@ -5153,6 +5282,57 @@ fn handle_compress_rules_command(
     match action.as_str() {
         "status" | "show" | "preview" => {
             emit_command_output(app, render_compression_policy_status());
+        }
+        "recommend" => {
+            let (merged, _, _) = merged_compression_policy();
+            let rec = recommend_compression_policy_for_app(app, &merged);
+            emit_command_output(app, render_compression_recommendation(&merged, &rec));
+        }
+        "autotune" => {
+            let (merged, _, _) = merged_compression_policy();
+            let rec = recommend_compression_policy_for_app(app, &merged);
+            if args
+                .get(1)
+                .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "apply" | "--apply"))
+            {
+                let target = args
+                    .get(2)
+                    .copied()
+                    .unwrap_or("user")
+                    .to_ascii_lowercase();
+                let path = match resolve_compression_plane_path(&target) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        emit_command_output(app, err.to_string());
+                        return Ok(CommandResult::Handled);
+                    }
+                };
+                let plane = CompressionRulePlaneConfig {
+                    max_assistant_render_lines: Some(rec.max_assistant_render_lines),
+                    max_tool_output_lines: Some(rec.max_tool_output_lines),
+                    max_tool_output_line_chars: Some(rec.max_tool_output_line_chars),
+                    max_tool_output_total_chars: Some(rec.max_tool_output_total_chars),
+                };
+                save_compression_plane(&path, &plane)?;
+                apply_compression_policy_env(&rec);
+                emit_command_output(
+                    app,
+                    format!(
+                        "{}\n\nAutotune applied to {} plane ({}) and runtime env updated.",
+                        render_compression_recommendation(&merged, &rec),
+                        target,
+                        path.display()
+                    ),
+                );
+            } else {
+                emit_command_output(
+                    app,
+                    format!(
+                        "{}\n\nDry-run only. Add `apply` to persist: `/compress rules autotune apply [user|project]`.",
+                        render_compression_recommendation(&merged, &rec)
+                    ),
+                );
+            }
         }
         "apply" => {
             let (merged, _, _) = merged_compression_policy();
@@ -5198,17 +5378,12 @@ fn handle_compress_rules_command(
                 AgentError::Config(format!("Invalid value '{}' (expected positive integer).", value_raw))
             })?;
             let target = plane_name.trim().to_ascii_lowercase();
-            let path = if target == "user" {
-                compression_user_rules_path()
-            } else if target == "project" {
-                compression_project_rules_path().ok_or_else(|| {
-                    AgentError::Config(
-                        "Project plane unavailable: run inside a repository checkout.".to_string(),
-                    )
-                })?
-            } else {
-                emit_command_output(app, "Plane must be `user` or `project`.");
-                return Ok(CommandResult::Handled);
+            let path = match resolve_compression_plane_path(&target) {
+                Ok(path) => path,
+                Err(err) => {
+                    emit_command_output(app, err.to_string());
+                    return Ok(CommandResult::Handled);
+                }
             };
             let mut plane = load_compression_plane(&path).unwrap_or_default();
             set_compression_rule_field(&mut plane, key, value)?;
@@ -5230,20 +5405,12 @@ fn handle_compress_rules_command(
                 return Ok(CommandResult::Handled);
             };
             let target = plane_name.trim().to_ascii_lowercase();
-            let maybe_path = if target == "user" {
-                Some(compression_user_rules_path())
-            } else if target == "project" {
-                compression_project_rules_path()
-            } else {
-                emit_command_output(app, "Plane must be `user` or `project`.");
-                return Ok(CommandResult::Handled);
-            };
-            let Some(path) = maybe_path else {
-                emit_command_output(
-                    app,
-                    "Project plane unavailable: run inside a repository checkout.",
-                );
-                return Ok(CommandResult::Handled);
+            let path = match resolve_compression_plane_path(&target) {
+                Ok(path) => path,
+                Err(err) => {
+                    emit_command_output(app, err.to_string());
+                    return Ok(CommandResult::Handled);
+                }
             };
             if path.exists() {
                 std::fs::remove_file(&path)
@@ -5255,7 +5422,7 @@ fn handle_compress_rules_command(
         }
         _ => emit_command_output(
             app,
-            "Usage: /compress rules [status|preview|apply|set <user|project> <key> <value>|clear <user|project>]",
+            "Usage: /compress rules [status|preview|recommend|autotune [apply [user|project]]|apply|set <user|project> <key> <value>|clear <user|project>]",
         ),
     }
     Ok(CommandResult::Handled)
@@ -8656,6 +8823,90 @@ fn trigger_triage_mode() -> String {
         .unwrap_or_else(|| "balanced".to_string())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TriggerTriageLearningEntry {
+    at: String,
+    source: String,
+    outcome: String,
+    decision: String,
+    severity: i32,
+    bias_delta: i32,
+    note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct TriggerTriageLearningState {
+    #[serde(default)]
+    entries: Vec<TriggerTriageLearningEntry>,
+}
+
+fn trigger_triage_learning_state_path() -> PathBuf {
+    hermes_config::hermes_home()
+        .join("triage")
+        .join("learning.json")
+}
+
+fn load_trigger_triage_learning_state() -> TriggerTriageLearningState {
+    let path = trigger_triage_learning_state_path();
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    serde_json::from_str::<TriggerTriageLearningState>(&raw).unwrap_or_default()
+}
+
+fn save_trigger_triage_learning_state(
+    state: &TriggerTriageLearningState,
+) -> Result<(), AgentError> {
+    let path = trigger_triage_learning_state_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AgentError::Io(format!("Failed to create {}: {}", parent.display(), e)))?;
+    }
+    let payload = serde_json::to_string_pretty(state)
+        .map_err(|e| AgentError::Io(format!("Failed to encode triage learning state: {}", e)))?;
+    std::fs::write(&path, payload)
+        .map_err(|e| AgentError::Io(format!("Failed to write {}: {}", path.display(), e)))?;
+    Ok(())
+}
+
+fn triage_feedback_delta(outcome: &str) -> Option<i32> {
+    match outcome.trim().to_ascii_lowercase().as_str() {
+        "critical" | "escalate" | "confirmed" | "true-positive" | "tp" => Some(2),
+        "useful" | "good" | "notify" | "watch" => Some(1),
+        "neutral" | "mixed" => Some(0),
+        "false-positive" | "fp" | "noise" | "noisy" => Some(-2),
+        "drop" | "ignore" | "spam" => Some(-1),
+        _ => None,
+    }
+}
+
+fn triage_learning_bias(source: &str, payload: &str) -> (i32, Vec<String>) {
+    let source_l = source.trim().to_ascii_lowercase();
+    let payload_l = payload.trim().to_ascii_lowercase();
+    let state = load_trigger_triage_learning_state();
+    let mut total = 0i32;
+    let mut reasons = Vec::new();
+    for entry in state.entries.iter().rev().take(120) {
+        if entry.source.eq_ignore_ascii_case(&source_l) {
+            total += entry.bias_delta;
+            if reasons.len() < 3 {
+                reasons.push(format!(
+                    "source feedback {} ({})",
+                    entry.outcome, entry.bias_delta
+                ));
+            }
+            continue;
+        }
+        if !entry.note.trim().is_empty()
+            && payload_l.contains(entry.note.trim().to_ascii_lowercase().as_str())
+        {
+            total += entry.bias_delta.signum();
+            if reasons.len() < 3 {
+                reasons.push(format!("matched prior note '{}'", entry.note));
+            }
+        }
+    }
+    (total.clamp(-3, 3), reasons)
+}
+
 fn evaluate_trigger_triage(source: &str, payload: &str) -> TriggerTriageAssessment {
     let source_l = source.trim().to_ascii_lowercase();
     let payload_l = payload.trim().to_ascii_lowercase();
@@ -8688,6 +8939,13 @@ fn evaluate_trigger_triage(source: &str, payload: &str) -> TriggerTriageAssessme
     if source_l.contains("cron") {
         severity += 1;
         reasons.push("scheduled trigger".to_string());
+    }
+
+    let (learning_bias, learning_reasons) = triage_learning_bias(source, payload);
+    if learning_bias != 0 {
+        severity += learning_bias;
+        reasons.push(format!("learning bias applied ({:+})", learning_bias));
+        reasons.extend(learning_reasons);
     }
 
     if mode == "strict" {
@@ -8734,6 +8992,74 @@ fn render_trigger_triage_assessment(assessment: &TriggerTriageAssessment) -> Str
         for reason in &assessment.reasons {
             let _ = writeln!(out, "- {}", reason);
         }
+    }
+    out
+}
+
+fn append_triage_learning_feedback(
+    source: &str,
+    payload: &str,
+    outcome: &str,
+    assessment: &TriggerTriageAssessment,
+) -> Result<TriggerTriageLearningEntry, AgentError> {
+    let delta = triage_feedback_delta(outcome).ok_or_else(|| {
+        AgentError::Config(
+            "Unknown triage feedback outcome. Use critical|confirmed|useful|neutral|false-positive|drop."
+                .to_string(),
+        )
+    })?;
+    let note = payload
+        .split_whitespace()
+        .take(10)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    let entry = TriggerTriageLearningEntry {
+        at: chrono::Utc::now().to_rfc3339(),
+        source: source.trim().to_ascii_lowercase(),
+        outcome: outcome.trim().to_ascii_lowercase(),
+        decision: assessment.decision.as_str().to_string(),
+        severity: assessment.severity,
+        bias_delta: delta,
+        note,
+    };
+    let mut state = load_trigger_triage_learning_state();
+    state.entries.push(entry.clone());
+    if state.entries.len() > 400 {
+        let remove = state.entries.len().saturating_sub(400);
+        state.entries.drain(0..remove);
+    }
+    save_trigger_triage_learning_state(&state)?;
+    Ok(entry)
+}
+
+fn render_trigger_triage_learning_status() -> String {
+    let state = load_trigger_triage_learning_state();
+    let mut by_source: HashMap<String, i32> = HashMap::new();
+    for entry in &state.entries {
+        *by_source.entry(entry.source.clone()).or_insert(0) += entry.bias_delta;
+    }
+    let mut ranked = by_source.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out = String::new();
+    out.push_str("Trigger triage learning\n");
+    out.push_str("----------------------\n");
+    let _ = writeln!(out, "entries: {}", state.entries.len());
+    if ranked.is_empty() {
+        out.push_str("source_bias: none\n");
+    } else {
+        out.push_str("source_bias:\n");
+        for (source, bias) in ranked.into_iter().take(6) {
+            let _ = writeln!(out, "- {} => {:+}", source, bias);
+        }
+    }
+    if let Some(last) = state.entries.last() {
+        let _ = writeln!(
+            out,
+            "last_feedback: {} source={} outcome={} delta={:+}",
+            last.at, last.source, last.outcome, last.bias_delta
+        );
     }
     out
 }
@@ -8826,6 +9152,69 @@ fn risk_for_prompt(prompt: &str) -> (&'static str, bool) {
     ("low", false)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubconsciousProfile {
+    Strict,
+    Balanced,
+    Dev,
+}
+
+impl SubconsciousProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Balanced => "balanced",
+            Self::Dev => "dev",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "strict" => Some(Self::Strict),
+            "balanced" | "standard" => Some(Self::Balanced),
+            "dev" => Some(Self::Dev),
+            _ => None,
+        }
+    }
+}
+
+fn subconscious_profile_env() -> SubconsciousProfile {
+    std::env::var("HERMES_SUBCONSCIOUS_PROFILE")
+        .ok()
+        .and_then(|v| SubconsciousProfile::parse(&v))
+        .unwrap_or(SubconsciousProfile::Balanced)
+}
+
+fn subconscious_guard_allows(
+    profile: SubconsciousProfile,
+    task: &SubconsciousTask,
+) -> (bool, String) {
+    let risk = task.risk.to_ascii_lowercase();
+    match profile {
+        SubconsciousProfile::Dev => (true, "dev profile allows execution".to_string()),
+        SubconsciousProfile::Balanced => {
+            if risk == "high" {
+                (
+                    false,
+                    "balanced profile blocks high-risk subconscious runs".to_string(),
+                )
+            } else {
+                (true, "balanced profile allows low/medium risk".to_string())
+            }
+        }
+        SubconsciousProfile::Strict => {
+            if task.requires_approval || risk != "low" {
+                (
+                    false,
+                    "strict profile allows only low-risk non-approval tasks".to_string(),
+                )
+            } else {
+                (true, "strict profile allows low-risk task".to_string())
+            }
+        }
+    }
+}
+
 fn handle_subconscious_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
     let action = args
         .first()
@@ -8835,9 +9224,11 @@ fn handle_subconscious_command(app: &mut App, args: &[&str]) -> Result<CommandRe
     match action.as_str() {
         "status" | "list" => {
             let state = load_subconscious_state();
+            let profile = subconscious_profile_env();
             let mut out = String::new();
             out.push_str("Subconscious queue\n");
             out.push_str("-----------------\n");
+            let _ = writeln!(out, "profile: {}", profile.as_str());
             if state.tasks.is_empty() {
                 out.push_str("No queued subconscious tasks.\n");
             } else {
@@ -8855,7 +9246,9 @@ fn handle_subconscious_command(app: &mut App, args: &[&str]) -> Result<CommandRe
                     );
                 }
             }
-            out.push_str("\nUsage: /subconscious add <prompt> | approve <id> | reject <id> | run [n] | clear");
+            out.push_str(
+                "\nUsage: /subconscious add <prompt> | approve <id> | reject <id> | run [n] [--dry-run] [profile=<strict|balanced|dev>] | profile [status|list|strict|balanced|dev|clear] | clear",
+            );
             emit_command_output(app, out.trim_end());
         }
         "add" => {
@@ -8937,18 +9330,49 @@ fn handle_subconscious_command(app: &mut App, args: &[&str]) -> Result<CommandRe
             emit_command_output(app, format!("Subconscious task {} {}", task_id, action));
         }
         "run" => {
-            let limit = args
-                .get(1)
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(1)
-                .clamp(1, 8);
+            let mut limit = 1usize;
+            let mut dry_run = false;
+            let mut profile_override: Option<SubconsciousProfile> = None;
+            for token in args.get(1..).unwrap_or(&[]) {
+                let token_l = token.trim().to_ascii_lowercase();
+                if token_l == "--dry-run" || token_l == "dry-run" || token_l == "preview" {
+                    dry_run = true;
+                    continue;
+                }
+                if let Ok(parsed) = token_l.parse::<usize>() {
+                    limit = parsed.clamp(1, 8);
+                    continue;
+                }
+                if let Some(raw) = token_l.strip_prefix("profile=") {
+                    profile_override = SubconsciousProfile::parse(raw);
+                    continue;
+                }
+                if profile_override.is_none() {
+                    profile_override = SubconsciousProfile::parse(&token_l);
+                }
+            }
+            let profile = profile_override.unwrap_or_else(subconscious_profile_env);
             let mut state = load_subconscious_state();
+            let mut reviewed = 0usize;
             let mut dispatched = 0usize;
+            let mut blocked = 0usize;
+            let mut notes = Vec::new();
             for task in &mut state.tasks {
-                if dispatched >= limit {
+                if reviewed >= limit {
                     break;
                 }
                 if task.status != "pending" {
+                    continue;
+                }
+                reviewed += 1;
+                let (allowed, guard_note) = subconscious_guard_allows(profile, task);
+                if !allowed {
+                    blocked += 1;
+                    notes.push(format!("{} blocked ({})", task.id, guard_note));
+                    continue;
+                }
+                if dry_run {
+                    notes.push(format!("{} would dispatch ({})", task.id, guard_note));
                     continue;
                 }
                 let job = queue_background_job(&task.prompt)?;
@@ -8956,15 +9380,65 @@ fn handle_subconscious_command(app: &mut App, args: &[&str]) -> Result<CommandRe
                 task.job_id = Some(job.id.clone());
                 task.updated_at = chrono::Utc::now().to_rfc3339();
                 dispatched += 1;
+                notes.push(format!("{} dispatched id={}", task.id, job.id));
             }
-            save_subconscious_state(&state)?;
+            if !dry_run {
+                save_subconscious_state(&state)?;
+            }
             emit_command_output(
                 app,
                 format!(
-                    "Dispatched {} subconscious task(s). Use `/background status` and `/subconscious status` for tracking.",
-                    dispatched
+                    "{} subconscious run profile={}\nreviewed={} dispatched={} blocked={}\n{}\nUse `/background status` and `/subconscious status` for tracking.",
+                    if dry_run {
+                        "Dry-run"
+                    } else {
+                        "Executed"
+                    },
+                    profile.as_str(),
+                    reviewed,
+                    dispatched,
+                    blocked,
+                    if notes.is_empty() {
+                        "No pending tasks matched selection.".to_string()
+                    } else {
+                        notes.join("\n")
+                    }
                 ),
             );
+        }
+        "profile" => {
+            let token = args.get(1).copied().unwrap_or("status").to_ascii_lowercase();
+            match token.as_str() {
+                "status" | "show" => emit_command_output(
+                    app,
+                    format!(
+                        "Subconscious profile: {}\nUse `/subconscious profile list` or `/subconscious profile strict|balanced|dev`.",
+                        subconscious_profile_env().as_str()
+                    ),
+                ),
+                "list" => emit_command_output(
+                    app,
+                    "Subconscious profiles:\n- strict: only low-risk non-approval tasks auto-dispatch\n- balanced: low/medium dispatch, high-risk blocked\n- dev: permit all pending tasks\nSet with `/subconscious profile <name>`.",
+                ),
+                "clear" => {
+                    std::env::remove_var("HERMES_SUBCONSCIOUS_PROFILE");
+                    emit_command_output(
+                        app,
+                        "Cleared subconscious profile override (default=balanced).",
+                    );
+                }
+                other => {
+                    let Some(next) = SubconsciousProfile::parse(other) else {
+                        emit_command_output(
+                            app,
+                            "Usage: /subconscious profile [status|list|strict|balanced|dev|clear]",
+                        );
+                        return Ok(CommandResult::Handled);
+                    };
+                    std::env::set_var("HERMES_SUBCONSCIOUS_PROFILE", next.as_str());
+                    emit_command_output(app, format!("Subconscious profile set to {}.", next.as_str()));
+                }
+            }
         }
         "clear" => {
             let path = subconscious_state_path();
@@ -8977,7 +9451,7 @@ fn handle_subconscious_command(app: &mut App, args: &[&str]) -> Result<CommandRe
         }
         _ => emit_command_output(
             app,
-            "Usage: /subconscious [status|add <prompt>|approve <id>|reject <id>|run [n]|clear]",
+            "Usage: /subconscious [status|add <prompt>|approve <id>|reject <id>|run [n] [--dry-run] [profile=<strict|balanced|dev>]|profile [status|list|strict|balanced|dev|clear]|clear]",
         ),
     }
     Ok(CommandResult::Handled)
@@ -8997,8 +9471,9 @@ fn handle_trigger_triage_command(
             emit_command_output(
                 app,
                 format!(
-                    "Trigger triage mode: {}\nUsage: /triage eval <source> <payload> | /triage queue <source> <payload>",
-                    trigger_triage_mode()
+                    "Trigger triage mode: {}\n{}\nUsage: /triage eval <source> <payload> | /triage queue <source> <payload> | /triage feedback <source> <outcome> <payload>",
+                    trigger_triage_mode(),
+                    render_trigger_triage_learning_status().trim_end()
                 ),
             );
         }
@@ -9010,7 +9485,42 @@ fn handle_trigger_triage_command(
                  - medium severity: repeated errors/blocked/timeout -> agent-run\n\
                  - low severity: notify\n\
                  - empty/noise payload -> drop\n\
-                 Mode override: HERMES_TRIGGER_TRIAGE_MODE={strict|balanced|relaxed}",
+                 Mode override: HERMES_TRIGGER_TRIAGE_MODE={strict|balanced|relaxed}\n\
+                 Feedback loop: `/triage feedback <source> <outcome> <payload>` updates persistent bias.",
+            );
+        }
+        "feedback" => {
+            let Some(source) = args.get(1).copied() else {
+                emit_command_output(
+                    app,
+                    "Usage: /triage feedback <source> <outcome> <payload>",
+                );
+                return Ok(CommandResult::Handled);
+            };
+            let Some(outcome) = args.get(2).copied() else {
+                emit_command_output(
+                    app,
+                    "Usage: /triage feedback <source> <outcome> <payload>",
+                );
+                return Ok(CommandResult::Handled);
+            };
+            let payload = args.get(3..).unwrap_or(&[]).join(" ").trim().to_string();
+            if payload.is_empty() {
+                emit_command_output(
+                    app,
+                    "Usage: /triage feedback <source> <outcome> <payload>",
+                );
+                return Ok(CommandResult::Handled);
+            }
+            let assessment = evaluate_trigger_triage(source, &payload);
+            let entry = append_triage_learning_feedback(source, &payload, outcome, &assessment)?;
+            let (bias_now, _) = triage_learning_bias(source, &payload);
+            emit_command_output(
+                app,
+                format!(
+                    "Recorded triage feedback.\nsource={} outcome={} delta={:+} decision={} severity={}\nsource_bias_now={:+}",
+                    entry.source, entry.outcome, entry.bias_delta, entry.decision, entry.severity, bias_now
+                ),
             );
         }
         "eval" | "queue" => {
@@ -9081,7 +9591,7 @@ fn handle_trigger_triage_command(
         }
         _ => emit_command_output(
             app,
-            "Usage: /triage [status|list|eval <source> <payload>|queue <source> <payload>]",
+            "Usage: /triage [status|list|eval <source> <payload>|queue <source> <payload>|feedback <source> <outcome> <payload>]",
         ),
     }
     Ok(CommandResult::Handled)
@@ -15598,6 +16108,58 @@ fn handle_platforms_command(app: &mut App) -> Result<CommandResult, AgentError> 
     Ok(CommandResult::Handled)
 }
 
+fn integrations_snapshot_path(session_id: &str) -> PathBuf {
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    hermes_config::hermes_home().join("logs").join(format!(
+        "integrations-snapshot-{}-{}.json",
+        session_id, stamp
+    ))
+}
+
+fn render_integrations_repair_steps(
+    provider: &str,
+    auth_ok: bool,
+    oauth_gate: Option<(bool, String)>,
+    memory_probe: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str("Integrations repair plan\n");
+    out.push_str("------------------------\n");
+    let _ = writeln!(out, "provider: {}", provider);
+    if !auth_ok {
+        out.push_str("- auth: FAIL -> run `/auth status` then `/auth verify` (or `hermes-ultra auth add`).\n");
+    } else {
+        out.push_str("- auth: PASS\n");
+    }
+    if let Some((ok, detail)) = oauth_gate {
+        if ok {
+            let _ = writeln!(out, "- oauth runtime gate: PASS ({})", detail);
+        } else {
+            let _ = writeln!(
+                out,
+                "- oauth runtime gate: FAIL ({}) -> rebuild/install latest CLI binary.",
+                detail
+            );
+        }
+    }
+    if memory_probe.to_ascii_lowercase().starts_with("warn") {
+        let _ = writeln!(
+            out,
+            "- contextlattice probe: {} -> verify local orchestrator and env vars (CONTEXTLATTICE_ORCHESTRATOR_URL/MEMMCP_ORCHESTRATOR_URL).",
+            memory_probe
+        );
+    } else {
+        let _ = writeln!(out, "- contextlattice probe: {}", memory_probe);
+    }
+    out.push_str(
+        "- tools: run `/tools` and `/integrations status` to verify adapter registry health.\n",
+    );
+    out.push_str(
+        "- walkthrough: run `/walkthrough next` to continue operator recovery sequence.\n",
+    );
+    out
+}
+
 async fn handle_integrations_command(
     app: &mut App,
     args: &[&str],
@@ -15624,6 +16186,9 @@ async fn handle_integrations_command(
         .is_some();
     let auth_ok = credential_present || (oauth_capable && oauth_state_present);
     let oauth_gate = oauth_runtime_gate_for_provider(&provider);
+    let oauth_manifest_source = oauth_min_version_for_provider(&provider)
+        .map(|(_, source)| source)
+        .unwrap_or_else(|| "n/a".to_string());
 
     let memory_url = std::env::var("CONTEXTLATTICE_ORCHESTRATOR_URL")
         .ok()
@@ -15656,6 +16221,59 @@ async fn handle_integrations_command(
     let mcp_count = app.config.mcp_servers.len();
     let platforms_count = app.config.platforms.len();
 
+    if action == "repair" {
+        emit_command_output(
+            app,
+            render_integrations_repair_steps(&provider, auth_ok, oauth_gate.clone(), &memory_probe),
+        );
+        return Ok(CommandResult::Handled);
+    }
+
+    if action == "snapshot" {
+        let path = integrations_snapshot_path(&app.session_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AgentError::Io(format!("Failed to create {}: {}", parent.display(), e))
+            })?;
+        }
+        let payload = serde_json::json!({
+            "captured_at": chrono::Utc::now().to_rfc3339(),
+            "session_id": app.session_id,
+            "provider": provider,
+            "model": app.current_model,
+            "auth": {
+                "oauth_capable": oauth_capable,
+                "managed_tools_supported": managed_tools,
+                "credential_present": credential_present,
+                "oauth_state_present": oauth_state_present,
+                "status": if auth_ok { "PASS" } else { "FAIL" },
+                "oauth_runtime_gate": oauth_gate.as_ref().map(|(ok, detail)| serde_json::json!({"ok": ok, "detail": detail})),
+            },
+            "panels": {
+                "providers_count": curated_provider_slugs().len(),
+                "platform_adapters": platforms_count,
+                "mcp_servers": mcp_count,
+                "plugins": plugins_count,
+                "toolsets": app.config.platform_toolsets.len(),
+                "registered_tools": tools_count,
+                "contextlattice_url": memory_url,
+                "memory_probe": memory_probe,
+            }
+        });
+        let json = serde_json::to_string_pretty(&payload)
+            .map_err(|e| AgentError::Io(format!("Failed to encode snapshot payload: {}", e)))?;
+        std::fs::write(&path, json)
+            .map_err(|e| AgentError::Io(format!("Failed to write {}: {}", path.display(), e)))?;
+        emit_command_output(
+            app,
+            format!(
+                "Integration snapshot exported:\n{}\nUse `/integrations repair` for remediation guidance.",
+                path.display()
+            ),
+        );
+        return Ok(CommandResult::Handled);
+    }
+
     let mut out = String::new();
     out.push_str("Integration Control Plane\n");
     out.push_str("=========================\n");
@@ -15669,6 +16287,7 @@ async fn handle_integrations_command(
         let _ = writeln!(out, "credential_present: {}", credential_present);
         let _ = writeln!(out, "oauth_state_present: {}", oauth_state_present);
         let _ = writeln!(out, "status: {}", if auth_ok { "PASS" } else { "FAIL" });
+        let _ = writeln!(out, "oauth_manifest: {}", oauth_manifest_source);
         if let Some((gate_ok, gate_detail)) = oauth_gate.clone() {
             let _ = writeln!(
                 out,
@@ -15710,11 +16329,11 @@ async fn handle_integrations_command(
 
     if !matches!(
         action.as_str(),
-        "status" | "all" | "auth" | "providers" | "gateway" | "memory"
+        "status" | "all" | "auth" | "providers" | "gateway" | "memory" | "repair" | "snapshot"
     ) {
         emit_command_output(
             app,
-            "Usage: /integrations [status|all|auth|providers|gateway|memory]",
+            "Usage: /integrations [status|all|auth|providers|gateway|memory|repair|snapshot]",
         );
         return Ok(CommandResult::Handled);
     }
@@ -15723,6 +16342,9 @@ async fn handle_integrations_command(
     out.push_str("- `/boot` for startup readiness\n");
     out.push_str("- `/auth verify` for runtime credential hydration\n");
     out.push_str("- `/walkthrough next` for guided operator setup\n");
+    out.push_str(
+        "- `/integrations repair` for remediation plan and `/integrations snapshot` for export\n",
+    );
     emit_command_output(app, out.trim_end());
     Ok(CommandResult::Handled)
 }
@@ -16506,23 +17128,178 @@ fn version_at_least(current: &str, minimum: &str) -> bool {
     cur >= min
 }
 
-fn oauth_min_version_for_provider(provider: &str) -> Option<&'static str> {
-    let normalized = crate::providers::canonical_provider_id(provider);
-    if crate::providers::provider_capability_for(&normalized)?.oauth_supported {
-        // Keep this low and explicit: gate only rejects truly old runtimes.
-        Some("0.1.0")
-    } else {
-        None
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OAuthRuntimeGateManifest {
+    #[serde(default = "oauth_runtime_gate_default_min_version")]
+    default_min_version: String,
+    #[serde(default)]
+    required_oauth_provider_ids: Vec<String>,
+    #[serde(default)]
+    provider_min_versions: HashMap<String, String>,
+}
+
+fn oauth_runtime_gate_default_min_version() -> String {
+    "0.1.0".to_string()
+}
+
+fn oauth_runtime_gate_manifest_default() -> OAuthRuntimeGateManifest {
+    OAuthRuntimeGateManifest {
+        default_min_version: oauth_runtime_gate_default_min_version(),
+        required_oauth_provider_ids: vec![
+            "anthropic".to_string(),
+            "nous".to_string(),
+            "openai-codex".to_string(),
+            "qwen-oauth".to_string(),
+            "google-gemini-cli".to_string(),
+        ],
+        provider_min_versions: HashMap::new(),
     }
 }
 
+fn normalize_oauth_runtime_gate_manifest(
+    manifest: OAuthRuntimeGateManifest,
+) -> OAuthRuntimeGateManifest {
+    let mut out = manifest;
+    if out.default_min_version.trim().is_empty() {
+        out.default_min_version = oauth_runtime_gate_default_min_version();
+    }
+    out.required_oauth_provider_ids = out
+        .required_oauth_provider_ids
+        .into_iter()
+        .map(|v| crate::providers::canonical_provider_id(v.trim()))
+        .filter(|v| !v.trim().is_empty())
+        .collect();
+    let mut mins = HashMap::new();
+    for (provider, version) in out.provider_min_versions {
+        let key = crate::providers::canonical_provider_id(provider.trim());
+        if key.is_empty() || version.trim().is_empty() {
+            continue;
+        }
+        mins.insert(key, version.trim().to_string());
+    }
+    out.provider_min_versions = mins;
+    out
+}
+
+fn oauth_runtime_gate_manifest_path() -> Option<PathBuf> {
+    std::env::var("HERMES_OAUTH_GATE_MANIFEST_PATH")
+        .ok()
+        .map(|v| PathBuf::from(v.trim()))
+        .filter(|path| path.exists())
+        .or_else(|| {
+            let path = hermes_config::hermes_home().join("oauth-gate-manifest.json");
+            if path.exists() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+}
+
+fn load_oauth_runtime_gate_manifest() -> (OAuthRuntimeGateManifest, String) {
+    if let Some(path) = oauth_runtime_gate_manifest_path() {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(parsed) = serde_json::from_str::<OAuthRuntimeGateManifest>(&raw) {
+                return (
+                    normalize_oauth_runtime_gate_manifest(parsed),
+                    path.display().to_string(),
+                );
+            }
+        }
+    }
+    (
+        oauth_runtime_gate_manifest_default(),
+        "builtin-default".to_string(),
+    )
+}
+
+fn oauth_min_version_for_provider(provider: &str) -> Option<(String, String)> {
+    let normalized = crate::providers::canonical_provider_id(provider);
+    if !crate::providers::provider_capability_for(&normalized)?.oauth_supported {
+        return None;
+    }
+    let (manifest, source) = load_oauth_runtime_gate_manifest();
+    let min = manifest
+        .provider_min_versions
+        .get(&normalized)
+        .cloned()
+        .unwrap_or_else(|| manifest.default_min_version.clone());
+    Some((min, source))
+}
+
 fn oauth_runtime_gate_for_provider(provider: &str) -> Option<(bool, String)> {
-    let minimum = oauth_min_version_for_provider(provider)?;
+    let (minimum, source) = oauth_min_version_for_provider(provider)?;
     let current = env!("CARGO_PKG_VERSION");
     Some((
-        version_at_least(current, minimum),
-        format!("runtime={} required>={}", current, minimum),
+        version_at_least(current, &minimum),
+        format!(
+            "runtime={} required>={} manifest={}",
+            current, minimum, source
+        ),
     ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootProfile {
+    Dev,
+    Standard,
+    Prod,
+}
+
+impl BootProfile {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "dev" => Some(Self::Dev),
+            "standard" | "balanced" | "default" => Some(Self::Standard),
+            "prod" | "production" | "strict" => Some(Self::Prod),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dev => "dev",
+            Self::Standard => "standard",
+            Self::Prod => "prod",
+        }
+    }
+}
+
+fn boot_profile_env() -> BootProfile {
+    std::env::var("HERMES_BOOT_PROFILE")
+        .ok()
+        .and_then(|v| BootProfile::parse(&v))
+        .unwrap_or(BootProfile::Standard)
+}
+
+fn boot_profile_overall(profile: BootProfile, fail: usize, warn: usize) -> &'static str {
+    match profile {
+        BootProfile::Dev => {
+            if fail == 0 {
+                "PASS"
+            } else {
+                "FAIL"
+            }
+        }
+        BootProfile::Standard => {
+            if fail == 0 {
+                if warn == 0 {
+                    "PASS"
+                } else {
+                    "WARN"
+                }
+            } else {
+                "FAIL"
+            }
+        }
+        BootProfile::Prod => {
+            if fail == 0 && warn == 0 {
+                "PASS"
+            } else {
+                "FAIL"
+            }
+        }
+    }
 }
 
 async fn collect_boot_readiness_checks(app: &App, quick: bool) -> Vec<ReadinessCheck> {
@@ -16664,6 +17441,7 @@ async fn collect_boot_readiness_checks(app: &App, quick: bool) -> Vec<ReadinessC
 }
 
 fn render_boot_readiness_report(checks: &[ReadinessCheck], quick: bool) -> String {
+    let profile = boot_profile_env();
     let mut pass = Vec::new();
     let mut warn = Vec::new();
     let mut fail = Vec::new();
@@ -16689,16 +17467,14 @@ fn render_boot_readiness_report(checks: &[ReadinessCheck], quick: bool) -> Strin
         warn.len(),
         fail.len()
     );
-    let overall = if fail.is_empty() {
-        if warn.is_empty() {
-            "PASS"
-        } else {
-            "WARN"
-        }
-    } else {
-        "FAIL"
-    };
+    let _ = writeln!(out, "profile: {}", profile.as_str());
+    let overall = boot_profile_overall(profile, fail.len(), warn.len());
     let _ = writeln!(out, "overall: {}\n", overall);
+    if profile == BootProfile::Prod && (!warn.is_empty() || !fail.is_empty()) {
+        out.push_str("prod_policy: warnings are treated as launch blockers.\n\n");
+    } else if profile == BootProfile::Dev && !warn.is_empty() && fail.is_empty() {
+        out.push_str("dev_policy: warnings surfaced but do not block overall PASS.\n\n");
+    }
 
     for section in [("PASS", &pass), ("WARN", &warn), ("FAIL", &fail)] {
         if section.1.is_empty() {
@@ -16727,6 +17503,46 @@ fn render_boot_readiness_report(checks: &[ReadinessCheck], quick: bool) -> Strin
 }
 
 async fn handle_boot_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    if args
+        .first()
+        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "profile" | "mode"))
+    {
+        let token = args
+            .get(1)
+            .copied()
+            .unwrap_or("status")
+            .to_ascii_lowercase();
+        match token.as_str() {
+            "status" | "show" => emit_command_output(
+                app,
+                format!(
+                    "Boot profile: {}\nUse `/boot profile list` or `/boot profile dev|standard|prod`.",
+                    boot_profile_env().as_str()
+                ),
+            ),
+            "list" => emit_command_output(
+                app,
+                "Boot profiles:\n- dev: warnings are advisory; only FAIL blocks overall\n- standard: current balanced pass/warn/fail behavior\n- prod: warnings and fails both block overall PASS",
+            ),
+            "clear" => {
+                std::env::remove_var("HERMES_BOOT_PROFILE");
+                emit_command_output(app, "Cleared boot profile override (default=standard).");
+            }
+            other => {
+                let Some(profile) = BootProfile::parse(other) else {
+                    emit_command_output(
+                        app,
+                        "Usage: /boot profile [status|list|dev|standard|prod|clear]",
+                    );
+                    return Ok(CommandResult::Handled);
+                };
+                std::env::set_var("HERMES_BOOT_PROFILE", profile.as_str());
+                emit_command_output(app, format!("Boot profile set to {}.", profile.as_str()));
+            }
+        }
+        return Ok(CommandResult::Handled);
+    }
+
     let quick = args
         .first()
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "quick" | "--quick"))
@@ -16832,6 +17648,75 @@ fn walkthrough_state_path() -> PathBuf {
         .join("state.json")
 }
 
+fn walkthrough_events_path() -> PathBuf {
+    hermes_config::hermes_home()
+        .join("walkthrough")
+        .join("events.jsonl")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WalkthroughEvent {
+    at: String,
+    session_id: String,
+    action: String,
+    mode: String,
+    #[serde(default)]
+    step_id: Option<String>,
+    current_step: usize,
+    completed_count: usize,
+}
+
+fn append_walkthrough_event(
+    session_id: &str,
+    action: &str,
+    state: &WalkthroughState,
+    step_id: Option<&str>,
+) -> Result<(), AgentError> {
+    let path = walkthrough_events_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AgentError::Io(format!("Failed to create {}: {}", parent.display(), e)))?;
+    }
+    let event = WalkthroughEvent {
+        at: chrono::Utc::now().to_rfc3339(),
+        session_id: session_id.to_string(),
+        action: action.to_string(),
+        mode: if state.mode.trim().is_empty() {
+            "quick".to_string()
+        } else {
+            state.mode.clone()
+        },
+        step_id: step_id.map(|v| v.to_string()),
+        current_step: state.current_step,
+        completed_count: state.completed_steps.len(),
+    };
+    let mut writer = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| AgentError::Io(format!("Failed to open {}: {}", path.display(), e)))?;
+    writer
+        .write_all(format!("{}\n", serde_json::to_string(&event).unwrap_or_default()).as_bytes())
+        .map_err(|e| AgentError::Io(format!("Failed to append {}: {}", path.display(), e)))?;
+    Ok(())
+}
+
+fn load_walkthrough_events(limit: usize) -> Vec<WalkthroughEvent> {
+    let path = walkthrough_events_path();
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut events = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<WalkthroughEvent>(line).ok())
+        .collect::<Vec<_>>();
+    if events.len() > limit {
+        let trim = events.len() - limit;
+        events.drain(0..trim);
+    }
+    events
+}
+
 fn walkthrough_steps_for_mode(mode: &str) -> &'static [WalkthroughStep] {
     if mode.eq_ignore_ascii_case("full") {
         WALKTHROUGH_STEPS_FULL
@@ -16889,7 +17774,74 @@ fn render_walkthrough_status(state: &WalkthroughState) -> String {
         let _ = writeln!(out, "    cmd: {}", step.command);
         let _ = writeln!(out, "    done_when: {}", step.success_signal);
     }
-    out.push_str("\nUsage: /walkthrough start [quick|full] | /walkthrough next | /walkthrough done <step-id> | /walkthrough reset");
+    out.push_str("\nUsage: /walkthrough start [quick|full] | /walkthrough next | /walkthrough done <step-id> | /walkthrough reset | /walkthrough insights");
+    out
+}
+
+fn render_walkthrough_insights(state: &WalkthroughState) -> String {
+    let events = load_walkthrough_events(1200);
+    let mut starts_by_mode: HashMap<String, usize> = HashMap::new();
+    let mut completions_by_step: HashMap<String, usize> = HashMap::new();
+    let mut last_event_at: Option<String> = None;
+    for event in &events {
+        last_event_at = Some(event.at.clone());
+        if event.action == "start" {
+            *starts_by_mode.entry(event.mode.clone()).or_insert(0) += 1;
+        }
+        if event.action == "done" {
+            if let Some(step) = &event.step_id {
+                *completions_by_step.entry(step.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    let mode = if state.mode.trim().is_empty() {
+        "quick"
+    } else {
+        state.mode.as_str()
+    };
+    let steps = walkthrough_steps_for_mode(mode);
+    let next_step = steps.iter().find(|step| {
+        !state
+            .completed_steps
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(step.id))
+    });
+    let mut out = String::new();
+    out.push_str("Walkthrough insights\n");
+    out.push_str("--------------------\n");
+    let _ = writeln!(out, "events: {}", events.len());
+    let _ = writeln!(out, "active_mode: {}", mode);
+    if starts_by_mode.is_empty() {
+        out.push_str("starts: none\n");
+    } else {
+        let mut modes = starts_by_mode.into_iter().collect::<Vec<_>>();
+        modes.sort_by(|a, b| b.1.cmp(&a.1));
+        out.push_str("starts:\n");
+        for (name, count) in modes {
+            let _ = writeln!(out, "- {} => {}", name, count);
+        }
+    }
+    if completions_by_step.is_empty() {
+        out.push_str("dropoff: no completed steps yet\n");
+    } else {
+        out.push_str("step_completions:\n");
+        for step in steps {
+            let count = completions_by_step.get(step.id).copied().unwrap_or(0);
+            let _ = writeln!(out, "- {} => {}", step.id, count);
+        }
+    }
+    let _ = writeln!(
+        out,
+        "resume_hint: {}",
+        next_step
+            .map(|step| format!("Run {} ({})", step.command, step.id))
+            .unwrap_or_else(
+                || "Walkthrough complete. Start full mode for deeper checks.".to_string()
+            )
+    );
+    if let Some(ts) = last_event_at {
+        let _ = writeln!(out, "last_event_at: {}", ts);
+    }
     out
 }
 
@@ -16905,6 +17857,7 @@ fn handle_walkthrough_command(app: &mut App, args: &[&str]) -> Result<CommandRes
             if state.mode.trim().is_empty() {
                 state.mode = "quick".to_string();
             }
+            let _ = append_walkthrough_event(&app.session_id, "status", &state, None);
             emit_command_output(app, render_walkthrough_status(&state));
         }
         "start" => {
@@ -16917,6 +17870,7 @@ fn handle_walkthrough_command(app: &mut App, args: &[&str]) -> Result<CommandRes
                 updated_at: chrono::Utc::now().to_rfc3339(),
             };
             save_walkthrough_state(&state)?;
+            let _ = append_walkthrough_event(&app.session_id, "start", &state, None);
             let steps = walkthrough_steps_for_mode(selected);
             let first = steps.first().copied();
             emit_command_output(
@@ -16936,6 +17890,7 @@ fn handle_walkthrough_command(app: &mut App, args: &[&str]) -> Result<CommandRes
             if state.mode.trim().is_empty() {
                 state.mode = "quick".to_string();
             }
+            let _ = append_walkthrough_event(&app.session_id, "next", &state, None);
             let steps = walkthrough_steps_for_mode(&state.mode);
             let next = steps.iter().find(|step| {
                 !state
@@ -16996,23 +17951,34 @@ fn handle_walkthrough_command(app: &mut App, args: &[&str]) -> Result<CommandRes
                 .unwrap_or(steps.len());
             state.updated_at = chrono::Utc::now().to_rfc3339();
             save_walkthrough_state(&state)?;
+            let _ = append_walkthrough_event(&app.session_id, "done", &state, Some(step_id));
             emit_command_output(app, render_walkthrough_status(&state));
         }
         "reset" | "clear" => {
+            let state = load_walkthrough_state();
             let path = walkthrough_state_path();
             if path.exists() {
                 std::fs::remove_file(&path).map_err(|e| {
                     AgentError::Io(format!("Failed to remove {}: {}", path.display(), e))
                 })?;
             }
+            let _ = append_walkthrough_event(&app.session_id, "reset", &state, None);
             emit_command_output(
                 app,
                 "Walkthrough state reset. Run `/walkthrough start quick` to reinitialize.",
             );
         }
+        "insights" => {
+            let mut state = load_walkthrough_state();
+            if state.mode.trim().is_empty() {
+                state.mode = "quick".to_string();
+            }
+            let _ = append_walkthrough_event(&app.session_id, "insights", &state, None);
+            emit_command_output(app, render_walkthrough_insights(&state));
+        }
         _ => emit_command_output(
             app,
-            "Usage: /walkthrough [status|start [quick|full]|next|done <step-id>|reset]",
+            "Usage: /walkthrough [status|start [quick|full]|next|done <step-id>|reset|insights]",
         ),
     }
     Ok(CommandResult::Handled)
@@ -23262,6 +24228,154 @@ mod tests {
         assert!(assessment.requires_approval);
         assert!(assessment.severity >= 7);
         std::env::remove_var("HERMES_TRIGGER_TRIAGE_MODE");
+    }
+
+    #[test]
+    fn p2_trigger_triage_feedback_persists_bias_and_influences_scoring() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TempHomeGuard::new(tmp.path());
+        let baseline = evaluate_trigger_triage("webhook", "timeout error while polling");
+        let feedback_assessment = evaluate_trigger_triage("webhook", "critical outage and panic");
+        append_triage_learning_feedback(
+            "webhook",
+            "critical outage and panic",
+            "critical",
+            &feedback_assessment,
+        )
+        .expect("append triage feedback");
+        let (bias, _) = triage_learning_bias("webhook", "timeout error while polling");
+        assert!(bias > 0);
+        let after = evaluate_trigger_triage("webhook", "timeout error while polling");
+        assert!(after.severity >= baseline.severity);
+        assert!(
+            trigger_triage_learning_state_path().exists(),
+            "triage learning state file should be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn p2_subconscious_profile_dry_run_blocks_high_risk_tasks() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TempHomeGuard::new(tmp.path());
+        let mut app = build_test_app_with_stream(tmp.path()).await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let state = SubconsciousQueueState {
+            tasks: vec![SubconsciousTask {
+                id: "sc-risky".to_string(),
+                source: "test".to_string(),
+                prompt: "rotate key and deploy to prod".to_string(),
+                score: 4.2,
+                risk: "high".to_string(),
+                requires_approval: false,
+                status: "pending".to_string(),
+                job_id: None,
+                created_at: now.clone(),
+                updated_at: now,
+            }],
+        };
+        save_subconscious_state(&state).expect("save subconscious state");
+
+        handle_slash_command(
+            &mut app,
+            "/subconscious",
+            &["run", "1", "--dry-run", "profile=strict"],
+        )
+        .await
+        .expect("subconscious dry-run");
+        let out = latest_ui_assistant_text(&app);
+        assert!(out.contains("Dry-run subconscious run profile=strict"));
+        assert!(out.contains("blocked=1"));
+    }
+
+    #[tokio::test]
+    async fn p2_walkthrough_insights_persists_events() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TempHomeGuard::new(tmp.path());
+        let mut app = build_test_app_with_stream(tmp.path()).await;
+
+        handle_slash_command(&mut app, "/walkthrough", &["start", "quick"])
+            .await
+            .expect("walkthrough start");
+        handle_slash_command(&mut app, "/walkthrough", &["done", "boot-gate"])
+            .await
+            .expect("walkthrough done");
+        handle_slash_command(&mut app, "/walkthrough", &["insights"])
+            .await
+            .expect("walkthrough insights");
+        let out = latest_ui_assistant_text(&app);
+        assert!(out.contains("Walkthrough insights"));
+        assert!(out.contains("resume_hint:"));
+        assert!(walkthrough_events_path().exists());
+    }
+
+    #[tokio::test]
+    async fn p2_integrations_snapshot_and_repair_commands_work() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TempHomeGuard::new(tmp.path());
+        let mut app = build_test_app_with_stream(tmp.path()).await;
+
+        handle_slash_command(&mut app, "/integrations", &["snapshot"])
+            .await
+            .expect("integrations snapshot");
+        let snapshot_out = latest_ui_assistant_text(&app);
+        assert!(snapshot_out.contains("Integration snapshot exported"));
+
+        handle_slash_command(&mut app, "/integrations", &["repair"])
+            .await
+            .expect("integrations repair");
+        let repair_out = latest_ui_assistant_text(&app);
+        assert!(repair_out.contains("Integrations repair plan"));
+    }
+
+    #[tokio::test]
+    async fn p2_compress_rules_autotune_apply_updates_runtime_env() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TempHomeGuard::new(tmp.path());
+        let mut app = build_test_app_with_stream(tmp.path()).await;
+        std::env::remove_var("HERMES_TUI_MAX_TOOL_OUTPUT_TOTAL_CHARS");
+
+        handle_slash_command(
+            &mut app,
+            "/compress",
+            &["rules", "autotune", "apply", "user"],
+        )
+        .await
+        .expect("compress autotune apply");
+        let out = latest_ui_assistant_text(&app);
+        assert!(out.contains("Autotune applied"));
+        assert!(
+            std::env::var("HERMES_TUI_MAX_TOOL_OUTPUT_TOTAL_CHARS")
+                .ok()
+                .is_some(),
+            "autotune should write runtime compression env"
+        );
+    }
+
+    #[test]
+    fn p2_oauth_runtime_gate_manifest_override_is_honored() {
+        let _guard = env_test_lock();
+        let tmp = tempdir().expect("tempdir");
+        let manifest = tmp.path().join("oauth-manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{
+  "default_min_version": "99.0.0",
+  "required_oauth_provider_ids": ["nous"],
+  "provider_min_versions": { "nous": "99.0.0" }
+}"#,
+        )
+        .expect("write manifest");
+        std::env::set_var("HERMES_OAUTH_GATE_MANIFEST_PATH", &manifest);
+        let (ok, detail) = oauth_runtime_gate_for_provider("nous").expect("oauth gate");
+        assert!(!ok);
+        assert!(detail.contains("required>=99.0.0"));
+        assert!(detail.contains("oauth-manifest.json"));
+        std::env::remove_var("HERMES_OAUTH_GATE_MANIFEST_PATH");
     }
 
     #[test]

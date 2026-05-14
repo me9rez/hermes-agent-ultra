@@ -51,6 +51,7 @@ const SESSION_SNAPSHOT_MAX_TOTAL_BYTES_DEFAULT: u64 = 1536 * 1024 * 1024;
 const SESSION_SNAPSHOT_MIN_FREE_BYTES_DEFAULT: u64 = 128 * 1024 * 1024;
 const QUORUM_HINT_PREFIX: &str = "[QUORUM_MODE] ";
 const QUORUM_MAX_VOTER_OUTPUT_CHARS: usize = 20_000;
+const QUORUM_DEFAULT_VOTER_PASSES: usize = 3;
 
 #[derive(Debug, Clone)]
 struct SessionSnapshotEntry {
@@ -874,6 +875,221 @@ impl App {
         models
     }
 
+    fn quorum_voter_passes() -> usize {
+        std::env::var("HERMES_QUORUM_VOTER_PASSES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .map(|v| v.clamp(1, 4))
+            .unwrap_or(QUORUM_DEFAULT_VOTER_PASSES)
+    }
+
+    fn normalize_quorum_model_target(current_model: &str, raw: &str) -> String {
+        let candidate = raw.trim();
+        if candidate.is_empty() {
+            return current_model.trim().to_string();
+        }
+        if let Some((provider, model)) = candidate.split_once(':') {
+            return format!("{}:{}", provider.trim().to_ascii_lowercase(), model.trim());
+        }
+        let (provider, _) = resolve_provider_and_model(&GatewayConfig::default(), current_model);
+        format!("{}:{}", provider.trim().to_ascii_lowercase(), candidate)
+    }
+
+    fn split_provider_model(provider_model: &str) -> (&str, &str) {
+        if let Some((provider, model)) = provider_model.split_once(':') {
+            (provider, model)
+        } else {
+            ("", provider_model)
+        }
+    }
+
+    fn resolve_quorum_catalog_candidate(
+        requested_model: &str,
+        catalog: &[String],
+    ) -> Option<String> {
+        if catalog.is_empty() {
+            return None;
+        }
+        let requested_trimmed = requested_model.trim();
+        if requested_trimmed.is_empty() {
+            return catalog.first().cloned();
+        }
+        if let Some(hit) = catalog
+            .iter()
+            .find(|m| m.trim().eq_ignore_ascii_case(requested_trimmed))
+        {
+            return Some(hit.clone());
+        }
+        let requested_lc = requested_trimmed.to_ascii_lowercase();
+        let slash_suffix = format!("/{}", requested_lc);
+        if let Some(hit) = catalog.iter().find(|m| {
+            let lower = m.trim().to_ascii_lowercase();
+            lower.ends_with(&slash_suffix) || lower == requested_lc
+        }) {
+            return Some(hit.clone());
+        }
+        Self::rank_catalog_candidates(requested_trimmed, catalog, 1)
+            .into_iter()
+            .next()
+    }
+
+    fn rank_catalog_candidates(
+        requested_model: &str,
+        catalog: &[String],
+        limit: usize,
+    ) -> Vec<String> {
+        if catalog.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let requested = requested_model.trim().to_ascii_lowercase();
+        if requested.is_empty() {
+            return catalog.iter().take(limit).cloned().collect();
+        }
+        let requested_tail = requested.rsplit('/').next().unwrap_or(requested.as_str());
+        let requested_norm: String = requested
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+
+        let mut scored: Vec<(usize, usize, String)> = catalog
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, candidate)| {
+                let cand_trimmed = candidate.trim();
+                if cand_trimmed.is_empty() {
+                    return None;
+                }
+                let cand = cand_trimmed.to_ascii_lowercase();
+                let cand_tail = cand.rsplit('/').next().unwrap_or(cand.as_str());
+                let cand_norm: String =
+                    cand.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+
+                let mut score = 0usize;
+                if cand == requested {
+                    score += 10_000;
+                }
+                if cand_tail == requested_tail {
+                    score += 8_000;
+                }
+                if cand.ends_with(&format!("/{}", requested_tail)) {
+                    score += 6_000;
+                }
+                if cand.contains(requested_tail) || requested_tail.contains(cand_tail) {
+                    score += 2_000;
+                }
+
+                let shared_prefix = requested_norm
+                    .chars()
+                    .zip(cand_norm.chars())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                score += shared_prefix.saturating_mul(40);
+
+                let shared_chars = requested_norm
+                    .chars()
+                    .filter(|ch| cand_norm.contains(*ch))
+                    .count();
+                score += shared_chars.saturating_mul(12);
+
+                let len_delta = requested_norm.len().abs_diff(cand_norm.len());
+                score = score.saturating_sub(len_delta.saturating_mul(4));
+                if score == 0 {
+                    return None;
+                }
+                Some((score, idx, cand_trimmed.to_string()))
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, candidate)| candidate)
+            .collect()
+    }
+
+    async fn resolve_quorum_models(&self, policy: &QuorumPolicy) -> (Vec<String>, Vec<String>) {
+        let raw = Self::collect_quorum_models(policy, &self.current_model);
+        if raw.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let mut notes = Vec::new();
+        let mut resolved = Vec::new();
+        for raw_target in raw {
+            let normalized = Self::normalize_quorum_model_target(&self.current_model, &raw_target);
+            let (provider, model_id) = Self::split_provider_model(&normalized);
+            let provider = provider.trim().to_ascii_lowercase();
+            let model_id = model_id.trim();
+            if provider.is_empty() || model_id.is_empty() {
+                continue;
+            }
+            let mut final_target = normalized.clone();
+            let catalog = provider_model_ids(&provider).await;
+            if !catalog.is_empty() {
+                if let Some(candidate) = Self::resolve_quorum_catalog_candidate(model_id, &catalog)
+                {
+                    final_target = format!("{}:{}", provider, candidate.trim());
+                    if !final_target.eq_ignore_ascii_case(&normalized) {
+                        notes.push(format!(
+                            "quorum model remapped via catalog: {} -> {}",
+                            normalized, final_target
+                        ));
+                    }
+                } else if let Some(fallback) = catalog.first() {
+                    let ranked = Self::rank_catalog_candidates(model_id, &catalog, 3);
+                    final_target = format!("{}:{}", provider, fallback.trim());
+                    notes.push(format!(
+                        "quorum model not in provider catalog: {} ; fallback -> {} ; close matches: {}",
+                        normalized,
+                        final_target,
+                        if ranked.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            ranked.join(", ")
+                        }
+                    ));
+                }
+            }
+            if !resolved
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(&final_target))
+            {
+                resolved.push(final_target);
+            }
+        }
+        (resolved, notes)
+    }
+
+    fn build_quorum_voter_prompt(pass_index: usize, total_passes: usize, model: &str) -> String {
+        if pass_index == 0 {
+            return format!(
+                "[QUORUM_VOTER] model={}\n\
+                 You are in deep-voter mode. Do rigorous objective-first work, not a shallow one-pass answer.\n\
+                 Required phases:\n\
+                 1) hypothesis framing,\n\
+                 2) contradiction/null-hypothesis attack,\n\
+                 3) final synthesis with explicit confidence and risk caveats.\n\
+                 Evidence requirements:\n\
+                 - include concrete evidence bullets (tools/data/reasoning traces)\n\
+                 - include at least one counter-argument before final answer.\n\
+                 This is pass {}/{}.",
+                model,
+                pass_index + 1,
+                total_passes
+            );
+        }
+        format!(
+            "[QUORUM_VOTER_REVIEW] pass {}/{}\n\
+             Critique and strengthen your prior answer.\n\
+             - Assume the previous draft is partially wrong.\n\
+             - Fix weak claims, tighten evidence, and improve actionability.\n\
+             - Keep objective truth over optimism.",
+            pass_index + 1,
+            total_passes
+        )
+    }
+
     fn extract_last_assistant_output(messages: &[hermes_core::Message]) -> String {
         for message in messages.iter().rev() {
             if message.role != hermes_core::MessageRole::Assistant {
@@ -1469,7 +1685,10 @@ impl App {
         run_started_at: Instant,
         policy: QuorumPolicy,
     ) -> Result<bool, AgentError> {
-        let voter_models = Self::collect_quorum_models(&policy, &self.current_model);
+        let (voter_models, model_resolution_notes) = self.resolve_quorum_models(&policy).await;
+        for note in model_resolution_notes {
+            Self::emit_lifecycle_event(&self.stream_handle_shared, note);
+        }
         if voter_models.len() < 2 {
             Self::emit_lifecycle_event(
                 &self.stream_handle_shared,
@@ -1519,46 +1738,94 @@ impl App {
                 .await;
 
             let started = Instant::now();
-            let mut attempts = 0usize;
             let max_attempts = 2usize;
+            let voter_passes = Self::quorum_voter_passes();
+            let mut pass_errors: Vec<String> = Vec::new();
+            let mut combined_output = String::new();
+            let mut combined_turns: u32 = 0;
+            let mut combined_tool_errors: usize = 0;
             let mut last_err: Option<AgentError> = None;
-            let mut maybe_result: Option<hermes_core::AgentResult> = None;
-            while attempts < max_attempts {
-                attempts += 1;
-                match self
-                    .run_messages_with_current_agent(base_messages.clone(), false)
-                    .await
-                {
-                    Ok(result) => {
-                        maybe_result = Some(result);
-                        break;
-                    }
-                    Err(err) => {
-                        if Self::is_provider_auth_or_session_error(&err) && attempts < max_attempts
-                        {
-                            let refreshed = self.force_auth_refresh_after_error().await;
-                            if refreshed {
-                                continue;
-                            }
+
+            for pass_idx in 0..voter_passes {
+                Self::emit_lifecycle_event(
+                    &self.stream_handle_shared,
+                    format!(
+                        "quorum voter {}/{} pass {}/{}",
+                        display_index,
+                        voter_models.len(),
+                        pass_idx + 1,
+                        voter_passes
+                    ),
+                );
+
+                let mut pass_messages = base_messages.clone();
+                if pass_idx > 0 && !combined_output.trim().is_empty() {
+                    pass_messages.push(hermes_core::Message::assistant(combined_output.clone()));
+                }
+                pass_messages.push(hermes_core::Message::system(
+                    Self::build_quorum_voter_prompt(pass_idx, voter_passes, model),
+                ));
+
+                let mut attempts = 0usize;
+                let mut maybe_result: Option<hermes_core::AgentResult> = None;
+                while attempts < max_attempts {
+                    attempts += 1;
+                    match self
+                        .run_messages_with_current_agent(pass_messages.clone(), false)
+                        .await
+                    {
+                        Ok(result) => {
+                            maybe_result = Some(result);
+                            break;
                         }
-                        last_err = Some(err);
-                        break;
+                        Err(err) => {
+                            if Self::is_provider_auth_or_session_error(&err)
+                                && attempts < max_attempts
+                            {
+                                let refreshed = self.force_auth_refresh_after_error().await;
+                                if refreshed {
+                                    continue;
+                                }
+                            }
+                            last_err = Some(err);
+                            break;
+                        }
                     }
+                }
+
+                let Some(result) = maybe_result else {
+                    if let Some(err) = &last_err {
+                        pass_errors.push(format!("pass {}: {}", pass_idx + 1, err));
+                    } else {
+                        pass_errors.push(format!("pass {}: unknown error", pass_idx + 1));
+                    }
+                    break;
+                };
+
+                combined_turns = combined_turns.saturating_add(result.total_turns);
+                combined_tool_errors =
+                    combined_tool_errors.saturating_add(result.tool_errors.len());
+                let latest = Self::extract_last_assistant_output(&result.messages);
+                if !latest.trim().is_empty() {
+                    combined_output = latest;
+                } else {
+                    pass_errors.push(format!("pass {}: empty assistant output", pass_idx + 1));
+                    break;
                 }
             }
 
-            if let Some(result) = maybe_result {
-                let output = Self::truncate_for_quorum(
-                    &Self::extract_last_assistant_output(&result.messages),
-                    QUORUM_MAX_VOTER_OUTPUT_CHARS,
-                );
+            if !combined_output.trim().is_empty() {
+                let output =
+                    Self::truncate_for_quorum(&combined_output, QUORUM_MAX_VOTER_OUTPUT_CHARS);
                 let status = if output.trim().is_empty() {
                     "empty"
                 } else {
                     succeeded += 1;
                     "ok"
                 };
-                let error = if output.trim().is_empty() {
+                let error = if !pass_errors.is_empty() {
+                    Some(pass_errors.join(" | "))
+                } else if output.trim().is_empty() {
                     Some("voter returned empty assistant output".to_string())
                 } else {
                     None
@@ -1567,8 +1834,8 @@ impl App {
                     model: model.clone(),
                     status: status.to_string(),
                     duration_ms: started.elapsed().as_millis() as u64,
-                    total_turns: result.total_turns,
-                    tool_errors: result.tool_errors.len(),
+                    total_turns: combined_turns,
+                    tool_errors: combined_tool_errors,
                     output,
                     error,
                 });
@@ -1576,13 +1843,14 @@ impl App {
                 let err_text = last_err
                     .as_ref()
                     .map(ToString::to_string)
+                    .or_else(|| (!pass_errors.is_empty()).then(|| pass_errors.join(" | ")))
                     .unwrap_or_else(|| "unknown voter error".to_string());
                 outcomes.push(QuorumVoterOutcome {
                     model: model.clone(),
                     status: "error".to_string(),
                     duration_ms: started.elapsed().as_millis() as u64,
-                    total_turns: 0,
-                    tool_errors: 0,
+                    total_turns: combined_turns,
+                    tool_errors: combined_tool_errors,
                     output: String::new(),
                     error: Some(err_text),
                 });
@@ -2123,10 +2391,14 @@ impl App {
             || message.contains("403")
             || message.contains("unauthorized")
             || message.contains("invalid token")
+            || message.contains("token_expired")
+            || message.contains("expired_token")
             || message.contains("token expired")
             || message.contains("invalid_token")
             || message.contains("expired")
             || message.contains("authentication")
+            || message.contains("session expired")
+            || message.contains("provider rejected")
     }
 
     async fn force_auth_refresh_after_error(&mut self) -> bool {
@@ -2252,24 +2524,23 @@ impl App {
             return None;
         }
 
-        let current_trimmed = current_model_id.trim().to_ascii_lowercase();
-        let slash_suffix = format!("/{}", current_trimmed);
-        let selected = catalog
-            .iter()
-            .find(|m| {
-                let lower = m.trim().to_ascii_lowercase();
-                lower == current_trimmed || lower.ends_with(&slash_suffix)
-            })
-            .cloned()
+        let selected = Self::resolve_quorum_catalog_candidate(current_model_id, &catalog)
             .or_else(|| catalog.first().cloned())?;
 
         let next_model = format!("{}:{}", provider, selected.trim());
         if next_model.eq_ignore_ascii_case(&self.current_model) {
             return None;
         }
+        let close = Self::rank_catalog_candidates(current_model_id, &catalog, 3);
         let notice = format!(
-            "Model catalog remediation: `{}` failed with not-found; switching to `{}` and retrying once.",
-            self.current_model, next_model
+            "Model catalog remediation: `{}` failed with not-found; switching to `{}` and retrying once. close matches: {}",
+            self.current_model,
+            next_model,
+            if close.is_empty() {
+                "(none)".to_string()
+            } else {
+                close.join(", ")
+            }
         );
         Some((next_model, notice))
     }
@@ -3299,6 +3570,28 @@ mod tests {
         assert!(App::is_provider_auth_or_session_error(&err));
         let non_auth = AgentError::LlmApi("API error 404 Not Found: model missing".to_string());
         assert!(!App::is_provider_auth_or_session_error(&non_auth));
+    }
+
+    #[test]
+    fn test_rank_catalog_candidates_prefers_syntactic_nearest() {
+        let catalog = vec![
+            "qwen/qwen3.6-plus".to_string(),
+            "qwen/qwen3.6-max-preview".to_string(),
+            "deepseek/deepseek-r1".to_string(),
+        ];
+        let ranked = App::rank_catalog_candidates("qwen3.6-max", &catalog, 2);
+        assert!(!ranked.is_empty());
+        assert_eq!(ranked[0], "qwen/qwen3.6-max-preview");
+    }
+
+    #[test]
+    fn test_resolve_quorum_catalog_candidate_uses_relative_match_when_exact_missing() {
+        let catalog = vec![
+            "moonshotai/kimi-k2.6".to_string(),
+            "qwen/qwen3.6-max-preview".to_string(),
+        ];
+        let resolved = App::resolve_quorum_catalog_candidate("qwen3.6-max", &catalog);
+        assert_eq!(resolved.as_deref(), Some("qwen/qwen3.6-max-preview"));
     }
 
     #[test]

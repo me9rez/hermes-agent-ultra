@@ -3628,7 +3628,83 @@ fn resolve_catalog_model_candidate(requested_model: &str, catalog: &[String]) ->
     }) {
         return Some(hit.clone());
     }
-    None
+    rank_catalog_model_candidates(requested_trimmed, catalog, 1)
+        .into_iter()
+        .next()
+}
+
+fn rank_catalog_model_candidates(
+    requested_model: &str,
+    catalog: &[String],
+    limit: usize,
+) -> Vec<String> {
+    if catalog.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let requested = requested_model.trim().to_ascii_lowercase();
+    if requested.is_empty() {
+        return catalog.iter().take(limit).cloned().collect();
+    }
+    let requested_tail = requested.rsplit('/').next().unwrap_or(requested.as_str());
+    let requested_norm: String = requested
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+
+    let mut scored: Vec<(usize, usize, String)> = catalog
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, candidate)| {
+            let cand_trimmed = candidate.trim();
+            if cand_trimmed.is_empty() {
+                return None;
+            }
+            let cand = cand_trimmed.to_ascii_lowercase();
+            let cand_tail = cand.rsplit('/').next().unwrap_or(cand.as_str());
+            let cand_norm: String = cand.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+            let mut score = 0usize;
+
+            if cand == requested {
+                score += 10_000;
+            }
+            if cand_tail == requested_tail {
+                score += 8_000;
+            }
+            if cand.ends_with(&format!("/{}", requested_tail)) {
+                score += 6_000;
+            }
+            if cand.contains(requested_tail) || requested_tail.contains(cand_tail) {
+                score += 2_000;
+            }
+
+            let shared_prefix = requested_norm
+                .chars()
+                .zip(cand_norm.chars())
+                .take_while(|(a, b)| a == b)
+                .count();
+            score += shared_prefix.saturating_mul(40);
+
+            let shared_chars = requested_norm
+                .chars()
+                .filter(|ch| cand_norm.contains(*ch))
+                .count();
+            score += shared_chars.saturating_mul(12);
+
+            let len_delta = requested_norm.len().abs_diff(cand_norm.len());
+            score = score.saturating_sub(len_delta.saturating_mul(4));
+            if score == 0 {
+                return None;
+            }
+            Some((score, idx, cand_trimmed.to_string()))
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, candidate)| candidate)
+        .collect()
 }
 
 async fn guard_provider_model_selection(
@@ -3666,10 +3742,16 @@ async fn guard_provider_model_selection(
         return Ok((provider_model.to_string(), None));
     }
     let Some(candidate) = resolve_catalog_model_candidate(model_id, &catalog) else {
+        let suggestions = rank_catalog_model_candidates(model_id, &catalog, 5);
         return Err(AgentError::Config(format!(
-            "Model '{}' is not available for provider '{}'. Use `/model {}` to pick a valid catalog entry.",
+            "Model '{}' is not available for provider '{}'. Close matches: {}. Use `/model {}` to pick a valid catalog entry.",
             model_id.trim(),
             provider,
+            if suggestions.is_empty() {
+                "(none)".to_string()
+            } else {
+                suggestions.join(", ")
+            },
             provider,
         )));
     };
@@ -13045,11 +13127,57 @@ async fn handle_quorum_command(app: &mut App, args: &[&str]) -> Result<CommandRe
                 return Ok(CommandResult::Handled);
             }
             let joined = args[1..].join(" ");
-            let models: Vec<String> = joined
+            let parsed: Vec<String> = joined
                 .split(',')
                 .map(|m| m.trim().to_string())
                 .filter(|m| !m.is_empty())
                 .collect();
+            let (default_provider, _) = split_provider_model(&app.current_model);
+            let default_provider = default_provider.trim().to_ascii_lowercase();
+            let mut models: Vec<String> = Vec::new();
+            let mut notes: Vec<String> = Vec::new();
+            for raw in parsed {
+                let normalized = if raw.contains(':') {
+                    normalize_provider_model(raw.as_str())?
+                } else {
+                    normalize_provider_model(format!("{}:{}", default_provider, raw).as_str())?
+                };
+                let (provider, model_id) = split_provider_model(&normalized);
+                let provider = provider.trim().to_ascii_lowercase();
+                let model_id = model_id.trim();
+                if provider.is_empty() || model_id.is_empty() {
+                    continue;
+                }
+                let mut final_model = normalized.clone();
+                let catalog = provider_model_ids(&provider).await;
+                if !catalog.is_empty() {
+                    if let Some(candidate) = resolve_catalog_model_candidate(model_id, &catalog) {
+                        final_model = format!("{}:{}", provider, candidate.trim());
+                        if !final_model.eq_ignore_ascii_case(&normalized) {
+                            notes.push(format!("{} -> {}", normalized, final_model));
+                        }
+                    } else if let Some(fallback) = catalog.first() {
+                        let close = rank_catalog_model_candidates(model_id, &catalog, 3);
+                        final_model = format!("{}:{}", provider, fallback.trim());
+                        notes.push(format!(
+                            "{} -> {} (close: {})",
+                            normalized,
+                            final_model,
+                            if close.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                close.join(", ")
+                            }
+                        ));
+                    }
+                }
+                if !models
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(&final_model))
+                {
+                    models.push(final_model);
+                }
+            }
             let current = load_quorum_policy()?;
             let policy = set_quorum_policy(current.enabled, None, Some(models))?;
             if policy.enabled {
@@ -13057,14 +13185,26 @@ async fn handle_quorum_command(app: &mut App, args: &[&str]) -> Result<CommandRe
             }
             emit_command_output(
                 app,
-                format!(
-                    "Quorum models updated: {}",
-                    if policy.models.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        policy.models.join(", ")
-                    }
-                ),
+                if notes.is_empty() {
+                    format!(
+                        "Quorum models updated: {}",
+                        if policy.models.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            policy.models.join(", ")
+                        }
+                    )
+                } else {
+                    format!(
+                        "Quorum models updated: {}\nCatalog remaps: {}",
+                        if policy.models.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            policy.models.join(", ")
+                        },
+                        notes.join(" | ")
+                    )
+                },
             );
         }
         "run" => {
@@ -15212,6 +15352,34 @@ fn query_mode_tools_enabled(query_mode: bool, allow_tools_flag: bool) -> bool {
     true
 }
 
+fn query_mode_model_not_found(err: &hermes_core::AgentError) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    (msg.contains("model") && msg.contains("not found"))
+        || msg.contains("requested model does not exist")
+        || msg.contains("openrouter catalog")
+}
+
+async fn query_mode_remediation_target(provider_model: &str) -> Option<(String, Vec<String>)> {
+    let (provider, model_id) = split_provider_model(provider_model);
+    let provider = provider.trim().to_ascii_lowercase();
+    if provider.is_empty() || model_id.trim().is_empty() {
+        return None;
+    }
+    let catalog = provider_model_ids(&provider).await;
+    if catalog.is_empty() {
+        return None;
+    }
+    let close = rank_catalog_model_candidates(model_id.trim(), &catalog, 5);
+    let selected = resolve_catalog_model_candidate(model_id.trim(), &catalog)
+        .or_else(|| close.first().cloned())
+        .or_else(|| catalog.first().cloned())?;
+    let next = format!("{}:{}", provider, selected.trim());
+    if next.eq_ignore_ascii_case(provider_model) {
+        return None;
+    }
+    Some((next, close))
+}
+
 /// Handle `hermes chat [--query ...] [--preload-skill ...] [--yolo]`.
 pub async fn handle_cli_chat(
     query: Option<String>,
@@ -15284,48 +15452,89 @@ pub async fn handle_cli_chat(
     };
     let agent_tool_registry = Arc::new(crate::app::bridge_tool_registry(&tool_registry));
 
-    let agent_config = crate::app::build_agent_config(&config, &current_model);
-    let provider = crate::app::build_provider(&config, &current_model);
-
-    let on_tool_start: Box<dyn Fn(&str, &serde_json::Value) + Send + Sync> =
-        Box::new(move |name: &str, args: &serde_json::Value| {
-            let emoji = tool_emoji(name);
-            let preview = build_tool_preview_from_value(name, args, 56).unwrap_or_default();
-            if preview.is_empty() {
-                println!("┊ {emoji} {name}");
-            } else {
-                println!("┊ {emoji} {name:<16} {preview}");
-            }
-        });
-    let on_tool_complete: Box<dyn Fn(&str, &str) + Send + Sync> =
-        Box::new(move |name: &str, result: &str| {
-            let mut snippet: String = result.trim().chars().take(96).collect();
-            if result.trim().chars().count() > 96 {
-                snippet.push_str("...");
-            }
-            let emoji = tool_emoji(name);
-            if snippet.is_empty() {
-                println!("┊ {emoji} {name:<16} done");
-            } else {
-                println!("┊ {emoji} {name:<16} done: {snippet}");
-            }
-        });
-    let callbacks = hermes_agent::AgentCallbacks {
-        on_tool_start: Some(on_tool_start),
-        on_tool_complete: Some(on_tool_complete),
-        ..Default::default()
+    let build_query_agent = |provider_model: &str| {
+        let on_tool_start: Box<dyn Fn(&str, &serde_json::Value) + Send + Sync> =
+            Box::new(move |name: &str, args: &serde_json::Value| {
+                let emoji = tool_emoji(name);
+                let preview = build_tool_preview_from_value(name, args, 56).unwrap_or_default();
+                if preview.is_empty() {
+                    println!("┊ {emoji} {name}");
+                } else {
+                    println!("┊ {emoji} {name:<16} {preview}");
+                }
+            });
+        let on_tool_complete: Box<dyn Fn(&str, &str) + Send + Sync> =
+            Box::new(move |name: &str, result: &str| {
+                let mut snippet: String = result.trim().chars().take(96).collect();
+                if result.trim().chars().count() > 96 {
+                    snippet.push_str("...");
+                }
+                let emoji = tool_emoji(name);
+                if snippet.is_empty() {
+                    println!("┊ {emoji} {name:<16} done");
+                } else {
+                    println!("┊ {emoji} {name:<16} done: {snippet}");
+                }
+            });
+        let callbacks = hermes_agent::AgentCallbacks {
+            on_tool_start: Some(on_tool_start),
+            on_tool_complete: Some(on_tool_complete),
+            ..Default::default()
+        };
+        let agent_config = crate::app::build_agent_config(&config, provider_model);
+        let provider = crate::app::build_provider(&config, provider_model);
+        let base =
+            hermes_agent::AgentLoop::new(agent_config, Arc::clone(&agent_tool_registry), provider)
+                .with_callbacks(callbacks);
+        if query_mode {
+            base
+        } else {
+            hermes_agent::attach_discovered_memory(base)
+        }
     };
-    let agent = hermes_agent::attach_discovered_memory(hermes_agent::AgentLoop::new(
-        agent_config,
-        agent_tool_registry,
-        provider,
-    ))
-    .with_callbacks(callbacks);
 
     match query {
         Some(q) => {
             let messages = vec![hermes_core::Message::user(&q)];
-            let result = agent.run(messages, Some(tool_schemas)).await?;
+            let mut active_model = current_model.clone();
+            if let Some((next_model, close)) = query_mode_remediation_target(&active_model).await {
+                println!(
+                    "[Model remediation: {} -> {}. Close matches: {}]",
+                    active_model,
+                    next_model,
+                    if close.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        close.join(", ")
+                    }
+                );
+                active_model = next_model;
+            }
+            apply_cli_chat_runtime_env(&active_model);
+            let agent = build_query_agent(&active_model);
+            let result = match agent.run(messages, Some(tool_schemas.clone())).await {
+                Ok(result) => result,
+                Err(err) => {
+                    if query_mode_model_not_found(&err) {
+                        if let Some((next_model, close)) =
+                            query_mode_remediation_target(&active_model).await
+                        {
+                            return Err(hermes_core::AgentError::Config(format!(
+                                "{}\nModel remediation suggestion: {} -> {} (close matches: {})",
+                                err,
+                                active_model,
+                                next_model,
+                                if close.is_empty() {
+                                    "(none)".to_string()
+                                } else {
+                                    close.join(", ")
+                                }
+                            )));
+                        }
+                    }
+                    return Err(err);
+                }
+            };
 
             let reply = result
                 .messages
@@ -22462,6 +22671,34 @@ install_command: "uv pip install -r requirements.txt"
         ];
         let chosen = resolve_catalog_model_candidate("kimi-k2.6", &catalog).expect("candidate");
         assert_eq!(chosen, "moonshotai/kimi-k2.6");
+    }
+
+    #[test]
+    fn resolve_catalog_model_candidate_uses_relative_match_for_near_miss() {
+        let catalog = vec![
+            "qwen/qwen3.6-plus".to_string(),
+            "qwen/qwen3.6-max-preview".to_string(),
+            "moonshotai/kimi-k2.6".to_string(),
+        ];
+        let chosen = resolve_catalog_model_candidate("qwen3.6-max", &catalog).expect("candidate");
+        assert_eq!(chosen, "qwen/qwen3.6-max-preview");
+    }
+
+    #[test]
+    fn rank_catalog_model_candidates_returns_best_first() {
+        let catalog = vec![
+            "qwen/qwen3.6-plus".to_string(),
+            "qwen/qwen3.6-max-preview".to_string(),
+            "moonshotai/kimi-k2.6".to_string(),
+        ];
+        let ranked = rank_catalog_model_candidates("qwen3.6-max", &catalog, 2);
+        assert_eq!(
+            ranked,
+            vec![
+                "qwen/qwen3.6-max-preview".to_string(),
+                "qwen/qwen3.6-plus".to_string()
+            ]
+        );
     }
 
     #[test]

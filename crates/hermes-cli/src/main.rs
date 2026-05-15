@@ -313,6 +313,49 @@ async fn main() {
                     global_allow_tools_override,
                 )
                 .await;
+                if provider == "nous" {
+                    if let Err(retry_err) = &result {
+                        if oneshot_auto_verify_oauth_provider(
+                            retry_err,
+                            Some(provider.as_str()),
+                            global_model_override.as_deref(),
+                        )
+                        .as_deref()
+                            == Some("nous")
+                        {
+                            eprintln!(
+                                "Nous OAuth still invalid; launching `hermes-ultra auth login nous` and retrying once..."
+                            );
+                            if let Err(login_err) = run_auth(
+                                cli.clone(),
+                                Some("login".to_string()),
+                                Some("nous".to_string()),
+                                None,
+                                None,
+                                None,
+                                None,
+                                false,
+                            )
+                            .await
+                            {
+                                eprintln!(
+                                    "Warning: automatic `auth login nous` failed: {}",
+                                    login_err
+                                );
+                            } else {
+                                result = hermes_cli::commands::handle_cli_chat(
+                                    Some(cli.oneshot.clone().unwrap_or_default()),
+                                    None,
+                                    false,
+                                    global_model_override.clone(),
+                                    global_provider_override.clone(),
+                                    global_allow_tools_override,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
             }
         }
         if let Err(e) = result {
@@ -9795,7 +9838,7 @@ fn build_elite_doctor_diagnostics(cli: &Cli) -> serde_json::Value {
     let policy_preset = std::env::var("HERMES_TOOL_POLICY_PRESET")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "balanced".to_string());
+        .unwrap_or_else(|| "relaxed".to_string());
 
     let elite_gate_script = std::env::var("HERMES_ELITE_GATE_CMD")
         .ok()
@@ -11982,7 +12025,7 @@ async fn run_status(cli: Cli) -> Result<(), AgentError> {
     let policy_preset = std::env::var("HERMES_TOOL_POLICY_PRESET")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "balanced".to_string());
+        .unwrap_or_else(|| "relaxed".to_string());
     let policy_counters_path = default_tool_policy_counters_path();
     let policy_counters = load_tool_policy_counters(&policy_counters_path).unwrap_or_default();
     println!(

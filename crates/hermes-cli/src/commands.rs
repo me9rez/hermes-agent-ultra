@@ -7397,7 +7397,7 @@ async fn handle_ops_cockpit_command(
         "policy: profile={} mode={} preset={} sandbox={} skills_tier={}",
         current_policy_profile_name(),
         std::env::var("HERMES_TOOL_POLICY_MODE").unwrap_or_else(|_| "enforce".into()),
-        std::env::var("HERMES_TOOL_POLICY_PRESET").unwrap_or_else(|_| "balanced".into()),
+        std::env::var("HERMES_TOOL_POLICY_PRESET").unwrap_or_else(|_| "relaxed".into()),
         std::env::var("HERMES_EXECUTION_SANDBOX_PROFILE").unwrap_or_else(|_| "balanced".into()),
         std::env::var("HERMES_SKILLS_EXECUTION_TIER").unwrap_or_else(|_| "balanced".into())
     );

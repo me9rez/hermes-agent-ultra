@@ -35,8 +35,9 @@ use crate::alpha_runtime::{
     load_objective_contract, load_quorum_policy, objective_lifecycle_is_active, QuorumPolicy,
 };
 use crate::auth::{
-    resolve_gemini_oauth_runtime_credentials, resolve_nous_runtime_credentials,
-    resolve_qwen_runtime_credentials, DEFAULT_NOUS_AGENT_KEY_MIN_TTL_SECONDS,
+    login_nous_device_code, resolve_gemini_oauth_runtime_credentials,
+    resolve_nous_runtime_credentials, resolve_qwen_runtime_credentials, save_nous_auth_state,
+    NousDeviceCodeOptions, DEFAULT_NOUS_AGENT_KEY_MIN_TTL_SECONDS,
     NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
 };
 use crate::cli::Cli;
@@ -428,6 +429,60 @@ impl App {
         )
     }
 
+    fn auto_nous_reauth_enabled() -> bool {
+        !matches!(
+            std::env::var("HERMES_AUTO_NOUS_REAUTH")
+                .ok()
+                .as_deref()
+                .map(|v| v.trim().to_ascii_lowercase()),
+            Some(v) if matches!(v.as_str(), "0" | "false" | "off" | "no")
+        )
+    }
+
+    fn auth_error_requires_nous_login(err: &AgentError) -> bool {
+        let text = err.to_string().to_ascii_lowercase();
+        text.contains("not logged into nous portal")
+            || text.contains("re-run `hermes auth nous`")
+            || text.contains("stored nous auth state is invalid")
+            || text.contains("missing refresh token")
+            || text.contains("invalid nous refresh response")
+    }
+
+    async fn attempt_interactive_nous_login(&mut self, reason: &str) -> bool {
+        if !Self::auto_nous_reauth_enabled() {
+            return false;
+        }
+        Self::emit_lifecycle_event(
+            &self.stream_handle_shared,
+            format!("Nous OAuth re-auth required ({reason}); launching portal login flow"),
+        );
+        match login_nous_device_code(NousDeviceCodeOptions::default()).await {
+            Ok(state) => match save_nous_auth_state(&state) {
+                Ok(path) => {
+                    Self::emit_lifecycle_event(
+                        &self.stream_handle_shared,
+                        format!("Nous OAuth state refreshed: {}", path.display()),
+                    );
+                    true
+                }
+                Err(err) => {
+                    Self::emit_lifecycle_event(
+                        &self.stream_handle_shared,
+                        format!("Nous OAuth state save failed: {}", err),
+                    );
+                    false
+                }
+            },
+            Err(err) => {
+                Self::emit_lifecycle_event(
+                    &self.stream_handle_shared,
+                    format!("Nous OAuth interactive login failed: {}", err),
+                );
+                false
+            }
+        }
+    }
+
     async fn refresh_runtime_provider_credentials_if_needed(&mut self, force_refresh: bool) {
         let (provider_name, _) = resolve_provider_and_model(&self.config, &self.current_model);
         let provider = normalize_runtime_provider_name(provider_name.as_str());
@@ -454,10 +509,44 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    Self::emit_lifecycle_event(
-                        &self.stream_handle_shared,
-                        format!("warning: Nous credential refresh skipped ({e})"),
-                    );
+                    if Self::auth_error_requires_nous_login(&e)
+                        && self
+                            .attempt_interactive_nous_login("credential missing or invalid")
+                            .await
+                    {
+                        match resolve_nous_runtime_credentials(
+                            true,
+                            true,
+                            NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
+                            DEFAULT_NOUS_AGENT_KEY_MIN_TTL_SECONDS,
+                        )
+                        .await
+                        {
+                            Ok(creds) => {
+                                rotated |= Self::set_env_if_changed("NOUS_API_KEY", &creds.api_key);
+                                if !creds.base_url.trim().is_empty() {
+                                    rotated |= Self::set_env_if_changed(
+                                        "NOUS_INFERENCE_BASE_URL",
+                                        &creds.base_url,
+                                    );
+                                }
+                                if rotated {
+                                    note = Some("refreshed Nous runtime credential".to_string());
+                                }
+                            }
+                            Err(err) => {
+                                Self::emit_lifecycle_event(
+                                    &self.stream_handle_shared,
+                                    format!("warning: Nous credential refresh skipped ({err})"),
+                                );
+                            }
+                        }
+                    } else {
+                        Self::emit_lifecycle_event(
+                            &self.stream_handle_shared,
+                            format!("warning: Nous credential refresh skipped ({e})"),
+                        );
+                    }
                 }
             },
             "qwen-oauth" => match resolve_qwen_runtime_credentials(
@@ -754,7 +843,9 @@ impl App {
              1) apply anti-scheming evidence-first discipline\n\
              2) pull ContextLattice context first when relevant\n\
              3) route tool usage intentionally and avoid repetitive low-signal loops\n\
-             4) match requested output shape exactly (count/format), with no template placeholders or duplicate list items\n",
+             4) match requested output shape exactly (count/format), with no template placeholders or duplicate list items\n\
+             5) for open-ended missions, execute at least one concrete action before returning status text\n\
+             6) maintain iterative objective momentum: gather evidence, test, refine, then continue with next high-value action\n",
         );
         out.push_str(&format!(
             "tool-profile(mode): {}\ncontextlattice(topic): {}\n{}\n",
@@ -2428,10 +2519,52 @@ impl App {
                         true,
                     )
                 }
-                Err(err) => (
-                    Some(format!("Nous auth auto-refresh failed: {}", err)),
-                    false,
-                ),
+                Err(err) => {
+                    if Self::auth_error_requires_nous_login(&err)
+                        && self
+                            .attempt_interactive_nous_login("runtime auth refresh failed")
+                            .await
+                    {
+                        match resolve_nous_runtime_credentials(
+                            true,
+                            true,
+                            NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
+                            DEFAULT_NOUS_AGENT_KEY_MIN_TTL_SECONDS,
+                        )
+                        .await
+                        {
+                            Ok(creds) => {
+                                let mut changed = false;
+                                changed |= Self::set_env_if_changed("NOUS_API_KEY", &creds.api_key);
+                                if !creds.base_url.trim().is_empty() {
+                                    changed |= Self::set_env_if_changed(
+                                        "NOUS_INFERENCE_BASE_URL",
+                                        &creds.base_url,
+                                    );
+                                }
+                                if changed {
+                                    self.switch_model(&self.current_model.clone());
+                                }
+                                (
+                                    Some(
+                                        "Nous auth re-login succeeded; retrying request."
+                                            .to_string(),
+                                    ),
+                                    true,
+                                )
+                            }
+                            Err(retry_err) => (
+                                Some(format!("Nous auth auto-refresh failed: {}", retry_err)),
+                                false,
+                            ),
+                        }
+                    } else {
+                        (
+                            Some(format!("Nous auth auto-refresh failed: {}", err)),
+                            false,
+                        )
+                    }
+                }
             },
             "qwen-oauth" => {
                 match resolve_qwen_runtime_credentials(
@@ -3474,6 +3607,8 @@ mod tests {
         assert!(injected_text.contains("contextlattice(topic): runbooks/objective/test-objective"));
         assert!(injected_text.contains(contract.id.as_str()));
         assert!(injected_text.contains("UNPROVEN/CONTRADICTORY"));
+        assert!(injected_text.contains("execute at least one concrete action"));
+        assert!(injected_text.contains("iterative objective momentum"));
         assert_eq!(messages[1].role, hermes_core::MessageRole::User);
 
         match prev_home {
@@ -3570,6 +3705,26 @@ mod tests {
         assert!(App::is_provider_auth_or_session_error(&err));
         let non_auth = AgentError::LlmApi("API error 404 Not Found: model missing".to_string());
         assert!(!App::is_provider_auth_or_session_error(&non_auth));
+    }
+
+    #[test]
+    fn test_auth_error_requires_nous_login_detects_missing_login_shape() {
+        let err = AgentError::AuthFailed(
+            "Hermes is not logged into Nous Portal. Run `hermes auth nous`.".to_string(),
+        );
+        assert!(App::auth_error_requires_nous_login(&err));
+        let unrelated = AgentError::AuthFailed("rate limited".to_string());
+        assert!(!App::auth_error_requires_nous_login(&unrelated));
+    }
+
+    #[test]
+    fn test_auto_nous_reauth_toggle_defaults_on() {
+        let _guard = env_test_lock();
+        std::env::remove_var("HERMES_AUTO_NOUS_REAUTH");
+        assert!(App::auto_nous_reauth_enabled());
+        std::env::set_var("HERMES_AUTO_NOUS_REAUTH", "0");
+        assert!(!App::auto_nous_reauth_enabled());
+        std::env::remove_var("HERMES_AUTO_NOUS_REAUTH");
     }
 
     #[test]

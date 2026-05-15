@@ -700,8 +700,8 @@ fn default_subagent_registry() -> SubagentRegistry {
                 ],
                 escalation_target: "coder".to_string(),
                 budget: SubagentBudgetPolicy {
-                    max_turns: 24,
-                    max_tool_calls: 72,
+                    max_turns: 64,
+                    max_tool_calls: 180,
                     max_tokens: 250_000,
                 },
             },
@@ -715,8 +715,8 @@ fn default_subagent_registry() -> SubagentRegistry {
                 ],
                 escalation_target: "release-manager".to_string(),
                 budget: SubagentBudgetPolicy {
-                    max_turns: 48,
-                    max_tool_calls: 120,
+                    max_turns: 96,
+                    max_tool_calls: 320,
                     max_tokens: 350_000,
                 },
             },
@@ -730,8 +730,8 @@ fn default_subagent_registry() -> SubagentRegistry {
                 ],
                 escalation_target: "operator".to_string(),
                 budget: SubagentBudgetPolicy {
-                    max_turns: 20,
-                    max_tool_calls: 50,
+                    max_turns: 48,
+                    max_tool_calls: 180,
                     max_tokens: 180_000,
                 },
             },
@@ -1390,7 +1390,35 @@ pub fn append_objective_eval_sample(
 
 pub fn load_subagent_registry() -> Result<SubagentRegistry, AgentError> {
     ensure_alpha_runtime_bootstrap(false)?;
-    read_json_file(&subagent_registry_path())
+    let path = subagent_registry_path();
+    let mut registry = read_json_file::<SubagentRegistry>(&path)?;
+    let mut changed = false;
+    for profile in registry.profiles.iter_mut() {
+        let role = profile.role.trim().to_ascii_lowercase();
+        let (min_turns, min_tool_calls, min_tokens) = match role.as_str() {
+            "research" => (64u32, 180u32, 250_000u32),
+            "coder" => (96u32, 320u32, 350_000u32),
+            "release-manager" => (48u32, 180u32, 180_000u32),
+            _ => (48u32, 120u32, 180_000u32),
+        };
+        if profile.budget.max_turns < min_turns {
+            profile.budget.max_turns = min_turns;
+            changed = true;
+        }
+        if profile.budget.max_tool_calls < min_tool_calls {
+            profile.budget.max_tool_calls = min_tool_calls;
+            changed = true;
+        }
+        if profile.budget.max_tokens < min_tokens {
+            profile.budget.max_tokens = min_tokens;
+            changed = true;
+        }
+    }
+    if changed {
+        registry.updated_at = now_rfc3339();
+        write_json_file(&path, &registry)?;
+    }
+    Ok(registry)
 }
 
 pub fn load_contextlattice_policy() -> Result<ContextLatticePolicy, AgentError> {
@@ -3525,6 +3553,28 @@ mod tests {
             assert!(alpha_state_dir().join(LOOPS_FILE).exists());
             assert!(alpha_state_dir().join(SUBAGENT_REGISTRY_FILE).exists());
             assert!(alpha_state_dir().join(CONTEXTLATTICE_POLICY_FILE).exists());
+        });
+    }
+
+    #[test]
+    fn load_subagent_registry_normalizes_legacy_low_budgets() {
+        with_test_hermes_home(|| {
+            ensure_alpha_runtime_bootstrap(true).expect("bootstrap");
+            let path = alpha_state_dir().join(SUBAGENT_REGISTRY_FILE);
+            let mut registry: SubagentRegistry = read_json_file(&path).expect("read registry");
+            for profile in registry.profiles.iter_mut() {
+                profile.budget.max_turns = 1;
+                profile.budget.max_tool_calls = 1;
+                profile.budget.max_tokens = 1;
+            }
+            write_json_file(&path, &registry).expect("write legacy budgets");
+
+            let normalized = load_subagent_registry().expect("load normalized registry");
+            for profile in normalized.profiles {
+                assert!(profile.budget.max_turns >= 48);
+                assert!(profile.budget.max_tool_calls >= 120);
+                assert!(profile.budget.max_tokens >= 180_000);
+            }
         });
     }
 

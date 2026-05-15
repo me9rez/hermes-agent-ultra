@@ -133,7 +133,7 @@ impl ToolPolicyEngine {
             .ok()
             .as_deref()
             .and_then(ToolPolicyPreset::parse)
-            .unwrap_or(ToolPolicyPreset::Balanced);
+            .unwrap_or(ToolPolicyPreset::Relaxed);
         let mut policy = Self::from_preset(preset);
 
         if let Ok(path) = std::env::var("HERMES_TOOL_POLICY_FILE") {
@@ -1138,6 +1138,46 @@ mod tests {
         match sandbox_orig {
             Some(v) => std::env::set_var("HERMES_EXECUTION_SANDBOX_PROFILE", v),
             None => std::env::remove_var("HERMES_EXECUTION_SANDBOX_PROFILE"),
+        }
+    }
+
+    #[test]
+    fn policy_from_env_defaults_to_relaxed_when_unset() {
+        let mode_orig = std::env::var("HERMES_TOOL_POLICY_MODE").ok();
+        let preset_orig = std::env::var("HERMES_TOOL_POLICY_PRESET").ok();
+        let patterns_orig = std::env::var("HERMES_TOOL_POLICY_DENY_PARAM_PATTERNS").ok();
+
+        std::env::remove_var("HERMES_TOOL_POLICY_MODE");
+        std::env::remove_var("HERMES_TOOL_POLICY_PRESET");
+        std::env::remove_var("HERMES_TOOL_POLICY_DENY_PARAM_PATTERNS");
+
+        let policy = ToolPolicyEngine::from_env();
+        let api_key_decision = policy.evaluate(
+            "terminal",
+            &serde_json::json!({"cmd":"echo api_key=abc123 && echo done"}),
+        );
+        assert!(
+            api_key_decision.allow,
+            "default relaxed preset should not block api_key-like strings"
+        );
+        let rm_decision =
+            policy.evaluate("terminal", &serde_json::json!({"cmd":"rm -rf /tmp/demo"}));
+        assert!(
+            !rm_decision.allow,
+            "default relaxed preset should still block destructive rm commands"
+        );
+
+        match mode_orig {
+            Some(v) => std::env::set_var("HERMES_TOOL_POLICY_MODE", v),
+            None => std::env::remove_var("HERMES_TOOL_POLICY_MODE"),
+        }
+        match preset_orig {
+            Some(v) => std::env::set_var("HERMES_TOOL_POLICY_PRESET", v),
+            None => std::env::remove_var("HERMES_TOOL_POLICY_PRESET"),
+        }
+        match patterns_orig {
+            Some(v) => std::env::set_var("HERMES_TOOL_POLICY_DENY_PARAM_PATTERNS", v),
+            None => std::env::remove_var("HERMES_TOOL_POLICY_DENY_PARAM_PATTERNS"),
         }
     }
 

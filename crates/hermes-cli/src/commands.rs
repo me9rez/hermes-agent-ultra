@@ -13382,7 +13382,7 @@ fn apply_objective_lifecycle_update(
 }
 
 fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
-    let objective_usage = "Usage: `/objective <text>` or `/objective status|verify|plan|constraints|counterfactual <scenario> | <expected_delta>|lifecycle [status|active|pause|resume|budget-limited|achieved|unmet]|behavior [status|list|balanced|strict|autonomous|minimal]|profile [status|list|general|me|set <id>]|context [status|list|max|balanced|fast]|simulator [status|balanced|strict|aggressive]|ensemble [status|committee|single|debate]|ledger [status|tail [n]|clear]|dag [status|rebuild|clear]|eval [status|tail [n]]|clear`.";
+    let objective_usage = "Usage: `/objective <text>` or `/objective status|verify|plan|constraints|counterfactual <scenario> | <expected_delta>|lifecycle [status|active|pause|resume|budget-limited|achieved|unmet]|behavior [status|list|balanced|strict|autonomous|mission|minimal]|profile [status|list|general|me|set <id>]|context [status|list|max|balanced|fast]|simulator [status|balanced|strict|aggressive]|ensemble [status|committee|single|debate]|ledger [status|tail [n]|clear]|dag [status|rebuild|clear]|eval [status|tail [n]]|clear`.";
 
     if let Some(first) = args.first() {
         let cmd = first.trim().to_ascii_lowercase();
@@ -13513,17 +13513,18 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
             if sub == "list" {
                 emit_command_output(
                     app,
-                    "Behavior modes:\n- balanced: generalized execution with evidence checkpoints\n- strict: strongest evidence-first + contradiction discipline\n- autonomous: proactive loop execution until blocked\n- minimal: concise operator-facing output with decisive actions",
+                    "Behavior modes:\n- balanced: generalized execution with evidence checkpoints\n- strict: strongest evidence-first + contradiction discipline\n- autonomous: proactive loop execution until blocked\n- mission (aliases: sigma, sota, perpetual): closed-loop perpetual objective improvement with concrete execution each cycle\n- minimal: concise operator-facing output with decisive actions",
                 );
                 return Ok(CommandResult::Handled);
             }
+            let canonical_mode = canonical_objective_behavior_mode(&sub);
             if !matches!(
-                sub.as_str(),
-                "balanced" | "strict" | "autonomous" | "minimal"
+                canonical_mode.as_str(),
+                "balanced" | "strict" | "autonomous" | "mission" | "minimal"
             ) {
                 emit_command_output(
                     app,
-                    "Usage: /objective behavior [status|list|balanced|strict|autonomous|minimal]",
+                    "Usage: /objective behavior [status|list|balanced|strict|autonomous|mission|minimal|sigma|sota]",
                 );
                 return Ok(CommandResult::Handled);
             }
@@ -24250,6 +24251,13 @@ mod tests {
         let output = latest_ui_assistant_text(&app);
         assert!(output.contains("mode=strict"));
         assert!(output.contains("directives:"));
+
+        let mission_result = handle_slash_command(&mut app, "/objective", &["behavior", "sigma"])
+            .await
+            .expect("set behavior sigma");
+        assert_eq!(mission_result, CommandResult::Handled);
+        let mission_output = latest_ui_assistant_text(&app);
+        assert!(mission_output.contains("mode=mission"));
     }
 
     #[tokio::test]

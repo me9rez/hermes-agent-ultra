@@ -32,7 +32,8 @@ use hermes_skills::{FileSkillStore, SkillManager};
 use hermes_tools::ToolRegistry;
 
 use crate::alpha_runtime::{
-    load_objective_contract, load_quorum_policy, objective_lifecycle_is_active, QuorumPolicy,
+    canonical_objective_behavior_mode, load_objective_contract, load_quorum_policy,
+    objective_lifecycle_is_active, ObjectiveContract, QuorumPolicy,
 };
 use crate::auth::{
     login_nous_device_code, resolve_gemini_oauth_runtime_credentials,
@@ -417,6 +418,145 @@ impl App {
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(3)
+    }
+
+    fn objective_execution_enforcer_enabled() -> bool {
+        !matches!(
+            std::env::var("HERMES_OBJECTIVE_EXECUTION_ENFORCER")
+                .ok()
+                .as_deref()
+                .map(|v| v.trim().to_ascii_lowercase()),
+            Some(v) if matches!(v.as_str(), "0" | "false" | "off" | "no")
+        )
+    }
+
+    fn objective_continuation_retry_limit() -> usize {
+        std::env::var("HERMES_OBJECTIVE_CONTINUATION_MAX_RETRIES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(1)
+    }
+
+    fn load_active_objective_contract() -> Option<ObjectiveContract> {
+        load_objective_contract()
+            .ok()
+            .flatten()
+            .filter(|contract| objective_lifecycle_is_active(&contract.lifecycle_status))
+    }
+
+    fn looks_like_status_only_output(text: &str) -> bool {
+        let lowered = text.trim().to_ascii_lowercase();
+        if lowered.is_empty() {
+            return true;
+        }
+
+        let has_future_language = [
+            "i will",
+            "i'll",
+            "next i",
+            "going to",
+            "plan:",
+            "i can",
+            "we should",
+            "i would",
+            "i'll proceed",
+            "i will proceed",
+            "proceeding with",
+        ]
+        .iter()
+        .any(|needle| lowered.contains(needle));
+        let has_execution_evidence = [
+            "path=",
+            "file=",
+            "exit code",
+            "result:",
+            "tested",
+            "verified",
+            "implemented",
+            "changed",
+            "patched",
+            "command:",
+            "run_id",
+            "metric",
+        ]
+        .iter()
+        .any(|needle| lowered.contains(needle));
+
+        let has_weakness_markers = [
+            "let me know",
+            "if you'd like",
+            "i can do that next",
+            "awaiting",
+            "need your confirmation",
+        ]
+        .iter()
+        .any(|needle| lowered.contains(needle));
+
+        (has_future_language && !has_execution_evidence) || has_weakness_markers
+    }
+
+    fn should_force_objective_continuation(
+        &self,
+        result: &hermes_core::AgentResult,
+        baseline_len: usize,
+    ) -> Option<String> {
+        if !Self::objective_execution_enforcer_enabled() {
+            return None;
+        }
+        let contract = Self::load_active_objective_contract()?;
+        let behavior_mode = canonical_objective_behavior_mode(&contract.behavior_mode);
+        if !matches!(behavior_mode.as_str(), "autonomous" | "mission") {
+            return None;
+        }
+
+        let new_messages = if result.messages.len() > baseline_len {
+            &result.messages[baseline_len..]
+        } else {
+            &result.messages[..]
+        };
+
+        let had_tool_activity = new_messages.iter().any(|message| {
+            message.role == hermes_core::MessageRole::Tool
+                || (message.role == hermes_core::MessageRole::Assistant
+                    && message
+                        .tool_calls
+                        .as_ref()
+                        .map(|calls| !calls.is_empty())
+                        .unwrap_or(false))
+        });
+        if had_tool_activity {
+            return None;
+        }
+
+        let output = Self::extract_last_assistant_output(new_messages);
+        if output.trim().is_empty() {
+            return Some(
+                "assistant returned empty output while objective remained active".to_string(),
+            );
+        }
+        if Self::looks_like_status_only_output(&output) {
+            return Some(
+                "assistant output was status/plan-heavy without concrete executed action"
+                    .to_string(),
+            );
+        }
+        None
+    }
+
+    fn objective_continuation_system_prompt(reason: &str) -> String {
+        format!(
+            "[OBJECTIVE_CONTINUATION_ENFORCER]\n\
+             reason={}\n\
+             Continue objective execution immediately.\n\
+             Requirements for this pass:\n\
+             1) execute at least one concrete action (tool or code operation),\n\
+             2) include verifiable evidence from that action,\n\
+             3) report objective delta in measurable terms,\n\
+             4) end with the next highest-value action and continue momentum.\n\
+             Do not return a plan-only or defer-only response.",
+            reason
+        )
     }
 
     fn should_force_preflight_auth_refresh(provider: &str) -> bool {
@@ -816,19 +956,44 @@ impl App {
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "runbooks/hermes".to_string());
 
-        let objective_line = load_objective_contract()
-            .ok()
-            .flatten()
-            .filter(|contract| objective_lifecycle_is_active(&contract.lifecycle_status))
+        let objective_contract = Self::load_active_objective_contract();
+        let objective_line = objective_contract
+            .as_ref()
             .map(|contract| {
                 format!(
                     "objective(active): {} | behavior={} | text={}",
                     contract.id,
-                    contract.behavior_mode.trim(),
+                    canonical_objective_behavior_mode(&contract.behavior_mode),
                     Self::preview_for_status(&contract.objective_text, 220)
                 )
             })
             .unwrap_or_else(|| "objective(active): none".to_string());
+        let objective_directives = objective_contract
+            .as_ref()
+            .map(|contract| {
+                contract
+                    .behavior_directives
+                    .iter()
+                    .take(6)
+                    .map(|line| format!("- {}", line.trim()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "- (none)".to_string());
+        let objective_success = objective_contract
+            .as_ref()
+            .map(|contract| {
+                contract
+                    .success_criteria
+                    .iter()
+                    .take(5)
+                    .map(|line| format!("- {}", line.trim()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "- (none)".to_string());
 
         let contradiction_line = if contradiction_check {
             "before final response: self-audit contradictions across tool outputs, runtime facts, and claims; unresolved items must be marked UNPROVEN/CONTRADICTORY."
@@ -851,6 +1016,19 @@ impl App {
             "tool-profile(mode): {}\ncontextlattice(topic): {}\n{}\n",
             tool_profile_mode, context_topic, objective_line
         ));
+        out.push_str("objective behavior directives:\n");
+        out.push_str(&objective_directives);
+        out.push('\n');
+        out.push_str("objective success criteria:\n");
+        out.push_str(&objective_success);
+        out.push('\n');
+        out.push_str(
+            "objective loop protocol:\n\
+             - baseline: state current objective KPI and latest known value\n\
+             - execute: perform concrete highest-leverage action now\n\
+             - verify: present measurable delta or explicit blocked evidence\n\
+             - continue: state next action with no soft deferral\n",
+        );
         out.push_str(contradiction_line);
         out.push_str("\nuser-request(original):\n");
         out.push_str(prompt);
@@ -2068,6 +2246,8 @@ impl App {
         let mut remediation_attempted = false;
         let mut auth_refresh_attempts = 0usize;
         let auth_refresh_retry_limit = Self::auth_refresh_retry_limit();
+        let mut objective_continuation_attempts = 0usize;
+        let objective_continuation_limit = Self::objective_continuation_retry_limit();
         loop {
             Self::emit_lifecycle_event(
                 &self.stream_handle_shared,
@@ -2083,6 +2263,7 @@ impl App {
                 "model inference + tool execution",
                 35,
             );
+            let baseline_len = self.messages.len();
             let (messages, reformulated) = self.build_inference_messages();
             if reformulated {
                 Self::emit_lifecycle_event(
@@ -2097,6 +2278,34 @@ impl App {
                     let total_turns = result.total_turns;
                     let interrupted = result.interrupted;
                     let finished_naturally = result.finished_naturally;
+                    if objective_continuation_attempts < objective_continuation_limit {
+                        if let Some(reason) =
+                            self.should_force_objective_continuation(&result, baseline_len)
+                        {
+                            self.messages = result.messages;
+                            self.messages.push(hermes_core::Message::system(
+                                Self::objective_continuation_system_prompt(&reason),
+                            ));
+                            self.prune_ui_after_current_messages();
+                            objective_continuation_attempts += 1;
+                            Self::emit_lifecycle_event(
+                                &self.stream_handle_shared,
+                                format!(
+                                    "objective continuation enforcer triggered ({}/{}): {}",
+                                    objective_continuation_attempts,
+                                    objective_continuation_limit,
+                                    reason
+                                ),
+                            );
+                            Self::emit_phase_event(
+                                &self.stream_handle_shared,
+                                "objective",
+                                "auto-continuing objective loop for concrete execution",
+                                50,
+                            );
+                            continue;
+                        }
+                    }
                     if let Err(err) = self.apply_agent_result_and_persist(result) {
                         tracing::warn!("session autosave skipped: {}", err);
                     }
@@ -2733,7 +2942,10 @@ fn apply_cli_runtime_overrides(config: &mut GatewayConfig, cli: &Cli) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alpha_runtime::{load_quorum_policy, set_quorum_policy, upsert_objective_contract};
+    use crate::alpha_runtime::{
+        load_quorum_policy, set_objective_contract_behavior_mode, set_quorum_policy,
+        upsert_objective_contract,
+    };
     use crate::test_env_lock;
     use hermes_config::LlmProviderConfig;
     use std::collections::HashMap;
@@ -3609,6 +3821,9 @@ mod tests {
         assert!(injected_text.contains("UNPROVEN/CONTRADICTORY"));
         assert!(injected_text.contains("execute at least one concrete action"));
         assert!(injected_text.contains("iterative objective momentum"));
+        assert!(injected_text.contains("objective behavior directives:"));
+        assert!(injected_text.contains("objective success criteria:"));
+        assert!(injected_text.contains("objective loop protocol:"));
         assert_eq!(messages[1].role, hermes_core::MessageRole::User);
 
         match prev_home {
@@ -3633,6 +3848,57 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, hermes_core::MessageRole::User);
         std::env::remove_var("HERMES_RUNTIME_PROMPT_REFORMULATION");
+    }
+
+    #[test]
+    fn test_looks_like_status_only_output_detects_defer_only_language() {
+        assert!(App::looks_like_status_only_output(
+            "I will proceed with investigation next. Let me know if you'd like me to continue."
+        ));
+        assert!(!App::looks_like_status_only_output(
+            "Implemented patch in path=crates/hermes-cli/src/app.rs and verified with cargo test result: pass."
+        ));
+    }
+
+    #[test]
+    fn test_should_force_objective_continuation_for_mission_status_only_turn() {
+        let _lock = env_test_lock();
+        let prev_home = std::env::var("HERMES_HOME").ok();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("HERMES_HOME", tmp.path());
+        std::env::set_var("HERMES_OBJECTIVE_EXECUTION_ENFORCER", "1");
+
+        let mut app = build_minimal_test_app();
+        app.messages.push(hermes_core::Message::user(
+            "Proceed with objective and improve outcomes continuously.",
+        ));
+        upsert_objective_contract(
+            "Run this assignment in perpetuity and continuously improve output quality",
+            false,
+        )
+        .expect("set objective");
+        set_objective_contract_behavior_mode("mission").expect("set mission mode");
+
+        let baseline_len = app.messages.len();
+        let mut result_messages = app.messages.clone();
+        result_messages.push(hermes_core::Message::assistant(
+            "I will proceed with the next steps and share updates shortly.",
+        ));
+        let result = hermes_core::AgentResult {
+            messages: result_messages,
+            finished_naturally: true,
+            total_turns: 1,
+            ..Default::default()
+        };
+
+        let reason = app.should_force_objective_continuation(&result, baseline_len);
+        assert!(reason.is_some());
+
+        match prev_home {
+            Some(val) => std::env::set_var("HERMES_HOME", val),
+            None => std::env::remove_var("HERMES_HOME"),
+        }
+        std::env::remove_var("HERMES_OBJECTIVE_EXECUTION_ENFORCER");
     }
 
     #[test]

@@ -477,6 +477,16 @@ fn default_objective_behavior_mode() -> String {
 
 fn objective_behavior_directives_for_mode(mode: &str) -> Vec<String> {
     match canonical_objective_behavior_mode(mode).as_str() {
+        "mission" => vec![
+            "run closed-loop objective cycles: evidence -> action -> verification -> next loop"
+                .to_string(),
+            "avoid status-only updates; each loop must execute at least one concrete action"
+                .to_string(),
+            "persist measurable deltas and objective analytics on every major turn".to_string(),
+            "treat objective as continuously improvable; prefer iterative upgrades over one-shot answers"
+                .to_string(),
+            "escalate only on hard boundaries; otherwise keep autonomous progress".to_string(),
+        ],
         "strict" => vec![
             "retrieve context before inference".to_string(),
             "verify facts from direct artifacts before claiming state".to_string(),
@@ -526,11 +536,32 @@ pub fn objective_lifecycle_is_active(status: &str) -> bool {
 
 pub fn canonical_objective_behavior_mode(mode: &str) -> String {
     match mode.trim().to_ascii_lowercase().as_str() {
+        "mission" | "sigma" | "sota" | "god-tier" | "god_tier" | "godtier" | "perpetual"
+        | "continuous" => "mission".to_string(),
         "strict" | "evidence" | "evidence-first" => "strict".to_string(),
         "autonomous" | "proactive" | "loop" | "agentic" => "autonomous".to_string(),
         "minimal" | "concise" | "lean" => "minimal".to_string(),
         _ => "balanced".to_string(),
     }
+}
+
+fn objective_prefers_mission_mode(objective: &str) -> bool {
+    let lowered = objective.to_ascii_lowercase();
+    [
+        "perpetuity",
+        "perpetual",
+        "always improve",
+        "continuous improvement",
+        "sota",
+        "sigma",
+        "god tier",
+        "mission-driven",
+        "mission driven",
+        "exponentiate",
+        "compound",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
 }
 
 pub fn objective_profile_specialized_for(operator_hint: &str) -> ObjectiveProfile {
@@ -1069,10 +1100,21 @@ pub fn upsert_objective_contract(
         .as_ref()
         .map(|v| v.status_reason.trim().to_string())
         .unwrap_or_default();
-    let behavior_mode = existing
+    let inferred_behavior_mode = if objective_prefers_mission_mode(objective_text) {
+        "mission".to_string()
+    } else {
+        default_objective_behavior_mode()
+    };
+    let mut behavior_mode = existing
         .as_ref()
         .map(|v| canonical_objective_behavior_mode(&v.behavior_mode))
-        .unwrap_or_else(default_objective_behavior_mode);
+        .unwrap_or(inferred_behavior_mode);
+    if !existing_objective.eq_ignore_ascii_case(objective_text.trim())
+        && behavior_mode == "balanced"
+        && objective_prefers_mission_mode(objective_text)
+    {
+        behavior_mode = "mission".to_string();
+    }
     let behavior_directives = existing
         .as_ref()
         .map(|v| {
@@ -3528,6 +3570,17 @@ mod tests {
             );
             assert!(!strict.behavior_directives.is_empty());
 
+            let mission =
+                set_objective_contract_behavior_mode("sigma").expect("behavior sigma->mission");
+            assert_eq!(
+                canonical_objective_behavior_mode(&mission.behavior_mode),
+                "mission"
+            );
+            assert!(mission
+                .behavior_directives
+                .iter()
+                .any(|line| line.contains("closed-loop objective cycles")));
+
             let same = upsert_objective_contract("stabilize runtime telemetry", false)
                 .expect("upsert same objective");
             assert_eq!(
@@ -3541,6 +3594,21 @@ mod tests {
             assert_eq!(
                 canonical_objective_lifecycle_status(&replaced.lifecycle_status),
                 "active"
+            );
+        });
+    }
+
+    #[test]
+    fn objective_upsert_can_infer_mission_mode_for_perpetual_objectives() {
+        with_test_hermes_home(|| {
+            let contract = upsert_objective_contract(
+                "run this assignment in perpetuity and continuously improve output quality",
+                false,
+            )
+            .expect("upsert mission objective");
+            assert_eq!(
+                canonical_objective_behavior_mode(&contract.behavior_mode),
+                "mission"
             );
         });
     }

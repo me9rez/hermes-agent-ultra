@@ -629,6 +629,15 @@ impl App {
             .unwrap_or_else(|| "http://127.0.0.1:8075".to_string())
     }
 
+    fn contextlattice_ping_timeout_secs() -> u64 {
+        std::env::var("HERMES_CONTEXTLATTICE_PING_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(12)
+            .clamp(1, 120)
+    }
+
     async fn emit_contextlattice_connectivity_status(&self) {
         if !Self::contextlattice_ui_status_enabled() {
             return;
@@ -645,7 +654,7 @@ impl App {
             format!("contextlattice preflight ping {} (topic={})", base, topic),
         );
         let client = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(Self::contextlattice_ping_timeout_secs()))
             .build()
         {
             Ok(c) => c,

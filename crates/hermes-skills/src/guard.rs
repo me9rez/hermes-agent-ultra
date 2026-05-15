@@ -127,11 +127,11 @@ static COMPILED_BLOCKED_URLS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .collect()
 });
 
-static COMPILED_RELAXED_RM_BLOCKS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+static COMPILED_RELAXED_RM_COMMANDS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
-        // In relaxed mode we intentionally keep only destructive file-removal blocks.
-        r"(?i)(?:^|[\s;&|`])rm\s+",
-        r"(?i)\brm\s+-[^\n]*\b(?:r|f)\b",
+        // Shell-like rm command lines; used to distinguish safe temp cleanup
+        // from broad destructive removal in relaxed mode.
+        r"(?im)\brm\s+-[A-Za-z]*[rf][A-Za-z]*[^\n]*",
     ]
     .iter()
     .filter_map(|p| Regex::new(p).ok())
@@ -157,6 +157,73 @@ impl SkillGuardMode {
             _ => Self::Strict,
         }
     }
+}
+
+fn relaxed_rm_target_is_safe(target: &str) -> bool {
+    let raw = target.trim().trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+    if raw.is_empty() {
+        return false;
+    }
+    let t = raw.to_ascii_lowercase();
+    if t == "/" || t == "*" || t == "/*" || t == "~" || t == "~/" || t == "~/*" {
+        return false;
+    }
+    if t.starts_with("/tmp")
+        || t.starts_with("/var/tmp")
+        || t.starts_with("$tmpdir")
+        || t.starts_with("${tmpdir}")
+        || t.starts_with("./tmp")
+        || t.starts_with("tmp/")
+        || t.starts_with("./.tmp")
+        || t.starts_with(".tmp/")
+        || t.starts_with("./target")
+        || t.starts_with("target/")
+        || t.starts_with("./dist")
+        || t.starts_with("dist/")
+        || t.starts_with("./build")
+        || t.starts_with("build/")
+        || t.starts_with("./.cache")
+        || t.starts_with(".cache/")
+        || t.starts_with("./.pytest_cache")
+        || t.starts_with(".pytest_cache/")
+        || t.starts_with("./__pycache__")
+        || t.starts_with("__pycache__/")
+    {
+        return true;
+    }
+    false
+}
+
+fn relaxed_rm_command_is_safe(command: &str) -> bool {
+    let mut saw_target = false;
+    for token in command.split_whitespace() {
+        let tok = token.trim().trim_matches(|c| matches!(c, ';' | '&' | '|'));
+        if tok.is_empty() {
+            continue;
+        }
+        if tok.eq_ignore_ascii_case("rm") {
+            continue;
+        }
+        if tok.starts_with('-') {
+            continue;
+        }
+        saw_target = true;
+        if !relaxed_rm_target_is_safe(tok) {
+            return false;
+        }
+    }
+    saw_target
+}
+
+fn relaxed_mode_has_unsafe_rm(content: &str) -> bool {
+    for re in COMPILED_RELAXED_RM_COMMANDS.iter() {
+        for mat in re.find_iter(content) {
+            if !relaxed_rm_command_is_safe(mat.as_str()) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -253,12 +320,10 @@ impl SkillGuard {
             }
             SkillGuardMode::Relaxed => {
                 // User-relaxed mode: only block destructive rm operations.
-                for regex in COMPILED_RELAXED_RM_BLOCKS.iter() {
-                    if regex.is_match(&skill.content) {
-                        return Err(SkillError::GuardViolation(
-                            "Blocked content: destructive rm operation detected".to_string(),
-                        ));
-                    }
+                if relaxed_mode_has_unsafe_rm(&skill.content) {
+                    return Err(SkillError::GuardViolation(
+                        "Blocked content: destructive rm operation detected".to_string(),
+                    ));
                 }
             }
             SkillGuardMode::Off => {}
@@ -493,6 +558,22 @@ mod tests {
             "# Skill\n1. Fetch from https://malware.example.com/payload",
         );
         assert!(validate_skill(&skill).is_err());
+    }
+
+    #[test]
+    fn test_relaxed_mode_allows_tmp_cleanup_rm() {
+        std::env::set_var("HERMES_SKILL_GUARD_MODE", "relaxed");
+        let skill = make_skill("ok", "# Skill\n1. rm -rf /tmp/hermes-ultra-cache");
+        assert!(validate_skill(&skill).is_ok());
+        std::env::remove_var("HERMES_SKILL_GUARD_MODE");
+    }
+
+    #[test]
+    fn test_relaxed_mode_blocks_root_rm() {
+        std::env::set_var("HERMES_SKILL_GUARD_MODE", "relaxed");
+        let skill = make_skill("bad", "# Skill\n1. rm -rf /");
+        assert!(validate_skill(&skill).is_err());
+        std::env::remove_var("HERMES_SKILL_GUARD_MODE");
     }
 
     #[test]

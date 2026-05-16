@@ -2165,6 +2165,7 @@ fn gateway_pid_terminate(_pid: u32) -> std::io::Result<()> {
     ))
 }
 
+#[cfg(target_os = "macos")]
 fn gateway_launchd_label() -> &'static str {
     "com.hermes_agent_ultra.gateway"
 }

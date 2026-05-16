@@ -14,6 +14,7 @@ hermes-agent-ultra|clippy::type_complexity|crates/hermes-cli/src/main.rs
 hermes-agent-ultra|clippy::unnecessary_map_or|crates/hermes-cli/src/main.rs
 hermes-agent-ultra|clippy::unnecessary_sort_by|crates/hermes-cli/src/main.rs
 hermes-agent-ultra|clippy::unwrap_or_default|crates/hermes-cli/src/main.rs
+hermes-agent-ultra|dead_code|crates/hermes-cli/src/main.rs
 hermes-bench-smoke|clippy::default_constructed_unit_structs|crates/hermes-eval/src/bin/hermes-bench-smoke.rs
 hermes_acp|clippy::derivable_impls|crates/hermes-acp/src/session.rs
 hermes_acp|clippy::type_complexity|crates/hermes-acp/src/session.rs

@@ -4212,9 +4212,11 @@ fn pet_frame_token(
 }
 
 fn is_ctrl_c(key: &KeyEvent) -> bool {
-    key.modifiers
-        .contains(crossterm::event::KeyModifiers::CONTROL)
-        && key.code == crossterm::event::KeyCode::Char('c')
+    matches!(key.code, crossterm::event::KeyCode::Char('\u{3}'))
+        || (key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL)
+            && matches!(key.code, crossterm::event::KeyCode::Char('c' | 'C')))
 }
 
 fn is_submit_shortcut(key: &KeyEvent, _input: &str) -> bool {
@@ -5925,8 +5927,12 @@ mod tests {
     fn test_is_ctrl_c_detection() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let ctrl_upper_c = KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL);
+        let raw_etx = KeyEvent::new(KeyCode::Char('\u{3}'), KeyModifiers::NONE);
         let plain_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
         assert!(is_ctrl_c(&ctrl_c));
+        assert!(is_ctrl_c(&ctrl_upper_c));
+        assert!(is_ctrl_c(&raw_etx));
         assert!(!is_ctrl_c(&plain_c));
     }
 

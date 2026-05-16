@@ -1,6 +1,10 @@
 use crate::theme::Theme;
 
 pub const BUILTIN_SKINS: &[(&str, &str)] = &[
+    (
+        "ultra-sunburst",
+        "Futuristic 8-bit yellow/red profile for Hermes Ultra",
+    ),
     ("ultra-neon", "Default Ultra neon profile (magenta/cyan)"),
     (
         "neon-glow",
@@ -28,6 +32,7 @@ pub const BUILTIN_SKINS: &[(&str, &str)] = &[
 
 pub fn canonical_skin_name(name: &str) -> Option<&'static str> {
     match name.trim().to_ascii_lowercase().as_str() {
+        "ultra-sunburst" | "sunburst" | "desert-neon" => Some("ultra-sunburst"),
         "ultra" | "ultra-neon" | "neon" => Some("ultra-neon"),
         "neon-glow" | "glow" => Some("neon-glow"),
         "hyper-ultra-hyper-saturated" | "hyper-saturated" | "hypersat" => {
@@ -46,7 +51,8 @@ pub fn canonical_skin_name(name: &str) -> Option<&'static str> {
 }
 
 pub fn resolve_theme(name: &str) -> Theme {
-    match canonical_skin_name(name).unwrap_or("ultra-neon") {
+    match canonical_skin_name(name).unwrap_or("ultra-sunburst") {
+        "ultra-sunburst" => crate::theme::ultra_sunburst_theme(),
         "ultra-neon" => crate::theme::ultra_neon_theme(),
         "neon-glow" => crate::theme::neon_glow_theme(),
         "hyper-ultra-hyper-saturated" => crate::theme::hyper_ultra_hyper_saturated_theme(),
@@ -58,7 +64,7 @@ pub fn resolve_theme(name: &str) -> Theme {
         "ultra-hc" => crate::theme::ultra_hc_theme(),
         "light" => crate::theme::light_theme(),
         "dark" => crate::theme::default_theme(),
-        _ => crate::theme::ultra_neon_theme(),
+        _ => crate::theme::ultra_sunburst_theme(),
     }
 }
 
@@ -68,6 +74,7 @@ mod tests {
 
     #[test]
     fn canonical_skin_aliases_resolve() {
+        assert_eq!(canonical_skin_name("sunburst"), Some("ultra-sunburst"));
         assert_eq!(canonical_skin_name("neon"), Some("ultra-neon"));
         assert_eq!(canonical_skin_name("glow"), Some("neon-glow"));
         assert_eq!(
@@ -80,6 +87,7 @@ mod tests {
 
     #[test]
     fn resolve_theme_uses_new_builtins() {
+        assert_eq!(resolve_theme("ultra-sunburst").name, "ultra-sunburst");
         assert_eq!(resolve_theme("neon-glow").name, "neon-glow");
         assert_eq!(
             resolve_theme("hyper-ultra-hyper-saturated").name,

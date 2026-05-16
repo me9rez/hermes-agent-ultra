@@ -396,6 +396,34 @@ pub fn ultra_neon_theme() -> Theme {
     theme
 }
 
+/// Built-in sunburst profile: saturated yellow/red on midnight black.
+pub fn ultra_sunburst_theme() -> Theme {
+    let mut theme = default_theme();
+    theme.name = "ultra-sunburst".to_string();
+    theme.colors.primary = "#2b0700".to_string();
+    theme.colors.secondary = "#d07025".to_string();
+    theme.colors.accent = "#ff3b12".to_string();
+    theme.colors.background = "#050300".to_string();
+    theme.colors.foreground = "#fff0c2".to_string();
+    theme.colors.warning = "#ffd21a".to_string();
+    theme.colors.success = "#45ff9a".to_string();
+    theme.colors.status_bar_bg = Some("#210600".to_string());
+    theme.colors.status_bar_text = Some("#ffe7a6".to_string());
+    theme.colors.status_bar_strong = Some("#ffd21a".to_string());
+    theme.colors.status_bar_dim = Some("#b66d36".to_string());
+    theme.colors.status_bar_good = Some("#45ff9a".to_string());
+    theme.colors.status_bar_warn = Some("#ffd21a".to_string());
+    theme.colors.status_bar_bad = Some("#ff5a2f".to_string());
+    theme.colors.status_bar_critical = Some("#ff1f12".to_string());
+    theme.styles.user_input.fg = Some("#ffd66b".to_string());
+    theme.styles.assistant_response.fg = Some("#fff0c2".to_string());
+    theme.styles.system_message.fg = Some("#c87941".to_string());
+    theme.styles.tool_call.fg = Some("#ff8b2e".to_string());
+    theme.styles.tool_result.fg = Some("#48ffa0".to_string());
+    theme.styles.error.fg = Some("#ff3b12".to_string());
+    theme
+}
+
 /// Built-in amber neon variant (high warmth, high contrast).
 pub fn ultra_amber_theme() -> Theme {
     let mut theme = default_theme();
@@ -668,6 +696,7 @@ mod tests {
     #[test]
     fn test_ultra_variants_have_distinct_names() {
         assert_eq!(ultra_amber_theme().name, "ultra-amber");
+        assert_eq!(ultra_sunburst_theme().name, "ultra-sunburst");
         assert_eq!(ultra_ice_theme().name, "ultra-ice");
         assert_eq!(ultra_hc_theme().name, "ultra-hc");
         assert_eq!(neon_glow_theme().name, "neon-glow");

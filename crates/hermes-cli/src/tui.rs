@@ -9,14 +9,16 @@
 //! - Theme/skin engine support (9.8)
 
 use std::collections::{HashMap, HashSet};
-use std::io::Stdout;
+use std::io::{Stdout, Write};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
 use crossterm::cursor::Show;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyEvent, MouseEvent,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as CrosstermEvent, KeyEvent, MouseEvent,
 };
+use crossterm::style::ResetColor;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -30,6 +32,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tui_textarea::{CursorMove, TextArea};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -65,10 +68,21 @@ pub enum Event {
         result: Result<AgentResult, String>,
         elapsed_secs: f64,
     },
+    /// Background app-owned run completed. Used for slash commands and
+    /// managed quorum/swarm turns that must mutate App state while keeping the
+    /// render loop responsive.
+    ManagedAppRunComplete {
+        result: Result<Box<App>, String>,
+        elapsed_secs: f64,
+    },
     /// Interrupt signal (Ctrl+C).
     Interrupt,
+    /// External shutdown signal (SIGINT/SIGTERM/SIGHUP).
+    Shutdown,
     /// Mouse interaction.
     Mouse(MouseEvent),
+    /// Terminal bracketed paste payload.
+    Paste(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -322,13 +336,14 @@ impl Tui {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         enable_raw_mode()?;
         let mut stdout = std::io::stdout();
+        stdout.execute(EnableBracketedPaste)?;
         stdout.execute(EnterAlternateScreen)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = ratatui::Terminal::new(backend)?;
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         let (stream_sender, stream_receiver) = mpsc::unbounded_channel();
         let requested_theme =
-            std::env::var("HERMES_THEME").unwrap_or_else(|_| "ultra-neon".to_string());
+            std::env::var("HERMES_THEME").unwrap_or_else(|_| "ultra-sunburst".to_string());
         Ok(Self {
             terminal,
             events: event_receiver,
@@ -364,8 +379,12 @@ impl Tui {
             self.terminal.backend_mut().execute(DisableMouseCapture)?;
             self.mouse_capture_enabled = false;
         }
+        self.terminal.backend_mut().execute(DisableBracketedPaste)?;
         self.terminal.backend_mut().execute(LeaveAlternateScreen)?;
         self.terminal.show_cursor()?;
+        let mut stdout = std::io::stdout();
+        let _ = stdout.execute(ResetColor);
+        let _ = stdout.flush();
         self.restored = true;
         Ok(())
     }
@@ -398,10 +417,20 @@ impl Drop for Tui {
         }
         let _ = disable_raw_mode();
         let mut stdout = std::io::stdout();
+        let _ = stdout.execute(DisableBracketedPaste);
         let _ = stdout.execute(DisableMouseCapture);
         let _ = stdout.execute(LeaveAlternateScreen);
+        let _ = stdout.execute(ResetColor);
         let _ = stdout.execute(Show);
+        let _ = stdout.flush();
         self.restored = true;
+    }
+}
+
+async fn abort_and_join_task(task: &mut Option<JoinHandle<()>>) {
+    if let Some(handle) = task.take() {
+        handle.abort();
+        let _ = handle.await;
     }
 }
 
@@ -684,6 +713,18 @@ impl TuiState {
         self.processing_phase_label = "preparing request".to_string();
         self.processing_phase_progress = 0;
         self.push_activity(format!("⟳ dispatching request to {model}"));
+    }
+
+    fn mark_blocking_action(&mut self, label: impl AsRef<str>) {
+        let label = truncate_chars(label.as_ref().trim(), 100);
+        if label.is_empty() {
+            return;
+        }
+        self.processing_phase = "command".to_string();
+        self.processing_phase_label = label.clone();
+        self.processing_phase_progress = self.processing_phase_progress.max(5);
+        self.push_activity(format!("◈ {}", label));
+        self.maybe_emit_progress_pulse();
     }
 
     fn finish_processing_cycle(&mut self, label: &str) {
@@ -1268,10 +1309,7 @@ impl TuiState {
     /// Update auto-completion suggestions based on current input.
     fn update_completions(&mut self) {
         if self.input.starts_with('/') {
-            self.completions = commands::autocomplete(&self.input)
-                .into_iter()
-                .map(String::from)
-                .collect();
+            self.completions = commands::autocomplete_contextual(&self.input);
             self.completion_index = None;
         } else {
             self.completions.clear();
@@ -1364,6 +1402,18 @@ impl TuiState {
         let at = Self::clamp_char_boundary(&self.input, self.cursor_position);
         self.input.insert(at, '\n');
         self.cursor_position = at.saturating_add(1);
+    }
+
+    fn insert_paste_at_cursor(&mut self, pasted: &str) {
+        let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
+        if normalized.is_empty() {
+            return;
+        }
+        let at = Self::clamp_char_boundary(&self.input, self.cursor_position);
+        self.input.insert_str(at, &normalized);
+        self.cursor_position = at.saturating_add(normalized.len());
+        self.selection_anchor = None;
+        self.refresh_completions();
     }
 
     fn move_cursor_word_left(&mut self) {
@@ -1682,6 +1732,22 @@ pub fn render(frame: &mut Frame, app: &App, state: &mut TuiState, theme: &Theme)
     render_status(frame, app, state, status_area, &colors);
 }
 
+fn draw_frame_now(tui: &mut Tui, app: &App, state: &mut TuiState) -> Result<(), AgentError> {
+    state.refresh_sticky_prompt(app);
+    let active_theme = tui.theme().clone();
+    tui.terminal
+        .draw(|f| render(f, app, state, &active_theme))
+        .map(|_| ())
+        .map_err(|e| AgentError::Config(e.to_string()))
+}
+
+fn stream_event_completes_background_task(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::AgentRunComplete { .. } | Event::ManagedAppRunComplete { .. }
+    )
+}
+
 fn should_render_completions_popup(state: &TuiState) -> bool {
     state.mode != InputMode::Normal
         && !state.processing
@@ -1692,19 +1758,50 @@ fn should_render_completions_popup(state: &TuiState) -> bool {
         && !state.completions.is_empty()
 }
 
+fn should_route_prompt_via_managed_agent(quorum_armed_once: bool, messages: &[Message]) -> bool {
+    if quorum_armed_once {
+        return true;
+    }
+    messages.iter().any(|message| {
+        message.role == hermes_core::MessageRole::System
+            && message
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("[QUORUM_MODE] ")
+    })
+}
+
 fn render_header(frame: &mut Frame, app: &App, area: Rect, colors: &crate::theme::RatatuiColors) {
     let session_short = &app.session_id[..8.min(app.session_id.len())];
-    let title = format!(
-        " HERMES AGENT ULTRA  •  session {}  •  Enter send  •  Shift+Enter/Ctrl+J newline  •  / commands  •  Ctrl+L lane  •  Ctrl+O cockpit  •  Ctrl+D density  •  Ctrl+T timestamps  •  Ctrl+G refresh-tail",
+    let chrome = format!(
+        "  •  session {}  •  Enter send  •  Shift+Enter/Ctrl+J newline  •  / commands  •  Ctrl+L lane  •  Ctrl+O cockpit  •  Ctrl+G refresh-tail",
         session_short
     );
-    let text = Text::from(vec![Line::from(vec![Span::styled(
-        truncate_chars(&title, area.width.saturating_sub(1) as usize),
-        Style::default()
-            .fg(colors.status_bar_text)
-            .bg(colors.status_bar_bg)
-            .add_modifier(Modifier::BOLD),
-    )])]);
+    let available = area.width.saturating_sub(28) as usize;
+    let text = Text::from(vec![Line::from(vec![
+        Span::styled(
+            " ▓ HERMES ",
+            Style::default()
+                .fg(colors.status_bar_strong)
+                .bg(colors.status_bar_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "AGENT ULTRA",
+            Style::default()
+                .fg(colors.accent)
+                .bg(colors.status_bar_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            truncate_chars(&chrome, available),
+            Style::default()
+                .fg(colors.status_bar_text)
+                .bg(colors.status_bar_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])]);
     let title = Paragraph::new(text)
         .block(Block::default().style(Style::default().bg(colors.status_bar_bg)));
     frame.render_widget(title, area);
@@ -3101,22 +3198,21 @@ fn build_transcript_lines(
         let accent = Style::default().fg(colors.accent).bg(colors.background);
         let hero = [
             " ╔══════════════════════════════════════════════════════════════════╗",
+            " ║  ██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗          ║",
+            " ║  ██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝          ║",
+            " ║  ███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗          ║",
+            " ║  ██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║          ║",
+            " ║  ██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║          ║",
+            " ║  ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝          ║",
             " ║                                                                  ║",
-            " ║   ██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗           ║",
-            " ║   ██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝           ║",
-            " ║   ███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗           ║",
-            " ║   ██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║           ║",
-            " ║   ██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║           ║",
-            " ║   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝           ║",
-            " ║                                                                  ║",
-            " ║              AGENT ULTRA • READY FOR EXECUTION                  ║",
-            " ║                                                                  ║",
+            " ║       AGENT ULTRA  //  SUNBURST OPS  //  LIVE EXECUTION         ║",
+            " ║       YELLOW SIGNAL • REDLINE DRIVE • RUST-NATIVE CONTROL       ║",
             " ╚══════════════════════════════════════════════════════════════════╝",
         ];
         for (idx, row) in hero.iter().enumerate() {
             let style = if idx == 0 || idx == hero.len() - 1 {
                 accent
-            } else if row.contains("AGENT ULTRA") {
+            } else if row.contains("AGENT ULTRA") || row.contains("YELLOW SIGNAL") {
                 neon
             } else {
                 dim
@@ -4486,8 +4582,9 @@ fn open_skin_modal(state: &mut TuiState) {
         });
     }
     let mut modal = PickerModal::new(PickerKind::Skin, "Select Skin", items);
-    let active = std::env::var("HERMES_THEME").unwrap_or_else(|_| "ultra-neon".to_string());
-    let active_canonical = crate::skin_engine::canonical_skin_name(&active).unwrap_or("ultra-neon");
+    let active = std::env::var("HERMES_THEME").unwrap_or_else(|_| "ultra-sunburst".to_string());
+    let active_canonical =
+        crate::skin_engine::canonical_skin_name(&active).unwrap_or("ultra-sunburst");
     if let Some(idx) = modal.filtered_indices.iter().position(|item_idx| {
         modal.items[*item_idx]
             .value
@@ -4576,7 +4673,7 @@ async fn process_modal_confirm(state: &mut TuiState, app: &mut App) -> Result<()
         }
         PickerKind::Skin => {
             let skin = crate::skin_engine::canonical_skin_name(item.value.as_str())
-                .unwrap_or("ultra-neon")
+                .unwrap_or("ultra-sunburst")
                 .to_string();
             std::env::set_var("HERMES_THEME", &skin);
             app.request_theme_change(&skin);
@@ -4622,6 +4719,33 @@ fn handle_agent_run_complete(
             } else if !finished_naturally {
                 state.push_activity("run stopped before natural finish".to_string());
             }
+        }
+        Err(err) => {
+            state.finish_processing_cycle("✖ failed after");
+            state.status_message = format!("Error: {}", err);
+            state.push_activity(format!("✖ {}", err));
+            app.push_ui_assistant(format!("Error: {}", err));
+        }
+    }
+    state.stream_buffer.clear();
+    state.stream_muted = false;
+    state.stream_needs_break = false;
+    state.active_tools.clear();
+    state.awaiting_run_complete = false;
+}
+
+fn handle_managed_app_run_complete(
+    app: &mut App,
+    state: &mut TuiState,
+    result: Result<Box<App>, String>,
+    elapsed_secs: f64,
+) {
+    match result {
+        Ok(completed_app) => {
+            *app = *completed_app;
+            state.finish_processing_cycle("✔ completed in");
+            state.status_message.clear();
+            state.push_activity(format!("managed run finished in {:.2}s", elapsed_secs));
         }
         Err(err) => {
             state.finish_processing_cycle("✖ failed after");
@@ -4927,6 +5051,13 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
             handle_agent_run_complete(app, state, result, elapsed_secs);
             true
         }
+        Event::ManagedAppRunComplete {
+            result,
+            elapsed_secs,
+        } => {
+            handle_managed_app_run_complete(app, state, result, elapsed_secs);
+            true
+        }
         _ => false,
     }
 }
@@ -4950,31 +5081,75 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
 
     // Spawn crossterm event reader
     let event_sender = tui.event_sender();
-    let _event_task = tokio::spawn(async move {
+    let event_task = tokio::spawn(async move {
         loop {
             if crate::checklist::embedded_picker_active() {
                 tokio::time::sleep(Duration::from_millis(16)).await;
                 continue;
             }
-            if crossterm::event::poll(Duration::from_millis(100)).unwrap_or(false) {
+            if crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false) {
                 if let Ok(event) = crossterm::event::read() {
                     let msg = match event {
                         CrosstermEvent::Key(key) => Some(Event::Key(key)),
                         CrosstermEvent::Resize(w, h) => Some(Event::Resize(w, h)),
                         CrosstermEvent::Mouse(mouse) => Some(Event::Mouse(mouse)),
+                        CrosstermEvent::Paste(text) => Some(Event::Paste(text)),
                         _ => None,
                     };
                     if let Some(msg) = msg {
-                        let _ = event_sender.send(msg);
+                        if event_sender.send(msg).is_err() {
+                            break;
+                        }
                     }
                 }
             }
         }
     });
+    // Spawn OS signal bridge so terminal close / signal-driven shutdowns
+    // unwind the TUI and return control cleanly.
+    let signal_sender = tui.event_sender();
+    let signal_task = tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = signal(SignalKind::interrupt()).ok();
+            let mut sigterm = signal(SignalKind::terminate()).ok();
+            let mut sighup = signal(SignalKind::hangup()).ok();
+            tokio::select! {
+                _ = async {
+                    if let Some(sig) = sigint.as_mut() {
+                        let _ = sig.recv().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
+                _ = async {
+                    if let Some(sig) = sigterm.as_mut() {
+                        let _ = sig.recv().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
+                _ = async {
+                    if let Some(sig) = sighup.as_mut() {
+                        let _ = sig.recv().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        let _ = signal_sender.send(Event::Shutdown);
+    });
 
     let mut frame_tick = tokio::time::interval(Duration::from_millis(60));
     frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut needs_redraw = true;
+    let mut active_agent_task: Option<JoinHandle<()>> = None;
 
     // Main event loop
     while app.running {
@@ -5002,11 +5177,24 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
             biased;
             event = tui.events.recv() => {
                 match event {
+                    Some(Event::Paste(text)) => {
+                        if state.modal_active() {
+                            state.status_message = "Paste ignored while picker is open".to_string();
+                        } else {
+                            let line_count = text.lines().count().max(1);
+                            state.insert_paste_at_cursor(&text);
+                            state.status_message = format!("Pasted {} line(s)", line_count);
+                        }
+                        needs_redraw = true;
+                        continue;
+                    }
                     Some(Event::Key(key)) => {
                         // Ctrl+C always exits back to parent terminal. If work is in flight,
                         // emit interrupt first so in-progress tools can stop gracefully.
                         if is_ctrl_c(&key) {
                             if state.processing {
+                                app.interrupt_controller.interrupt(None);
+                                abort_and_join_task(&mut active_agent_task).await;
                                 tui.event_sender().send(Event::Interrupt).ok();
                             }
                             app.running = false;
@@ -5033,6 +5221,8 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
 
                         let should_quit = state.handle_key(key, &mut app);
                         if should_quit {
+                            app.interrupt_controller.interrupt(None);
+                            abort_and_join_task(&mut active_agent_task).await;
                             app.running = false;
                             break;
                         }
@@ -5128,8 +5318,27 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                                 if !handled_by_tui {
                                     let trimmed = input.trim().to_string();
                                     if trimmed.starts_with('/') {
+                                        let command_name =
+                                            trimmed.split_whitespace().next().unwrap_or("/");
+                                        if command_name.eq_ignore_ascii_case("/quit")
+                                            || command_name.eq_ignore_ascii_case("/exit")
+                                        {
+                                            app.push_ui_user(trimmed.clone());
+                                            app.push_ui_assistant("Goodbye!");
+                                            app.running = false;
+                                            state.status_message.clear();
+                                            state.completions.clear();
+                                            state.completion_index = None;
+                                            needs_redraw = true;
+                                            continue;
+                                        }
                                         state.begin_processing_cycle(&app.current_model);
-                                        state.status_message = "Processing...".to_string();
+                                        state.mark_blocking_action(format!(
+                                            "running {command_name} command"
+                                        ));
+                                        state.status_message =
+                                            format!("Running {command_name}…");
+                                        draw_frame_now(&mut tui, &app, &mut state)?;
                                         match app.handle_input(&input).await {
                                             Ok(_) => {
                                                 state.finish_processing_cycle("✔ completed in");
@@ -5143,58 +5352,96 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                                             }
                                         }
                                     } else if !trimmed.is_empty() {
-                                        // Non-slash prompts run in a background task so stream events
-                                        // can be consumed/rendered live by this UI loop.
-                                        app.input_history.push(trimmed.clone());
-                                        app.history_index = app.input_history.len();
-                                        let user_message = app.prepare_user_message(&trimmed);
-                                        app.messages.push(Message::user(user_message));
+                                        let managed_turn_required =
+                                            should_route_prompt_via_managed_agent(
+                                                app.quorum_armed_once,
+                                                &app.messages,
+                                            );
+                                        if managed_turn_required {
+                                            // Quorum/system-hint turns must run through App::run_agent
+                                            // so fanout orchestration, artifact persistence, and arm/disarm
+                                            // behavior remain correct. Run it on a cloned App so the
+                                            // render loop can keep drawing live activity while the
+                                            // worker mutates/persists the final session state.
+                                            let mut worker_app = app.clone();
+                                            app.push_ui_user(trimmed.clone());
+                                            state.begin_processing_cycle(&app.current_model);
+                                            state.mark_blocking_action(
+                                                "running managed quorum/system turn",
+                                            );
+                                            state.status_message =
+                                                "Running managed agent turn…".to_string();
+                                            draw_frame_now(&mut tui, &app, &mut state)?;
+                                            let stream_tx = tui.stream_sender();
+                                            let input_for_task = input.clone();
+                                            let task = tokio::spawn(async move {
+                                                let started = Instant::now();
+                                                let result = worker_app
+                                                    .handle_input(&input_for_task)
+                                                    .await
+                                                    .map(|_| Box::new(worker_app))
+                                                    .map_err(|e| e.to_string());
+                                                let _ = stream_tx.send(Event::ManagedAppRunComplete {
+                                                    result,
+                                                    elapsed_secs: started.elapsed().as_secs_f64(),
+                                                });
+                                            });
+                                            active_agent_task = Some(task);
+                                        } else {
+                                            // Non-slash prompts run in a background task so stream events
+                                            // can be consumed/rendered live by this UI loop.
+                                            app.input_history.push(trimmed.clone());
+                                            app.history_index = app.input_history.len();
+                                            let user_message = app.prepare_user_message(&trimmed);
+                                            app.messages.push(Message::user(user_message));
 
-                                        state.begin_processing_cycle(&app.current_model);
-                                        state.status_message = "Processing...".to_string();
+                                            state.begin_processing_cycle(&app.current_model);
+                                            state.status_message = "Processing...".to_string();
 
-                                        let stream_tx = tui.stream_sender();
-                                        let agent = app.agent.clone();
-                                        let stream_enabled = app.config.streaming.enabled;
-                                        let tool_schemas = app.tool_schemas.clone();
-                                        let messages = app.messages.clone();
-                                        let stream_handle = app.stream_handle.clone();
+                                            let stream_tx = tui.stream_sender();
+                                            let agent = app.agent.clone();
+                                            let stream_enabled = app.config.streaming.enabled;
+                                            let tool_schemas = app.tool_schemas.clone();
+                                            let messages = app.messages.clone();
+                                            let stream_handle = app.stream_handle.clone();
 
-                                        tokio::spawn(async move {
-                                            let started = Instant::now();
-                                            let result = if stream_enabled {
-                                                let stream_cb: Option<
-                                                    Box<
-                                                        dyn Fn(hermes_core::StreamChunk)
-                                                            + Send
-                                                            + Sync,
-                                                    >,
-                                                > = stream_handle.map(|h| {
-                                                    Box::new(
-                                                        move |chunk: hermes_core::StreamChunk| {
-                                                            h.send_chunk(chunk);
-                                                        },
-                                                    )
-                                                        as Box<
+                                            let task = tokio::spawn(async move {
+                                                let started = Instant::now();
+                                                let result = if stream_enabled {
+                                                    let stream_cb: Option<
+                                                        Box<
                                                             dyn Fn(hermes_core::StreamChunk)
                                                                 + Send
                                                                 + Sync,
-                                                        >
+                                                        >,
+                                                    > = stream_handle.map(|h| {
+                                                        Box::new(
+                                                            move |chunk: hermes_core::StreamChunk| {
+                                                                h.send_chunk(chunk);
+                                                            },
+                                                        )
+                                                            as Box<
+                                                                dyn Fn(hermes_core::StreamChunk)
+                                                                    + Send
+                                                                    + Sync,
+                                                            >
+                                                    });
+                                                    agent.run_stream(
+                                                        messages,
+                                                        Some(tool_schemas),
+                                                        stream_cb,
+                                                    )
+                                                    .await
+                                                } else {
+                                                    agent.run(messages, Some(tool_schemas)).await
+                                                };
+                                                let _ = stream_tx.send(Event::AgentRunComplete {
+                                                    result: result.map_err(|e| e.to_string()),
+                                                    elapsed_secs: started.elapsed().as_secs_f64(),
                                                 });
-                                                agent.run_stream(
-                                                    messages,
-                                                    Some(tool_schemas),
-                                                    stream_cb,
-                                                )
-                                                .await
-                                            } else {
-                                                agent.run(messages, Some(tool_schemas)).await
-                                            };
-                                            let _ = stream_tx.send(Event::AgentRunComplete {
-                                                result: result.map_err(|e| e.to_string()),
-                                                elapsed_secs: started.elapsed().as_secs_f64(),
                                             });
-                                        });
+                                            active_agent_task = Some(task);
+                                        }
                                     }
                                 }
                             }
@@ -5233,6 +5480,7 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                         result,
                         elapsed_secs,
                     }) => {
+                        active_agent_task = None;
                         handle_agent_run_complete(
                             &mut app,
                             &mut state,
@@ -5241,13 +5489,38 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                         );
                         needs_redraw = true;
                     }
+                    Some(Event::ManagedAppRunComplete {
+                        result,
+                        elapsed_secs,
+                    }) => {
+                        active_agent_task = None;
+                        handle_managed_app_run_complete(
+                            &mut app,
+                            &mut state,
+                            result,
+                            elapsed_secs,
+                        );
+                        needs_redraw = true;
+                    }
                     Some(Event::Interrupt) => {
+                        abort_and_join_task(&mut active_agent_task).await;
                         state.finish_processing_cycle("⏹ interrupted after");
                         state.stream_buffer.clear();
                         state.stream_muted = false;
                         state.stream_needs_break = false;
                         state.active_tools.clear();
                         needs_redraw = true;
+                    }
+                    Some(Event::Shutdown) => {
+                        app.interrupt_controller.interrupt(None);
+                        abort_and_join_task(&mut active_agent_task).await;
+                        state.finish_processing_cycle("⏹ interrupted after");
+                        state.stream_buffer.clear();
+                        state.stream_muted = false;
+                        state.stream_needs_break = false;
+                        state.active_tools.clear();
+                        app.running = false;
+                        break;
                     }
                     Some(Event::StreamDelta(_)) | Some(Event::StreamChunk(_)) | Some(Event::AgentDone) => {
                         // Stream events are consumed on the dedicated stream lane.
@@ -5260,6 +5533,8 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
             }
             stream_event = tui.stream_events.recv() => {
                 if let Some(first) = stream_event {
+                    let mut task_completed =
+                        stream_event_completes_background_task(&first);
                     let mut redraw = process_stream_lane_event(&mut app, &mut state, first);
                     let (drain_cap, drain_budget) =
                         stream_lane_budget(state.processing, state.stream_chunk_count);
@@ -5267,6 +5542,7 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                     for _ in 0..drain_cap {
                         match tui.stream_events.try_recv() {
                             Ok(next) => {
+                                task_completed |= stream_event_completes_background_task(&next);
                                 redraw |= process_stream_lane_event(&mut app, &mut state, next);
                                 if drain_started.elapsed() >= drain_budget {
                                     break;
@@ -5275,6 +5551,9 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
                         }
+                    }
+                    if task_completed {
+                        active_agent_task = None;
                     }
                     if redraw {
                         needs_redraw = true;
@@ -5306,6 +5585,13 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
             }
         }
     }
+
+    app.interrupt_controller.interrupt(None);
+    abort_and_join_task(&mut active_agent_task).await;
+    event_task.abort();
+    signal_task.abort();
+    let _ = event_task.await;
+    let _ = signal_task.await;
 
     // Restore terminal
     tui.restore()
@@ -5438,6 +5724,35 @@ mod tests {
             }],
         ));
         assert!(!should_render_completions_popup(&state));
+    }
+
+    #[test]
+    fn test_managed_route_when_quorum_armed() {
+        let messages: Vec<Message> = Vec::new();
+        assert!(should_route_prompt_via_managed_agent(true, &messages));
+    }
+
+    #[test]
+    fn test_managed_route_when_quorum_hint_present() {
+        let messages = vec![Message::system(
+            "[QUORUM_MODE] Quorum reasoning is enabled for multi-voter fanout",
+        )];
+        assert!(should_route_prompt_via_managed_agent(false, &messages));
+    }
+
+    #[test]
+    fn test_background_route_without_quorum_state() {
+        let messages = vec![Message::system("normal system message")];
+        assert!(!should_route_prompt_via_managed_agent(false, &messages));
+    }
+
+    #[test]
+    fn test_background_completion_events_clear_task_handle() {
+        let event = Event::AgentRunComplete {
+            result: Err("stopped".to_string()),
+            elapsed_secs: 1.0,
+        };
+        assert!(stream_event_completes_background_task(&event));
     }
 
     #[test]
@@ -5643,6 +5958,23 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let plain_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert!(is_submit_shortcut(&plain_enter, "/model\nlist"));
+    }
+
+    #[test]
+    fn test_bracketed_paste_inserts_multiline_text_without_submit_shortcut() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut state = TuiState::default();
+        state.input = "before  after".to_string();
+        state.cursor_position = "before ".len();
+
+        state.insert_paste_at_cursor("line1\r\nline2\rline3");
+
+        assert_eq!(state.input, "before line1\nline2\nline3 after");
+        assert_eq!(state.cursor_position, "before line1\nline2\nline3".len());
+
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert!(!is_submit_shortcut(&shift_enter, &state.input));
     }
 
     #[test]

@@ -424,6 +424,91 @@ pub fn ultra_sunburst_theme() -> Theme {
     theme
 }
 
+/// Built-in cyberpunk profile: toxic yellow, hot red, electric cyan, dead black.
+pub fn ultra_cyberpunk_theme() -> Theme {
+    let mut theme = default_theme();
+    theme.name = "ultra-cyberpunk".to_string();
+    theme.colors.primary = "#190019".to_string();
+    theme.colors.secondary = "#00d7ff".to_string();
+    theme.colors.accent = "#ff174f".to_string();
+    theme.colors.background = "#020004".to_string();
+    theme.colors.foreground = "#fff7bf".to_string();
+    theme.colors.error = "#ff174f".to_string();
+    theme.colors.warning = "#fff200".to_string();
+    theme.colors.success = "#00ff9d".to_string();
+    theme.colors.status_bar_bg = Some("#24001f".to_string());
+    theme.colors.status_bar_text = Some("#fff7bf".to_string());
+    theme.colors.status_bar_strong = Some("#fff200".to_string());
+    theme.colors.status_bar_dim = Some("#00a6c7".to_string());
+    theme.colors.status_bar_good = Some("#00ff9d".to_string());
+    theme.colors.status_bar_warn = Some("#fff200".to_string());
+    theme.colors.status_bar_bad = Some("#ff174f".to_string());
+    theme.colors.status_bar_critical = Some("#ff0033".to_string());
+    theme.styles.user_input.fg = Some("#fff200".to_string());
+    theme.styles.assistant_response.fg = Some("#fff7bf".to_string());
+    theme.styles.system_message.fg = Some("#00d7ff".to_string());
+    theme.styles.tool_call.fg = Some("#ff7a18".to_string());
+    theme.styles.tool_result.fg = Some("#00ff9d".to_string());
+    theme.styles.error.fg = Some("#ff174f".to_string());
+    theme
+}
+
+/// Built-in 32-bit profile: crunchy indexed-color console energy.
+pub fn ultra_32bit_theme() -> Theme {
+    let mut theme = default_theme();
+    theme.name = "ultra-32bit".to_string();
+    theme.colors.primary = "#001b2e".to_string();
+    theme.colors.secondary = "#6b8cff".to_string();
+    theme.colors.accent = "#ffcc00".to_string();
+    theme.colors.background = "#000814".to_string();
+    theme.colors.foreground = "#d7f8ff".to_string();
+    theme.colors.error = "#ff4d4d".to_string();
+    theme.colors.warning = "#ffcc00".to_string();
+    theme.colors.success = "#3dff73".to_string();
+    theme.colors.status_bar_bg = Some("#00172b".to_string());
+    theme.colors.status_bar_text = Some("#d7f8ff".to_string());
+    theme.colors.status_bar_strong = Some("#ffcc00".to_string());
+    theme.colors.status_bar_dim = Some("#7897ff".to_string());
+    theme.colors.status_bar_good = Some("#3dff73".to_string());
+    theme.colors.status_bar_warn = Some("#ffcc00".to_string());
+    theme.colors.status_bar_bad = Some("#ff4d4d".to_string());
+    theme.colors.status_bar_critical = Some("#ff1f1f".to_string());
+    theme.styles.user_input.fg = Some("#7ddfff".to_string());
+    theme.styles.assistant_response.fg = Some("#d7f8ff".to_string());
+    theme.styles.system_message.fg = Some("#7f92c7".to_string());
+    theme.styles.tool_call.fg = Some("#ffcc00".to_string());
+    theme.styles.tool_result.fg = Some("#3dff73".to_string());
+    theme
+}
+
+/// Built-in 64-bit profile: wider color depth, sharper chrome, calmer contrast.
+pub fn ultra_64bit_theme() -> Theme {
+    let mut theme = default_theme();
+    theme.name = "ultra-64bit".to_string();
+    theme.colors.primary = "#08142c".to_string();
+    theme.colors.secondary = "#86a6c7".to_string();
+    theme.colors.accent = "#ff6a00".to_string();
+    theme.colors.background = "#020712".to_string();
+    theme.colors.foreground = "#edf6ff".to_string();
+    theme.colors.error = "#ff3155".to_string();
+    theme.colors.warning = "#ffb84d".to_string();
+    theme.colors.success = "#66ffd1".to_string();
+    theme.colors.status_bar_bg = Some("#07142a".to_string());
+    theme.colors.status_bar_text = Some("#edf6ff".to_string());
+    theme.colors.status_bar_strong = Some("#ff6a00".to_string());
+    theme.colors.status_bar_dim = Some("#88a8c8".to_string());
+    theme.colors.status_bar_good = Some("#66ffd1".to_string());
+    theme.colors.status_bar_warn = Some("#ffb84d".to_string());
+    theme.colors.status_bar_bad = Some("#ff3155".to_string());
+    theme.colors.status_bar_critical = Some("#ff193f".to_string());
+    theme.styles.user_input.fg = Some("#92d8ff".to_string());
+    theme.styles.assistant_response.fg = Some("#edf6ff".to_string());
+    theme.styles.system_message.fg = Some("#9fb9d4".to_string());
+    theme.styles.tool_call.fg = Some("#ff9d4d".to_string());
+    theme.styles.tool_result.fg = Some("#66ffd1".to_string());
+    theme
+}
+
 /// Built-in amber neon variant (high warmth, high contrast).
 pub fn ultra_amber_theme() -> Theme {
     let mut theme = default_theme();
@@ -697,6 +782,9 @@ mod tests {
     fn test_ultra_variants_have_distinct_names() {
         assert_eq!(ultra_amber_theme().name, "ultra-amber");
         assert_eq!(ultra_sunburst_theme().name, "ultra-sunburst");
+        assert_eq!(ultra_cyberpunk_theme().name, "ultra-cyberpunk");
+        assert_eq!(ultra_32bit_theme().name, "ultra-32bit");
+        assert_eq!(ultra_64bit_theme().name, "ultra-64bit");
         assert_eq!(ultra_ice_theme().name, "ultra-ice");
         assert_eq!(ultra_hc_theme().name, "ultra-hc");
         assert_eq!(neon_glow_theme().name, "neon-glow");

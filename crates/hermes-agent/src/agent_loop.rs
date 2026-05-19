@@ -4359,8 +4359,18 @@ impl AgentLoop {
     /// Mirrors Python `agent.context_references.preprocess_context_references_async`
     /// (also invoked from gateway/CLI before `run_conversation` on some paths). Both
     /// `run` and `run_stream` call this so streaming callers get the same expansion.
+    fn context_reference_workspace_root() -> PathBuf {
+        std::env::var("TERMINAL_CWD")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            })
+    }
+
     async fn preprocess_user_message_context_references(&self, messages: &mut [Message]) {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let cwd = Self::context_reference_workspace_root();
         let context_length = get_model_context_length(&self.config.model);
         for msg in messages.iter_mut() {
             if msg.role != MessageRole::User {
@@ -4369,8 +4379,13 @@ impl AgentLoop {
             let Some(content) = msg.content.clone() else {
                 continue;
             };
-            let result =
-                preprocess_context_references_async(&content, &cwd, context_length, None).await;
+            let result = preprocess_context_references_async(
+                &content,
+                &cwd,
+                context_length,
+                Some(&cwd),
+            )
+            .await;
             if result.expanded && result.message != content {
                 msg.content = Some(result.message);
             }

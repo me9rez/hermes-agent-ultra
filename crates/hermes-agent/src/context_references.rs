@@ -888,4 +888,40 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].target, "ok.txt");
     }
+
+    #[test]
+    fn parse_windows_absolute_path_line_range() {
+        let refs = parse_context_references(
+            r"@file:C:\Users\15059\hermes-agent-ultra\crates\hermes-core\src\types.rs:5-10",
+        );
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].target,
+            r"C:\Users\15059\hermes-agent-ultra\crates\hermes-core\src\types.rs"
+        );
+        assert_eq!(refs[0].line_start, Some(5));
+        assert_eq!(refs[0].line_end, Some(10));
+    }
+
+    #[tokio::test]
+    async fn preprocess_windows_line_range_injects_only_selected_lines() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest
+            .parent()
+            .expect("workspace")
+            .parent()
+            .expect("repo root")
+            .to_path_buf();
+        let msg = format!(
+            "@hermes-go @file:{}\\crates\\hermes-core\\src\\types.rs:5-10 写了什么",
+            root.display()
+        );
+        let result =
+            preprocess_context_references_async(&msg, &root, 128_000, None).await;
+        assert!(result.expanded, "expected @file expansion");
+        assert!(!result.blocked);
+        assert!(result.message.contains("MessageRole"));
+        assert!(!result.message.contains("CacheType"));
+        assert!(!result.message.contains("ReasoningFormat::Details"));
+    }
 }

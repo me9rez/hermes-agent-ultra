@@ -4,6 +4,7 @@
 //! stack when constructing the full command tree.
 
 pub(crate) mod commands;
+mod completion_tree;
 mod globals;
 mod parse;
 mod shallow;
@@ -12,6 +13,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use completion_tree::completion_command;
 pub use globals::GlobalCli;
 pub use types::{Cli, CliCommand};
 

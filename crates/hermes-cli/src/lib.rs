@@ -52,7 +52,7 @@ pub use checklist::{
     curses_checklist, curses_select, curses_select_embedded, ChecklistResult, SelectResult,
 };
 pub use claw_migrate::{run_migration, MigrateOptions, MigrationResult};
-pub use cli::{Cli, CliCommand};
+pub use cli::{completion_command, Cli, CliCommand};
 pub use commands::CommandResult;
 pub use theme::Theme;
 pub use tui::{Event, InputMode, ToolOutputSection, Tui};

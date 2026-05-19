@@ -74,11 +74,14 @@ impl GlobalCli {
 }
 
 /// Second-pass root: global flags + one fully-specified subcommand (no shallow duplicates).
-pub fn command_with_subcommand(subcommand: Command) -> Command {
-    let mut cmd = Command::new(BINARY_NAME)
+pub fn root_with_global_flags() -> Command {
+    let cmd = Command::new(BINARY_NAME)
         .about(ABOUT)
         .long_about(LONG_ABOUT)
         .disable_help_subcommand(true);
-    cmd = GlobalFlags::augment_args(cmd);
-    cmd.subcommand(subcommand)
+    GlobalFlags::augment_args(cmd)
+}
+
+pub fn command_with_subcommand(subcommand: Command) -> Command {
+    root_with_global_flags().subcommand(subcommand)
 }

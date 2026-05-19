@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::{Cli, CliCommand};
+    use crate::{completion_command, Cli, CliCommand};
     use clap::CommandFactory;
 
     #[test]
@@ -60,6 +60,20 @@ mod tests {
     fn cli_effective_command_default() {
         let cli = Cli::try_parse_from(["hermes"]).unwrap();
         assert!(matches!(cli.effective_command(), CliCommand::Hermes));
+    }
+
+    #[test]
+    fn completion_command_includes_full_gateway_flags() {
+        let cmd = completion_command();
+        let gateway = cmd
+            .find_subcommand("gateway")
+            .expect("gateway subcommand");
+        assert!(
+            gateway
+                .get_arguments()
+                .any(|arg| arg.get_long() == Some("system")),
+            "completion tree should include gateway-specific flags"
+        );
     }
 
     #[test]

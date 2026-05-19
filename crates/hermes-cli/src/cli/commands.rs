@@ -868,3 +868,56 @@ pub fn parse_lumio(args: &[OsString]) -> Result<CliCommand, clap::Error> {
         }
     })
 }
+
+/// Fully-specified subcommands for shell completion (built on demand, not at startup).
+pub fn all_subcommand_commands() -> Vec<clap::Command> {
+    macro_rules! commands {
+        ($($parser:ty),* $(,)?) => {
+            vec![$(<$parser as CommandFactory>::command()),*]
+        };
+    }
+
+    commands![
+        ModelArgs,
+        ToolsArgs,
+        ConfigArgs,
+        GatewayArgs,
+        DoctorArgs,
+        UpdateArgs,
+        EliteCheckArgs,
+        VerifyProvenanceArgs,
+        RotateProvenanceKeyArgs,
+        RouteLearningArgs,
+        RouteHealthArgs,
+        RouteAutotuneArgs,
+        IncidentPackArgs,
+        DashboardArgs,
+        DebugArgs,
+        LogsArgs,
+        ProfileArgs,
+        AuthArgs,
+        SecretsArgs,
+        CronArgs,
+        WebhookArgs,
+        ChatArgs,
+        SkillsArgs,
+        PluginsArgs,
+        MemoryArgs,
+        McpArgs,
+        SessionsArgs,
+        ResumeArgs,
+        InsightsArgs,
+        LoginArgs,
+        LogoutArgs,
+        WhatsappArgs,
+        PairingArgs,
+        ClawArgs,
+        AcpArgs,
+        BackupArgs,
+        ImportArgs,
+        DumpArgs,
+        CompletionArgs,
+        UninstallArgs,
+        LumioArgs,
+    ]
+}

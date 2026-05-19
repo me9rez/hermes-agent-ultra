@@ -7,7 +7,6 @@ use aes_gcm::aead::Aead;
 use aes_gcm::Aes256Gcm;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
-use clap::CommandFactory;
 use clap_complete::{generate, Shell as CompletionShell};
 use hermes_agent::session_persistence::SessionPersistence;
 use hermes_agent::{leading_system_prompt_for_persist, AgentCallbacks, AgentLoop};
@@ -8805,7 +8804,7 @@ async fn run_dump(
 }
 
 fn run_completion(shell: Option<String>) -> Result<(), AgentError> {
-    let mut cmd = Cli::command();
+    let mut cmd = hermes_cli::completion_command();
     let sh = match shell.as_deref().unwrap_or("zsh") {
         "bash" => CompletionShell::Bash,
         "fish" => CompletionShell::Fish,

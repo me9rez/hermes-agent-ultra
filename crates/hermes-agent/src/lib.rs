@@ -22,6 +22,7 @@ pub mod memory_manager;
 pub mod memory_plugins;
 pub mod oauth;
 pub mod plugins;
+pub mod shell_hooks;
 pub mod provider;
 pub mod providers_extra;
 pub mod python_alignment;
@@ -76,6 +77,7 @@ pub use memory_manager::{
 
 // Re-export plugin system
 pub use plugins::{Plugin, PluginManager, PluginMeta};
+pub use shell_hooks::set_process_accept_hooks;
 
 // Re-export skill orchestrator
 pub use skill_orchestrator::SkillOrchestrator;
@@ -132,6 +134,24 @@ fn default_memory_home() -> String {
                 .map(|home| format!("{home}/.hermes-agent-ultra"))
         })
         .unwrap_or_else(|| ".hermes-agent-ultra".to_string())
+}
+
+/// Attach a runtime [`PluginManager`] (config shell hooks + future native plugins).
+pub fn attach_discovered_plugins(agent: AgentLoop) -> AgentLoop {
+    let hermes_home = agent
+        .config()
+        .hermes_home
+        .clone()
+        .unwrap_or_else(default_memory_home);
+    let Some(pm) = PluginManager::build_runtime_manager(std::path::Path::new(&hermes_home)) else {
+        return agent;
+    };
+    agent.with_plugins(pm)
+}
+
+/// Memory + plugin runtime wiring for CLI, gateway, HTTP, and cron surfaces.
+pub fn attach_agent_runtime(agent: AgentLoop) -> AgentLoop {
+    attach_discovered_plugins(attach_discovered_memory(agent))
 }
 
 /// Attach discovered external memory providers to an `AgentLoop`.

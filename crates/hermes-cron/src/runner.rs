@@ -208,11 +208,11 @@ impl CronRunner {
         let tools = self.filtered_tool_schemas();
 
         // Create a fresh agent loop
-        let agent_loop = AgentLoop::new(
+        let agent_loop = hermes_agent::attach_agent_runtime(AgentLoop::new(
             config,
             self.tool_registry.clone(),
             self.llm_provider.clone(),
-        );
+        ));
 
         // Build initial messages
         let messages = self.build_messages(job);

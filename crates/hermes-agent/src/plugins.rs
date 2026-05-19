@@ -206,6 +206,10 @@ impl PluginContext {
     pub fn drain_injected_messages(&mut self) -> Vec<String> {
         std::mem::take(&mut self.injected_messages)
     }
+
+    pub fn has_hooks(&self) -> bool {
+        !self.hooks.is_empty()
+    }
 }
 
 impl Default for PluginContext {
@@ -279,6 +283,20 @@ impl PluginManager {
         tracing::info!("Registered plugin: {} v{}", meta.name, meta.version);
         plugin.register(&mut self.context);
         self.plugins.insert(meta.name.clone(), plugin);
+    }
+
+    /// Register a hook callback directly (e.g. config-driven shell hooks).
+    pub fn register_hook_callback(
+        &mut self,
+        hook: HookType,
+        callback: Arc<dyn Fn(&Value) -> HookResult + Send + Sync>,
+    ) {
+        self.context.on(hook, callback);
+    }
+
+    /// True when any lifecycle hook callbacks are registered.
+    pub fn has_hooks(&self) -> bool {
+        self.context.has_hooks()
     }
 
     pub async fn initialize_all(&self) -> Result<(), AgentError> {
@@ -395,6 +413,25 @@ impl PluginManager {
         let cwd = std::env::current_dir().ok();
         Self::discover_plugins_with_options(hermes_dir, cwd.as_deref(), enable_project_plugins)
     }
+
+    /// Build a plugin manager with built-in and config-driven shell hooks.
+    ///
+    /// Returns `None` when no hooks or native plugins are registered (caller
+    /// may skip [`AgentLoop::with_plugins`]).
+    pub fn build_runtime_manager(hermes_home: &Path) -> Option<std::sync::Arc<std::sync::Mutex<Self>>> {
+        let mut mgr = Self::new();
+        register_builtin_plugins(&mut mgr);
+        crate::shell_hooks::register_config_shell_hooks(&mut mgr, hermes_home);
+        if mgr.list_plugins().is_empty() && !mgr.has_hooks() {
+            return None;
+        }
+        Some(std::sync::Arc::new(std::sync::Mutex::new(mgr)))
+    }
+}
+
+/// Register native Rust plugins compiled into the agent binary.
+pub fn register_builtin_plugins(_mgr: &mut PluginManager) {
+    // Extension point for future in-tree plugins (observability, disk-cleanup, …).
 }
 
 fn scan_plugin_root(

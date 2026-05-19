@@ -296,6 +296,10 @@ async fn run(cli: Cli) {
         std::env::set_var("HERMES_IGNORE_RULES", "1");
         std::env::set_var("HERMES_AGENT_SKIP_CONTEXT_FILES", "1");
     }
+    if cli.accept_hooks {
+        std::env::set_var("HERMES_ACCEPT_HOOKS", "1");
+        hermes_agent::shell_hooks::set_process_accept_hooks(true);
+    }
     let effective_command = cli.effective_command();
     let global_model_override = cli.model.clone();
     let global_provider_override = cli.provider.clone();
@@ -3960,7 +3964,7 @@ fn build_agent_for_gateway_context(
             Path::new(h),
         );
     }
-    hermes_agent::attach_discovered_memory(
+    hermes_agent::attach_agent_runtime(
         AgentLoop::new(agent_config, agent_tools, provider)
             .with_async_tool_dispatch(async_tool_dispatch_for(runtime_tools)),
     )

@@ -252,6 +252,7 @@ pub struct Cli {
     pub personality: Option<String>,
     pub ignore_user_config: bool,
     pub ignore_rules: bool,
+    pub accept_hooks: bool,
 }
 
 impl Cli {

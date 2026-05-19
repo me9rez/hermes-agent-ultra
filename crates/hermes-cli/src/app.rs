@@ -2071,7 +2071,7 @@ impl App {
         let agent_config = build_agent_config(&config, &current_model);
         let provider = build_provider(&config, &current_model);
 
-        let agent_inner = hermes_agent::attach_discovered_memory(AgentLoop::new(
+        let agent_inner = hermes_agent::attach_agent_runtime(AgentLoop::new(
             agent_config,
             agent_tool_registry,
             provider,
@@ -2387,7 +2387,7 @@ impl App {
         let agent_config = build_agent_config(&self.config, &self.current_model);
         let agent_tool_registry = Arc::new(bridge_tool_registry(&self.tool_registry));
 
-        let agent_inner = hermes_agent::attach_discovered_memory(AgentLoop::new(
+        let agent_inner = hermes_agent::attach_agent_runtime(AgentLoop::new(
             agent_config,
             agent_tool_registry,
             provider,
@@ -3679,7 +3679,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(NoBackendProvider {
             model: "openai:gpt-4o".to_string(),
         });
-        let agent_inner = hermes_agent::attach_discovered_memory(AgentLoop::new(
+        let agent_inner = hermes_agent::attach_agent_runtime(AgentLoop::new(
             agent_config,
             agent_tool_registry,
             provider,

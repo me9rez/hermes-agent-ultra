@@ -158,12 +158,13 @@ impl HttpServerState {
         let config_arc_stream = config_arc.clone();
         let agent_tools_stream = agent_tools.clone();
         let runtime_tools_stream = tool_registry.clone();
+        let tool_registry_handler = tool_registry.clone();
 
         gateway
             .set_message_handler_with_context(Arc::new(move |messages, ctx| {
                 let config = config_arc.clone();
                 let agent_tools = agent_tools.clone();
-                let runtime_tools = tool_registry.clone();
+                let runtime_tools = tool_registry_handler.clone();
                 Box::pin(async move {
                     hermes_telemetry::record_llm_request();
                     let effective_model = resolve_model_for_gateway(
@@ -886,7 +887,7 @@ fn build_agent_for_gateway_context(
             FsPath::new(h),
         );
     }
-    hermes_agent::attach_discovered_memory(
+    hermes_agent::attach_agent_runtime(
         AgentLoop::new(agent_config, agent_tools, provider)
             .with_async_tool_dispatch(async_tool_dispatch_for(runtime_tools)),
     )

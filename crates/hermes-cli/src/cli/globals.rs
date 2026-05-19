@@ -44,6 +44,9 @@ pub struct GlobalFlags {
     /// Ignore local instruction/rules context injection for this run.
     #[arg(long, global = true)]
     pub ignore_rules: bool,
+    /// Auto-approve config shell hooks without a TTY prompt (also sets HERMES_ACCEPT_HOOKS).
+    #[arg(long, global = true)]
+    pub accept_hooks: bool,
 }
 
 /// First-pass root parser: global flags + shallow subcommand names only.

@@ -15,6 +15,7 @@ mod tests {
         assert!(!cli.allow_tools);
         assert!(!cli.ignore_user_config);
         assert!(!cli.ignore_rules);
+        assert!(!cli.accept_hooks);
     }
 
     #[test]

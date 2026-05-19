@@ -51,6 +51,7 @@ impl Cli {
             personality: globals.flags.personality,
             ignore_user_config: globals.flags.ignore_user_config,
             ignore_rules: globals.flags.ignore_rules,
+            accept_hooks: globals.flags.accept_hooks,
         })
     }
 }

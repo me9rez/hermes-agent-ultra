@@ -134,6 +134,44 @@ pub trait PlatformAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Whether this adapter supports native token streaming delivery.
+    ///
+    /// Native streaming means tokens can be pushed progressively using a
+    /// platform-specific stream primitive (e.g. WeCom `msgtype=stream`)
+    /// instead of repeated `send_message` calls.
+    fn supports_native_streaming(&self) -> bool {
+        false
+    }
+
+    /// Start a native streaming session for a chat.
+    ///
+    /// Returns `Ok(Some(stream_id))` when the stream is successfully started,
+    /// `Ok(None)` when the adapter chooses not to start a native stream for
+    /// this request, and `Err` on hard failures.
+    async fn start_native_stream(
+        &self,
+        _chat_id: &str,
+        _reply_to: Option<&str>,
+        _initial_content: Option<&str>,
+    ) -> Result<Option<String>, GatewayError> {
+        Ok(None)
+    }
+
+    /// Send a chunk for an existing native streaming session.
+    ///
+    /// `finish=true` indicates the stream should be finalized.
+    async fn send_native_stream_chunk(
+        &self,
+        _chat_id: &str,
+        _stream_id: &str,
+        _content: &str,
+        _finish: bool,
+    ) -> Result<(), GatewayError> {
+        Err(GatewayError::Platform(
+            "native streaming is not supported by this adapter".into(),
+        ))
+    }
+
     /// Check whether the adapter is currently running.
     fn is_running(&self) -> bool;
 

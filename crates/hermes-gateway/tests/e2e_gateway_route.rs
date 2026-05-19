@@ -85,6 +85,8 @@ async fn e2e_gateway_routes_message_and_replies() {
             chat_id: "c1".to_string(),
             user_id: "u1".to_string(),
             text: "hello".to_string(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         })

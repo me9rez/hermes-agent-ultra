@@ -496,6 +496,8 @@ async fn send_message(
         chat_id: effective_session_id.clone(),
         user_id,
         text: req.text,
+        media_urls: vec![],
+        media_types: vec![],
         message_id: None,
         is_dm: false,
     };
@@ -562,6 +564,8 @@ async fn exec_command(
         chat_id: session_id,
         user_id,
         text: cmd,
+        media_urls: vec![],
+        media_types: vec![],
         message_id: None,
         is_dm: false,
     };

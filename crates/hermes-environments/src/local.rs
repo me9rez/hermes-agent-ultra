@@ -20,8 +20,16 @@ const PROCESS_OUTPUT_WINDOW_CHARS: usize = 200_000;
 const PROCESS_PREVIEW_CHARS: usize = 1_000;
 const PROCESS_WAIT_OUTPUT_CHARS: usize = 2_000;
 const PROCESS_LOG_DEFAULT_LINES: usize = 200;
+const LOCAL_SHELL_ENV: &str = "HERMES_LOCAL_SHELL";
+const TERMINAL_SHELL_ENV: &str = "HERMES_TERMINAL_SHELL";
 
 static NEXT_PROCESS_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellInvocation {
+    program: String,
+    args: Vec<&'static str>,
+}
 
 #[derive(Clone)]
 struct ProcessSession {
@@ -46,6 +54,8 @@ pub struct LocalBackend {
     default_timeout: u64,
     /// Maximum output size in bytes before truncation.
     max_output_size: usize,
+    /// Optional shell program/path for local command execution.
+    shell: Option<String>,
     /// Background processes tracked by session id for lifecycle operations.
     background_processes: Arc<Mutex<HashMap<String, ProcessSession>>>,
 }
@@ -53,11 +63,43 @@ pub struct LocalBackend {
 impl LocalBackend {
     /// Create a new local backend with the given defaults.
     pub fn new(default_timeout: u64, max_output_size: usize) -> Self {
+        Self::new_with_shell(default_timeout, max_output_size, None)
+    }
+
+    /// Create a new local backend with an optional shell override.
+    pub fn new_with_shell(
+        default_timeout: u64,
+        max_output_size: usize,
+        shell: Option<String>,
+    ) -> Self {
         Self {
             default_timeout,
             max_output_size,
+            shell: shell.and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }),
             background_processes: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn shell_override(&self) -> Option<String> {
+        self.shell
+            .clone()
+            .or_else(|| std::env::var(LOCAL_SHELL_ENV).ok())
+            .or_else(|| std::env::var(TERMINAL_SHELL_ENV).ok())
+            .and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+    }
+
+    fn shell_command(&self, command: &str) -> TokioCommand {
+        let shell_override = self.shell_override();
+        let invocation = local_shell_invocation(shell_override.as_deref());
+        let mut cmd = TokioCommand::new(invocation.program);
+        cmd.args(invocation.args).arg(command);
+        cmd
     }
 
     fn next_process_session_id() -> String {
@@ -330,6 +372,66 @@ fn scrub_subprocess_env(cmd: &mut TokioCommand) {
     }
 }
 
+fn normalized_shell_name(shell: &str) -> String {
+    let file_name = shell
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(shell)
+        .to_ascii_lowercase();
+    file_name
+        .strip_suffix(".exe")
+        .unwrap_or(&file_name)
+        .to_string()
+}
+
+fn local_shell_invocation(shell: Option<&str>) -> ShellInvocation {
+    let Some(shell) = shell.map(str::trim).filter(|value| !value.is_empty()) else {
+        return default_local_shell_invocation();
+    };
+
+    let name = normalized_shell_name(shell);
+    let args = match name.as_str() {
+        "cmd" => vec!["/D", "/S", "/C"],
+        "powershell" | "pwsh" => vec!["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
+        "sh" | "bash" | "zsh" => vec!["-c"],
+        _ => default_shell_args_for_platform(),
+    };
+
+    ShellInvocation {
+        program: shell.to_string(),
+        args,
+    }
+}
+
+fn default_local_shell_invocation() -> ShellInvocation {
+    #[cfg(windows)]
+    {
+        ShellInvocation {
+            program: "powershell.exe".to_string(),
+            args: vec!["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        ShellInvocation {
+            program: "sh".to_string(),
+            args: vec!["-c"],
+        }
+    }
+}
+
+fn default_shell_args_for_platform() -> Vec<&'static str> {
+    #[cfg(windows)]
+    {
+        vec!["-Command"]
+    }
+    #[cfg(not(windows))]
+    {
+        vec!["-c"]
+    }
+}
+
 fn with_login_profile_sources(command: &str) -> String {
     #[cfg(unix)]
     {
@@ -469,14 +571,10 @@ impl TerminalBackend for LocalBackend {
                 tracing::warn!(
                     "PTY mode is not supported on this platform; using standard shell execution"
                 );
-                let mut shell_cmd = TokioCommand::new("sh");
-                shell_cmd.arg("-c").arg(&command_with_profiles);
-                shell_cmd
+                self.shell_command(&command_with_profiles)
             }
         } else {
-            let mut shell_cmd = TokioCommand::new("sh");
-            shell_cmd.arg("-c").arg(&command_with_profiles);
-            shell_cmd
+            self.shell_command(&command_with_profiles)
         };
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         scrub_subprocess_env(&mut cmd);
@@ -717,10 +815,8 @@ impl TerminalBackend for LocalBackend {
             }
         }
 
-        let mut cmd = TokioCommand::new("sh");
-        cmd.arg("-c")
-            .arg(&command_with_profiles)
-            .stdout(Stdio::piped())
+        let mut cmd = self.shell_command(&command_with_profiles);
+        cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::piped());
         scrub_subprocess_env(&mut cmd);
@@ -1128,6 +1224,40 @@ mod tests {
     fn test_with_login_profile_sources_is_passthrough_off_unix() {
         let wrapped = with_login_profile_sources("echo hi");
         assert_eq!(wrapped, "echo hi");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_default_local_shell_is_powershell_on_windows() {
+        let invocation = local_shell_invocation(None);
+        assert_eq!(invocation.program, "powershell.exe");
+        assert_eq!(invocation.args.last(), Some(&"-Command"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_default_local_shell_is_sh_off_windows() {
+        let invocation = local_shell_invocation(None);
+        assert_eq!(invocation.program, "sh");
+        assert_eq!(invocation.args, vec!["-c"]);
+    }
+
+    #[test]
+    fn test_local_shell_invocation_supports_cmd() {
+        let invocation = local_shell_invocation(Some(r"C:\Windows\System32\cmd.exe"));
+        assert_eq!(invocation.program, r"C:\Windows\System32\cmd.exe");
+        assert_eq!(invocation.args, vec!["/D", "/S", "/C"]);
+    }
+
+    #[test]
+    fn test_local_shell_invocation_supports_powershell_paths() {
+        let invocation = local_shell_invocation(Some(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\PowerShell.EXE",
+        ));
+        assert_eq!(
+            invocation.args,
+            vec!["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]
+        );
     }
 
     #[tokio::test]

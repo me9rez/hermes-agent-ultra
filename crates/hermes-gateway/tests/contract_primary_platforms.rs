@@ -93,6 +93,8 @@ fn incoming(platform: &str, user_id: &str, text: &str) -> IncomingMessage {
         chat_id: format!("chat-{platform}"),
         user_id: user_id.to_string(),
         text: text.to_string(),
+        media_urls: vec![],
+        media_types: vec![],
         message_id: None,
         is_dm: true,
     }

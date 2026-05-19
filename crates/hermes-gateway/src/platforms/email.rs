@@ -504,6 +504,8 @@ fn imap_fetch_unseen(
                 } else {
                     body.trim().to_string()
                 },
+                media_urls: vec![],
+                media_types: vec![],
                 message_id: Some(mid.clone()),
                 is_dm: true,
             });

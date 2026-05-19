@@ -987,6 +987,8 @@ impl WeChatAdapter {
             chat_id: effective_id.clone(),
             user_id: sender.clone(),
             text,
+            media_urls: vec![],
+            media_types: vec![],
             message_id: if msg_id.is_empty() {
                 None
             } else {

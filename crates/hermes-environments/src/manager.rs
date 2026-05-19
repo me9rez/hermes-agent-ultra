@@ -49,7 +49,11 @@ impl BackendManager {
     fn create_backend(config: &TerminalConfig) -> (Arc<dyn TerminalBackend>, TerminalBackendType) {
         match config.backend {
             TerminalBackendType::Local => (
-                Arc::new(LocalBackend::new(config.timeout, config.max_output_size)),
+                Arc::new(LocalBackend::new_with_shell(
+                    config.timeout,
+                    config.max_output_size,
+                    config.shell.clone(),
+                )),
                 TerminalBackendType::Local,
             ),
             #[cfg(feature = "docker")]
@@ -112,7 +116,11 @@ impl BackendManager {
                     config.backend
                 );
                 (
-                    Arc::new(LocalBackend::new(config.timeout, config.max_output_size)),
+                    Arc::new(LocalBackend::new_with_shell(
+                        config.timeout,
+                        config.max_output_size,
+                        config.shell.clone(),
+                    )),
                     TerminalBackendType::Local,
                 )
             }

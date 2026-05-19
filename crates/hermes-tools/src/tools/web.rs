@@ -3,6 +3,8 @@
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde_json::{json, Value};
+use std::time::Instant;
+use tracing::debug;
 
 use hermes_core::{tool_schema, JsonSchema, ToolError, ToolHandler, ToolSchema};
 
@@ -59,7 +61,20 @@ impl ToolHandler for WebSearchHandler {
 
         let category = params.get("category").and_then(|v| v.as_str());
 
-        self.backend.search(query, num_results, category).await
+        let started = Instant::now();
+        debug!(
+            query_chars = query.chars().count(),
+            num_results,
+            category = ?category,
+            "web_search tool execute start"
+        );
+        let result = self.backend.search(query, num_results, category).await;
+        debug!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "web_search tool execute finished"
+        );
+        result
     }
 
     fn schema(&self) -> ToolSchema {

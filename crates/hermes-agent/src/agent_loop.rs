@@ -5186,6 +5186,16 @@ impl AgentLoop {
                 detect_contextlattice_connect_intent(ctx.get_messages());
 
             // --- Pre-tool hook ---
+            let tool_names_for_log: Vec<&str> = tool_calls
+                .iter()
+                .map(|tc| tc.function.name.as_str())
+                .collect();
+            tracing::debug!(
+                turn = total_turns,
+                tool_count = tool_calls.len(),
+                tools = ?tool_names_for_log,
+                "agent tool batch start"
+            );
             for tc in &tool_calls {
                 let tc_ctx = serde_json::json!({
                     "tool": &tc.function.name,
@@ -5234,6 +5244,14 @@ impl AgentLoop {
             let tool_elapsed = tool_start.elapsed().as_millis() as u64;
             _total_tool_time_ms += tool_elapsed;
             let turn_tool_error_count = results.iter().filter(|r| r.is_error).count() as u32;
+            tracing::debug!(
+                turn = total_turns,
+                tool_count = tool_calls.len(),
+                result_count = results.len(),
+                errors = turn_tool_error_count,
+                elapsed_ms = tool_elapsed,
+                "agent tool batch finished"
+            );
             let turn_tool_error_rate = if results.is_empty() {
                 0.0
             } else {
@@ -5591,6 +5609,7 @@ impl AgentLoop {
         );
 
         let mut total_turns: u32 = 0;
+        let mut _total_tool_time_ms: u64 = 0;
         let mut accumulated_usage: Option<UsageStats> = None;
         let mut session_cost_usd: f64 = 0.0;
         let mut cost_warned = false;
@@ -6385,6 +6404,17 @@ impl AgentLoop {
                 detect_contextlattice_connect_intent(ctx.get_messages());
 
             // Pre-tool hooks + callbacks
+            let tool_names_for_log: Vec<&str> = tool_calls
+                .iter()
+                .map(|tc| tc.function.name.as_str())
+                .collect();
+            tracing::debug!(
+                turn = total_turns,
+                tool_count = tool_calls.len(),
+                tools = ?tool_names_for_log,
+                streaming = true,
+                "agent tool batch start"
+            );
             for tc in &tool_calls {
                 let tc_ctx = serde_json::json!({"tool": &tc.function.name, "turn": total_turns});
                 self.invoke_hook(HookType::PreToolCall, &tc_ctx);
@@ -6407,6 +6437,7 @@ impl AgentLoop {
                 ));
             }
 
+            let tool_start = Instant::now();
             let mut results = self
                 .execute_tool_calls(
                     &tool_calls,
@@ -6425,7 +6456,18 @@ impl AgentLoop {
                     &mut tool_errors,
                 )
                 .await;
+            let tool_elapsed = tool_start.elapsed().as_millis() as u64;
+            _total_tool_time_ms += tool_elapsed;
             let turn_tool_error_count = results.iter().filter(|r| r.is_error).count() as u32;
+            tracing::debug!(
+                turn = total_turns,
+                tool_count = tool_calls.len(),
+                result_count = results.len(),
+                errors = turn_tool_error_count,
+                elapsed_ms = tool_elapsed,
+                streaming = true,
+                "agent tool batch finished"
+            );
             let turn_tool_error_rate = if results.is_empty() {
                 0.0
             } else {
@@ -7335,8 +7377,10 @@ impl AgentLoop {
             let parent_budget_remaining_usd = parent_budget_remaining_usd;
 
             join_set.spawn(async move {
+                let started = Instant::now();
                 match registry.get(&tool_name) {
                     Some(entry) => {
+                        tracing::debug!(tool = %tool_name, "agent tool call start");
                         // Parse arguments
                         let mut params: Value = match serde_json::from_str(&raw_args) {
                             Ok(v) => v,
@@ -7381,13 +7425,27 @@ impl AgentLoop {
                         // Execute the handler
                         match (entry.handler)(params) {
                             Ok(output) => {
+                                tracing::debug!(
+                                    tool = %tool_name,
+                                    elapsed_ms = started.elapsed().as_millis() as u64,
+                                    output_chars = output.chars().count(),
+                                    "agent tool call finished"
+                                );
                                 if looks_like_tool_error_output(&output) {
                                     ToolResult::err(&tool_call_id, output)
                                 } else {
                                     ToolResult::ok(&tool_call_id, output)
                                 }
                             }
-                            Err(e) => ToolResult::err(&tool_call_id, e.to_string()),
+                            Err(e) => {
+                                tracing::debug!(
+                                    tool = %tool_name,
+                                    elapsed_ms = started.elapsed().as_millis() as u64,
+                                    error = %e,
+                                    "agent tool call failed"
+                                );
+                                ToolResult::err(&tool_call_id, e.to_string())
+                            }
                         }
                     }
                     None => {

@@ -13,8 +13,9 @@ use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use std::time::Instant;
+use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, error, info, trace, warn};
 
 use hermes_core::errors::GatewayError;
 use hermes_core::traits::{ParseMode, PlatformAdapter};
@@ -96,6 +97,10 @@ pub struct IncomingMessage {
     pub user_id: String,
     /// Message text content.
     pub text: String,
+    /// Structured inbound media URLs or local cache paths.
+    pub media_urls: Vec<String>,
+    /// Structured inbound media types, aligned by index with `media_urls`.
+    pub media_types: Vec<String>,
     /// Platform-specific message ID (for reply threading).
     pub message_id: Option<String>,
     /// Whether this is a DM (direct message) or group message.
@@ -522,6 +527,16 @@ impl Gateway {
     /// Route an incoming message through the full pipeline:
     /// DM check → session lookup → agent loop → response.
     pub async fn route_message(&self, incoming: &IncomingMessage) -> Result<(), GatewayError> {
+        let route_start = Instant::now();
+        debug!(
+            platform = %incoming.platform,
+            chat_id = %incoming.chat_id,
+            user_id = %incoming.user_id,
+            is_dm = incoming.is_dm,
+            has_media = !incoming.media_urls.is_empty(),
+            text_chars = incoming.text.chars().count(),
+            "gateway route start"
+        );
         let access_policy = self.platform_access_policy(&incoming.platform).await;
         let is_slash_command = incoming.text.trim_start().starts_with('/');
         if let Some(policy) = access_policy.as_ref() {
@@ -603,6 +618,12 @@ impl Gateway {
             .session_manager
             .get_or_create_session(&incoming.platform, &incoming.chat_id, &incoming.user_id)
             .await;
+        trace!(
+            platform = %incoming.platform,
+            session_key = %session_key,
+            session_started = existing_session.is_none(),
+            "gateway session resolved"
+        );
         let session_started = existing_session.is_none();
         let session_auto_reset = existing_session
             .as_ref()
@@ -651,8 +672,9 @@ impl Gateway {
             }
         }
 
-        let enriched_text = self
-            .enrich_message_with_transcription(&self.enrich_message_with_vision(&incoming.text));
+        let inbound_text = self.enrich_message_with_media(incoming);
+        let enriched_text =
+            self.enrich_message_with_transcription(&self.enrich_message_with_vision(&inbound_text));
         self.maybe_apply_smart_model_routing(&session_key, &enriched_text)
             .await;
 
@@ -660,7 +682,7 @@ impl Gateway {
         self.session_manager
             .add_message(&session_key, Message::user(enriched_text))
             .await;
-        self.bump_input_usage(&session_key, incoming.text.chars().count())
+        self.bump_input_usage(&session_key, inbound_text.chars().count())
             .await;
 
         // 4. Get all session messages for the agent loop
@@ -674,6 +696,14 @@ impl Gateway {
             self.route_non_streaming(&incoming, messages, &session_key)
                 .await
         };
+        debug!(
+            platform = %incoming.platform,
+            chat_id = %incoming.chat_id,
+            session_key = %session_key,
+            elapsed_ms = route_start.elapsed().as_millis() as u64,
+            success = processing_result.is_ok(),
+            "gateway route finished"
+        );
 
         if let (Some(adapter), Some(message_id)) =
             (&reaction_adapter, incoming.message_id.as_deref())
@@ -1254,6 +1284,14 @@ impl Gateway {
         runtime_context.deferred_post_delivery_messages = Some(deferred_messages.clone());
         runtime_context.deferred_post_delivery_released = Some(deferred_release.clone());
         let context_handler = self.message_handler_with_context.read().await.clone();
+        let agent_start = Instant::now();
+        debug!(
+            platform = %incoming.platform,
+            chat_id = %incoming.chat_id,
+            session_key = %session_key,
+            message_count = messages.len(),
+            "gateway non-streaming agent start"
+        );
         let response_result = if let Some(handler) = context_handler {
             handler(messages, runtime_context).await
         } else {
@@ -1283,6 +1321,14 @@ impl Gateway {
                 return Err(e);
             }
         };
+        debug!(
+            platform = %incoming.platform,
+            chat_id = %incoming.chat_id,
+            session_key = %session_key,
+            elapsed_ms = agent_start.elapsed().as_millis() as u64,
+            response_chars = response.chars().count(),
+            "gateway non-streaming agent finished"
+        );
 
         // Add assistant response to session
         self.session_manager
@@ -1346,47 +1392,129 @@ impl Gateway {
             .inject_runtime_hints(session_key, messages.clone())
             .await;
 
-        // Start a stream
-        let stream_handle = self
-            .stream_manager
-            .start_stream(&incoming.platform, &incoming.chat_id)
-            .await;
-        let stream_id = stream_handle.id.clone();
+        let adapter_for_platform = self.adapters.read().await.get(&incoming.platform).cloned();
+        let native_streaming = adapter_for_platform
+            .as_ref()
+            .map(|a| a.supports_native_streaming())
+            .unwrap_or(false);
 
-        // Send an initial streaming anchor message.
-        self.send_message(&incoming.platform, &incoming.chat_id, "...", None)
-            .await?;
+        let mut stream_id: Option<String> = None;
+        let mut native_worker: Option<tokio::task::JoinHandle<()>> = None;
+        let native_started = Arc::new(AtomicBool::new(false));
+        let native_failed = Arc::new(AtomicBool::new(false));
 
-        // Set up the chunk callback that updates the stream and edits the message
-        let stream_manager = self.stream_manager.clone();
-        let platform = incoming.platform.clone();
-        let chat_id = incoming.chat_id.clone();
-        let gateway_adapters = self.adapters.read().await.clone();
-        let sid = stream_id.clone();
-
-        let on_chunk: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |chunk: String| {
-            let sm = stream_manager.clone();
-            let sid = sid.clone();
-            let platform = platform.clone();
-            let chat_id = chat_id.clone();
-            let adapters = gateway_adapters.clone();
-
-            tokio::spawn(async move {
-                if let Some(should_flush) = sm.update_stream(&sid, &chunk).await {
-                    if should_flush {
-                        if let Some(content) = sm.get_stream_content(&sid).await {
-                            if let Some(adapter) = adapters.get(&platform) {
-                                // For streaming, we'd need the message_id from the initial send.
-                                // This is a simplified version.
-                                let _ = adapter.send_message(&chat_id, &content, None).await;
+        let on_chunk: Arc<dyn Fn(String) + Send + Sync> = if native_streaming {
+            let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+            let adapter = adapter_for_platform.clone().expect("adapter exists when native_streaming");
+            let chat_id = incoming.chat_id.clone();
+            let reply_to = incoming.message_id.clone();
+            let started = native_started.clone();
+            let failed = native_failed.clone();
+            native_worker = Some(tokio::spawn(async move {
+                let mut native_stream_id: Option<String> = None;
+                let mut accumulated = String::new();
+                while let Some(chunk) = rx.recv().await {
+                    if chunk.trim().is_empty() {
+                        continue;
+                    }
+                    accumulated.push_str(&chunk);
+                    if native_stream_id.is_none() {
+                        match adapter
+                            .start_native_stream(
+                                &chat_id,
+                                reply_to.as_deref(),
+                                Some(accumulated.as_str()),
+                            )
+                            .await
+                        {
+                            Ok(Some(sid)) => {
+                                native_stream_id = Some(sid);
+                                started.store(true, Ordering::Release);
                             }
+                            Ok(None) => {
+                                failed.store(true, Ordering::Release);
+                                return;
+                            }
+                            Err(err) => {
+                                warn!(error = %err, "native streaming start failed");
+                                failed.store(true, Ordering::Release);
+                                return;
+                            }
+                        }
+                    } else if let Some(sid) = native_stream_id.as_deref() {
+                        if let Err(err) = adapter
+                            .send_native_stream_chunk(&chat_id, sid, accumulated.as_str(), false)
+                            .await
+                        {
+                            warn!(error = %err, stream_id = %sid, "native streaming chunk failed");
+                            failed.store(true, Ordering::Release);
+                            return;
                         }
                     }
                 }
-            });
-        });
+                if let Some(sid) = native_stream_id.as_deref() {
+                    if let Err(err) = adapter
+                        .send_native_stream_chunk(&chat_id, sid, accumulated.as_str(), true)
+                        .await
+                    {
+                        warn!(error = %err, stream_id = %sid, "native streaming finish failed");
+                        failed.store(true, Ordering::Release);
+                    }
+                }
+            }));
+
+            Arc::new(move |chunk: String| {
+                let _ = tx.send(chunk);
+            })
+        } else {
+            // Start legacy stream manager session.
+            let stream_handle = self
+                .stream_manager
+                .start_stream(&incoming.platform, &incoming.chat_id)
+                .await;
+            stream_id = Some(stream_handle.id.clone());
+
+            // Send an initial streaming anchor message.
+            self.send_message(&incoming.platform, &incoming.chat_id, "...", None)
+                .await?;
+
+            let stream_manager = self.stream_manager.clone();
+            let platform = incoming.platform.clone();
+            let chat_id = incoming.chat_id.clone();
+            let gateway_adapters = self.adapters.read().await.clone();
+            let sid = stream_id.clone().unwrap_or_default();
+
+            Arc::new(move |chunk: String| {
+                let sm = stream_manager.clone();
+                let sid = sid.clone();
+                let platform = platform.clone();
+                let chat_id = chat_id.clone();
+                let adapters = gateway_adapters.clone();
+
+                tokio::spawn(async move {
+                    if let Some(should_flush) = sm.update_stream(&sid, &chunk).await {
+                        if should_flush {
+                            if let Some(content) = sm.get_stream_content(&sid).await {
+                                if let Some(adapter) = adapters.get(&platform) {
+                                    // Legacy fallback path: progressively emits messages.
+                                    let _ = adapter.send_message(&chat_id, &content, None).await;
+                                }
+                            }
+                        }
+                    }
+                });
+            })
+        };
 
         // Invoke the streaming handler
+        let agent_start = Instant::now();
+        debug!(
+            platform = %incoming.platform,
+            chat_id = %incoming.chat_id,
+            session_key = %session_key,
+            message_count = messages.len(),
+            "gateway streaming agent start"
+        );
         let response_result = if let Some(handler) = context_handler {
             handler(messages, runtime_context, on_chunk).await
         } else {
@@ -1415,9 +1543,26 @@ impl Gateway {
                 return Err(e);
             }
         };
+        debug!(
+            platform = %incoming.platform,
+            chat_id = %incoming.chat_id,
+            session_key = %session_key,
+            elapsed_ms = agent_start.elapsed().as_millis() as u64,
+            response_chars = response.chars().count(),
+            "gateway streaming agent finished"
+        );
 
-        // Finish the stream
-        self.stream_manager.finish_stream(&stream_id).await;
+        if let Some(worker) = native_worker {
+            let _ = worker.await;
+            // If native stream could not start, fall back to one-shot delivery.
+            if !native_started.load(Ordering::Acquire) || native_failed.load(Ordering::Acquire) {
+                self.send_message(&incoming.platform, &incoming.chat_id, &response, None)
+                    .await?;
+            }
+        } else if let Some(stream_id) = stream_id {
+            // Finish the legacy stream-manager session.
+            self.stream_manager.finish_stream(&stream_id).await;
+        }
 
         // Add assistant response to session
         self.session_manager
@@ -1873,6 +2018,13 @@ impl Gateway {
         text: &str,
         parse_mode: Option<ParseMode>,
     ) -> Result<(), GatewayError> {
+        debug!(
+            platform = %platform,
+            chat_id = %chat_id,
+            text_chars = text.chars().count(),
+            has_parse_mode = parse_mode.is_some(),
+            "gateway send_message dispatch"
+        );
         let adapter = self.get_adapter(platform).await.ok_or_else(|| {
             GatewayError::Platform(format!("No adapter registered for platform: {}", platform))
         })?;
@@ -2012,6 +2164,36 @@ impl Gateway {
         }
     }
 
+    /// Convert structured media fields into stable text lines for downstream consumers.
+    pub fn enrich_message_with_media(&self, incoming: &IncomingMessage) -> String {
+        if incoming.media_urls.is_empty() {
+            return incoming.text.clone();
+        }
+        let mut media_lines = Vec::with_capacity(incoming.media_urls.len());
+        for (idx, media_url) in incoming.media_urls.iter().enumerate() {
+            let media_url = media_url.trim();
+            if media_url.is_empty() {
+                continue;
+            }
+            let media_type = incoming
+                .media_types
+                .get(idx)
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("file");
+            media_lines.push(format!("[media:{media_type}] {media_url}"));
+        }
+        if media_lines.is_empty() {
+            return incoming.text.clone();
+        }
+        if incoming.text.trim().is_empty() {
+            media_lines.join("\n")
+        } else {
+            format!("{}\n{}", incoming.text, media_lines.join("\n"))
+        }
+    }
+
     /// Build deterministic signature for config-change detection.
     pub fn agent_config_signature(&self) -> String {
         let s = serde_json::to_string(&self.config).unwrap_or_default();
@@ -2121,6 +2303,11 @@ mod tests {
 
     struct TestAdapter {
         messages: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    struct NativeStreamTestAdapter {
+        messages: Arc<Mutex<Vec<(String, String)>>>,
+        chunks: Arc<Mutex<Vec<(String, bool)>>>,
     }
 
     struct ReactionTestAdapter {
@@ -2290,6 +2477,87 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl PlatformAdapter for NativeStreamTestAdapter {
+        async fn start(&self) -> Result<(), GatewayError> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), GatewayError> {
+            Ok(())
+        }
+
+        async fn send_message(
+            &self,
+            chat_id: &str,
+            text: &str,
+            _parse_mode: Option<ParseMode>,
+        ) -> Result<(), GatewayError> {
+            self.messages
+                .lock()
+                .unwrap()
+                .push((chat_id.to_string(), text.to_string()));
+            Ok(())
+        }
+
+        async fn edit_message(
+            &self,
+            _chat_id: &str,
+            _message_id: &str,
+            _text: &str,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+
+        async fn send_file(
+            &self,
+            _chat_id: &str,
+            _file_path: &str,
+            _caption: Option<&str>,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+
+        fn supports_native_streaming(&self) -> bool {
+            true
+        }
+
+        async fn start_native_stream(
+            &self,
+            _chat_id: &str,
+            _reply_to: Option<&str>,
+            initial_content: Option<&str>,
+        ) -> Result<Option<String>, GatewayError> {
+            self.chunks.lock().unwrap().push((
+                initial_content.unwrap_or_default().to_string(),
+                false,
+            ));
+            Ok(Some("sid-1".to_string()))
+        }
+
+        async fn send_native_stream_chunk(
+            &self,
+            _chat_id: &str,
+            _stream_id: &str,
+            content: &str,
+            finish: bool,
+        ) -> Result<(), GatewayError> {
+            self.chunks
+                .lock()
+                .unwrap()
+                .push((content.to_string(), finish));
+            Ok(())
+        }
+
+        fn is_running(&self) -> bool {
+            true
+        }
+
+        fn platform_name(&self) -> &str {
+            "wecom"
+        }
+    }
+
     #[test]
     fn gateway_config_default() {
         let cfg = GatewayConfig::default();
@@ -2348,6 +2616,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "unknown_user".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2369,6 +2639,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2389,6 +2661,8 @@ mod tests {
             chat_id: "-group1".into(),
             user_id: "unknown_user".into(),
             text: "hello group".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: false, // Group message, no DM check
         };
@@ -2417,6 +2691,8 @@ mod tests {
             chat_id: "-100123".into(),
             user_id: "other_user".into(),
             text: "hello group".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: false,
         };
@@ -2456,6 +2732,8 @@ mod tests {
             chat_id: "guild:1".into(),
             user_id: "random_user".into(),
             text: "/status".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: Some("m1".into()),
             is_dm: false,
         };
@@ -2471,6 +2749,8 @@ mod tests {
             chat_id: "guild:1".into(),
             user_id: "allowed_user".into(),
             text: "/status".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: Some("m2".into()),
             is_dm: false,
         };
@@ -2499,6 +2779,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/status".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2555,6 +2837,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/compress".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2605,6 +2889,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/compress".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2657,6 +2943,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/background ping".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2683,6 +2971,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: format!("/background status {}", task_id),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2710,6 +3000,8 @@ mod tests {
             chat_id: "admin-chat".into(),
             user_id: "admin1".into(),
             text: "/approve user2".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2721,6 +3013,8 @@ mod tests {
             chat_id: "chat-u2".into(),
             user_id: "user2".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2731,6 +3025,8 @@ mod tests {
             chat_id: "admin-chat".into(),
             user_id: "admin1".into(),
             text: "/deny user2".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2742,6 +3038,8 @@ mod tests {
             chat_id: "chat-u2".into(),
             user_id: "user2".into(),
             text: "hello again".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2766,6 +3064,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/provider openrouter".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2776,6 +3076,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/profile prod".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2786,6 +3088,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/reload_mcp".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2796,6 +3100,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/status".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2853,6 +3159,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/provider openai".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2863,6 +3171,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/model gpt-4o".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2873,6 +3183,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/profile prod".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2883,6 +3195,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/branch feature/parity".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2893,6 +3207,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2942,6 +3258,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/yolo".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2952,6 +3270,8 @@ mod tests {
             chat_id: "chat2".into(),
             user_id: "user1".into(),
             text: "/yolo".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -2968,6 +3288,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/new".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -3011,6 +3333,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/yolo".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -3025,6 +3349,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: format!("/sessions {}", target_key),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -3058,6 +3384,8 @@ mod tests {
             chat_id: "C123".into(),
             user_id: "user1".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: Some("1710000000.123".into()),
             is_dm: true,
         };
@@ -3098,6 +3426,8 @@ mod tests {
             chat_id: "C123".into(),
             user_id: "user1".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: Some("1710000000.456".into()),
             is_dm: true,
         };
@@ -3137,6 +3467,8 @@ mod tests {
             chat_id: "C123".into(),
             user_id: "user1".into(),
             text: "general channel chatter".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: Some("1710000000.789".into()),
             is_dm: false,
         };
@@ -3190,6 +3522,8 @@ mod tests {
                 chat_id: "chat1".into(),
                 user_id: "user1".into(),
                 text: cmd.to_string(),
+                media_urls: vec![],
+                media_types: vec![],
                 message_id: None,
                 is_dm: true,
             };
@@ -3201,6 +3535,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "run".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -3265,6 +3601,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -3322,6 +3660,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -3380,6 +3720,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -3390,6 +3732,61 @@ mod tests {
         assert_eq!(
             ordered,
             vec!["...".to_string(), "💾 stream-bg-review".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_native_streaming_sends_full_refresh_chunks() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(NativeStreamTestAdapter {
+            messages: sent.clone(),
+            chunks: chunks.clone(),
+        });
+
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let mut dm_manager = DmManager::with_pair_behavior();
+        dm_manager.authorize_user("user1");
+        let mut cfg = GatewayConfig::default();
+        cfg.streaming_enabled = true;
+        let gw = Arc::new(Gateway::new(session_mgr, dm_manager, cfg));
+        gw.register_adapter("wecom", adapter).await;
+
+        gw.set_streaming_handler(Arc::new(|_messages, on_chunk| {
+            Box::pin(async move {
+                on_chunk("你".to_string());
+                on_chunk("好".to_string());
+                Ok("你好".to_string())
+            })
+        }))
+        .await;
+
+        let incoming = IncomingMessage {
+            platform: "wecom".into(),
+            chat_id: "chat1".into(),
+            user_id: "user1".into(),
+            text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
+            message_id: None,
+            is_dm: true,
+        };
+        assert!(gw.route_message(&incoming).await.is_ok());
+
+        let sent = sent.lock().unwrap();
+        assert!(
+            sent.is_empty(),
+            "native stream path should not fall back to one-shot send_message"
+        );
+
+        let chunks = chunks.lock().unwrap().clone();
+        assert_eq!(
+            chunks,
+            vec![
+                ("你".to_string(), false),
+                ("你好".to_string(), false),
+                ("你好".to_string(), true)
+            ]
         );
     }
 
@@ -3424,6 +3821,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -3506,6 +3905,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -3557,6 +3958,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/status".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -3599,6 +4002,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };
@@ -3609,6 +4014,8 @@ mod tests {
             chat_id: "chat1".into(),
             user_id: "user1".into(),
             text: "/reset".into(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: None,
             is_dm: true,
         };

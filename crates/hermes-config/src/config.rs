@@ -474,6 +474,10 @@ pub struct TerminalConfig {
     #[serde(default = "default_max_output_size")]
     pub max_output_size: usize,
 
+    /// Optional shell program/path for local command execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+
     /// Working directory override for command execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
@@ -485,6 +489,7 @@ impl Default for TerminalConfig {
             backend: TerminalBackendType::default(),
             timeout: default_terminal_timeout(),
             max_output_size: default_max_output_size(),
+            shell: None,
             workdir: None,
         }
     }

@@ -357,6 +357,8 @@ impl DingTalkAdapter {
             chat_id: chat_id.clone(),
             user_id: parsed.sender_id.clone(),
             text: parsed.text.clone(),
+            media_urls: vec![],
+            media_types: vec![],
             message_id: if parsed.message_id.is_empty() {
                 None
             } else {

@@ -405,6 +405,11 @@ impl PlatformAdapter for WeComCallbackAdapter {
         text: &str,
         _parse_mode: Option<ParseMode>,
     ) -> Result<(), GatewayError> {
+        debug!(
+            chat_id = %chat_id,
+            text_chars = text.chars().count(),
+            "WeCom callback sending text message"
+        );
         let app = self.resolve_app_for_chat(chat_id);
         let token = self.get_access_token_for_app(app).await?;
         let touser = chat_id.split_once(':').map(|(_, u)| u).unwrap_or(chat_id);
@@ -671,6 +676,7 @@ async fn handle_callback_request(
     let parts: Vec<&str> = line.split_whitespace().collect();
     let method = parts.first().copied().unwrap_or("GET");
     let full_path = parts.get(1).copied().unwrap_or("/");
+    debug!(method = %method, full_path = %full_path, "WeCom callback HTTP request received");
     let (path, query) = if let Some((p, q)) = full_path.split_once('?') {
         (p, q)
     } else {
@@ -767,6 +773,13 @@ async fn handle_callback_request(
         }
         if !text.is_empty() {
             if let Some(tx) = inbound_tx.read().await.clone() {
+                debug!(
+                    app = %app.name,
+                    from_user = %from_user,
+                    is_group,
+                    text_chars = text.chars().count(),
+                    "WeCom callback enqueue incoming message"
+                );
                 let _ = tx
                     .send(IncomingMessage {
                         platform: "wecom_callback".to_string(),
@@ -781,6 +794,8 @@ async fn handle_callback_request(
                         ),
                         user_id: from_user,
                         text,
+                        media_urls: vec![],
+                        media_types: vec![],
                         message_id: Some(msg_id),
                         is_dm: !is_group,
                     })

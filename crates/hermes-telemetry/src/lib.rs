@@ -1,5 +1,8 @@
 //! Telemetry bootstrap and in-process metrics registry.
 
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -19,6 +22,81 @@ pub struct TelemetryConfig {
     /// OTLP HTTP traces URL base (`http://host:4318`) or full path (`.../v1/traces`).
     /// Active when crate is built with `--features otlp`.
     pub otlp_endpoint: Option<String>,
+}
+
+struct TeeLogMakeWriter {
+    file_path: Option<PathBuf>,
+}
+
+impl TeeLogMakeWriter {
+    fn new() -> Self {
+        Self {
+            file_path: default_log_file_path(),
+        }
+    }
+}
+
+struct TeeLogWriter {
+    stderr: io::Stderr,
+    file: Option<File>,
+}
+
+impl Write for TeeLogWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(file) = self.file.as_mut() {
+            let _ = file.write_all(buf);
+        }
+        self.stderr.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(file) = self.file.as_mut() {
+            let _ = file.flush();
+        }
+        self.stderr.flush()
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TeeLogMakeWriter {
+    type Writer = TeeLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        let file = self.file_path.as_ref().and_then(|path| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        });
+        TeeLogWriter {
+            stderr: io::stderr(),
+            file,
+        }
+    }
+}
+
+fn default_log_file_path() -> Option<PathBuf> {
+    if let Ok(raw) = std::env::var("HERMES_LOG_FILE") {
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("stderr")
+            || trimmed.eq_ignore_ascii_case("none")
+            || trimmed.eq_ignore_ascii_case("off")
+        {
+            return None;
+        }
+        let path = PathBuf::from(trimmed);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        return Some(path);
+    }
+
+    let path = hermes_config::hermes_home().join("logs").join("hermes.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    Some(path)
 }
 
 impl Default for TelemetryConfig {
@@ -81,7 +159,9 @@ pub fn init_telemetry(config: &TelemetryConfig) {
         Registry::default()
     };
 
-    let fmt_base = tracing_subscriber::fmt::layer().with_target(false);
+    let fmt_base = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_writer(TeeLogMakeWriter::new());
     let _ = if config.json {
         reg.with(filter).with(fmt_base.json()).try_init()
     } else {

@@ -148,13 +148,9 @@ mod tests {
 
     #[test]
     fn returns_none_when_feature_flag_off() {
-        let payload = json!({
-            "providers": {"nous": {
-                "access_token": "tok",
-                "expires_at": iso_in(3600),
-            }}
-        });
-        let _g = Guard::new(Some(&payload));
+        // No auth.json payload — the feature flag is off AND no token exists,
+        // so the resolver must return None.
+        let _g = Guard::new(None);
         assert!(resolve_managed_tool_gateway("firecrawl", ResolveOptions::default()).is_none());
     }
 

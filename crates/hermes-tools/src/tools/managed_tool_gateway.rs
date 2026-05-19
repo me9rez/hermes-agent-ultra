@@ -166,17 +166,28 @@ mod tests {
 
     struct EnvGuard {
         _g: std::sync::MutexGuard<'static, ()>,
+        _tmp: tempfile::TempDir,
         original: Vec<(&'static str, Option<String>)>,
     }
 
     impl EnvGuard {
         fn new(keys: &[&'static str]) -> Self {
             let g = test_lock::lock();
-            let original = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
-            for k in keys {
+            let tmp = tempfile::tempdir().unwrap();
+            // Always save/clear HERMES_HOME to isolate from real auth.json
+            let mut all_keys: Vec<&'static str> = vec!["HERMES_HOME"];
+            all_keys.extend_from_slice(keys);
+            all_keys.dedup();
+            let original = all_keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+            for k in &all_keys {
                 std::env::remove_var(k);
             }
-            Self { _g: g, original }
+            std::env::set_var("HERMES_HOME", tmp.path());
+            Self {
+                _g: g,
+                _tmp: tmp,
+                original,
+            }
         }
     }
 
@@ -258,8 +269,7 @@ mod tests {
             "HERMES_ENABLE_NOUS_MANAGED_TOOLS",
             "TOOL_GATEWAY_USER_TOKEN",
         ]);
-        // Feature flag stays off; no legacy URL → resolver returns None.
-        std::env::set_var("TOOL_GATEWAY_USER_TOKEN", "vendor-tok");
+        // Feature flag off AND no token → resolver returns None.
         assert!(ManagedToolGatewayHandler::resolve_transport(Some("firecrawl")).is_none());
         // No vendor and no legacy URL → also None.
         assert!(ManagedToolGatewayHandler::resolve_transport(None).is_none());

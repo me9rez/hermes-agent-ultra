@@ -19,7 +19,7 @@
 | 录 Python golden | `python3 scripts/record_fixtures.py` | 同上 |
 | 真实 agent 评测 rollout | `cargo build -p hermes-eval --features agent-loop` | 见文末「评测」 |
 
-**当前 active 模块**（与 registry 同步）：`anthropic_adapter`、`hermes_core_tool_format`、`checkpoint_manager`。
+**当前 active 模块**（与 registry 同步）：`anthropic_adapter`、`hermes_core_tool_format`、`checkpoint_manager`、`model_metadata`、`usage_pricing`、`approval`、`v4a_patch`、`error_classifier`。
 
 未出现在 registry 的模块（如 `send_message`、`process_registry`）**没有**已激活 SOP；按 `PARITY_PLAN.md` 对应 Week 推进，落地 fixture 后再在 `docs/sop/` 新增一页。
 
@@ -37,11 +37,12 @@
 
 ### 编码约定（所有移植）
 
-1. 先读 `research/hermes-agent` 下对应 Python（registry 标 `N/A` 的模块跳过）。
+1. 先读 `C:\\Users\\15059\\hermes-agent` 下对应 Python（registry 标 `N/A` 的模块跳过）。
 2. 错误类型用各 crate 已有 `AgentError` / `ToolError`，不新建平行体系。
 3. 日志：`tracing::{debug,info,warn,error}`；CLI 面向用户的输出可用 `println!`。
 4. 异步：**tokio**，不用 async-std。
 5. 新 golden：放在 `crates/hermes-parity-tests/fixtures/<dir>/`，并更新 `scripts/record_fixtures.py`（若适用）与 `registry.json`。
+6. `docs\roadmaps\ULTRA_ADDITIONAL_FEATURES_PLAN_2026-04-24.md` Issue #78 / Workstream 7 不属于 registry.json parity，避免移植任务误加 Rust-only 行为。
 
 ### 禁止事项
 

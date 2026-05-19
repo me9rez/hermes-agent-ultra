@@ -1,0 +1,7 @@
+{
+  "allow": 1,
+  "deny": 0,
+  "audit_only": 1,
+  "simulate": 1,
+  "would_block": 1
+}

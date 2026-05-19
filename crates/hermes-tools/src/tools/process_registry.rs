@@ -729,6 +729,47 @@ impl ToolHandler for ProcessRegistryHandler {
 mod tests {
     use super::*;
 
+    /// Print `message` and exit (no shell required on Windows).
+    fn test_print_cmd(message: &str) -> (String, Vec<String>) {
+        #[cfg(windows)]
+        {
+            (
+                "cmd".into(),
+                vec!["/C".into(), "echo".into(), message.into()],
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            ("echo".into(), vec![message.into()])
+        }
+    }
+
+    /// Block for roughly `seconds` (stop / duplicate-name tests).
+    fn test_sleep_cmd(seconds: u32) -> (String, Vec<String>) {
+        #[cfg(windows)]
+        {
+            let n = (seconds + 1).to_string();
+            (
+                "cmd".into(),
+                vec![
+                    "/C".into(),
+                    "ping".into(),
+                    "127.0.0.1".into(),
+                    "-n".into(),
+                    n,
+                ],
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            ("sleep".into(), vec![seconds.to_string()])
+        }
+    }
+
+    fn arg_refs(args: &[String]) -> Vec<&str> {
+        args.iter().map(String::as_str).collect()
+    }
+
     // -- Ring buffer tests ---------------------------------------------------
 
     #[test]
@@ -768,12 +809,13 @@ mod tests {
     #[tokio::test]
     async fn spawn_and_list() {
         let mgr = ProcessManager::new().with_buffer_capacity(1024);
+        let (cmd, args) = test_print_cmd("hello");
         let info = mgr
-            .spawn("test-echo", "echo", &["hello"], None, None)
+            .spawn("test-echo", &cmd, &arg_refs(&args), None, None)
             .await
             .unwrap();
         assert_eq!(info.name, "test-echo");
-        assert_eq!(info.command, "echo");
+        assert_eq!(info.command, cmd);
         assert!(info.pid > 0);
 
         // Give it a moment to finish
@@ -787,7 +829,8 @@ mod tests {
     #[tokio::test]
     async fn spawn_captures_stdout() {
         let mgr = ProcessManager::new().with_buffer_capacity(1024);
-        mgr.spawn("echo-test", "echo", &["captured output"], None, None)
+        let (cmd, args) = test_print_cmd("captured output");
+        mgr.spawn("echo-test", &cmd, &arg_refs(&args), None, None)
             .await
             .unwrap();
 
@@ -801,13 +844,14 @@ mod tests {
     #[tokio::test]
     async fn spawn_duplicate_name_fails() {
         let mgr = ProcessManager::new().with_buffer_capacity(1024);
-        // Use sleep to keep the process running
-        mgr.spawn("dup", "sleep", &["10"], None, None)
+        let (sleep_cmd, sleep_args) = test_sleep_cmd(3);
+        mgr.spawn("dup", &sleep_cmd, &arg_refs(&sleep_args), None, None)
             .await
             .unwrap();
 
+        let (echo_cmd, echo_args) = test_print_cmd("hi");
         let err = mgr
-            .spawn("dup", "echo", &["hi"], None, None)
+            .spawn("dup", &echo_cmd, &arg_refs(&echo_args), None, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("already running"));
@@ -819,7 +863,8 @@ mod tests {
     #[tokio::test]
     async fn stop_process() {
         let mgr = ProcessManager::new().with_buffer_capacity(1024);
-        mgr.spawn("sleeper", "sleep", &["60"], None, None)
+        let (cmd, args) = test_sleep_cmd(60);
+        mgr.spawn("sleeper", &cmd, &arg_refs(&args), None, None)
             .await
             .unwrap();
 
@@ -844,7 +889,8 @@ mod tests {
     #[tokio::test]
     async fn remove_stopped_process() {
         let mgr = ProcessManager::new().with_buffer_capacity(1024);
-        mgr.spawn("rm-test", "echo", &["bye"], None, None)
+        let (cmd, args) = test_print_cmd("bye");
+        mgr.spawn("rm-test", &cmd, &arg_refs(&args), None, None)
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -869,13 +915,14 @@ mod tests {
     #[tokio::test]
     async fn handler_spawn_and_list() {
         let handler = ProcessRegistryHandler::default();
+        let (cmd, args) = test_print_cmd("handler test");
 
         let result = handler
             .execute(json!({
                 "action": "spawn",
                 "name": "h-echo",
-                "command": "echo",
-                "args": ["handler test"]
+                "command": cmd,
+                "args": args
             }))
             .await
             .unwrap();
@@ -893,13 +940,14 @@ mod tests {
     #[tokio::test]
     async fn handler_output() {
         let handler = ProcessRegistryHandler::default();
+        let (cmd, args) = test_print_cmd("output test");
 
         handler
             .execute(json!({
                 "action": "spawn",
                 "name": "h-out",
-                "command": "echo",
-                "args": ["output test"]
+                "command": cmd,
+                "args": args
             }))
             .await
             .unwrap();

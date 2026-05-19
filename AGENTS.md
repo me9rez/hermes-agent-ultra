@@ -1,46 +1,75 @@
-# Hermes Rust Parity Rules
+# AGENTS.md — Hermes Parity 移植操作系统（路由层）
 
-移植与 parity 相关改动请遵循以下约定（与 `PARITY_PLAN.md` Week 0 一致）。
+> **薄路由 + 厚 SOP**：本文件定义元规则与通用流程；模块级步骤见 [`docs/sop/`](docs/sop/README.md)。  
+> **机器真相**：可测模块以 [`crates/hermes-parity-tests/fixtures/registry.json`](crates/hermes-parity-tests/fixtures/registry.json) 为准；路线图见 [`PARITY_PLAN.md`](PARITY_PLAN.md)。
 
-## 移植任务通用约定
+## 核心元规则
 
-1. 任何移植任务必须先读对应的 Python 源文件（`research/hermes-agent`）以及相关 Rust crate 目录结构。
-2. 对外 API 命名保持与 Python 侧一致（`snake_case`）。
-3. 错误类型优先使用各 crate 内已有的 `AgentError` / `ToolError`，避免随意新建平行错误体系。
-4. 日志使用 `tracing::{debug,info,warn,error}`，避免无门控的 `println!`（CLI 用户输出除外）。
-5. 异步代码使用 **tokio**，不要使用 async-std。
-6. 可对照的行为应通过 `crates/hermes-parity-tests/fixtures/<module>/*.json` 提供 golden；新增用例时同步更新 `scripts/record_fixtures.py`（若适用）。
-7. 单个 PR 尽量只移植一个模块；commit message 建议：`parity(<module>): port from python …`
+1. **任务分型**：parity 移植 / 修 golden / `hermes-eval` 评测 / 其它 — 仅前两类执行下方「通用移植 SOP」。
+2. **禁止猜测**：路径、trait、依赖版本、fixture `op` 名称 — 用仓库搜索或 Read 工具查证，不得臆造。
+3. **步进验证**：每一步有且仅有一条验证命令；失败则停止，不得进入下一步。
+4. **单模块 PR**：一次改动只覆盖 `registry.json` 中的一个 `id`（或为其新增 fixture 条目）。
 
-## 禁止事项
+## 任务路由
 
-- 不要随意改动 workspace 成员结构（新增 crate 需有明确动机并更新根 `Cargo.toml`）。
-- 新增顶层依赖须与根 `Cargo.toml` 已有版本策略一致。
-- 合并前应尽量消除新增 `clippy` 警告（全仓 `-D warnings` 为目标，当前 CI 可能仍允许存量警告）。
+| 人类意图 | 第一步 | 详细 SOP |
+|----------|--------|----------|
+| 移植某 Python 模块 | 读 `registry.json` 找 `id`；若无条目 → 见 [`PARITY_PLAN.md`](PARITY_PLAN.md)，先录 fixture | [`docs/sop/<id>.md`](docs/sop/README.md) |
+| 跑 parity / 验收 | `cargo test -p hermes-parity-tests` | [`crates/hermes-parity-tests/fixtures/README.md`](crates/hermes-parity-tests/fixtures/README.md) |
+| 录 Python golden | `python3 scripts/record_fixtures.py` | 同上 |
+| 真实 agent 评测 rollout | `cargo build -p hermes-eval --features agent-loop` | 见文末「评测」 |
 
-## Parity 测试
+**当前 active 模块**（与 registry 同步）：`anthropic_adapter`、`hermes_core_tool_format`、`checkpoint_manager`。
+
+未出现在 registry 的模块（如 `send_message`、`process_registry`）**没有**已激活 SOP；按 `PARITY_PLAN.md` 对应 Week 推进，落地 fixture 后再在 `docs/sop/` 新增一页。
+
+## 通用移植 SOP（所有 `registry.json` active 模块）
+
+```
+1. 读 registry 条目 → python 路径、rust 位置、fixture_dirs、note
+2. 读 docs/sop/<id>.md → 打开列出的 Python / Rust 源文件
+3. 实现或修改 Rust（仅 touched crate；API 命名 snake_case，与 Python 一致）
+4. 验证编译：cargo build -p <crate>   （失败则只修报错，重复至多 3 次，见防御规则）
+5. 验证 parity：cargo test -p hermes-parity-tests
+6. 验证风格：cargo clippy -p <crate> -- -D warnings  （仅 touched crate）
+7. 提交：parity(<id>): port from python v2026.4.13
+```
+
+### 编码约定（所有移植）
+
+1. 先读 `research/hermes-agent` 下对应 Python（registry 标 `N/A` 的模块跳过）。
+2. 错误类型用各 crate 已有 `AgentError` / `ToolError`，不新建平行体系。
+3. 日志：`tracing::{debug,info,warn,error}`；CLI 面向用户的输出可用 `println!`。
+4. 异步：**tokio**，不用 async-std。
+5. 新 golden：放在 `crates/hermes-parity-tests/fixtures/<dir>/`，并更新 `scripts/record_fixtures.py`（若适用）与 `registry.json`。
+
+### 禁止事项
+
+- 不随意改 workspace 成员（新 crate 需动机 + 根 `Cargo.toml`）。
+- **依赖**：改 `Cargo.toml` 前必须在根 `Cargo.toml` / workspace 中核对已有版本；禁止重复添加同名 crate。
+- 合并前消除**本次引入**的 clippy 警告（全仓 `-D warnings` 为目标）。
+
+## 防御性规则
+
+- **连续 3 次** `cargo build` 仍失败 → 向人类汇报完整错误与已尝试修改 → **暂停**。
+- **parity 失败** → 记录 case `id`、`op`、Rust 实际输出与 fixture `expected`（完整 JSON 或 diff）→ 再改实现；仍不确定则请人确认 golden。
+- **禁止**在未读 fixture 的情况下改 `expected` 以「骗过」测试。
+
+## Parity 测试（速查）
 
 ```bash
 cargo test -p hermes-parity-tests
 ```
 
-- 模块状态见 `crates/hermes-parity-tests/fixtures/registry.json`。
-- `fixtures/pending/` 中的内容默认不参与 `run_all_active_fixtures`。
+- `fixtures/pending/` 不参与 `run_all_active_fixtures`。
+- 无 Python 仓库时，`record_fixtures.py` 仍可输出 checkpoint shadow 目录哈希 golden。
 
-Python 侧对照录制：
+## 评测（非移植任务）
+
+`hermes-eval` 用 [`JsonReporter`](crates/hermes-eval/src/reporter.rs) 写 [`RunRecord`](crates/hermes-eval/src/result.rs) JSON。
+
+真实 Agent rollout：启用 feature **`agent-loop`**，以 [`AgentLoopRollout`](crates/hermes-eval/src/agent_rollout.rs) 作为 [`TaskRollout`](crates/hermes-eval/src/runner.rs)：
 
 ```bash
-python3 scripts/record_fixtures.py
+cargo build -p hermes-eval --features agent-loop
 ```
-
-无 Python 仓库时仍会输出 **checkpoint 目录哈希**（与 `checkpoint_manager`  shadow 目录命名算法一致）。
-
-## 评测结果落盘
-
-`hermes-eval` 使用 [`JsonReporter`](crates/hermes-eval/src/reporter.rs) 将 [`RunRecord`](crates/hermes-eval/src/result.rs) 写成 JSON；基线对比 / Parquet 可在其上扩展。
-
-### 真实 Agent rollout（非 Noop）
-
-构建与 `hermes-cli` 相同的 [`hermes_agent::AgentLoop`](crates/hermes-agent)，启用 crate feature **`agent-loop`** 后使用 [`AgentLoopRollout`](crates/hermes-eval/src/agent_rollout.rs) 作为 [`TaskRollout`](crates/hermes-eval/src/runner.rs) 传入 [`Runner::run`](crates/hermes-eval/src/runner.rs)：
-
-`cargo build -p hermes-eval --features agent-loop`

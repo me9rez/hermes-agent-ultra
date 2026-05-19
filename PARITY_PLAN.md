@@ -50,24 +50,19 @@ hermes-parity-tests/
 
 ### 0.2 AI 开发环境配置
 
-在项目根加 `.cursor/rules/` 或 `AGENTS.md`：
+- **路由层**：根目录 [`AGENTS.md`](AGENTS.md)（元规则、通用移植 SOP、防御性规则、任务路由表）。
+- **可执行 SOP**：[`docs/sop/`](docs/sop/README.md) — 每个 **`fixtures/registry.json` 中 `status: active` 的 `id`** 一页；新增 active 模块时同步新增 `docs/sop/<id>.md`。
+- **机器真相**：`crates/hermes-parity-tests/fixtures/registry.json`（勿在 `AGENTS.md` 手写完整模块列表，避免与 registry 漂移）。
+- **路线图 Prompt 模板**：仍在本文件各 Week/Day 小节；细节以对应 `docs/sop/<id>.md` 为准。
 
 ```markdown
-# Hermes Rust Parity Rules
+# 摘要（完整版见 AGENTS.md）
 
-## 移植任务通用约定
-1. 任何移植任务必须先读对应的 Python 源文件 + 相关 Rust crate 目录结构
-2. 所有 public API 签名保留 Python 命名（snake_case → Rust snake_case 即可）
-3. 错误类型用 crate 内已有的 `AgentError` / `ToolError`，不要新建
-4. 日志用 `tracing::{debug,info,warn,error}`，不要 println!
-5. async 函数用 tokio 运行时，不要用 async-std
-6. 测试必须对照 fixtures/<module_name>/*.json 做断言
-7. 每个 PR 只移植一个模块，commit message 用：`parity(<module>): port from python v2026.4.13`
-
-## 禁止事项
-- 禁止修改 crate 工作空间结构
-- 禁止引入新的顶层依赖（必须与 workspace Cargo.toml 已有版本对齐）
-- 禁止跳过 clippy warnings
+1. 先读 registry.json → docs/sop/<id>.md → Python / Rust 源文件
+2. snake_case API；AgentError/ToolError；tracing；tokio
+3. cargo test -p hermes-parity-tests → clippy（touched crate）
+4. 单模块 PR；commit: parity(<module>): port from python v2026.4.13
+5. 依赖：先核对 workspace Cargo.toml，禁止未核对版本就添加
 ```
 
 ### 0.3 CI 流水线（`.github/workflows/parity.yml`）

@@ -1613,7 +1613,7 @@ fn governor_for_turn(
 /// Owns the configuration, a tool registry, and an LLM provider.
 /// Call `run()` or `run_stream()` to begin an autonomous loop.
 pub struct AgentLoop {
-    config_runtime: tokio::sync::RwLock<AgentConfig>,
+    config_runtime: std::sync::RwLock<AgentConfig>,
     pub tool_registry: Arc<ToolRegistry>,
     pub llm_provider: Arc<dyn LlmProvider>,
     pub interrupt: InterruptController,
@@ -1813,14 +1813,17 @@ impl AgentLoop {
         let Ok(active) = self.active_runtime.lock() else {
             return;
         };
-        let mut cfg = self.config_runtime.blocking_write();
+        let mut cfg = self
+            .config_runtime
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         cfg.model = active.model.clone();
         cfg.provider = active.provider.clone();
         cfg.api_mode = active.api_mode.clone();
     }
 
     fn primary_runtime_for_failover_model(&self, model_id: &str) -> PrimaryRuntime {
-        let cfg = self.config();
+        let cfg = self.config_snapshot();
         let mut rt = Self::primary_runtime_from_config(&cfg);
         let (provider, _) = self.extract_provider_and_model(model_id);
         rt.model = model_id.trim().to_string();
@@ -1894,7 +1897,7 @@ impl AgentLoop {
         self.active_runtime
             .lock()
             .map(|rt| rt.model.clone())
-            .unwrap_or_else(|_| self.config().model.clone())
+            .unwrap_or_else(|_| self.config_snapshot().model)
     }
 
     /// Apply an in-session fallback runtime (Python `_try_activate_fallback` outcome).
@@ -1908,13 +1911,16 @@ impl AgentLoop {
         self.sync_config_from_active_runtime();
     }
 
-    /// Read-only agent config; `model` / `provider` / `api_mode` track active runtime after fallback.
-    pub fn config(&self) -> tokio::sync::RwLockReadGuard<'_, AgentConfig> {
-        self.config_runtime.blocking_read()
+    /// Snapshot of agent config (`model` / `provider` / `api_mode` follow active runtime after fallback).
+    pub fn config(&self) -> AgentConfig {
+        self.config_runtime
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn config_snapshot(&self) -> AgentConfig {
-        self.config().clone()
+        self.config()
     }
 
     /// Create a new agent loop.
@@ -1929,7 +1935,7 @@ impl AgentLoop {
         let stored_primary_runtime = Self::primary_runtime_from_config(&config);
         let active_runtime = Mutex::new(stored_primary_runtime.clone());
         Self {
-            config_runtime: tokio::sync::RwLock::new(config),
+            config_runtime: std::sync::RwLock::new(config),
             tool_registry,
             llm_provider,
             interrupt: InterruptController::new(),
@@ -1963,7 +1969,7 @@ impl AgentLoop {
         let stored_primary_runtime = Self::primary_runtime_from_config(&config);
         let active_runtime = Mutex::new(stored_primary_runtime.clone());
         Self {
-            config_runtime: tokio::sync::RwLock::new(config),
+            config_runtime: std::sync::RwLock::new(config),
             tool_registry,
             llm_provider,
             interrupt,
@@ -2035,7 +2041,7 @@ impl AgentLoop {
     }
 
     fn save_route_learning_state(&self, entries: &HashMap<String, RouteLearningStats>) {
-        let path = route_learning_state_path(&*self.config());
+        let path = route_learning_state_path(&self.config());
         if let Some(parent) = path.parent() {
             if let Err(err) = std::fs::create_dir_all(parent) {
                 tracing::warn!(
@@ -4704,7 +4710,7 @@ impl AgentLoop {
         if self.config().preflight_context_compress {
             self.preflight_context_compress_with_status(&mut ctx);
         }
-        let replay = ReplayRecorder::for_session(&*self.config(), session_id);
+        let replay = ReplayRecorder::for_session(&self.config(), session_id);
         let max_turns_limit = effective_max_turns(self.config().max_turns);
         replay.record(
             "session_start",
@@ -4837,7 +4843,7 @@ impl AgentLoop {
                 governor_consecutive_error_turns,
             );
             let llm_governor =
-                governor_for_turn(&*self.config(), &ctx, 0, Some(&turn_governor_runtime));
+                governor_for_turn(&self.config(), &ctx, 0, Some(&turn_governor_runtime));
             if forced_runtime_route.is_none()
                 && (turn_governor_runtime.consecutive_error_turns >= 2
                     || turn_governor_runtime
@@ -5039,7 +5045,7 @@ impl AgentLoop {
             if let Some(ref usage) = turn_usage_acc {
                 accumulated_usage = Some(merge_usage(accumulated_usage, usage));
                 if let Some(cost) =
-                    estimate_usage_cost_usd(usage, response.model.as_str(), &*self.config())
+                    estimate_usage_cost_usd(usage, response.model.as_str(), &self.config())
                 {
                     session_cost_usd += cost;
                 }
@@ -5451,7 +5457,7 @@ impl AgentLoop {
             }
             let tool_start = Instant::now();
             let tool_governor = governor_for_turn(
-                &*self.config(),
+                &self.config(),
                 &ctx,
                 tool_calls.len(),
                 Some(&turn_governor_runtime),
@@ -5831,7 +5837,7 @@ impl AgentLoop {
         if self.config().preflight_context_compress {
             self.preflight_context_compress_with_status(&mut ctx);
         }
-        let replay = ReplayRecorder::for_session(&*self.config(), session_id);
+        let replay = ReplayRecorder::for_session(&self.config(), session_id);
         let max_turns_limit = effective_max_turns(self.config().max_turns);
         replay.record(
             "session_start",
@@ -5959,7 +5965,7 @@ impl AgentLoop {
                 governor_consecutive_error_turns,
             );
             let llm_governor =
-                governor_for_turn(&*self.config(), &ctx, 0, Some(&turn_governor_runtime));
+                governor_for_turn(&self.config(), &ctx, 0, Some(&turn_governor_runtime));
             if forced_runtime_route.is_none()
                 && (turn_governor_runtime.consecutive_error_turns >= 2
                     || turn_governor_runtime
@@ -6048,7 +6054,7 @@ impl AgentLoop {
                             if let Some(ref u) = partial.usage {
                                 accumulated_usage = Some(merge_usage(accumulated_usage.clone(), u));
                                 if let Some(cost) =
-                                    estimate_usage_cost_usd(u, partial.model.as_str(), &*self.config())
+                                    estimate_usage_cost_usd(u, partial.model.as_str(), &self.config())
                                 {
                                     session_cost_usd += cost;
                                 }
@@ -6208,7 +6214,7 @@ impl AgentLoop {
             if let Some(ref usage) = turn_usage_acc {
                 accumulated_usage = Some(merge_usage(accumulated_usage, usage));
                 if let Some(cost) =
-                    estimate_usage_cost_usd(usage, response.model.as_str(), &*self.config())
+                    estimate_usage_cost_usd(usage, response.model.as_str(), &self.config())
                 {
                     session_cost_usd += cost;
                 }
@@ -6681,7 +6687,7 @@ impl AgentLoop {
                     &tool_calls,
                     total_turns,
                     governor_for_turn(
-                        &*self.config(),
+                        &self.config(),
                         &ctx,
                         tool_calls.len(),
                         Some(&turn_governor_runtime),
@@ -6728,7 +6734,7 @@ impl AgentLoop {
                     "turn": total_turns,
                     "tool_count": tool_calls.len(),
                     "tool_concurrency": governor_for_turn(
-                        &*self.config(),
+                        &self.config(),
                         &ctx,
                         tool_calls.len(),
                         Some(&turn_governor_runtime),

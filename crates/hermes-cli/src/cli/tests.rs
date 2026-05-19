@@ -35,6 +35,17 @@ mod tests {
     }
 
     #[test]
+    fn subcommand_help_uses_second_pass_parser() {
+        let err = Cli::try_parse_from(["hermes", "gateway", "--help"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.contains("--system"),
+            "expected gateway-specific flags in help, got: {help}"
+        );
+    }
+
+    #[test]
     fn cli_parse_gateway_start() {
         let cli = Cli::try_parse_from(["hermes", "gateway", "start"]).unwrap();
         match cli.command {

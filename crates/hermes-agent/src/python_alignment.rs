@@ -1,4 +1,4 @@
-//! Python `run_agent.py` alignment helpers (budget pressure, history hygiene).
+//! Python `run_agent.py`,`run_conversation.py` alignment helpers (budget pressure, history hygiene).
 //!
 //! # Phase A — contract scenarios (mirrors Python tests)
 //!

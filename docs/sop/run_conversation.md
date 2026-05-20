@@ -43,6 +43,28 @@ cargo test -p hermes-agent --test run_conversation_hooks --test run_conversation
 cargo clippy -p hermes-agent -- -D warnings
 ```
 
+## Phase A 契约映射（`python_alignment.rs`）
+
+| # | 场景 | 决策 | 契约测试 | Divergence id |
+|---|------|------|----------|---------------|
+| 1 | 新会话 + `on_session_start` | Adopt（对齐 `conversation_loop._restore_or_build_system_prompt`） | `phase_a1_new_session_fires_on_session_start` | — |
+| 2 | 续会话 `stored_system_prompt` | Adopt | `phase_a2_continue_session_skips_on_session_start`, `hydrate_stored_system_prompt_roundtrip` | — |
+| 3 | Budget 70% caution | Adopt（`total_turns` / `max_turns` 比率，与配置文档一致） | `phase_a3_budget_caution_injected_at_seventy_percent` | — |
+| 4 | Budget 90% warning | Adopt | `phase_a4_budget_warning_injected_at_ninety_percent` | — |
+| 5 | History strip `_budget_warning` / `[BUDGET` | Adopt | `phase_a5_strip_budget_plain_text_tail_matches_python_regex`, `strip_budget_tool_message_matches_python_fixture` | — |
+| 6 | Preflight compress | Adopt | `preflight_compression_status_*`（`agent_loop` 模块内） | — |
+| 7 | 空 LLM 重试 | Adopt | `phase_a7_empty_llm_retry_without_appending_empty_assistant` | — |
+| 8 | Streaming + interrupt | Adopt | `phase_a8_stream_interrupt_forwards_deltas_and_stops` | — |
+| 9 | Hooks llm/tool/session_start | Adopt | `phase_a9_run_invokes_pre_post_llm_and_tool_hooks` | — |
+| 10 | `AgentResult` cost / interrupted | Adopt | `phase_a10_*` | — |
+| 11 | `run_conversation` 流式 | Adopt | `phase_a11_run_conversation_stream_callback_receives_deltas` | `run-conversation-orchestration-split`（编排路径） |
+| 12 | `on_session_end` / `pre_api_request` | Adopt | `run_natural_finish_invokes_on_session_end_and_pre_api_request` | — |
+| 13 | Steer pre-API + `pending_steer` | Adopt | `phase_a13_steer_pre_api_injects_into_last_tool_during_run`, `run_conversation_drains_pending_steer_into_result` | — |
+
+```bash
+cargo test -p hermes-agent --test alignment_contracts --test run_agent_phase_a --test run_agent_hooks --test run_conversation_hooks --test run_conversation_contracts
+```
+
 ## 参考
 
 - [`crates/hermes-agent/src/conversation_loop.rs`](../../crates/hermes-agent/src/conversation_loop.rs)

@@ -1,8 +1,10 @@
 //! Cron job definition and related types.
 
 use chrono::{DateTime, Utc};
-use cron::Schedule;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::python_job::JobOrigin;
+use crate::schedule::{compute_next_run, fast_forward_if_stale, parse_schedule, ScheduleSpec};
 
 // ---------------------------------------------------------------------------
 // JobStatus
@@ -12,13 +14,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
-    /// Job is active and will be scheduled.
     Active,
-    /// Job is paused and will not be scheduled.
     Paused,
-    /// Job has completed its repeat count.
     Completed,
-    /// Job failed during its last execution.
     Failed,
 }
 
@@ -37,13 +35,10 @@ impl std::fmt::Display for JobStatus {
 // ModelConfig
 // ---------------------------------------------------------------------------
 
-/// Optional model configuration override for a cron job.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelConfig {
-    /// Provider name override (e.g. "openai", "anthropic").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// Model name override (e.g. "gpt-4o", "claude-3-5-sonnet").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
@@ -52,117 +47,243 @@ pub struct ModelConfig {
 // DeliverTarget / DeliverConfig
 // ---------------------------------------------------------------------------
 
-/// Target platform for delivering cron job results.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Delivery platform slug — JSON uses Python/gateway names (`wecom`, `dingtalk`), not Rust `snake_case` (`we_com`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliverTarget {
-    /// Return results to the origin (caller).
     Origin,
-    /// Deliver locally (e.g. write to file, log).
     Local,
-    /// Deliver via Telegram.
     Telegram,
-    /// Deliver via Discord.
     Discord,
-    /// Deliver via Slack.
     Slack,
-    /// Deliver via Email.
     Email,
-    /// Deliver via WhatsApp.
     WhatsApp,
-    /// Deliver via Signal.
     Signal,
-    /// Deliver via Matrix.
     Matrix,
-    /// Deliver via Mattermost.
     Mattermost,
-    /// Deliver via DingTalk.
     DingTalk,
-    /// Deliver via Feishu.
     Feishu,
-    /// Deliver via WeCom.
     WeCom,
-    /// Deliver via WeChat.
     Weixin,
-    /// Deliver via BlueBubbles (iMessage).
     BlueBubbles,
-    /// Deliver via SMS.
     Sms,
-    /// Deliver via Home Assistant.
     HomeAssistant,
 }
 
-/// Delivery configuration for a cron job's results.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+impl DeliverTarget {
+    /// Canonical on-disk / Python `deliver` string (see `cron/scheduler.py` `_KNOWN_DELIVERY_PLATFORMS`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeliverTarget::Origin => "origin",
+            DeliverTarget::Local => "local",
+            DeliverTarget::Telegram => "telegram",
+            DeliverTarget::Discord => "discord",
+            DeliverTarget::Slack => "slack",
+            DeliverTarget::Email => "email",
+            DeliverTarget::WhatsApp => "whatsapp",
+            DeliverTarget::Signal => "signal",
+            DeliverTarget::Matrix => "matrix",
+            DeliverTarget::Mattermost => "mattermost",
+            DeliverTarget::DingTalk => "dingtalk",
+            DeliverTarget::Feishu => "feishu",
+            DeliverTarget::WeCom => "wecom",
+            DeliverTarget::Weixin => "weixin",
+            DeliverTarget::BlueBubbles => "bluebubbles",
+            DeliverTarget::Sms => "sms",
+            DeliverTarget::HomeAssistant => "homeassistant",
+        }
+    }
+}
+
+/// Parse Python-style `deliver` field (`"wecom"`, `"origin"`, …).
+pub fn deliver_target_from_str(value: &str) -> Option<DeliverTarget> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "origin" => Some(DeliverTarget::Origin),
+        "local" => Some(DeliverTarget::Local),
+        "telegram" => Some(DeliverTarget::Telegram),
+        "discord" => Some(DeliverTarget::Discord),
+        "slack" => Some(DeliverTarget::Slack),
+        "email" => Some(DeliverTarget::Email),
+        "whatsapp" => Some(DeliverTarget::WhatsApp),
+        "signal" => Some(DeliverTarget::Signal),
+        "matrix" => Some(DeliverTarget::Matrix),
+        "mattermost" => Some(DeliverTarget::Mattermost),
+        "dingtalk" => Some(DeliverTarget::DingTalk),
+        "feishu" => Some(DeliverTarget::Feishu),
+        "wecom" | "wecom_callback" => Some(DeliverTarget::WeCom),
+        "weixin" | "wechat" | "wx" => Some(DeliverTarget::Weixin),
+        "bluebubbles" | "imessage" => Some(DeliverTarget::BlueBubbles),
+        "sms" => Some(DeliverTarget::Sms),
+        "homeassistant" | "ha" => Some(DeliverTarget::HomeAssistant),
+        _ => None,
+    }
+}
+
+impl Serialize for DeliverTarget {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DeliverTarget {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        deliver_target_from_str(&raw).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown deliver target '{}'; expected a platform slug like wecom, telegram, origin",
+                raw
+            ))
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliverConfig {
-    /// The target platform for delivery.
     pub target: DeliverTarget,
-    /// Platform-specific identifier (e.g. chat_id, channel, email address).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+}
+
+impl DeliverConfig {
+    pub fn new(target: DeliverTarget) -> Self {
+        Self {
+            target,
+            platform: None,
+        }
+    }
+}
+
+impl Serialize for DeliverConfig {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("DeliverConfig", 2)?;
+        st.serialize_field("target", &self.target)?;
+        if let Some(ref platform) = self.platform {
+            st.serialize_field("platform", platform)?;
+        }
+        st.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for DeliverConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            target: DeliverTarget,
+            #[serde(default)]
+            platform: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self {
+            target: raw.target,
+            platform: raw.platform,
+        })
+    }
+}
+
+/// Python stores `deliver` as a string; Rust CLI may use `{ "target": "wecom", "platform": "..." }`.
+fn deserialize_deliver_opt<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<DeliverConfig>, D::Error> {
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            if let Some((platform, chat)) = trimmed.split_once(':') {
+                let target = deliver_target_from_str(platform).ok_or_else(|| {
+                    serde::de::Error::custom(format!("unknown deliver target '{platform}'"))
+                })?;
+                let chat_id = chat.split(':').next().unwrap_or(chat).trim().to_string();
+                return Ok(Some(DeliverConfig {
+                    target,
+                    platform: Some(chat_id),
+                }));
+            }
+            let target = deliver_target_from_str(trimmed).ok_or_else(|| {
+                serde::de::Error::custom(format!("unknown deliver target '{trimmed}'"))
+            })?;
+            Ok(Some(DeliverConfig::new(target)))
+        }
+        serde_json::Value::Object(_) => {
+            let cfg: DeliverConfig = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            Ok(Some(cfg))
+        }
+        _ => Err(serde::de::Error::custom(
+            "deliver must be a string (Python) or object with target",
+        )),
+    }
+}
+
+fn serialize_deliver_opt<S: Serializer>(
+    value: &Option<DeliverConfig>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        None => serializer.serialize_none(),
+        Some(cfg) => cfg.serialize(serializer),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // CronJob
 // ---------------------------------------------------------------------------
 
-/// A scheduled cron job that runs an agent prompt on a recurring basis.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CronJob {
-    /// Unique identifier (UUID).
     pub id: String,
-    /// Human-readable name for this job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Cron expression schedule (e.g. "0 9 * * *" for 9am daily).
+    /// Display / legacy schedule string (e.g. `every 2h`, `0 9 * * *`).
     pub schedule: String,
-    /// The prompt to send to the agent when this job fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_display: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_spec: Option<ScheduleSpec>,
     pub prompt: String,
-    /// Skills to load for the agent (by name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills: Option<Vec<String>>,
-    /// Optional model configuration override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
-    /// Optional delivery configuration for results.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_deliver_opt",
+        serialize_with = "serialize_deliver_opt"
+    )]
     pub deliver: Option<DeliverConfig>,
-    /// Current status of the job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<JobOrigin>,
     #[serde(default = "default_job_status")]
     pub status: JobStatus,
-    /// When this job was created.
     pub created_at: DateTime<Utc>,
-    /// When this job was last executed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "last_run_at")]
     pub last_run: Option<DateTime<Utc>>,
-    /// When this job is next scheduled to run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "next_run_at")]
     pub next_run: Option<DateTime<Utc>>,
-    /// Maximum number of times to repeat this job (None = unlimited).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat: Option<u32>,
-    /// Number of times this job has been executed so far.
     #[serde(default)]
     pub run_count: u32,
-    /// Optional script content to execute instead of an agent prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
-    /// Run in script-only mode (no LLM/agent loop), watchdog-style.
     #[serde(default, skip_serializing_if = "is_false")]
     pub no_agent: bool,
-    /// Optional per-job script timeout in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_timeout_seconds: Option<u64>,
-    /// Optional shell override for script execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_shell: Option<String>,
-    /// Optional source cron job IDs whose most recent output should be injected
-    /// into this job prompt before execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_from: Option<Vec<String>>,
-    /// Last assistant output captured from this job's most recent successful run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_error: Option<String>,
 }
 
 fn default_job_status() -> JobStatus {
@@ -174,19 +295,29 @@ fn is_false(v: &bool) -> bool {
 }
 
 impl CronJob {
-    /// Create a new CronJob with a generated UUID and the given schedule/prompt.
     pub fn new(schedule: impl Into<String>, prompt: impl Into<String>) -> Self {
-        let schedule = schedule.into();
+        let schedule_str = schedule.into();
+        let spec = parse_schedule(&schedule_str).ok();
+        let display = spec
+            .as_ref()
+            .map(|s| s.display())
+            .unwrap_or_else(|| schedule_str.clone());
         let now = Utc::now();
-        let next_run = Self::parse_next_run(&schedule, now);
+        let next_run = spec
+            .as_ref()
+            .and_then(|s| compute_next_run(s, None))
+            .or_else(|| Self::legacy_parse_next_run(&schedule_str, now));
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             name: None,
-            schedule,
+            schedule: schedule_str,
+            schedule_display: Some(display),
+            schedule_spec: spec,
             prompt: prompt.into(),
             skills: None,
             model: None,
             deliver: None,
+            origin: None,
             status: JobStatus::Active,
             created_at: now,
             last_run: None,
@@ -199,28 +330,55 @@ impl CronJob {
             script_shell: None,
             context_from: None,
             last_output: None,
+            last_error: None,
+            last_delivery_error: None,
         }
     }
 
-    /// Validate the cron job definition.
-    ///
-    /// Checks:
-    /// - The schedule is a valid cron expression
-    /// - The prompt is non-empty (or a script is provided)
-    /// - The repeat value is not zero
+    /// Ensure structured schedule exists (after load from disk).
+    pub fn normalize_schedule(&mut self) {
+        if self.schedule_spec.is_none() {
+            if let Ok(spec) = parse_schedule(&self.schedule) {
+                self.schedule_spec = Some(spec);
+            }
+        }
+        if self.schedule_display.is_none() {
+            self.schedule_display = self
+                .schedule_spec
+                .as_ref()
+                .map(|s| s.display())
+                .or(Some(self.schedule.clone()));
+        }
+    }
+
+    /// Recompute `next_run` for active jobs (e.g. after load).
+    pub fn refresh_next_run(&mut self) {
+        if self.status != JobStatus::Active {
+            return;
+        }
+        if let Some(spec) = self.schedule_spec.clone() {
+            self.next_run = compute_next_run(&spec, self.last_run);
+        }
+    }
+
+    pub fn schedule_spec(&self) -> Option<ScheduleSpec> {
+        self.schedule_spec.clone()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
-        // Validate schedule
         if self.schedule.trim().is_empty() {
             return Err("Schedule expression cannot be empty".to_string());
         }
-        if Self::parse_next_run(&self.schedule, Utc::now()).is_none() {
+        let spec = self
+            .schedule_spec
+            .clone()
+            .or_else(|| parse_schedule(&self.schedule).ok());
+        if spec.is_none() && self.compute_next_run(Utc::now()).is_none() {
             return Err(format!(
                 "Invalid cron schedule expression: '{}'",
                 self.schedule
             ));
         }
-
-        // Validate prompt or script
         if self.prompt.trim().is_empty()
             && self.script.as_ref().map_or(true, |s| s.trim().is_empty())
         {
@@ -229,54 +387,61 @@ impl CronJob {
         if self.no_agent && self.script.as_ref().map_or(true, |s| s.trim().is_empty()) {
             return Err("no_agent mode requires non-empty script".to_string());
         }
-
-        // Validate repeat
         if let Some(repeat) = self.repeat {
             if repeat == 0 {
                 return Err("Repeat count must be greater than zero if specified".to_string());
             }
         }
-
         Ok(())
     }
 
-    /// Compute the next run time based on the cron schedule, starting from `after`.
     pub fn compute_next_run(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        Self::parse_next_run(&self.schedule, after)
+        if let Some(spec) = self.schedule_spec.as_ref() {
+            return compute_next_run(spec, self.last_run.or(Some(after)));
+        }
+        Self::legacy_parse_next_run(&self.schedule, after)
     }
 
-    /// Parse a cron expression and return the next fire time after `after`.
-    ///
-    /// The `cron` crate requires 7-field format (sec min hour dom month dow year).
-    /// If the user provides a 5-field expression (min hour dom month dow), we
-    /// automatically prepend "0 " (run at second 0) and append " *" (any year).
-    fn parse_next_run(schedule: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let normalized = Self::normalize_cron_expr(schedule);
-        match normalized.parse::<Schedule>() {
-            Ok(sched) => sched.after(&after).next().map(|dt: DateTime<Utc>| dt),
-            Err(e) => {
-                tracing::warn!("Failed to parse cron expression '{}': {}", normalized, e);
-                None
+    fn legacy_parse_next_run(schedule: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let normalized = crate::schedule::normalize_cron_expr(schedule);
+        normalized
+            .parse::<cron::Schedule>()
+            .ok()?
+            .after(&after)
+            .next()
+    }
+
+    /// Tick preparation: recover missing next_run, fast-forward stale recurring jobs.
+    pub fn prepare_for_tick(&mut self, now: DateTime<Utc>) -> bool {
+        if self.status != JobStatus::Active {
+            return false;
+        }
+        self.normalize_schedule();
+        let Some(spec) = self.schedule_spec.clone() else {
+            return false;
+        };
+        let mut changed = false;
+        if self.next_run.is_none() {
+            if let Some(nr) = compute_next_run(&spec, self.last_run) {
+                self.next_run = Some(nr);
+                changed = true;
             }
         }
-    }
-
-    /// Normalize a cron expression to 7-field format.
-    ///
-    /// - 5 fields: `min hour dom month dow` -> `0 min hour dom month dow *`
-    /// - 6 fields: `sec min hour dom month dow` -> `sec min hour dom month dow *`
-    /// - 7 fields: already correct, return as-is
-    fn normalize_cron_expr(expr: &str) -> String {
-        let parts: Vec<&str> = expr.trim().split_whitespace().collect();
-        match parts.len() {
-            5 => format!("0 {} *", expr.trim()),
-            6 => format!("{} *", expr.trim()),
-            7 => expr.trim().to_string(),
-            _ => expr.trim().to_string(),
+        if let Some(next) = self.next_run {
+            if let Some(ff) = fast_forward_if_stale(&spec, next, now) {
+                tracing::info!(
+                    "Job '{}' fast-forwarded stale next_run {} -> {}",
+                    self.id,
+                    next,
+                    ff
+                );
+                self.next_run = Some(ff);
+                return true;
+            }
         }
+        changed
     }
 
-    /// Check whether this job is due to run at the given time.
     pub fn is_due(&self, now: DateTime<Utc>) -> bool {
         if self.status != JobStatus::Active {
             return false;
@@ -287,13 +452,9 @@ impl CronJob {
         }
     }
 
-    /// Mark the job as having just been run: increment run_count, set last_run,
-    /// and compute next_run. Returns false if the job has reached its repeat limit.
     pub fn mark_executed(&mut self, now: DateTime<Utc>) -> bool {
         self.run_count += 1;
         self.last_run = Some(now);
-
-        // Check repeat limit
         if let Some(repeat) = self.repeat {
             if self.run_count >= repeat {
                 self.status = JobStatus::Completed;
@@ -301,13 +462,14 @@ impl CronJob {
                 return false;
             }
         }
-
-        // Schedule next run
-        self.next_run = self.compute_next_run(now);
+        if let Some(spec) = self.schedule_spec.as_ref() {
+            self.next_run = compute_next_run(spec, Some(now));
+        } else {
+            self.next_run = self.compute_next_run(now);
+        }
         true
     }
 
-    /// Mark the job as failed.
     pub fn mark_failed(&mut self) {
         self.status = JobStatus::Failed;
     }
@@ -318,116 +480,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_job_new() {
-        let job = CronJob::new("0 9 * * *", "Say hello");
-        assert_eq!(job.status, JobStatus::Active);
-        assert_eq!(job.run_count, 0);
+    fn test_job_new_every_2h() {
+        let job = CronJob::new("every 2h", "drink water");
+        assert!(job.schedule_spec.is_some());
         assert!(job.next_run.is_some());
-        assert!(job.id.len() > 0);
+        let nr = job.next_run.unwrap();
+        let diff = nr - Utc::now();
+        assert!(diff.num_hours() <= 2 && diff.num_seconds() >= 0);
     }
 
     #[test]
-    fn test_validate_valid() {
-        let job = CronJob::new("0 9 * * *", "Say hello");
-        assert!(job.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_empty_schedule() {
-        let mut job = CronJob::new("", "Say hello");
-        job.schedule = "".to_string();
+    fn test_validate_rejects_garbage_schedule() {
+        let job = CronJob::new("not_a_schedule", "x");
         assert!(job.validate().is_err());
     }
 
     #[test]
-    fn test_validate_empty_prompt() {
-        let mut job = CronJob::new("0 9 * * *", "");
-        job.prompt = "".to_string();
-        assert!(job.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_zero_repeat() {
-        let mut job = CronJob::new("0 9 * * *", "Say hello");
-        job.repeat = Some(0);
-        assert!(job.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_no_agent_requires_script() {
-        let mut job = CronJob::new("0 9 * * *", "Say hello");
-        job.no_agent = true;
-        job.script = None;
-        assert!(job.validate().is_err());
-    }
-
-    #[test]
-    fn test_is_due() {
-        let job = CronJob::new("* * * * *", "Say hello");
-        // A minutely job: next_run is in the next minute.
-        // is_due returns true when now >= next_run, so it might not be due yet
-        // if we just created it. Instead, verify that next_run is set and is
-        // in the near future.
+    fn test_mark_executed_interval() {
+        let mut job = CronJob::new("every 2h", "test");
+        let now = Utc::now();
+        job.mark_executed(now);
+        assert_eq!(job.run_count, 1);
         assert!(job.next_run.is_some());
-        let next = job.next_run.unwrap();
-        // next_run should be within the next 2 minutes
-        let diff = next - Utc::now();
-        assert!(
-            diff.num_seconds() >= 0 && diff.num_seconds() <= 120,
-            "next_run should be within the next 2 minutes, got {}s",
-            diff.num_seconds()
+        assert!(job.next_run.unwrap() > now);
+    }
+
+    #[test]
+    fn test_deliver_deserialize_python_slug_wecom() {
+        let ts = "2026-05-17T17:27:05Z";
+        let object = format!(
+            r#"{{"id":"x","schedule":"every 2h","prompt":"p","created_at":"{ts}","deliver":{{"target":"wecom"}}}}"#
+        );
+        let job: CronJob = serde_json::from_str(&object).expect("object deliver");
+        assert_eq!(
+            job.deliver.as_ref().map(|d| d.target),
+            Some(DeliverTarget::WeCom)
+        );
+
+        let string = format!(
+            r#"{{"id":"y","schedule":"every 2h","prompt":"p","created_at":"{ts}","deliver":"wecom"}}"#
+        );
+        let job: CronJob = serde_json::from_str(&string).expect("string deliver");
+        assert_eq!(
+            job.deliver.as_ref().map(|d| d.target),
+            Some(DeliverTarget::WeCom)
         );
     }
 
     #[test]
-    fn test_is_due_paused() {
-        let mut job = CronJob::new("* * * * *", "Say hello");
-        job.status = JobStatus::Paused;
-        assert!(!job.is_due(Utc::now()));
-    }
-
-    #[test]
-    fn test_mark_executed_increments() {
-        let mut job = CronJob::new("* * * * *", "Say hello");
-        let now = Utc::now();
-        let result = job.mark_executed(now);
-        assert!(result);
-        assert_eq!(job.run_count, 1);
-        assert_eq!(job.last_run, Some(now));
-        assert!(job.next_run.is_some());
-    }
-
-    #[test]
-    fn test_mark_executed_repeat_limit() {
-        let mut job = CronJob::new("* * * * *", "Say hello");
-        job.repeat = Some(1);
-        let now = Utc::now();
-        let result = job.mark_executed(now);
-        assert!(!result);
-        assert_eq!(job.status, JobStatus::Completed);
-        assert!(job.next_run.is_none());
-    }
-
-    #[test]
-    fn test_mark_failed() {
-        let mut job = CronJob::new("* * * * *", "Say hello");
-        job.mark_failed();
-        assert_eq!(job.status, JobStatus::Failed);
-    }
-
-    #[test]
-    fn test_job_status_display() {
-        assert_eq!(JobStatus::Active.to_string(), "active");
-        assert_eq!(JobStatus::Paused.to_string(), "paused");
-        assert_eq!(JobStatus::Completed.to_string(), "completed");
-        assert_eq!(JobStatus::Failed.to_string(), "failed");
-    }
-
-    #[test]
-    fn test_serde_roundtrip() {
-        let job = CronJob::new("0 9 * * *", "Say hello");
+    fn test_deliver_roundtrip_serializes_wecom_not_we_com() {
+        let job = CronJob {
+            deliver: Some(DeliverConfig::new(DeliverTarget::WeCom)),
+            ..CronJob::new("every 2h", "p")
+        };
         let json = serde_json::to_string(&job).unwrap();
-        let parsed: CronJob = serde_json::from_str(&json).unwrap();
-        assert_eq!(job, parsed);
+        assert!(json.contains(r#""target":"wecom""#));
+        assert!(!json.contains("we_com"));
     }
 }

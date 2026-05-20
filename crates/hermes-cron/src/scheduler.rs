@@ -17,6 +17,7 @@ use crate::completion::CronCompletionEvent;
 use crate::job::{CronJob, JobStatus};
 use crate::persistence::JobPersistence;
 use crate::runner::CronRunner;
+use crate::schedule::advance_next_run_before_execute;
 
 /// Background poll interval for due jobs. Default **60** seconds.
 ///
@@ -202,7 +203,9 @@ impl CronScheduler {
             .map_err(|e| CronError::Persistence(e.to_string()))?;
 
         let mut guard = self.jobs.lock().await;
-        for job in jobs {
+        for mut job in jobs {
+            job.normalize_schedule();
+            job.refresh_next_run();
             tracing::info!(
                 "Loaded persisted job '{}' ({})",
                 job.name.as_deref().unwrap_or(&job.id),
@@ -257,6 +260,22 @@ impl CronScheduler {
 
                 let now = Utc::now();
                 let mut guard = jobs.lock().await;
+                let mut tick_dirty = false;
+                for job in guard.values_mut() {
+                    if job.prepare_for_tick(now) {
+                        tick_dirty = true;
+                    }
+                }
+                if tick_dirty {
+                    let snapshot: Vec<CronJob> = guard.values().cloned().collect();
+                    drop(guard);
+                    for job in snapshot {
+                        if let Err(e) = persistence.save_job(&job).await {
+                            tracing::error!("Failed to persist tick-adjusted job '{}': {}", job.id, e);
+                        }
+                    }
+                    guard = jobs.lock().await;
+                }
                 let due_job_ids: Vec<String> = guard
                     .iter()
                     .filter(|(_, job)| job.is_due(now))
@@ -266,6 +285,23 @@ impl CronScheduler {
                 for job_id in due_job_ids {
                     let job = guard.get(&job_id).cloned();
                     if let Some(mut job) = job {
+                        if let Some(spec) = job.schedule_spec.clone() {
+                            if let Some(advanced) =
+                                advance_next_run_before_execute(&spec, job.next_run, now)
+                            {
+                                job.next_run = Some(advanced);
+                                guard.insert(job.id.clone(), job.clone());
+                                drop(guard);
+                                if let Err(e) = persistence.save_job(&job).await {
+                                    tracing::error!(
+                                        "Failed to persist advanced next_run for '{}': {}",
+                                        job.id,
+                                        e
+                                    );
+                                }
+                                guard = jobs.lock().await;
+                            }
+                        }
                         let mut runnable_job = job.clone();
                         if let Some(ctx_prefix) = build_context_prefix_for_job(&job, &guard) {
                             runnable_job.prompt =
@@ -298,16 +334,14 @@ impl CronScheduler {
                             }
                             Err(e) => {
                                 tracing::error!("Cron job '{}' failed: {}", job.id, e);
-                                if let Some(ref deliver) = job.deliver {
-                                    if let Err(deliver_err) =
-                                        runner.deliver_error(&e.to_string(), deliver).await
-                                    {
-                                        tracing::warn!(
-                                            "Cron job '{}' failed to deliver error alert: {}",
-                                            job.id,
-                                            deliver_err
-                                        );
-                                    }
+                                if let Err(deliver_err) =
+                                    runner.deliver_error(&job, &e.to_string()).await
+                                {
+                                    tracing::warn!(
+                                        "Cron job '{}' failed to deliver error alert: {}",
+                                        job.id,
+                                        deliver_err
+                                    );
                                 }
                                 Self::emit_completion(
                                     &completion_tx,
@@ -423,13 +457,11 @@ impl CronScheduler {
             return Err(CronError::JobNotFound(id.to_string()));
         }
 
-        // Ensure the ID stays consistent
         let mut job = updated;
         job.id = id.to_string();
-
-        // Recompute next_run if schedule changed
-        if job.status == JobStatus::Active && job.next_run.is_none() {
-            job.next_run = job.compute_next_run(Utc::now());
+        job.normalize_schedule();
+        if job.status == JobStatus::Active {
+            job.refresh_next_run();
         }
 
         // Persist
@@ -546,16 +578,12 @@ impl CronScheduler {
         match &run_result {
             Ok(result) => Self::emit_completion(&self.completion_tx, &job, "manual", Ok(result)),
             Err(e) => {
-                if let Some(ref deliver) = job.deliver {
-                    if let Err(deliver_err) =
-                        self.runner.deliver_error(&e.to_string(), deliver).await
-                    {
-                        tracing::warn!(
-                            "Cron job '{}' failed to deliver manual error alert: {}",
-                            job.id,
-                            deliver_err
-                        );
-                    }
+                if let Err(deliver_err) = self.runner.deliver_error(&job, &e.to_string()).await {
+                    tracing::warn!(
+                        "Cron job '{}' failed to deliver manual error alert: {}",
+                        job.id,
+                        deliver_err
+                    );
                 }
                 Self::emit_completion(&self.completion_tx, &job, "manual", Err(e.to_string()))
             }

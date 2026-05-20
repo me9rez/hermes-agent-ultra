@@ -307,3 +307,21 @@ async fn phase_a3_budget_caution_injected_at_seventy_percent() {
     assert!(w.contains("[BUDGET:"), "{w}");
     assert!(!w.contains("BUDGET WARNING"), "{w}");
 }
+
+#[tokio::test]
+async fn phase_a4_budget_warning_injected_at_ninety_percent() {
+    let provider = Arc::new(ToolThenStopProvider::new(9));
+    let cfg = AgentConfig {
+        max_turns: 10,
+        budget_pressure_enabled: true,
+        budget_caution_threshold: 0.7,
+        budget_warning_threshold: 0.9,
+        ..AgentConfig::default()
+    };
+    let agent = AgentLoop::new(cfg, Arc::new(echo_tool_registry()), provider);
+    let result = agent.run(vec![Message::user("go")], None).await;
+    assert!(result.is_ok(), "{result:?}");
+    let w = last_tool_budget_text(&result.unwrap().messages)
+        .expect("expected budget pressure on a tool result");
+    assert!(w.contains("BUDGET WARNING"), "{w}");
+}

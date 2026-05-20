@@ -8,8 +8,10 @@ description = "Agent loop engine for Hermes Agent"
 
 [dependencies]
 hermes-core = { workspace = true }
+hermes-config = { workspace = true }
 hermes-auth = { workspace = true }
 hermes-intelligence = { workspace = true }
+hermes-tools = { workspace = true }
 hermes-skills = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

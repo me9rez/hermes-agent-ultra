@@ -8,6 +8,8 @@ pub mod agent_loop;
 pub mod conversation_loop;
 pub mod api_bridge;
 pub mod auxiliary_builder;
+pub mod tools_wiring;
+pub mod vision_adapter;
 pub mod budget;
 pub mod code_index;
 pub mod compression;
@@ -60,6 +62,8 @@ pub use budget::{check_aggregate_budget, enforce_budget, truncate_result};
 // Re-export LLM providers
 pub use api_bridge::CodexProvider;
 pub use auxiliary_builder::{build_default_auxiliary_client, AuxiliaryWiringSummary};
+pub use tools_wiring::register_builtin_tools as register_agent_builtin_tools;
+pub use vision_adapter::AuxiliaryVisionAdapter;
 pub use provider::{AnthropicProvider, GenericProvider, OpenAiProvider, OpenRouterProvider};
 pub use providers_extra::{
     CopilotProvider, KimiProvider, MiniMaxProvider, NousProvider, QwenProvider,

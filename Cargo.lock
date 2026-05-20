@@ -1640,9 +1640,11 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "hermes-auth",
+ "hermes-config",
  "hermes-core",
  "hermes-intelligence",
  "hermes-skills",
+ "hermes-tools",
  "hex",
  "lazy_static",
  "proptest",
@@ -1914,6 +1916,7 @@ name = "hermes-intelligence"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "futures",

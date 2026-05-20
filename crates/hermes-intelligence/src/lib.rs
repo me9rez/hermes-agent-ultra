@@ -7,6 +7,7 @@
 
 pub mod anthropic_adapter;
 pub mod auxiliary;
+pub mod vision_media;
 pub mod context_engine;
 pub mod credential_pool;
 pub mod display;

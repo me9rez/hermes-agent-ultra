@@ -102,14 +102,13 @@ pub use backends::session_search::SqliteSessionSearchBackend;
 pub use backends::todo::FileTodoBackend;
 pub use backends::tts::MultiTtsBackend;
 pub use backends::video::VisionFrameSamplingVideoBackend;
-pub use backends::vision::OpenAiVisionBackend;
 pub use backends::web::{
     search_backend_from_env_or_fallback, ExaSearchBackend, FallbackSearchBackend,
     FirecrawlExtractBackend, SimpleExtractBackend, TavilySearchBackend,
 };
 
 // Re-export builtin registration helper
-pub use register_builtins::register_builtin_tools;
+pub use register_builtins::{register_builtin_tools, register_builtin_tools_with_vision};
 
 // Re-export core types needed by consumers
 pub use hermes_core::{BudgetConfig, ToolCall, ToolError, ToolHandler, ToolResult, ToolSchema};

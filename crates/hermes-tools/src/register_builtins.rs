@@ -11,18 +11,25 @@ use hermes_core::{SkillProvider, TerminalBackend, ToolHandler};
 
 use crate::ToolRegistry;
 
-/// Register all built-in tool handlers into the given registry.
-///
-/// `terminal_backend` is shared by terminal, file read/write handlers.
-/// `skill_provider` is shared by the three skills handlers.
-///
-/// Backends that depend on environment variables (e.g. `OPENAI_API_KEY`,
-/// `FAL_KEY`, `HASS_URL`) are constructed eagerly; if the vars are absent
-/// the tools will return a clear error at *runtime*, not at registration.
+/// Register built-in tools without an injected vision backend.
 pub fn register_builtin_tools(
     registry: &ToolRegistry,
     terminal_backend: Arc<dyn TerminalBackend>,
     skill_provider: Arc<dyn SkillProvider>,
+) {
+    register_builtin_tools_with_vision(registry, terminal_backend, skill_provider, None);
+}
+
+/// Register all built-in tool handlers into the given registry.
+///
+/// `terminal_backend` is shared by terminal, file read/write handlers.
+/// `skill_provider` is shared by the three skills handlers.
+/// `vision_backend` should be an [`AuxiliaryVisionAdapter`] when auxiliary LLM is configured.
+pub fn register_builtin_tools_with_vision(
+    registry: &ToolRegistry,
+    terminal_backend: Arc<dyn TerminalBackend>,
+    skill_provider: Arc<dyn SkillProvider>,
+    vision_backend: Option<Arc<dyn crate::tools::vision::VisionBackend>>,
 ) {
     fn reg(
         registry: &ToolRegistry,
@@ -126,17 +133,8 @@ pub fn register_builtin_tools(
         vec![],
     );
 
-    // -- Vision --------------------------------------------------------------
-    {
-        let backend =
-            crate::backends::vision::OpenAiVisionBackend::from_env().unwrap_or_else(|_| {
-                crate::backends::vision::OpenAiVisionBackend::new(
-                    String::new(),
-                    "https://api.openai.com/v1".into(),
-                    "gpt-4o".into(),
-                )
-            });
-        let vision_backend: Arc<dyn crate::tools::vision::VisionBackend> = Arc::new(backend);
+    // -- Vision (requires injected AuxiliaryVisionAdapter from hermes-agent) --
+    if let Some(vision_backend) = vision_backend {
         reg(
             registry,
             "vision",
@@ -144,7 +142,7 @@ pub fn register_builtin_tools(
                 vision_backend.clone(),
             )),
             "👁️",
-            vec!["HERMES_OPENAI_API_KEY".into(), "OPENAI_API_KEY".into()],
+            vec![],
         );
         reg(
             registry,
@@ -153,8 +151,10 @@ pub fn register_builtin_tools(
                 crate::backends::video::VisionFrameSamplingVideoBackend::new(vision_backend),
             ))),
             "🎬",
-            vec!["HERMES_OPENAI_API_KEY".into(), "OPENAI_API_KEY".into()],
+            vec![],
         );
+    } else {
+        tracing::debug!("Skipping vision_analyze/video_analyze — no VisionBackend injected");
     }
 
     // -- Image generation ----------------------------------------------------

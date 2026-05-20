@@ -286,3 +286,24 @@ async fn phase_a2_continue_session_skips_on_session_start() {
         .and_then(|m| m.content.as_deref());
     assert_eq!(system, Some(STORED));
 }
+
+// --- Phase A-3 / A-4: budget pressure tiers ---------------------------------
+
+#[tokio::test]
+async fn phase_a3_budget_caution_injected_at_seventy_percent() {
+    let provider = Arc::new(ToolThenStopProvider::new(7));
+    let cfg = AgentConfig {
+        max_turns: 10,
+        budget_pressure_enabled: true,
+        budget_caution_threshold: 0.7,
+        budget_warning_threshold: 0.9,
+        ..AgentConfig::default()
+    };
+    let agent = AgentLoop::new(cfg, Arc::new(echo_tool_registry()), provider);
+    let result = agent.run(vec![Message::user("go")], None).await;
+    assert!(result.is_ok(), "{result:?}");
+    let w = last_tool_budget_text(&result.unwrap().messages)
+        .expect("expected budget pressure on a tool result");
+    assert!(w.contains("[BUDGET:"), "{w}");
+    assert!(!w.contains("BUDGET WARNING"), "{w}");
+}

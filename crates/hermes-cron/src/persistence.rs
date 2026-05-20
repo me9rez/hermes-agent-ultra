@@ -480,6 +480,22 @@ mod tests {
         assert!(loaded[0].next_run.is_some());
     }
 
+    #[test]
+    fn test_parse_per_job_json_wecom_deliver_target() {
+        let contents = r#"{
+  "id": "d0b0cf77-bd3f-4ab7-9ac6-b4553cdfb76e",
+  "schedule": "every 2h",
+  "prompt": "喝水",
+  "deliver": { "target": "wecom" },
+  "origin": { "platform": "wecom", "chat_id": "wrPMNBUgAAxFJsvKPM6tTJ2csX586dqQ" },
+  "created_at": "2026-05-17T17:27:05.435702300Z"
+}"#;
+        let job: CronJob = serde_json::from_str(contents).expect("wecom job file");
+        assert_eq!(
+            job.deliver.as_ref().map(|d| d.target),
+            Some(crate::DeliverTarget::WeCom)
+        );
+    }
 
     #[tokio::test]
     async fn test_file_load_jobs_fails_on_corrupt_json() {

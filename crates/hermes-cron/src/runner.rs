@@ -22,6 +22,14 @@ use crate::delivery::{deliver_text, CronDeliveryBackend};
 use crate::job::CronJob;
 use crate::scheduler::CronError;
 
+/// Result of running a cron job, including optional delivery failure (Python `mark_job_run` `delivery_error`).
+#[derive(Debug, Clone)]
+pub struct CronRunOutcome {
+    pub result: AgentResult,
+    /// `None` when delivery succeeded or was skipped (`local` / `[SILENT]`).
+    pub delivery_error: Option<String>,
+}
+
 /// Prompt-injection patterns blocked for scheduled jobs.
 ///
 /// Cron tasks are non-interactive and can run unattended, so we reject inputs
@@ -220,7 +228,7 @@ impl CronRunner {
     ///
     /// The agent is run with a restricted tool set that excludes the
     /// `cronjob` tool to prevent recursive scheduling.
-    pub async fn run_job(&self, job: &CronJob) -> Result<AgentResult, CronError> {
+    pub async fn run_job(&self, job: &CronJob) -> Result<CronRunOutcome, CronError> {
         tracing::info!(
             "Running cron job '{}' ({})",
             job.name.as_deref().unwrap_or(&job.id),
@@ -240,7 +248,12 @@ impl CronRunner {
             }
         }
         if job.no_agent {
-            return self.run_script_only_job(job).await;
+            let result = self.run_script_only_job(job).await?;
+            let delivery_error = self.delivery_error_for_result(job, &result).await;
+            return Ok(CronRunOutcome {
+                result,
+                delivery_error,
+            });
         }
 
         // Build agent config from job settings
@@ -280,11 +293,63 @@ impl CronRunner {
             .await
             .map_err(CronError::Agent)?;
 
-        if let Err(e) = self.deliver_result(job, &result).await {
-            tracing::warn!("Failed to deliver result for job '{}': {}", job.id, e);
+        let delivery_error = self.delivery_error_for_result(job, &result).await;
+        if let Some(ref err) = delivery_error {
+            tracing::warn!("Failed to deliver result for job '{}': {}", job.id, err);
         }
 
-        Ok(result)
+        Ok(CronRunOutcome {
+            result,
+            delivery_error,
+        })
+    }
+
+    /// Deliver assistant output; returns an error string on failure (Python `_deliver_result`).
+    pub async fn delivery_error_for_result(
+        &self,
+        job: &CronJob,
+        result: &AgentResult,
+    ) -> Option<String> {
+        let text = result
+            .messages
+            .iter()
+            .rev()
+            .find_map(|msg| {
+                if msg.role == hermes_core::MessageRole::Assistant {
+                    msg.content.clone()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "(no output)".to_string());
+        if text.trim().is_empty() || text.trim_start().starts_with("[SILENT]") {
+            tracing::debug!("Suppressing cron delivery due to silent response gate");
+            return None;
+        }
+        let Some(backend) = self.delivery.as_ref() else {
+            tracing::warn!(
+                "Cron job '{}' produced output but no CronDeliveryBackend is configured",
+                job.id
+            );
+            return None;
+        };
+        deliver_text(backend.as_ref(), job, &text).await
+    }
+
+    /// Deliver a failure alert; returns an error string if that delivery fails.
+    pub async fn delivery_error_for_failure(
+        &self,
+        job: &CronJob,
+        error_text: &str,
+    ) -> Option<String> {
+        let text = format!("Cron job failed:\n{}", error_text.trim());
+        if text.trim().is_empty() {
+            return None;
+        }
+        let Some(backend) = self.delivery.as_ref() else {
+            return None;
+        };
+        deliver_text(backend.as_ref(), job, &text).await
     }
 
     async fn run_script_only_job(&self, job: &CronJob) -> Result<AgentResult, CronError> {
@@ -396,43 +461,10 @@ impl CronRunner {
             .collect()
     }
 
-    async fn deliver_result(&self, job: &CronJob, result: &AgentResult) -> Result<(), CronError> {
-        let text = result
-            .messages
-            .iter()
-            .rev()
-            .find_map(|msg| {
-                if msg.role == hermes_core::MessageRole::Assistant {
-                    msg.content.clone()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "(no output)".to_string());
-        if text.trim().is_empty() || text.trim_start().starts_with("[SILENT]") {
-            tracing::debug!("Suppressing cron delivery due to silent response gate");
-            return Ok(());
-        }
-        if let Some(backend) = self.delivery.as_ref() {
-            if let Some(err) = deliver_text(backend.as_ref(), job, &text).await {
-                return Err(CronError::Scheduler(format!("delivery failed: {err}")));
-            }
-        } else {
-            tracing::warn!(
-                "Cron job '{}' produced output but no CronDeliveryBackend is configured",
-                job.id
-            );
-        }
-        Ok(())
-    }
-
     /// Deliver an explicit error payload to the configured target.
     pub async fn deliver_error(&self, job: &CronJob, error_text: &str) -> Result<(), CronError> {
-        let text = format!("Cron job failed:\n{}", error_text.trim());
-        if let Some(backend) = self.delivery.as_ref() {
-            if let Some(err) = deliver_text(backend.as_ref(), job, &text).await {
-                return Err(CronError::Scheduler(format!("error delivery failed: {err}")));
-            }
+        if let Some(err) = self.delivery_error_for_failure(job, error_text).await {
+            return Err(CronError::Scheduler(format!("error delivery failed: {err}")));
         }
         Ok(())
     }
@@ -539,6 +571,48 @@ mod tests {
         assert_eq!(control.stripped_output, "all good");
     }
 
+    struct FailingDeliveryBackend;
+
+    #[async_trait::async_trait]
+    impl CronDeliveryBackend for FailingDeliveryBackend {
+        async fn send(&self, _platform: &str, _chat_id: &str, _message: &str) -> Result<(), String> {
+            Err("gateway send failed".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_error_for_result_records_failure() {
+        let runner = CronRunner::new(Arc::new(MockLlmProvider), Arc::new(ToolRegistry::new()))
+            .with_delivery(Arc::new(FailingDeliveryBackend));
+        let mut job = CronJob::new("every 2h", "hi");
+        job.deliver = Some(crate::job::DeliverConfig {
+            target: crate::job::DeliverTarget::WeCom,
+            platform: Some("chat-1".into()),
+        });
+        let result = AgentResult {
+            messages: vec![Message::assistant("hello")],
+            finished_naturally: true,
+            total_turns: 1,
+            ..AgentResult::default()
+        };
+        let err = runner.delivery_error_for_result(&job, &result).await;
+        assert_eq!(err.as_deref(), Some("gateway send failed"));
+    }
+
+    #[tokio::test]
+    async fn delivery_error_cleared_on_success() {
+        let runner = CronRunner::new(Arc::new(MockLlmProvider), Arc::new(ToolRegistry::new()))
+            .with_delivery(Arc::new(FailingDeliveryBackend));
+        let job = CronJob::new("every 2h", "hi");
+        let result = AgentResult {
+            messages: vec![Message::assistant("[SILENT]")],
+            finished_naturally: true,
+            total_turns: 1,
+            ..AgentResult::default()
+        };
+        assert!(runner.delivery_error_for_result(&job, &result).await.is_none());
+    }
+
     #[tokio::test]
     async fn test_no_agent_script_mode_executes_inline_script() {
         let mut registry = ToolRegistry::new();
@@ -558,8 +632,9 @@ mod tests {
         let mut job = CronJob::new("* * * * *", "unused");
         job.no_agent = true;
         job.script = Some("echo watchdog-ok".to_string());
-        let result = runner.run_job(&job).await.expect("script-only result");
-        let reply = result
+        let outcome = runner.run_job(&job).await.expect("script-only result");
+        let reply = outcome
+            .result
             .messages
             .iter()
             .rev()

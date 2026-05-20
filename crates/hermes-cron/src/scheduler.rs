@@ -316,38 +316,40 @@ impl CronScheduler {
                             job.id
                         );
                         match runner.run_job(&runnable_job).await {
-                            Ok(result) => {
+                            Ok(outcome) => {
                                 tracing::info!(
                                     "Cron job '{}' completed successfully (turns: {})",
                                     job.id,
-                                    result.total_turns
+                                    outcome.result.total_turns
                                 );
                                 Self::emit_completion(
                                     &completion_tx,
                                     &job,
                                     "schedule",
-                                    Ok(&result),
+                                    Ok(&outcome.result),
                                 );
                                 job.mark_executed(now);
-                                job.last_output = latest_assistant_output(&result)
+                                job.last_output = latest_assistant_output(&outcome.result)
                                     .map(|s| truncate_chars(&s, MAX_STORED_OUTPUT_CHARS));
+                                job.last_delivery_error = outcome.delivery_error;
                             }
                             Err(e) => {
                                 tracing::error!("Cron job '{}' failed: {}", job.id, e);
-                                if let Err(deliver_err) =
-                                    runner.deliver_error(&job, &e.to_string()).await
-                                {
+                                let err_msg = e.to_string();
+                                job.last_delivery_error =
+                                    runner.delivery_error_for_failure(&job, &err_msg).await;
+                                if let Some(ref del_err) = job.last_delivery_error {
                                     tracing::warn!(
                                         "Cron job '{}' failed to deliver error alert: {}",
                                         job.id,
-                                        deliver_err
+                                        del_err
                                     );
                                 }
                                 Self::emit_completion(
                                     &completion_tx,
                                     &job,
                                     "schedule",
-                                    Err(e.to_string()),
+                                    Err(err_msg.clone()),
                                 );
                                 job.mark_failed();
                             }
@@ -575,28 +577,43 @@ impl CronScheduler {
 
         tracing::info!("Manually triggering cron job '{}'", id);
         let run_result = self.runner.run_job(&runnable_job).await;
-        match &run_result {
-            Ok(result) => Self::emit_completion(&self.completion_tx, &job, "manual", Ok(result)),
+        let delivery_error = match &run_result {
+            Ok(outcome) => {
+                Self::emit_completion(
+                    &self.completion_tx,
+                    &job,
+                    "manual",
+                    Ok(&outcome.result),
+                );
+                outcome.delivery_error.clone()
+            }
             Err(e) => {
-                if let Err(deliver_err) = self.runner.deliver_error(&job, &e.to_string()).await {
+                let err_msg = e.to_string();
+                let delivery_error = self
+                    .runner
+                    .delivery_error_for_failure(&job, &err_msg)
+                    .await;
+                if let Some(ref del_err) = delivery_error {
                     tracing::warn!(
                         "Cron job '{}' failed to deliver manual error alert: {}",
                         job.id,
-                        deliver_err
+                        del_err
                     );
                 }
-                Self::emit_completion(&self.completion_tx, &job, "manual", Err(e.to_string()))
+                Self::emit_completion(&self.completion_tx, &job, "manual", Err(err_msg));
+                delivery_error
             }
-        }
-        let result = run_result?;
+        };
+        let outcome = run_result?;
 
         // Update last_run but don't increment run_count for manual triggers
         {
             let mut guard = self.jobs.lock().await;
             if let Some(j) = guard.get_mut(id) {
                 j.last_run = Some(Utc::now());
-                j.last_output = latest_assistant_output(&result)
+                j.last_output = latest_assistant_output(&outcome.result)
                     .map(|s| truncate_chars(&s, MAX_STORED_OUTPUT_CHARS));
+                j.last_delivery_error = delivery_error;
                 if j.status == JobStatus::Failed {
                     // Reset status to Active on successful manual run
                     j.status = JobStatus::Active;
@@ -612,7 +629,7 @@ impl CronScheduler {
                 .map_err(|e| CronError::Persistence(e.to_string()))?;
         }
 
-        Ok(result)
+        Ok(outcome.result)
     }
 }
 

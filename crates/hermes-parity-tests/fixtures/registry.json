@@ -58,6 +58,14 @@
       "python": "agent/error_classifier.py",
       "rust": "hermes_intelligence::error_classifier",
       "fixture_dirs": ["error_classifier"]
+    },
+    {
+      "id": "run_conversation",
+      "status": "active",
+      "python": "run_agent.py::AIAgent.run_conversation",
+      "rust": "hermes_agent::conversation_loop",
+      "fixture_dirs": [],
+      "note": "Primary gate: crates/hermes-agent/tests/run_conversation_*.rs (rust-native). Optional golden under fixtures/conversation_loop/."
     }
   ]
 }

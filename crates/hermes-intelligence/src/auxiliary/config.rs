@@ -246,7 +246,8 @@ mod tests {
     #[test]
     fn env_override_promoted_when_enabled() {
         let key = "AUXILIARY_TITLE_PROVIDER";
-        std::env::set_var(key, "anthropic");
+        // SAFETY: test runs single-threaded; env restored before return.
+        unsafe { std::env::set_var(key, "anthropic") };
         let r = resolve_task_settings(
             &AuxiliaryTask::Title,
             &ExplicitOverrides::default(),
@@ -255,7 +256,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        std::env::remove_var(key);
+        unsafe { std::env::remove_var(key) };
         assert_eq!(r.provider, "anthropic");
     }
 

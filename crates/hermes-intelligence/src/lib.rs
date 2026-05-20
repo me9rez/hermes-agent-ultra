@@ -7,6 +7,7 @@
 
 pub mod anthropic_adapter;
 pub mod auxiliary;
+pub mod image_routing;
 pub mod vision_media;
 pub mod context_engine;
 pub mod credential_pool;
@@ -51,6 +52,9 @@ pub use display::{
     build_tool_preview, format_context_pressure, format_cost, format_duration_compact,
     format_model_response, format_progress_bar, format_token_count, format_tool_call,
     format_tool_result, format_usage_stats, get_cute_tool_message, render_inline_unified_diff,
+};
+pub use image_routing::{
+    build_native_content_parts, decide_image_input_mode, explicit_aux_vision_override,
 };
 pub use model_metadata::{
     estimate_messages_tokens_rough, estimate_request_tokens_rough, estimate_tokens_rough,

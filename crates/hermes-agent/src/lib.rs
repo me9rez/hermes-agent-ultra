@@ -61,7 +61,10 @@ pub use budget::{check_aggregate_budget, enforce_budget, truncate_result};
 
 // Re-export LLM providers
 pub use api_bridge::CodexProvider;
-pub use auxiliary_builder::{build_default_auxiliary_client, AuxiliaryWiringSummary};
+pub use auxiliary_builder::{
+    build_auxiliary_client, build_default_auxiliary_client, AuxiliaryBuildParams,
+    AuxiliaryWiringSummary,
+};
 pub use tools_wiring::register_builtin_tools as register_agent_builtin_tools;
 pub use vision_adapter::AuxiliaryVisionAdapter;
 pub use provider::{AnthropicProvider, GenericProvider, OpenAiProvider, OpenRouterProvider};

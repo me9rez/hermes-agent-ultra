@@ -325,3 +325,74 @@ async fn phase_a4_budget_warning_injected_at_ninety_percent() {
         .expect("expected budget pressure on a tool result");
     assert!(w.contains("BUDGET WARNING"), "{w}");
 }
+
+// --- Phase A-7: empty LLM retry ---------------------------------------------
+
+struct EmptyThenOkProvider {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl hermes_core::LlmProvider for EmptyThenOkProvider {
+    async fn chat_completion(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+        _max_tokens: Option<u32>,
+        _temperature: Option<f64>,
+        _model: Option<&str>,
+        _extra_body: Option<&serde_json::Value>,
+    ) -> Result<LlmResponse, AgentError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            Ok(LlmResponse {
+                message: Message::assistant(""),
+                usage: None,
+                model: "test".into(),
+                finish_reason: None,
+            })
+        } else {
+            Ok(LlmResponse {
+                message: Message::assistant("ok"),
+                usage: None,
+                model: "test".into(),
+                finish_reason: Some("stop".into()),
+            })
+        }
+    }
+
+    fn chat_completion_stream(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+        _max_tokens: Option<u32>,
+        _temperature: Option<f64>,
+        _model: Option<&str>,
+        _extra_body: Option<&serde_json::Value>,
+    ) -> futures::stream::BoxStream<'static, Result<StreamChunk, AgentError>> {
+        futures::stream::empty().boxed()
+    }
+}
+
+#[tokio::test]
+async fn phase_a7_empty_llm_retry_without_appending_empty_assistant() {
+    let provider = Arc::new(EmptyThenOkProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let cfg = AgentConfig {
+        max_turns: 1,
+        empty_content_max_retries: 2,
+        ..AgentConfig::default()
+    };
+    let agent = AgentLoop::new(cfg, Arc::new(ToolRegistry::new()), provider.clone());
+    let result = agent.run(vec![Message::user("hi")], None).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    let msgs = &result.unwrap().messages;
+    let empty_assistants = msgs.iter().filter(|m| {
+        m.role == MessageRole::Assistant && m.content.as_deref().is_some_and(|c| c.is_empty())
+    });
+    assert_eq!(empty_assistants.count(), 0);
+}
+
+// --- Phase A-8: streaming interrupt -----------------------------------------

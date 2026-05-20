@@ -499,3 +499,78 @@ async fn phase_a8_stream_interrupt_forwards_deltas_and_stops() {
 }
 
 // --- Phase A-10: AgentResult cost + interrupted -----------------------------
+
+struct CostedStopProvider;
+
+#[async_trait]
+impl hermes_core::LlmProvider for CostedStopProvider {
+    async fn chat_completion(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+        _max_tokens: Option<u32>,
+        _temperature: Option<f64>,
+        _model: Option<&str>,
+        _extra_body: Option<&serde_json::Value>,
+    ) -> Result<LlmResponse, AgentError> {
+        Ok(LlmResponse {
+            message: Message::assistant("priced"),
+            usage: Some(UsageStats {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+                estimated_cost: Some(0.042),
+            }),
+            model: "test".into(),
+            finish_reason: Some("stop".into()),
+        })
+    }
+
+    fn chat_completion_stream(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+        _max_tokens: Option<u32>,
+        _temperature: Option<f64>,
+        _model: Option<&str>,
+        _extra_body: Option<&serde_json::Value>,
+    ) -> futures::stream::BoxStream<'static, Result<StreamChunk, AgentError>> {
+        futures::stream::empty().boxed()
+    }
+}
+
+#[tokio::test]
+async fn phase_a10_agent_result_populates_session_cost_usd() {
+    let cfg = AgentConfig {
+        max_turns: 1,
+        ..AgentConfig::default()
+    };
+    let agent = AgentLoop::new(
+        cfg,
+        Arc::new(ToolRegistry::new()),
+        Arc::new(CostedStopProvider),
+    );
+    let result = agent.run(vec![Message::user("hi")], None).await.unwrap();
+    assert_eq!(result.session_cost_usd, Some(0.042));
+    assert!(!result.interrupted);
+}
+
+#[tokio::test]
+async fn phase_a10_agent_result_sets_interrupted_on_graceful_interrupt() {
+    let interrupt = InterruptController::new();
+    interrupt.interrupt(None);
+    let cfg = AgentConfig {
+        max_turns: 5,
+        ..AgentConfig::default()
+    };
+    let agent = AgentLoop::with_interrupt(
+        cfg,
+        Arc::new(ToolRegistry::new()),
+        Arc::new(StopAssistantProvider),
+        interrupt,
+    );
+    let result = agent.run(vec![Message::user("hi")], None).await.unwrap();
+    assert!(result.interrupted);
+}
+
+// --- Phase A-13: steer pre-API inject during run ----------------------------

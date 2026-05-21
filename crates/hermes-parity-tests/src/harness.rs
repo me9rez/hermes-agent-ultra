@@ -20,6 +20,7 @@ use hermes_skills::{
 };
 use hermes_tools::approval::{check_approval, ApprovalDecision};
 use hermes_tools::code_execution_env::scrub_child_env;
+use hermes_tools::code_execution_stubs::{generate_hermes_tools_module, RpcTransport};
 use hermes_tools::v4a_patch::{parse_v4a_patch, OperationType};
 use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
@@ -451,6 +452,28 @@ pub fn dispatch_case(op: &str, input: &Value) -> Result<Value, String> {
             };
             Ok(json!({ "allowed": allowed, "reason": reason }))
         }
+        "generate_hermes_tools_module" => {
+            let enabled_tools: Vec<String> = input
+                .get("enabled_tools")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .ok_or_else(|| "missing input.enabled_tools".to_string())?;
+            let transport = input
+                .get("transport")
+                .and_then(|v| v.as_str())
+                .unwrap_or("uds");
+            let rpc_transport = match transport {
+                "uds" | "tcp" => RpcTransport::Uds,
+                other => {
+                    return Err(format!(
+                        "unsupported transport {other:?} (only uds/tcp for local PTC)"
+                    ));
+                }
+            };
+            Ok(Value::String(generate_hermes_tools_module(
+                &enabled_tools,
+                rpc_transport,
+            )))
+        }
         "scrub_child_env" => {
             let env_obj = input
                 .get("env")
@@ -553,6 +576,12 @@ mod tests {
     fn parity_code_execution_env_fixtures() {
         run_fixtures_in_dir(&fixtures_dir().join("code_execution_env"))
             .expect("code_execution_env fixtures");
+    }
+
+    #[test]
+    fn parity_code_execution_stubs_fixtures() {
+        run_fixtures_in_dir(&fixtures_dir().join("code_execution_stubs"))
+            .expect("code_execution_stubs fixtures");
     }
 
     #[test]

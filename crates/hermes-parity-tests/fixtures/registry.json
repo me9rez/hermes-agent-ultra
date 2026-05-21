@@ -74,6 +74,13 @@
       "fixture_dirs": ["code_execution_env"]
     },
     {
+      "id": "code_execution_stubs",
+      "status": "active",
+      "python": "tools/code_execution_tool.py::generate_hermes_tools_module",
+      "rust": "hermes_tools::code_execution_stubs",
+      "fixture_dirs": ["code_execution_stubs"]
+    },
+    {
       "id": "run_conversation",
       "status": "active",
       "python": "run_agent.py::AIAgent.run_conversation",

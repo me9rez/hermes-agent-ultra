@@ -4291,6 +4291,7 @@ async fn register_gateway_adapters(
             if let Some(token) = platform_token_or_extra(platform_cfg) {
                 let telegram_config = build_telegram_config(platform_cfg, token);
                 let telegram_adapter = Arc::new(TelegramAdapter::new(telegram_config)?);
+                telegram_adapter.start().await?;
                 gateway
                     .register_adapter("telegram", telegram_adapter.clone())
                     .await;

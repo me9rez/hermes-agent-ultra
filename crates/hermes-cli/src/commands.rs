@@ -1329,18 +1329,8 @@ fn skill_guard_enforce_bundle(
         .iter()
         .map(|(p, b)| (p.clone(), b.to_vec()))
         .collect();
-    let scan = hermes_skills::scan_bundle(install_name, source, &file_vec);
-    let (decision, reason) = hermes_skills::should_allow_install(&scan, force);
-    match decision {
-        hermes_skills::InstallDecision::Allowed => Ok(()),
-        hermes_skills::InstallDecision::NeedsConfirmation => Err(AgentError::Config(format!(
-            "{reason}. Re-run with --force to override."
-        ))),
-        hermes_skills::InstallDecision::Blocked => Err(AgentError::Config(format!(
-            "{reason}\n{}",
-            scan.summary
-        ))),
-    }
+    hermes_skills::SkillGuard::enforce_install_bundle(install_name, source, &file_vec, force)
+        .map_err(|e| AgentError::Config(e.to_string()))
 }
 
 fn github_request(client: &reqwest::Client, url: &str, accept: &str) -> reqwest::RequestBuilder {

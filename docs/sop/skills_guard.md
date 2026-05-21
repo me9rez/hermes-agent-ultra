@@ -4,7 +4,7 @@
 |------|-----|
 | registry `id` | `skills_guard` |
 | Python | `tools/skills_guard.py` |
-| Rust | `crates/hermes-skills/src/skills_guard.rs` |
+| Rust | `crates/hermes-skills/src/skills_guard.rs`（引擎）+ `guard.rs`（`SkillGuard` 门面） |
 | Crate | `hermes-skills` |
 | Fixtures | `crates/hermes-parity-tests/fixtures/skills_guard/*.json` |
 

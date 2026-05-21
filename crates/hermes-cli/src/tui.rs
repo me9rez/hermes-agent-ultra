@@ -5082,35 +5082,45 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
     app.set_stream_handle(Some(StreamHandle::from(tui.stream_sender())));
 
     // Spawn crossterm event reader
+    // NOTE: crossterm::event::read() is synchronous and blocks the thread.
+    // We use spawn_blocking so that tokio can properly cancel it on shutdown.
     let event_sender = tui.event_sender();
-    let event_task = tokio::spawn(async move {
-        loop {
-            if crate::checklist::embedded_picker_active() {
-                tokio::time::sleep(Duration::from_millis(16)).await;
-                continue;
-            }
-            if crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false) {
-                if let Ok(event) = crossterm::event::read() {
-                    let msg = match event {
-                        CrosstermEvent::Key(key) => Some(Event::Key(key)),
-                        CrosstermEvent::Resize(w, h) => Some(Event::Resize(w, h)),
-                        CrosstermEvent::Mouse(mouse) => Some(Event::Mouse(mouse)),
-                        CrosstermEvent::Paste(text) => Some(Event::Paste(text)),
-                        _ => None,
-                    };
-                    if let Some(msg) = msg {
-                        if event_sender.send(msg).is_err() {
-                            break;
+    let mut event_task = tokio::spawn(async move {
+        let (blocking_tx, mut blocking_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = std::thread::spawn(move || {
+            loop {
+                if crate::checklist::embedded_picker_active() {
+                    std::thread::sleep(Duration::from_millis(16));
+                    continue;
+                }
+                if crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false) {
+                    if let Ok(event) = crossterm::event::read() {
+                        let msg = match event {
+                            CrosstermEvent::Key(key) => Some(Event::Key(key)),
+                            CrosstermEvent::Resize(w, h) => Some(Event::Resize(w, h)),
+                            CrosstermEvent::Mouse(mouse) => Some(Event::Mouse(mouse)),
+                            CrosstermEvent::Paste(text) => Some(Event::Paste(text)),
+                            _ => None,
+                        };
+                        if let Some(msg) = msg {
+                            if blocking_tx.send(msg).is_err() {
+                                break;
+                            }
                         }
                     }
                 }
+            }
+        });
+        while let Some(msg) = blocking_rx.recv().await {
+            if event_sender.send(msg).is_err() {
+                break;
             }
         }
     });
     // Spawn OS signal bridge so terminal close / signal-driven shutdowns
     // unwind the TUI and return control cleanly.
     let signal_sender = tui.event_sender();
-    let signal_task = tokio::spawn(async move {
+    let mut signal_task = tokio::spawn(async move {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{signal, SignalKind};
@@ -5635,8 +5645,16 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
     abort_and_join_task(&mut active_agent_task).await;
     event_task.abort();
     signal_task.abort();
-    let _ = event_task.await;
-    let _ = signal_task.await;
+    // Use a timeout to prevent hanging if the event/signal task doesn't yield
+    // promptly (e.g. crossterm blocked in a synchronous read).
+    tokio::select! {
+        _ = &mut event_task => {}
+        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
+    tokio::select! {
+        _ = &mut signal_task => {}
+        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
 
     // Restore terminal
     tui.restore()

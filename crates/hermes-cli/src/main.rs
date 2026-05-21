@@ -277,11 +277,12 @@ fn main() {
     {
         Ok(runtime) => runtime,
         Err(err) => {
-            eprintln!("Error: failed to initialize async runtime: {err}");
+            eprintln!("Error: failed to initialize async runtime: {}", err);
             std::process::exit(1);
         }
     };
     runtime.block_on(async_main(cli));
+    runtime.shutdown_background();
 }
 
 async fn async_main(cli: Cli) {

@@ -495,6 +495,10 @@ struct WeComInner {
     reply_req_ids: RwLock<HashMap<String, String>>,
     last_chat_req_ids: RwLock<HashMap<String, String>>,
     stream_reply_req_ids: RwLock<HashMap<String, String>>,
+    /// One in-flight `aibot_respond_msg` per inbound `req_id`. Concurrent calls
+    /// (native stream chunks + status `send_message`) previously shared the same
+    /// `pending` key and dropped each other's oneshot → "reply request cancelled".
+    reply_req_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pending_text: Mutex<HashMap<String, PendingTextBatch>>,
     text_batch_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     stop: Notify,
@@ -528,6 +532,7 @@ impl WeComAdapter {
                 reply_req_ids: RwLock::new(HashMap::new()),
                 last_chat_req_ids: RwLock::new(HashMap::new()),
                 stream_reply_req_ids: RwLock::new(HashMap::new()),
+                reply_req_locks: Mutex::new(HashMap::new()),
                 pending_text: Mutex::new(HashMap::new()),
                 text_batch_tasks: Mutex::new(HashMap::new()),
                 stop: Notify::new(),
@@ -1080,6 +1085,20 @@ impl WeComAdapter {
         inner.reply_req_ids.read().await.get(normalized).cloned()
     }
 
+    async fn reply_send_lock(inner: &WeComInner, reply_req_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = inner.reply_req_locks.lock().await;
+        let lock = locks
+            .entry(reply_req_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        while locks.len() > DEDUP_MAX {
+            if let Some(k) = locks.keys().next().cloned() {
+                locks.remove(&k);
+            }
+        }
+        lock
+    }
+
     async fn fail_pending(inner: &WeComInner) {
         let mut pending = inner.pending.write().await;
         for (_, tx) in pending.drain() {
@@ -1139,6 +1158,11 @@ impl WeComAdapter {
         if req_id.is_empty() {
             return Err(GatewayError::SendFailed("reply_req_id is required".into()));
         }
+        // WeCom correlates `aibot_respond_msg` by the inbound callback req_id. Only one
+        // pending waiter may exist per req_id; serialize all reply sends (stream + status).
+        let reply_lock = Self::reply_send_lock(inner, req_id).await;
+        let _reply_guard = reply_lock.lock().await;
+
         let (tx, rx) = oneshot::channel();
         inner.pending.write().await.insert(req_id.to_string(), tx);
         let frame = serde_json::json!({
@@ -1146,22 +1170,22 @@ impl WeComAdapter {
             "headers": { "req_id": req_id },
             "body": body,
         });
-        if let Err(e) = Self::send_ws_json(inner, frame).await {
+        let result = if let Err(e) = Self::send_ws_json(inner, frame).await {
             inner.pending.write().await.remove(req_id);
-            return Err(e);
-        }
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(_)) => Err(GatewayError::SendFailed(
-                "WeCom reply request cancelled".into(),
-            )),
-            Err(_) => {
-                inner.pending.write().await.remove(req_id);
-                Err(GatewayError::SendFailed(
+            Err(e)
+        } else {
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(v)) => Ok(v),
+                Ok(Err(_)) => Err(GatewayError::SendFailed(
+                    "WeCom reply request cancelled".into(),
+                )),
+                Err(_) => Err(GatewayError::SendFailed(
                     "Timeout sending reply to WeCom".into(),
-                ))
+                )),
             }
-        }
+        };
+        inner.pending.write().await.remove(req_id);
+        result
     }
 
     async fn dispatch_payload(inner: Arc<WeComInner>, payload: Value) {
@@ -2181,6 +2205,21 @@ mod tests {
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(key);
         let out = decrypt_wecom_file_bytes(&cipher, &key_b64).expect("decrypt");
         assert_eq!(out, plain);
+    }
+
+    /// Documents the race fixed by `reply_send_lock`: a second `pending.insert`
+    /// for the same req_id drops the first oneshot sender → `rx.await` is `Err`.
+    #[tokio::test]
+    async fn duplicate_pending_req_id_cancels_prior_waiter() {
+        let mut pending: HashMap<String, tokio::sync::oneshot::Sender<()>> = HashMap::new();
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        pending.insert("inbound-req".to_string(), tx1);
+        let (tx2, _rx2) = tokio::sync::oneshot::channel();
+        pending.insert("inbound-req".to_string(), tx2);
+        assert!(
+            rx1.await.is_err(),
+            "replacing pending slot must cancel the prior waiter"
+        );
     }
 
     #[tokio::test]

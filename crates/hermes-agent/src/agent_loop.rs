@@ -6290,6 +6290,11 @@ impl AgentLoop {
 
             total_turns += 1;
 
+            // Housekeeping-only turns enable mute_post_response for the *current* turn's
+            // pre-tool narration. Reset each turn so the next LLM stream (especially the
+            // final natural-language reply) is delivered to gateway native streaming.
+            stream_mute.store(false, Ordering::Release);
+
             // Refresh oauth-backed runtime credentials before routing/provider selection.
             self.refresh_oauth_store_tokens_if_needed().await;
 

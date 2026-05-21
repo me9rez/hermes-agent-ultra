@@ -29,6 +29,8 @@ use crate::commands::{handle_command, GatewayCommandResult};
 use crate::dm::{DmDecision, DmManager};
 use crate::hooks::{HookEvent, HookRegistry};
 use crate::platforms::helpers::extract_inline_images;
+use hermes_config::resolve_outbound_media_path;
+use hermes_tools::extract_media;
 use hermes_tools::tools::messaging::MessagingSessionContext;
 use crate::session::SessionManager;
 use crate::stream::{StreamConfig, StreamManager};
@@ -1377,7 +1379,9 @@ impl Gateway {
         self.bump_output_usage(session_key, response.chars().count())
             .await;
 
-        // Send response back to the platform
+        // Send response back to the platform (text + MEDIA: local attachments)
+        self.deliver_response_attachments(&incoming.platform, &incoming.chat_id, &response)
+            .await;
         self.send_message(&incoming.platform, &incoming.chat_id, &response, None)
             .await?;
         self.flush_post_delivery_messages(
@@ -1591,6 +1595,9 @@ impl Gateway {
             response_chars = response.chars().count(),
             "gateway streaming agent finished"
         );
+
+        self.deliver_response_attachments(&incoming.platform, &incoming.chat_id, &response)
+            .await;
 
         if let Some(worker) = native_worker {
             let _ = worker.await;
@@ -2049,6 +2056,41 @@ impl Gateway {
     // -----------------------------------------------------------------------
     // Message sending (delegates to adapters)
     // -----------------------------------------------------------------------
+
+    /// Deliver `MEDIA:<path>` attachments and bare local paths from an agent response.
+    pub async fn deliver_response_attachments(
+        &self,
+        platform: &str,
+        chat_id: &str,
+        text: &str,
+    ) {
+        let (media_files, _cleaned) = extract_media(text);
+        for (media_path, _is_voice) in media_files {
+            match resolve_outbound_media_path(&media_path) {
+                Ok(resolved) => {
+                    let path_str = resolved.to_string_lossy().into_owned();
+                    if let Err(err) = self.send_file(platform, chat_id, &path_str, None).await {
+                        warn!(
+                            platform = platform,
+                            chat_id = chat_id,
+                            path = %path_str,
+                            error = %err,
+                            "failed to deliver MEDIA attachment from agent response"
+                        );
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        platform = platform,
+                        chat_id = chat_id,
+                        path = %media_path,
+                        error = %err,
+                        "skipping MEDIA attachment (file missing or path invalid)"
+                    );
+                }
+            }
+        }
+    }
 
     /// Send a text message to a specific platform chat.
     pub async fn send_message(

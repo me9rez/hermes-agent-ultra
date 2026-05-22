@@ -106,6 +106,10 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub agent: AgentLoopBehaviorConfig,
 
+    /// Anthropic prompt caching (`cache_ttl`: `"5m"` or `"1h"`).
+    #[serde(default)]
+    pub prompt_caching: PromptCachingConfig,
+
     /// Override for the hermes home directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_dir: Option<String>,
@@ -144,6 +148,7 @@ impl Default for GatewayConfig {
             mcp_servers: Vec::new(),
             profile: ProfileConfig::default(),
             agent: AgentLoopBehaviorConfig::default(),
+            prompt_caching: PromptCachingConfig::default(),
             home_dir: None,
             tts: None,
             stt: None,
@@ -200,6 +205,30 @@ pub fn default_platform_toolsets() -> HashMap<String, Vec<String>> {
     map.insert("whatsapp".to_string(), vec!["hermes-whatsapp".to_string()]);
     map.insert("slack".to_string(), vec!["hermes-slack".to_string()]);
     map
+}
+
+// ---------------------------------------------------------------------------
+// PromptCachingConfig (Python `prompt_caching` block)
+// ---------------------------------------------------------------------------
+
+/// Anthropic prompt caching settings (Claude via native Anthropic / OpenRouter / Nous Portal).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptCachingConfig {
+    /// Cache TTL tier: `"5m"` (default) or `"1h"`.
+    #[serde(default = "default_prompt_cache_ttl")]
+    pub cache_ttl: String,
+}
+
+fn default_prompt_cache_ttl() -> String {
+    "5m".to_string()
+}
+
+impl Default for PromptCachingConfig {
+    fn default() -> Self {
+        Self {
+            cache_ttl: default_prompt_cache_ttl(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -177,6 +177,7 @@ impl PromptBuilder {
             if msg.role == hermes_core::types::MessageRole::System {
                 msg.cache_control = Some(CacheControl {
                     cache_type: CacheType::Persistent,
+                    ttl: None,
                 });
                 break;
             }
@@ -193,6 +194,7 @@ impl PromptBuilder {
             {
                 msg.cache_control = Some(CacheControl {
                     cache_type: CacheType::Ephemeral,
+                    ttl: None,
                 });
                 turn_count += 1;
             }

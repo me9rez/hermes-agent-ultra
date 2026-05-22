@@ -1842,6 +1842,7 @@ dependencies = [
  "hermes-core",
  "hermes-intelligence",
  "hermes-skills",
+ "hermes-telemetry",
  "hermes-tools",
  "hex",
  "lazy_static",

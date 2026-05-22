@@ -29,6 +29,7 @@ pub mod oauth;
 pub mod plugins;
 pub mod shell_hooks;
 pub mod steer;
+pub mod prompt_caching;
 pub mod provider;
 pub mod providers_extra;
 pub mod python_alignment;
@@ -72,6 +73,10 @@ pub use tools_wiring::{
     register_builtin_tools_with_voice as register_agent_builtin_tools_with_voice,
 };
 pub use vision_adapter::AuxiliaryVisionAdapter;
+pub use prompt_caching::{
+    anthropic_prompt_cache_policy, apply_anthropic_cache_control, build_cache_marker,
+    record_prompt_cache_telemetry,
+};
 pub use provider::{AnthropicProvider, GenericProvider, OpenAiProvider, OpenRouterProvider};
 pub use providers_extra::{
     CopilotProvider, KimiProvider, MiniMaxProvider, NousProvider, QwenProvider,

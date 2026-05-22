@@ -512,6 +512,18 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored_system_prompt: Option<String>,
 
+    /// Anthropic prompt caching TTL tier (`"5m"` or `"1h"`).
+    #[serde(default = "default_cache_ttl")]
+    pub cache_ttl: String,
+
+    /// Inject `cache_control` breakpoints on outbound API messages.
+    #[serde(default)]
+    pub use_prompt_caching: bool,
+
+    /// Place markers on inner content blocks (native Anthropic) vs message envelope (OpenRouter).
+    #[serde(default)]
+    pub use_native_cache_layout: bool,
+
     /// Progress ratio (0-1) at which Python emits a *caution* budget nudge (`_budget_caution_threshold`).
     #[serde(default = "default_budget_caution_threshold")]
     pub budget_caution_threshold: f64,
@@ -714,6 +726,10 @@ fn default_lsp_context_max_chars() -> usize {
     2_800
 }
 
+fn default_cache_ttl() -> String {
+    "5m".to_string()
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -757,6 +773,9 @@ impl Default for AgentConfig {
             background_review_enabled: default_background_review_enabled(),
             background_review_metrics_enabled: default_background_review_metrics_enabled(),
             stored_system_prompt: None,
+            cache_ttl: default_cache_ttl(),
+            use_prompt_caching: false,
+            use_native_cache_layout: false,
             budget_caution_threshold: default_budget_caution_threshold(),
             budget_warning_threshold: default_budget_warning_threshold(),
             budget_pressure_enabled: default_budget_pressure_enabled(),
@@ -3625,6 +3644,14 @@ impl AgentLoop {
     }
 
     fn messages_for_api_call(&self, ctx: &mut ContextManager) -> Vec<Message> {
+        let cfg = self.config();
+        let provider = cfg.provider.as_deref().unwrap_or("");
+        let base_url = self
+            .resolve_runtime_base_url(provider, None)
+            .unwrap_or_default();
+        let api_mode = Self::api_mode_as_hook_str(&cfg.api_mode);
+        self.refresh_prompt_cache_policy(provider, &base_url, api_mode);
+
         self.pending_steer
             .drain_pre_api_into_messages(ctx.get_messages_mut());
         let mut messages = ctx.get_messages().to_vec();
@@ -3642,40 +3669,28 @@ impl AgentLoop {
     }
 
     fn apply_prompt_cache_markers(&self, messages: &mut Vec<Message>) {
-        use hermes_core::types::{CacheControl, CacheType, MessageRole};
-        if messages.is_empty() {
+        let cfg = self.config();
+        if messages.is_empty() || !cfg.use_prompt_caching {
             return;
         }
-        let provider = self
-            .config()
-            .provider
-            .as_deref()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let is_anthropic = provider.contains("anthropic") || provider.contains("claude");
-        if !is_anthropic {
-            return;
-        }
-        for msg in messages.iter_mut() {
-            if msg.role == MessageRole::System {
-                msg.cache_control = Some(CacheControl {
-                    cache_type: CacheType::Persistent,
-                });
-                break;
-            }
-        }
-        let ephemeral_budget = 4;
-        let mut marked = 0;
-        for msg in messages.iter_mut().rev() {
-            if marked >= ephemeral_budget {
-                break;
-            }
-            if msg.role == MessageRole::User || msg.role == MessageRole::Assistant {
-                msg.cache_control = Some(CacheControl {
-                    cache_type: CacheType::Ephemeral,
-                });
-                marked += 1;
-            }
+        let cache_ttl = cfg.cache_ttl.as_str();
+        let native = cfg.use_native_cache_layout;
+        let marked = crate::prompt_caching::apply_anthropic_cache_control(messages, cache_ttl, native);
+        messages.clear();
+        messages.extend(marked);
+    }
+
+    /// Recompute prompt-cache policy from current route (Python `_anthropic_prompt_cache_policy`).
+    pub fn refresh_prompt_cache_policy(&self, provider: &str, base_url: &str, api_mode: &str) {
+        let (should_cache, native) = crate::prompt_caching::anthropic_prompt_cache_policy(
+            provider,
+            base_url,
+            api_mode,
+            &self.config().model,
+        );
+        if let Ok(mut cfg) = self.config_runtime.write() {
+            cfg.use_prompt_caching = should_cache;
+            cfg.use_native_cache_layout = native;
         }
     }
 
@@ -8374,6 +8389,21 @@ impl AgentLoop {
         cfg.skill_creation_nudge_interval = 0;
         cfg.max_concurrent_delegates = 0;
         cfg.quiet_mode = true;
+        cfg.skip_memory = true;
+        cfg.use_prompt_caching = self.config().use_prompt_caching;
+        cfg.use_native_cache_layout = self.config().use_native_cache_layout;
+        cfg.cache_ttl = self.config().cache_ttl.clone();
+        if let Some(sys) = ctx
+            .get_messages()
+            .iter()
+            .find(|m| m.role == MessageRole::System)
+            .and_then(|m| m.content.clone())
+            .filter(|s| !s.trim().is_empty())
+        {
+            cfg.stored_system_prompt = Some(sys);
+        } else if let Some(sys) = self.config().stored_system_prompt.clone() {
+            cfg.stored_system_prompt = Some(sys);
+        }
         cfg.max_turns = if cfg.max_turns == 0 {
             16
         } else {

@@ -30,6 +30,20 @@ pub enum CacheType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheControl {
     pub cache_type: CacheType,
+    /// Anthropic TTL tier (`"1h"` only; omitted for default 5m ephemeral).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
+impl CacheControl {
+    /// Anthropic API `cache_control` object (`type: ephemeral`, optional `ttl: 1h`).
+    pub fn to_api_json(&self) -> serde_json::Value {
+        let mut obj = serde_json::json!({"type": "ephemeral"});
+        if self.ttl.as_deref() == Some("1h") {
+            obj["ttl"] = serde_json::json!("1h");
+        }
+        obj
+    }
 }
 
 // ---------------------------------------------------------------------------

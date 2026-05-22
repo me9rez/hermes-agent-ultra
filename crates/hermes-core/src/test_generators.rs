@@ -26,7 +26,10 @@ pub fn arb_cache_type() -> impl Strategy<Value = CacheType> {
 }
 
 pub fn arb_cache_control() -> impl Strategy<Value = CacheControl> {
-    arb_cache_type().prop_map(|cache_type| CacheControl { cache_type })
+    arb_cache_type().prop_map(|cache_type| CacheControl {
+        cache_type,
+        ttl: None,
+    })
 }
 
 pub fn arb_reasoning_format() -> impl Strategy<Value = ReasoningFormat> {

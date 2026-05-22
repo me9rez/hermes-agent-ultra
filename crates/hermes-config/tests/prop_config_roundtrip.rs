@@ -131,6 +131,7 @@ fn arb_gateway_config() -> impl Strategy<Value = GatewayConfig> {
                 mcp_servers: Vec::new(),
                 profile: ProfileConfig::default(),
                 agent: AgentLoopBehaviorConfig::default(),
+                prompt_caching: hermes_config::PromptCachingConfig::default(),
                 home_dir: None,
             },
         )

@@ -966,24 +966,45 @@ impl AnthropicProvider {
         get_anthropic_max_output(model).max(1)
     }
 
+    fn is_native_anthropic_endpoint(base_url: Option<&str>) -> bool {
+        let host = base_url
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|url| {
+                let without_scheme = url.split("://").nth(1).unwrap_or(url);
+                without_scheme
+                    .split('/')
+                    .next()
+                    .map(|h| h.split(':').next().unwrap_or(h).to_ascii_lowercase())
+            });
+        host.as_deref() == Some("api.anthropic.com")
+    }
+
+    fn attach_cache_control(block: &mut Value, cc: &hermes_core::types::CacheControl) {
+        if let Value::Object(map) = block {
+            map.insert("cache_control".to_string(), cc.to_api_json());
+        }
+    }
+
     /// Convert internal messages to Anthropic format, extracting system message.
     fn convert_messages(
         messages: &[Message],
         base_url: Option<&str>,
-    ) -> (Option<String>, Vec<Value>) {
-        let mut system_text: Option<String> = None;
+    ) -> (Option<Value>, Vec<Value>) {
+        let mut system_blocks: Vec<Value> = Vec::new();
         let mut anthropic_messages: Vec<Value> = Vec::new();
         let is_kimi_endpoint = Self::is_kimi_coding_endpoint(base_url);
+        let native_anthropic = Self::is_native_anthropic_endpoint(base_url);
 
         for msg in messages {
             match msg.role {
                 MessageRole::System => {
-                    // Anthropic: system goes in a separate `system` parameter
                     let content = msg.content.as_deref().unwrap_or("");
-                    system_text = Some(match system_text {
-                        Some(existing) => format!("{existing}\n\n{content}"),
-                        None => content.to_string(),
-                    });
+                    let mut block = serde_json::json!({"type": "text", "text": content});
+                    if let Some(ref cc) = msg.cache_control {
+                        Self::attach_cache_control(&mut block, cc);
+                    }
+                    system_blocks.push(block);
                 }
                 MessageRole::User => {
                     let mut content_blocks = Vec::new();
@@ -1001,15 +1022,23 @@ impl AnthropicProvider {
                         } else {
                             let mut block = serde_json::json!({"type": "text", "text": text});
                             if let Some(ref cc) = msg.cache_control {
-                                block["cache_control"] = serde_json::json!({"type": format!("{:?}", cc.cache_type).to_lowercase()});
+                                Self::attach_cache_control(&mut block, cc);
                             }
                             content_blocks.push(block);
                         }
+                    } else if msg.cache_control.is_some() {
+                        let mut block = serde_json::json!({"type": "text", "text": ""});
+                        if let Some(ref cc) = msg.cache_control {
+                            Self::attach_cache_control(&mut block, cc);
+                        }
+                        content_blocks.push(block);
                     }
-                    anthropic_messages.push(serde_json::json!({
-                        "role": "user",
-                        "content": content_blocks,
-                    }));
+                    if !content_blocks.is_empty() {
+                        anthropic_messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": content_blocks,
+                        }));
+                    }
                 }
                 MessageRole::Assistant => {
                     let mut content_blocks = Vec::new();
@@ -1021,9 +1050,6 @@ impl AnthropicProvider {
                         && msg.reasoning_content.is_some()
                     {
                         let thinking = msg.reasoning_content.as_deref().unwrap_or("");
-                        // Kimi /coding expects assistant tool-call replay messages
-                        // to include reasoning_content semantics; preserve it as
-                        // a thinking block before any text/tool_use blocks.
                         content_blocks
                             .push(serde_json::json!({"type": "thinking", "thinking": thinking}));
                     }
@@ -1032,7 +1058,6 @@ impl AnthropicProvider {
                             content_blocks.push(serde_json::json!({"type": "text", "text": text}));
                         }
                     }
-                    // Convert tool_calls to Anthropic tool_use blocks
                     if let Some(ref tool_calls) = msg.tool_calls {
                         for tc in tool_calls {
                             let input: Value = serde_json::from_str(&tc.function.arguments)
@@ -1046,6 +1071,11 @@ impl AnthropicProvider {
                         }
                     }
                     if !content_blocks.is_empty() {
+                        if let Some(ref cc) = msg.cache_control {
+                            if let Some(last) = content_blocks.last_mut() {
+                                Self::attach_cache_control(last, cc);
+                            }
+                        }
                         anthropic_messages.push(serde_json::json!({
                             "role": "assistant",
                             "content": content_blocks,
@@ -1053,21 +1083,38 @@ impl AnthropicProvider {
                     }
                 }
                 MessageRole::Tool => {
-                    // Anthropic: tool results go as user messages with tool_result content blocks
-                    let content_blocks = vec![serde_json::json!({
+                    let mut block = serde_json::json!({
                         "type": "tool_result",
                         "tool_use_id": msg.tool_call_id.as_deref().unwrap_or(""),
                         "content": msg.content.as_deref().unwrap_or(""),
-                    })];
+                    });
+                    if native_anthropic {
+                        if let Some(ref cc) = msg.cache_control {
+                            Self::attach_cache_control(&mut block, cc);
+                        }
+                    }
                     anthropic_messages.push(serde_json::json!({
                         "role": "user",
-                        "content": content_blocks,
+                        "content": vec![block],
                     }));
                 }
             }
         }
 
-        (system_text, anthropic_messages)
+        let system = if system_blocks.is_empty() {
+            None
+        } else if system_blocks.iter().any(|b| b.get("cache_control").is_some()) {
+            Some(Value::Array(system_blocks))
+        } else {
+            let merged = system_blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            Some(Value::String(merged))
+        };
+
+        (system, anthropic_messages)
     }
 
     /// Convert tool schemas to Anthropic tool format.
@@ -1136,6 +1183,7 @@ impl AnthropicProvider {
         }
 
         let usage = json.get("usage").and_then(|u| {
+            crate::prompt_caching::record_prompt_cache_telemetry(u);
             let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
             let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
             Some(UsageStats {
@@ -1203,7 +1251,7 @@ impl LlmProvider for AnthropicProvider {
 
         let effective_model = model.unwrap_or(&self.model);
         let api_key = self.effective_api_key();
-        let (system_text, anthropic_messages) =
+        let (system, anthropic_messages) =
             Self::convert_messages(messages, Some(self.base_url.as_str()));
         let resolved_max_tokens = Self::resolve_messages_max_tokens(max_tokens, effective_model);
 
@@ -1213,8 +1261,8 @@ impl LlmProvider for AnthropicProvider {
             "max_tokens": resolved_max_tokens,
         });
 
-        if let Some(ref sys) = system_text {
-            body["system"] = serde_json::json!(sys);
+        if let Some(sys) = system {
+            body["system"] = sys;
         }
         if let Some(temp) = temperature {
             body["temperature"] = serde_json::json!(temp);
@@ -1270,7 +1318,7 @@ impl LlmProvider for AnthropicProvider {
 
             let effective_model = model.as_deref().unwrap_or(&provider.model);
             let api_key = provider.effective_api_key();
-            let (system_text, anthropic_messages) = AnthropicProvider::convert_messages(
+            let (system, anthropic_messages) = AnthropicProvider::convert_messages(
                 &messages,
                 Some(provider.base_url.as_str()),
             );
@@ -1284,8 +1332,8 @@ impl LlmProvider for AnthropicProvider {
                 "stream": true,
             });
 
-            if let Some(ref sys) = system_text {
-                body["system"] = serde_json::json!(sys);
+            if let Some(sys) = system {
+                body["system"] = sys;
             }
             if let Some(temp) = temperature {
                 body["temperature"] = serde_json::json!(temp);
@@ -1448,6 +1496,7 @@ impl LlmProvider for AnthropicProvider {
                                     other => other.to_string(),
                                 });
                             let usage = json.get("usage").and_then(|u| {
+                                crate::prompt_caching::record_prompt_cache_telemetry(u);
                                 let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                                 Some(UsageStats {
                                     prompt_tokens: 0,
@@ -1465,6 +1514,7 @@ impl LlmProvider for AnthropicProvider {
                         "message_start" => {
                             // Extract usage from the initial message
                             let usage = json.get("message").and_then(|m| m.get("usage")).and_then(|u| {
+                                crate::prompt_caching::record_prompt_cache_telemetry(u);
                                 let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                                 Some(UsageStats {
                                     prompt_tokens: input,
@@ -2377,7 +2427,10 @@ mod tests {
             Message::assistant("Hi there!"),
         ];
         let (system, msgs) = AnthropicProvider::convert_messages(&messages, None);
-        assert_eq!(system.as_deref(), Some("You are helpful"));
+        assert_eq!(
+            system.as_ref().and_then(|v| v.as_str()),
+            Some("You are helpful")
+        );
         assert_eq!(msgs.len(), 2); // user + assistant, system extracted
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[1]["role"], "assistant");
@@ -2420,7 +2473,7 @@ mod tests {
             Message::tool_result("tc_1", "file contents here"),
         ];
         let (system, msgs) = AnthropicProvider::convert_messages(&messages, None);
-        assert_eq!(system.as_deref(), Some("System"));
+        assert_eq!(system.as_ref().and_then(|v| v.as_str()), Some("System"));
         assert_eq!(msgs.len(), 3); // user, assistant with tool_use, user with tool_result
                                    // Assistant message should have tool_use block
         let assistant_content = msgs[1]["content"].as_array().unwrap();
@@ -2505,6 +2558,21 @@ mod tests {
             AnthropicProvider::convert_messages(&messages, Some("https://api.anthropic.com"));
         let content = msgs[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "tool_use");
+    }
+
+    #[test]
+    fn test_anthropic_convert_messages_system_cache_control_array() {
+        use crate::prompt_caching::build_cache_marker;
+        let mut sys = Message::system("cached sys");
+        sys.cache_control = Some(build_cache_marker("1h"));
+        let messages = vec![sys, Message::user("hi")];
+        let (system, _) = AnthropicProvider::convert_messages(
+            &messages,
+            Some("https://api.anthropic.com"),
+        );
+        let arr = system.expect("system").as_array().expect("system blocks");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(arr[0]["cache_control"]["ttl"], "1h");
     }
 
     #[test]

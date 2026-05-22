@@ -5129,6 +5129,32 @@ pub fn build_agent_config(config: &GatewayConfig, model: &str) -> AgentConfig {
         }
     }
 
+    let cache_ttl = if config.prompt_caching.cache_ttl.as_str() == "1h" {
+        "1h".to_string()
+    } else {
+        "5m".to_string()
+    };
+    let provider_base_url = config
+        .llm_providers
+        .get(resolved_provider.as_str())
+        .or_else(|| config.llm_providers.get(runtime_provider.as_str()))
+        .and_then(|c| c.base_url.clone())
+        .unwrap_or_default();
+    let api_mode_str = if resolved_provider.eq_ignore_ascii_case("anthropic")
+        || model.to_ascii_lowercase().contains("claude")
+    {
+        "anthropic_messages"
+    } else {
+        "chat_completions"
+    };
+    let (use_prompt_caching, use_native_cache_layout) =
+        hermes_agent::prompt_caching::anthropic_prompt_cache_policy(
+            &resolved_provider,
+            &provider_base_url,
+            api_mode_str,
+            model,
+        );
+
     AgentConfig {
         max_turns: config.max_turns,
         budget: config.budget.clone(),
@@ -5185,6 +5211,9 @@ pub fn build_agent_config(config: &GatewayConfig, model: &str) -> AgentConfig {
         code_index_max_symbols: config.agent.code_index_max_symbols,
         lsp_context_enabled: config.agent.lsp_context_enabled,
         lsp_context_max_chars: config.agent.lsp_context_max_chars,
+        cache_ttl,
+        use_prompt_caching,
+        use_native_cache_layout,
         ..AgentConfig::default()
     }
 }

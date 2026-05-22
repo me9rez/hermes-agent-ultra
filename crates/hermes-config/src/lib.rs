@@ -22,9 +22,9 @@ pub mod streaming;
 // Re-export key types for convenience
 pub use config::{
     AgentLoopBehaviorConfig, ApprovalConfig, CheapModelRouteConfig, GatewayConfig,
-    LlmProviderConfig, McpServerEntry, ProfileConfig, ProxyConfig, SecurityConfig,
-    SessionsMaintenanceConfig, SkillsSettings, SmartModelRoutingConfig, TerminalBackendType,
-    TerminalConfig, ToolsSettings,
+    LlmProviderConfig, McpServerEntry, ProfileConfig, PromptCachingConfig, ProxyConfig,
+    SecurityConfig, SessionsMaintenanceConfig, SkillsSettings, SmartModelRoutingConfig,
+    TerminalBackendType, TerminalConfig, ToolsSettings,
 };
 pub use voice::{
     SttConfig, SttGroqConfig, SttLocalConfig, SttMistralConfig, SttOpenAiConfig, SttXaiConfig,

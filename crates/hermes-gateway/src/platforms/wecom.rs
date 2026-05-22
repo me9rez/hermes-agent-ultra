@@ -1214,7 +1214,9 @@ impl WeComAdapter {
         if cmd == APP_CMD_PING || cmd == APP_CMD_EVENT_CALLBACK {
             return;
         }
-        debug!(cmd = %cmd, "Ignoring WeCom websocket payload");
+        if !cmd.is_empty() {
+            debug!(cmd = %cmd, "Ignoring WeCom websocket payload");
+        }
     }
 
     async fn on_message_callback(inner: Arc<WeComInner>, payload: Value) {

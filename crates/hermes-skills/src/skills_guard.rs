@@ -78,6 +78,9 @@ const MAX_FILE_COUNT: usize = 50;
 const MAX_TOTAL_SIZE_KB: usize = 1024;
 const MAX_SINGLE_FILE_KB: usize = 256;
 
+const MAX_MATCH_TEXT_LEN: usize = 120;
+const MATCH_ELLIPSIS: &str = "...";
+
 const SCANNABLE_EXTENSIONS: &[&str] = &[
     ".md", ".txt", ".py", ".sh", ".bash", ".js", ".ts", ".rb", ".yaml", ".yml", ".json", ".toml",
     ".cfg", ".ini", ".conf", ".html", ".css", ".xml", ".tex", ".r", ".jl", ".pl", ".php",
@@ -245,11 +248,17 @@ pub fn scan_content(rel_path: &str, content: &str) -> Vec<Finding> {
             }
             if pat.regex.is_match(line) {
                 seen.insert(key);
-                let mut matched = line.trim().to_string();
-                if matched.len() > 120 {
-                    matched.truncate(117);
-                    matched.push_str("...");
-                }
+                // Truncate by char count, not bytes: multi-byte UTF-8 chars
+                // make byte-index truncation panic on non-char-boundary.
+                let trimmed = line.trim();
+                let take_n = MAX_MATCH_TEXT_LEN - MATCH_ELLIPSIS.len();
+                let mut chars = trimmed.chars().peekable();
+                let head: String = chars.by_ref().take(take_n).collect();
+                let matched = if chars.next().is_some() {
+                    head + MATCH_ELLIPSIS
+                } else {
+                    trimmed.to_string()
+                };
                 findings.push(Finding {
                     pattern_id: pat.id.clone(),
                     severity: pat.severity.clone(),

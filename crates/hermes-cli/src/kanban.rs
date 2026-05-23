@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chrono::Utc;
@@ -141,10 +141,21 @@ pub fn load_store() -> Result<KanbanStore, AgentError> {
         save_store(&store)?;
         return Ok(store);
     }
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| AgentError::Io(format!("read {} failed: {}", path.display(), e)))?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            corrupt_store_error(&path, format!("read failed: {e}"))
+        } else {
+            AgentError::Io(format!("read {} failed: {}", path.display(), e))
+        }
+    })?;
     let mut store = serde_json::from_str::<KanbanStore>(&raw)
-        .map_err(|e| AgentError::Config(format!("parse {} failed: {}", path.display(), e)))?;
+        .map_err(|e| corrupt_store_error(&path, format!("parse failed: {e}")))?;
+    if store.boards.is_empty() {
+        return Err(corrupt_store_error(
+            &path,
+            "store has no boards; refusing to auto-initialize over existing state",
+        ));
+    }
     normalize_store(&mut store);
     Ok(store)
 }
@@ -441,6 +452,43 @@ fn normalize_store(store: &mut KanbanStore) {
     }
 }
 
+fn corrupt_store_error(path: &Path, reason: impl AsRef<str>) -> AgentError {
+    let backup = backup_corrupt_store(path);
+    let backup_detail = backup
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<backup failed>".to_string());
+    AgentError::Config(format!(
+        "Refusing to open corrupt kanban store at {}: {}. Original preserved; backup at {}.",
+        path.display(),
+        reason.as_ref(),
+        backup_detail
+    ))
+}
+
+fn backup_corrupt_store(path: &Path) -> Option<PathBuf> {
+    let resolved = path.canonicalize().ok()?;
+    let parent = resolved.parent()?.to_path_buf();
+    let base_name = resolved.file_name()?.to_string_lossy();
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
+    let base_backup_name = format!("{base_name}.corrupt.{timestamp}");
+    for idx in 0..100 {
+        let backup_name = if idx == 0 {
+            base_backup_name.clone()
+        } else {
+            format!("{base_backup_name}.{idx}")
+        };
+        let candidate = parent.join(backup_name);
+        if candidate.parent() != Some(parent.as_path()) || candidate.exists() {
+            continue;
+        }
+        if std::fs::copy(&resolved, &candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn unique_board_id(store: &KanbanStore, base: &str) -> String {
     let clean = if base.is_empty() {
         DEFAULT_BOARD_ID.to_string()
@@ -560,6 +608,46 @@ mod tests {
     }
 
     #[test]
+    fn load_store_refuses_malformed_existing_store_and_preserves_backup() {
+        with_temp_home(|| {
+            let path = kanban_store_path();
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            let original = b"{ not valid json";
+            std::fs::write(&path, original).expect("write corrupt store");
+
+            let err = load_store().expect_err("corrupt store should fail");
+            let msg = err.to_string();
+            assert!(msg.contains("Refusing to open corrupt kanban store"));
+            assert!(msg.contains("parse failed"));
+            assert_eq!(std::fs::read(&path).expect("read original"), original);
+
+            let backups = corrupt_store_backups(path.parent().expect("parent"));
+            assert_eq!(backups.len(), 1, "unexpected backups: {backups:?}");
+            assert_eq!(std::fs::read(&backups[0]).expect("read backup"), original);
+        });
+    }
+
+    #[test]
+    fn load_store_refuses_semantically_empty_existing_store() {
+        with_temp_home(|| {
+            let path = kanban_store_path();
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            let original = br#"{"schema_version":1,"current_board_id":"main","boards":[]}"#;
+            std::fs::write(&path, original).expect("write empty store");
+
+            let err = load_store().expect_err("empty existing store should fail closed");
+            let msg = err.to_string();
+            assert!(msg.contains("Refusing to open corrupt kanban store"));
+            assert!(msg.contains("store has no boards"));
+            assert_eq!(std::fs::read(&path).expect("read original"), original);
+
+            let backups = corrupt_store_backups(path.parent().expect("parent"));
+            assert_eq!(backups.len(), 1, "unexpected backups: {backups:?}");
+            assert_eq!(std::fs::read(&backups[0]).expect("read backup"), original);
+        });
+    }
+
+    #[test]
     fn add_move_and_archive_flow_works() {
         with_temp_home(|| {
             let mut store = load_store().expect("load");
@@ -616,5 +704,20 @@ mod tests {
             assert!(!res.attempted);
             std::env::remove_var("HERMES_KANBAN_CONTEXTLATTICE_SYNC");
         });
+    }
+
+    fn corrupt_store_backups(parent: &Path) -> Vec<PathBuf> {
+        let mut backups = std::fs::read_dir(parent)
+            .expect("read parent")
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("boards.json.corrupt."))
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        backups.sort();
+        backups
     }
 }

@@ -94,7 +94,22 @@ pub enum CliCommand {
     },
 
     /// Run the interactive setup wizard.
-    Setup,
+    Setup {
+        /// One-shot Nous Portal OAuth setup.
+        #[arg(long)]
+        portal: bool,
+    },
+
+    /// Nous Portal OAuth setup and status.
+    ///
+    /// Examples:
+    ///   hermes portal          — show Nous Portal auth status
+    ///   hermes portal setup    — run Nous Portal device-code login
+    ///   hermes portal status   — show Nous Portal auth status
+    Portal {
+        /// Action: "setup", "login", or "status".
+        action: Option<String>,
+    },
 
     /// Check dependencies and configuration health.
     Doctor {

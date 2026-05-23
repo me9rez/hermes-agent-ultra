@@ -35,6 +35,17 @@ const CURATED_PROVIDER_MODELS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "novita",
+        &[
+            "moonshotai/kimi-k2.5",
+            "minimax/minimax-m2.7",
+            "zai-org/glm-5",
+            "deepseek/deepseek-v3-0324",
+            "deepseek/deepseek-r1-0528",
+            "qwen/qwen3-235b-a22b-fp8",
+        ],
+    ),
+    (
         "nous",
         &[
             "openai/gpt-5.5-pro-20260423",
@@ -913,6 +924,42 @@ mod tests {
         test_env_lock::lock()
     }
 
+    const TEST_PROVENANCE_SIGNING_KEY: &str =
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    struct ScopedCatalogEnv {
+        prior_home: Option<String>,
+        prior_signing: Option<String>,
+    }
+
+    impl ScopedCatalogEnv {
+        fn new(home: &std::path::Path) -> Self {
+            let prior_home = std::env::var("HERMES_HOME").ok();
+            let prior_signing = std::env::var("HERMES_PROVENANCE_SIGNING_KEY").ok();
+            std::env::set_var("HERMES_HOME", home);
+            std::env::set_var("HERMES_PROVENANCE_SIGNING_KEY", TEST_PROVENANCE_SIGNING_KEY);
+            Self {
+                prior_home,
+                prior_signing,
+            }
+        }
+    }
+
+    impl Drop for ScopedCatalogEnv {
+        fn drop(&mut self) {
+            if let Some(value) = self.prior_home.take() {
+                std::env::set_var("HERMES_HOME", value);
+            } else {
+                std::env::remove_var("HERMES_HOME");
+            }
+            if let Some(value) = self.prior_signing.take() {
+                std::env::set_var("HERMES_PROVENANCE_SIGNING_KEY", value);
+            } else {
+                std::env::remove_var("HERMES_PROVENANCE_SIGNING_KEY");
+            }
+        }
+    }
+
     fn cache_path(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1018,8 +1065,7 @@ mod tests {
     async fn preferred_provider_merges_models_dev_with_curated() {
         let _guard = env_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior_home = std::env::var("HERMES_HOME").ok();
-        std::env::set_var("HERMES_HOME", tmp.path());
+        let _env = ScopedCatalogEnv::new(tmp.path());
         let client = seeded_client(json!({
             "opencode-go": {
                 "models": {
@@ -1046,11 +1092,6 @@ mod tests {
         assert!(mimo25 < qwen);
         assert!(mimo2 < qwen);
         assert!(merged.iter().any(|m| m == "qwen3.6-plus"));
-        if let Some(value) = prior_home {
-            std::env::set_var("HERMES_HOME", value);
-        } else {
-            std::env::remove_var("HERMES_HOME");
-        }
     }
 
     #[tokio::test]
@@ -1237,10 +1278,7 @@ mod tests {
     fn signed_provider_catalog_cache_round_trip_verifies() {
         let _guard = env_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior_home = std::env::var("HERMES_HOME").ok();
-        let prior_signing = std::env::var("HERMES_PROVENANCE_SIGNING_KEY").ok();
-        std::env::set_var("HERMES_HOME", tmp.path());
-        std::env::remove_var("HERMES_PROVENANCE_SIGNING_KEY");
+        let _env = ScopedCatalogEnv::new(tmp.path());
 
         let models = vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()];
         persist_provider_catalog_cache("openai", &models);
@@ -1249,26 +1287,13 @@ mod tests {
 
         let status = cached_provider_catalog_status("openai").expect("cache status");
         assert!(status.verified);
-        if let Some(value) = prior_home {
-            std::env::set_var("HERMES_HOME", value);
-        } else {
-            std::env::remove_var("HERMES_HOME");
-        }
-        if let Some(value) = prior_signing {
-            std::env::set_var("HERMES_PROVENANCE_SIGNING_KEY", value);
-        } else {
-            std::env::remove_var("HERMES_PROVENANCE_SIGNING_KEY");
-        }
     }
 
     #[test]
     fn signed_provider_catalog_cache_detects_tamper() {
         let _guard = env_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior_home = std::env::var("HERMES_HOME").ok();
-        let prior_signing = std::env::var("HERMES_PROVENANCE_SIGNING_KEY").ok();
-        std::env::set_var("HERMES_HOME", tmp.path());
-        std::env::remove_var("HERMES_PROVENANCE_SIGNING_KEY");
+        let _env = ScopedCatalogEnv::new(tmp.path());
 
         let models = vec!["gpt-4o".to_string()];
         persist_provider_catalog_cache("openai", &models);
@@ -1283,15 +1308,5 @@ mod tests {
         );
         let status = cached_provider_catalog_status("openai").expect("cache status");
         assert!(!status.verified);
-        if let Some(value) = prior_home {
-            std::env::set_var("HERMES_HOME", value);
-        } else {
-            std::env::remove_var("HERMES_HOME");
-        }
-        if let Some(value) = prior_signing {
-            std::env::set_var("HERMES_PROVENANCE_SIGNING_KEY", value);
-        } else {
-            std::env::remove_var("HERMES_PROVENANCE_SIGNING_KEY");
-        }
     }
 }

@@ -49,8 +49,11 @@ impl ToolHandler for TerminalHandler {
             ApprovalDecision::RequiresConfirmation => {
                 tracing::warn!(
                     command,
-                    "command requires confirmation — auto-approved in agent mode"
+                    "command requires explicit confirmation; denying because no user approval was supplied"
                 );
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Command requires explicit user approval and was not executed: {command}. Do NOT retry, rephrase, or achieve the same outcome via a different command. Silence is not consent."
+                )));
             }
             ApprovalDecision::Approved => {}
         }
@@ -603,6 +606,20 @@ mod tests {
             .await
             .unwrap();
         assert!(result.contains("stdin=abc123"));
+    }
+
+    #[tokio::test]
+    async fn test_terminal_handler_denies_confirmation_without_consent() {
+        let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
+        let err = handler
+            .execute(json!({"command": "sudo apt update"}))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Do NOT retry"));
+        assert!(msg.contains("rephrase"));
+        assert!(msg.contains("same outcome"));
+        assert!(msg.contains("Silence is not consent"));
     }
 
     #[tokio::test]

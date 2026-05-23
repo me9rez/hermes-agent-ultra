@@ -1,10 +1,10 @@
 # Global Parity Proof
 
-Generated: `2026-05-12T08:43:39.337343+00:00`
+Generated: `2026-05-23T12:19:23.831961+00:00`
 
 ## Gate Status
 
-- CI gate: **PASS**
+- CI gate: **FAIL**
 - CI gate mode: `tree-drift`
 - Release gate: **PASS**
 - Release gate mode: `functional`
@@ -13,10 +13,10 @@ Generated: `2026-05-12T08:43:39.337343+00:00`
 
 | Metric | Value |
 | --- | ---: |
-| `max_commits_behind` | 1896.0 |
-| `max_upstream_patch_missing` | 1827.0 |
-| `max_files_only_upstream` | 3020.0 |
-| `max_shared_different` | 12.0 |
+| `max_commits_behind` | 1.0 |
+| `max_upstream_patch_missing` | 1.0 |
+| `max_files_only_upstream` | 961.0 |
+| `max_shared_different` | 556.0 |
 | `max_unowned_divergences` | 0.0 |
 | `max_divergence_review_overdue` | 0.0 |
 | `min_test_intent_mapping_ratio` | 1.0 |
@@ -38,13 +38,7 @@ Generated: `2026-05-12T08:43:39.337343+00:00`
 
 ## Queue Summary
 
-- Upstream missing commits tracked: `2538`.
+- Upstream missing commits tracked: `1`.
 - By target ticket:
-  - `#20`: `1018`
-  - `#21`: `82`
-  - `#22`: `486`
-  - `#23`: `207`
-  - `#24`: `11`
-  - `#25`: `37`
-  - `#26`: `697`
+  - `#20`: `1`
 

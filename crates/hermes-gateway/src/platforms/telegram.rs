@@ -6,8 +6,9 @@
 //! caching, inline keyboards, callback queries, rate limiting, exponential
 //! backoff reconnection, and group chat support.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -363,6 +364,9 @@ pub struct TelegramAdapter {
     backoff_ms: AtomicU64,
     /// Consecutive poll error count.
     consecutive_errors: AtomicU64,
+    /// Status message IDs keyed by `(chat_id, status_key)` so repeated status
+    /// events edit one Telegram bubble instead of appending noisy updates.
+    status_message_ids: Mutex<HashMap<(String, String), String>>,
 }
 
 impl TelegramAdapter {
@@ -384,6 +388,7 @@ impl TelegramAdapter {
             stop_signal: Arc::new(Notify::new()),
             backoff_ms: AtomicU64::new(0),
             consecutive_errors: AtomicU64::new(0),
+            status_message_ids: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1133,6 +1138,45 @@ impl PlatformAdapter for TelegramAdapter {
     ) -> Result<(), GatewayError> {
         let pm = self.resolve_parse_mode(parse_mode);
         self.send_text(chat_id, text, pm, None).await?;
+        Ok(())
+    }
+
+    async fn send_or_update_status(
+        &self,
+        chat_id: &str,
+        status_key: &str,
+        text: &str,
+        parse_mode: Option<ParseMode>,
+    ) -> Result<(), GatewayError> {
+        let key = (chat_id.to_string(), status_key.to_string());
+        let existing_id = self
+            .status_message_ids
+            .lock()
+            .ok()
+            .and_then(|ids| ids.get(&key).cloned());
+        let pm = self.resolve_parse_mode(parse_mode);
+
+        if let Some(message_id) = existing_id {
+            match self.edit_text(chat_id, &message_id, text, pm).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    warn!(
+                        chat_id,
+                        status_key,
+                        message_id,
+                        error = %err,
+                        "Telegram status edit failed; sending replacement status message"
+                    );
+                }
+            }
+        }
+
+        let sent_ids = self.send_text(chat_id, text, pm, None).await?;
+        if let Some(message_id) = sent_ids.first() {
+            if let Ok(mut ids) = self.status_message_ids.lock() {
+                ids.insert(key, message_id.to_string());
+            }
+        }
         Ok(())
     }
 

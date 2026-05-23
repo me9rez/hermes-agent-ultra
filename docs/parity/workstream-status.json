@@ -1,11 +1,11 @@
 {
-  "generated_at_utc": "2026-05-05T21:41:34-06:00",
-  "head_sha": "bbc111a6e5ac41035e570eac179a2b95360baedf",
+  "generated_at_utc": "2026-05-23T05:56:16-06:00",
+  "head_sha": "8300f1562a7bfec930ed597bd09ab8115d0ccfa3",
   "states": {
     "complete": 7
   },
   "upstream_ref": "upstream/main",
-  "upstream_sha": "f27fcb6a82b8487174ca941c15e7a5887371eede",
+  "upstream_sha": "7f1b2b4569532d63a7f50e172963da0d4f3082f7",
   "workstreams": [
     {
       "evidence": [
@@ -39,8 +39,8 @@
       ],
       "metrics": {
         "divergence_documented": true,
-        "local_skill_files": 46,
-        "upstream_skill_files": 757
+        "local_skill_files": 796,
+        "upstream_skill_files": 855
       },
       "state": "complete",
       "title": "Skills parity",
@@ -53,7 +53,7 @@
       ],
       "metrics": {
         "divergence_documented": true,
-        "e2e_cli_tests": 5
+        "e2e_cli_tests": 6
       },
       "state": "complete",
       "title": "UX parity",

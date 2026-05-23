@@ -78,6 +78,230 @@
       "rationale": "Installer behavior directly affects setup parity and bootstrap capabilities.",
       "owner": "sheawinkler",
       "ticket": 25
+    },
+    {
+      "path": "tests/gateway",
+      "classification": "functional",
+      "rationale": "Gateway test deltas exercise platform adapter behavior and must be reviewed as runtime parity coverage.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "website/docs",
+      "classification": "policy_only",
+      "rationale": "Documentation-site content differs by project positioning and release policy; runtime behavior is unaffected.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools",
+      "classification": "functional",
+      "rationale": "Tool tests cover command, policy, and backend semantics that affect runtime parity.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/hermes_cli",
+      "classification": "functional",
+      "rationale": "CLI tests define user-facing command and setup behavior and must stay parity-reviewed.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "ui-tui/src",
+      "classification": "functional",
+      "rationale": "TUI source differences affect interactive UX/runtime surfaces.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent",
+      "classification": "functional",
+      "rationale": "Agent tests cover model routing, provider, memory, and loop semantics.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/run_agent",
+      "classification": "functional",
+      "rationale": "Run-agent tests cover orchestration and provider execution semantics.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "ui-tui/packages",
+      "classification": "functional",
+      "rationale": "TUI package differences affect distributed interactive UI behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cli",
+      "classification": "functional",
+      "rationale": "CLI test deltas cover command contracts and user-visible runtime behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "skills/creative",
+      "classification": "intentional_divergence",
+      "rationale": "Skill catalog content is curated locally while Rust runtime parity is tracked through native skill loader contracts.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "plugins/memory",
+      "classification": "functional",
+      "rationale": "Memory plugin differences affect recall/provider integration behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "plugins/model-providers",
+      "classification": "functional",
+      "rationale": "Model-provider plugin differences affect runtime provider compatibility.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "skills/productivity",
+      "classification": "intentional_divergence",
+      "rationale": "Skill catalog content is curated locally while loader and execution contracts carry runtime parity.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/acp",
+      "classification": "functional",
+      "rationale": "ACP tests cover protocol compatibility and session behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "plugins/google_meet",
+      "classification": "functional",
+      "rationale": "Google Meet plugin differences affect connector/plugin runtime behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "plugins/platforms",
+      "classification": "functional",
+      "rationale": "Platform plugin differences affect adapter surface parity.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/plugins",
+      "classification": "functional",
+      "rationale": "Plugin tests cover loader, hook, and runtime integration behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "plugins/teams_pipeline",
+      "classification": "functional",
+      "rationale": "Teams pipeline plugin differences affect platform integration behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cron",
+      "classification": "functional",
+      "rationale": "Cron tests cover scheduling/runtime behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/providers",
+      "classification": "functional",
+      "rationale": "Provider tests cover model transport compatibility and error handling.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "plugins/kanban",
+      "classification": "functional",
+      "rationale": "Kanban plugin differences affect plugin runtime behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "plugins/observability",
+      "classification": "functional",
+      "rationale": "Observability plugin differences affect telemetry/runtime diagnostics.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "website/scripts",
+      "classification": "policy_only",
+      "rationale": "Website build/generation scripts differ for local documentation publishing and do not affect Hermes runtime.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "plugins/example-dashboard",
+      "classification": "functional",
+      "rationale": "Example dashboard plugin differences affect plugin packaging and UI integration samples.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "skills/devops",
+      "classification": "intentional_divergence",
+      "rationale": "Skill catalog content is curated locally while runtime skill contracts remain tracked separately.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "skills/research",
+      "classification": "intentional_divergence",
+      "rationale": "Skill catalog content is curated locally while runtime skill contracts remain tracked separately.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/honcho_plugin",
+      "classification": "functional",
+      "rationale": "Honcho plugin tests cover memory/plugin behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/skills",
+      "classification": "functional",
+      "rationale": "Skill tests cover loader, guard, and execution semantics.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/stress",
+      "classification": "functional",
+      "rationale": "Stress tests cover runtime reliability envelopes.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "website/src",
+      "classification": "policy_only",
+      "rationale": "Website source differs for documentation/product presentation and does not change Rust runtime behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": ".gitattributes",
+      "classification": "policy_only",
+      "rationale": "Repository metadata affects text normalization and generated artifact handling, not runtime behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": ".github/workflows",
+      "classification": "functional",
+      "rationale": "CI workflow differences affect release and parity gate enforcement.",
+      "owner": "sheawinkler",
+      "ticket": 25
     }
   ]
 }

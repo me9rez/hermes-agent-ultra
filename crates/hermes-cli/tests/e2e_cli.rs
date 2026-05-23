@@ -82,6 +82,7 @@ fn e2e_cli_interactive_refuses_parallel_session_when_lock_pid_is_alive() {
 
     let mut cmd = Command::cargo_bin("hermes").expect("binary exists");
     cmd.env("HERMES_HOME", dir.path());
+    cmd.env_remove("HERMES_ALLOW_PARALLEL_INTERACTIVE");
     let assert = cmd.assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(

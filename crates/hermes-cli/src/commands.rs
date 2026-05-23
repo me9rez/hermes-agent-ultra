@@ -13034,7 +13034,7 @@ fn apply_task_depth_profile(profile: TaskDepthProfile) {
             std::env::set_var("HERMES_REPO_REVIEW_BUDGET_PROFILE", "aggressive");
         }
         TaskDepthProfile::Balanced => {
-            set_env_var_u64("HERMES_MAX_ITERATIONS", 250);
+            set_env_var_u64("HERMES_MAX_ITERATIONS", 50);
             set_env_var_u64("HERMES_TOOL_CALL_MAX_CONCURRENCY", 12);
             set_env_var_u64("HERMES_MAX_DELEGATE_DEPTH", 4);
             set_env_var_u64("HERMES_PERF_GOV_WINDOW", 8);
@@ -13073,7 +13073,7 @@ fn current_task_depth_profile() -> TaskDepthProfile {
 
 fn task_depth_runtime_summary() -> String {
     let profile = current_task_depth_profile();
-    let max_iters = std::env::var("HERMES_MAX_ITERATIONS").unwrap_or_else(|_| "250".to_string());
+    let max_iters = std::env::var("HERMES_MAX_ITERATIONS").unwrap_or_else(|_| "50".to_string());
     let tool_concurrency =
         std::env::var("HERMES_TOOL_CALL_MAX_CONCURRENCY").unwrap_or_else(|_| "12".to_string());
     let delegate_depth =

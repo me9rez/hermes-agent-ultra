@@ -79,6 +79,21 @@ pub trait PlatformAdapter: Send + Sync {
         parse_mode: Option<ParseMode>,
     ) -> Result<(), GatewayError>;
 
+    /// Send or update a status message keyed by stable status type.
+    ///
+    /// Platforms that can edit messages should override this to keep noisy
+    /// status updates in one bubble. The default preserves append-only
+    /// behavior for adapters without editable message IDs.
+    async fn send_or_update_status(
+        &self,
+        chat_id: &str,
+        _status_key: &str,
+        text: &str,
+        parse_mode: Option<ParseMode>,
+    ) -> Result<(), GatewayError> {
+        self.send_message(chat_id, text, parse_mode).await
+    }
+
     /// Edit an existing message.
     async fn edit_message(
         &self,

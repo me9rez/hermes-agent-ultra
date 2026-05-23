@@ -1927,6 +1927,24 @@ impl Gateway {
         adapter.edit_message(chat_id, message_id, text).await
     }
 
+    /// Send a status update, editing an existing status bubble when the
+    /// platform supports keyed status messages.
+    pub async fn send_or_update_status(
+        &self,
+        platform: &str,
+        chat_id: &str,
+        status_key: &str,
+        text: &str,
+        parse_mode: Option<ParseMode>,
+    ) -> Result<(), GatewayError> {
+        let adapter = self.get_adapter(platform).await.ok_or_else(|| {
+            GatewayError::Platform(format!("No adapter registered for platform: {}", platform))
+        })?;
+        adapter
+            .send_or_update_status(chat_id, status_key, text, parse_mode)
+            .await
+    }
+
     /// Send a file to a specific platform chat with an optional caption.
     pub async fn send_file(
         &self,
@@ -2123,6 +2141,10 @@ mod tests {
         messages: Arc<Mutex<Vec<(String, String)>>>,
     }
 
+    struct StatusUpdateAdapter {
+        updates: Arc<Mutex<Vec<(String, String, String)>>>,
+    }
+
     struct ReactionTestAdapter {
         messages: Arc<Mutex<Vec<(String, String)>>>,
         reactions: Arc<Mutex<Vec<String>>>,
@@ -2211,6 +2233,72 @@ mod tests {
 
         fn platform_name(&self) -> &str {
             "test"
+        }
+    }
+
+    #[async_trait]
+    impl PlatformAdapter for StatusUpdateAdapter {
+        async fn start(&self) -> Result<(), GatewayError> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), GatewayError> {
+            Ok(())
+        }
+
+        async fn send_message(
+            &self,
+            chat_id: &str,
+            text: &str,
+            _parse_mode: Option<ParseMode>,
+        ) -> Result<(), GatewayError> {
+            self.updates.lock().unwrap().push((
+                chat_id.to_string(),
+                "message".to_string(),
+                text.to_string(),
+            ));
+            Ok(())
+        }
+
+        async fn send_or_update_status(
+            &self,
+            chat_id: &str,
+            status_key: &str,
+            text: &str,
+            _parse_mode: Option<ParseMode>,
+        ) -> Result<(), GatewayError> {
+            self.updates.lock().unwrap().push((
+                chat_id.to_string(),
+                status_key.to_string(),
+                text.to_string(),
+            ));
+            Ok(())
+        }
+
+        async fn edit_message(
+            &self,
+            _chat_id: &str,
+            _message_id: &str,
+            _text: &str,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+
+        async fn send_file(
+            &self,
+            _chat_id: &str,
+            _file_path: &str,
+            _caption: Option<&str>,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+
+        fn is_running(&self) -> bool {
+            true
+        }
+
+        fn platform_name(&self) -> &str {
+            "status-test"
         }
     }
 
@@ -2335,6 +2423,47 @@ mod tests {
             "[image] https://cdn.example.com/x.png | caption=diagram"
         );
         assert_eq!(sent[2].1, "[image] https://fal.media/abc");
+    }
+
+    #[tokio::test]
+    async fn gateway_status_updates_use_platform_status_api() {
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(StatusUpdateAdapter {
+            updates: updates.clone(),
+        });
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let gw = Gateway::with_defaults(session_mgr, GatewayConfig::default());
+        gw.register_adapter("status-test", adapter).await;
+
+        gw.send_or_update_status(
+            "status-test",
+            "chat1",
+            "context_pressure",
+            "compressing",
+            None,
+        )
+        .await
+        .expect("first status update should succeed");
+        gw.send_or_update_status("status-test", "chat1", "context_pressure", "done", None)
+            .await
+            .expect("second status update should succeed");
+
+        let updates = updates.lock().unwrap();
+        assert_eq!(
+            *updates,
+            vec![
+                (
+                    "chat1".to_string(),
+                    "context_pressure".to_string(),
+                    "compressing".to_string()
+                ),
+                (
+                    "chat1".to_string(),
+                    "context_pressure".to_string(),
+                    "done".to_string()
+                )
+            ]
+        );
     }
 
     #[tokio::test]

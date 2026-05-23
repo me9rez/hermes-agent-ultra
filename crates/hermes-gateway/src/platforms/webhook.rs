@@ -33,6 +33,8 @@ pub struct WebhookConfig {
     pub secret: String,
 }
 
+const INSECURE_NO_AUTH: &str = "INSECURE_NO_AUTH";
+
 fn default_webhook_port() -> u16 {
     9000
 }
@@ -93,6 +95,16 @@ impl WebhookAdapter {
         &self.config
     }
 
+    fn validate_auth_safety(config: &WebhookConfig) -> Result<(), GatewayError> {
+        if config.secret.trim() == INSECURE_NO_AUTH {
+            return Err(GatewayError::Auth(
+                "webhook secret INSECURE_NO_AUTH is refused because the Rust webhook adapter binds 0.0.0.0; unauthenticated webhook routes are only safe on loopback test binds"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Set a channel to forward inbound webhook payloads to.
     pub async fn set_inbound_sender(&self, tx: tokio::sync::mpsc::Sender<WebhookPayload>) {
         *self.inbound_tx.write().await = Some(tx);
@@ -106,6 +118,10 @@ impl WebhookAdapter {
 
     /// Verify HMAC-SHA256 signature.
     fn verify_signature(secret: &str, body: &[u8], signature: &str) -> bool {
+        if secret == INSECURE_NO_AUTH {
+            return true;
+        }
+
         type HmacSha256 = Hmac<Sha256>;
 
         let sig_clean = signature
@@ -143,6 +159,8 @@ fn decode_hex(input: &str) -> Option<Vec<u8>> {
 #[async_trait]
 impl PlatformAdapter for WebhookAdapter {
     async fn start(&self) -> Result<(), GatewayError> {
+        Self::validate_auth_safety(&self.config)?;
+
         info!(
             "Webhook adapter starting on port {} at path {}",
             self.config.port, self.config.path
@@ -405,6 +423,32 @@ mod tests {
         let sig = format!("sha256={}", sign(secret, body));
         let tampered = br#"{"chat_id":"c1","text":"bye"}"#;
         assert!(!WebhookAdapter::verify_signature(secret, tampered, &sig));
+    }
+
+    #[test]
+    fn insecure_no_auth_is_refused_for_public_bind_adapter() {
+        let config = WebhookConfig {
+            port: 9000,
+            path: "/webhook".to_string(),
+            secret: INSECURE_NO_AUTH.to_string(),
+        };
+        let err = WebhookAdapter::validate_auth_safety(&config).unwrap_err();
+        assert!(err.to_string().contains("INSECURE_NO_AUTH"));
+        assert!(err.to_string().contains("0.0.0.0"));
+    }
+
+    #[test]
+    fn insecure_no_auth_signature_bypass_is_explicit_sentinel_only() {
+        assert!(WebhookAdapter::verify_signature(
+            INSECURE_NO_AUTH,
+            br#"{"ok":true}"#,
+            ""
+        ));
+        assert!(!WebhookAdapter::verify_signature(
+            "INSECURE_NO_AUTH ",
+            br#"{"ok":true}"#,
+            "bad"
+        ));
     }
 
     #[test]

@@ -483,7 +483,14 @@ async fn main() {
             )
             .await
         }
-        CliCommand::Setup => run_setup(cli).await,
+        CliCommand::Setup { portal } => {
+            if portal {
+                run_portal(cli, Some("setup".to_string())).await
+            } else {
+                run_setup(cli).await
+            }
+        }
+        CliCommand::Portal { action } => run_portal(cli, action).await,
         CliCommand::Doctor {
             deep,
             self_heal,
@@ -2725,9 +2732,18 @@ async fn run_gateway(
                             let gw = gateway_for_status.clone();
                             let platform = platform_for_status.clone();
                             let chat_id = chat_for_status.clone();
+                            let status_key = event_type.to_string();
                             let msg = message.to_string();
                             tokio::spawn(async move {
-                                let _ = gw.send_message(&platform, &chat_id, &msg, None).await;
+                                let _ = gw
+                                    .send_or_update_status(
+                                        &platform,
+                                        &chat_id,
+                                        &status_key,
+                                        &msg,
+                                        None,
+                                    )
+                                    .await;
                             });
                             let gw_hook = gateway_for_status_hook.clone();
                             let platform = platform_for_status_hook.clone();
@@ -2943,9 +2959,18 @@ async fn run_gateway(
                             let gw = gateway_for_status.clone();
                             let platform = platform_for_status.clone();
                             let chat_id = chat_for_status.clone();
+                            let status_key = event_type.to_string();
                             let msg = message.to_string();
                             tokio::spawn(async move {
-                                let _ = gw.send_message(&platform, &chat_id, &msg, None).await;
+                                let _ = gw
+                                    .send_or_update_status(
+                                        &platform,
+                                        &chat_id,
+                                        &status_key,
+                                        &msg,
+                                        None,
+                                    )
+                                    .await;
                             });
                             let gw_hook = gateway_for_status_hook.clone();
                             let platform = platform_for_status_hook.clone();
@@ -6684,6 +6709,43 @@ async fn run_auth_verify(
             "OAuth verification failed for provider(s): {}",
             failed_ids.join(", ")
         )))
+    }
+}
+
+async fn run_portal(cli: Cli, action: Option<String>) -> Result<(), AgentError> {
+    match action.as_deref().unwrap_or("status") {
+        "setup" | "login" | "auth" => {
+            println!("Nous Portal setup ({DEFAULT_NOUS_PORTAL_URL})");
+            run_auth(
+                cli,
+                Some("setup".to_string()),
+                Some("nous".to_string()),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .await
+        }
+        "status" | "check" => {
+            println!("Nous Portal status ({DEFAULT_NOUS_PORTAL_URL})");
+            run_auth(
+                cli,
+                Some("status".to_string()),
+                Some("nous".to_string()),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .await
+        }
+        other => Err(AgentError::Config(format!(
+            "Unknown portal action '{}'. Use `hermes portal status` or `hermes portal setup`.",
+            other
+        ))),
     }
 }
 

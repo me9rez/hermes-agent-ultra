@@ -500,7 +500,7 @@ async fn main() {
         } => run_doctor(cli, deep, self_heal, snapshot, snapshot_path, bundle).await,
         CliCommand::Update { check } => run_update(check).await,
         CliCommand::EliteCheck { json, strict } => run_elite_check(cli, json, strict).await,
-        CliCommand::Sota {
+        CliCommand::Systems {
             action,
             topic,
             json,
@@ -509,7 +509,7 @@ async fn main() {
             port,
             once,
         } => {
-            hermes_cli::sota::handle_cli_sota(
+            hermes_cli::systems::handle_cli_systems(
                 cli.config_dir.clone(),
                 action,
                 topic,

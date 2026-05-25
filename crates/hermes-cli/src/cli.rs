@@ -147,11 +147,11 @@ pub enum CliCommand {
         strict: bool,
     },
 
-    /// Inspect SOTA agent OS surfaces: release gate, flight recorder, A2A, MCP, handoffs, capabilities.
-    Sota {
-        /// Action: status/eval/flight/a2a/mcp/capabilities/handoff.
+    /// Inspect implemented system surfaces: release, replay, MCP, ACP, handoff, providers, provenance.
+    Systems {
+        /// Action: status/release/replay/mcp/acp/providers/handoff/provenance/agent-card.
         action: Option<String>,
-        /// Optional action topic (e.g. flight sample, a2a card, mcp conformance).
+        /// Optional action topic (e.g. mcp conformance, acp conformance, handoff template).
         topic: Option<String>,
         /// Print machine-readable JSON.
         #[arg(long)]
@@ -159,13 +159,13 @@ pub enum CliCommand {
         /// Write the JSON report/card to this path.
         #[arg(long)]
         output: Option<String>,
-        /// Host for `sota a2a serve`.
+        /// Host for `systems agent-card serve`.
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
-        /// Port for `sota a2a serve`.
+        /// Port for `systems agent-card serve`.
         #[arg(long, default_value_t = 9127)]
         port: u16,
-        /// Serve one A2A HTTP request, then exit.
+        /// Serve one agent-card HTTP request, then exit.
         #[arg(long)]
         once: bool,
     },
@@ -1062,10 +1062,10 @@ mod tests {
     }
 
     #[test]
-    fn cli_parse_sota_mcp_conformance() {
+    fn cli_parse_systems_mcp_conformance() {
         let cli = Cli::try_parse_from(vec![
             "hermes",
-            "sota",
+            "systems",
             "mcp",
             "conformance",
             "--json",
@@ -1074,7 +1074,7 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Some(CliCommand::Sota {
+            Some(CliCommand::Systems {
                 action,
                 topic,
                 json,
@@ -1091,7 +1091,7 @@ mod tests {
                 assert_eq!(port, 9127);
                 assert!(!once);
             }
-            _ => panic!("Expected Sota command"),
+            _ => panic!("Expected Systems command"),
         }
     }
 

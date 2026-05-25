@@ -536,8 +536,9 @@ pub fn objective_lifecycle_is_active(status: &str) -> bool {
 
 pub fn canonical_objective_behavior_mode(mode: &str) -> String {
     match mode.trim().to_ascii_lowercase().as_str() {
-        "mission" | "sigma" | "sota" | "god-tier" | "god_tier" | "godtier" | "perpetual"
-        | "continuous" => "mission".to_string(),
+        "mission" | "sigma" | "god-tier" | "god_tier" | "godtier" | "perpetual" | "continuous" => {
+            "mission".to_string()
+        }
         "strict" | "evidence" | "evidence-first" => "strict".to_string(),
         "autonomous" | "proactive" | "loop" | "agentic" => "autonomous".to_string(),
         "minimal" | "concise" | "lean" => "minimal".to_string(),
@@ -552,7 +553,6 @@ fn objective_prefers_mission_mode(objective: &str) -> bool {
         "perpetual",
         "always improve",
         "continuous improvement",
-        "sota",
         "sigma",
         "god tier",
         "mission-driven",

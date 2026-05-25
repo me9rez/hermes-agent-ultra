@@ -4384,7 +4384,7 @@ const BACKEND_BEST_PRACTICE_PROFILES: &[BackendBestPracticeProfile] = &[
     BackendBestPracticeProfile {
         provider: "vllm",
         profile: "balanced",
-        summary: "Default SOTA profile for stable throughput and latency.",
+        summary: "Default performance profile for stable throughput and latency.",
         launch_hint:
             "vllm serve MODEL --enable-prefix-caching --enable-chunked-prefill --gpu-memory-utilization 0.88",
         env_overrides: VLLM_PROFILE_BALANCED_ENV,
@@ -14313,7 +14313,7 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
             if sub == "list" {
                 emit_command_output(
                     app,
-                    "Behavior modes:\n- balanced: generalized execution with evidence checkpoints\n- strict: strongest evidence-first + contradiction discipline\n- autonomous: proactive loop execution until blocked\n- mission (aliases: sigma, sota, perpetual): closed-loop perpetual objective improvement with concrete execution each cycle\n- minimal: concise operator-facing output with decisive actions",
+                    "Behavior modes:\n- balanced: generalized execution with evidence checkpoints\n- strict: strongest evidence-first + contradiction discipline\n- autonomous: proactive loop execution until blocked\n- mission (aliases: sigma, perpetual): closed-loop perpetual objective improvement with concrete execution each cycle\n- minimal: concise operator-facing output with decisive actions",
                 );
                 return Ok(CommandResult::Handled);
             }
@@ -14324,7 +14324,7 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
             ) {
                 emit_command_output(
                     app,
-                    "Usage: /objective behavior [status|list|balanced|strict|autonomous|mission|minimal|sigma|sota]",
+                    "Usage: /objective behavior [status|list|balanced|strict|autonomous|mission|minimal|sigma]",
                 );
                 return Ok(CommandResult::Handled);
             }

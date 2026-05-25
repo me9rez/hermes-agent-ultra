@@ -95,15 +95,17 @@ fn e2e_cli_interactive_refuses_parallel_session_when_lock_pid_is_alive() {
 }
 
 #[test]
-fn e2e_cli_sota_status_and_reports_are_json() {
+fn e2e_cli_systems_status_and_reports_are_json() {
     let dir = tempfile::tempdir().expect("tempdir");
     for args in [
-        vec!["sota", "status", "--json"],
-        vec!["sota", "eval", "--json"],
-        vec!["sota", "a2a", "card", "--json"],
-        vec!["sota", "mcp", "conformance", "--json"],
-        vec!["sota", "capabilities", "--json"],
-        vec!["sota", "handoff", "template", "--json"],
+        vec!["systems", "status", "--json"],
+        vec!["systems", "release", "--json"],
+        vec!["systems", "agent-card", "card", "--json"],
+        vec!["systems", "mcp", "conformance", "--json"],
+        vec!["systems", "acp", "conformance", "--json"],
+        vec!["systems", "providers", "--json"],
+        vec!["systems", "handoff", "template", "--json"],
+        vec!["systems", "provenance", "--json"],
     ] {
         let mut cmd = Command::cargo_bin("hermes-agent-ultra").expect("binary exists");
         cmd.env("HERMES_HOME", dir.path());
@@ -120,21 +122,25 @@ fn e2e_cli_sota_status_and_reports_are_json() {
 }
 
 #[test]
-fn e2e_cli_sota_flight_sample_persists_event() {
+fn e2e_cli_systems_replay_reports_existing_trace() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut sample = Command::cargo_bin("hermes-agent-ultra").expect("binary exists");
-    sample.env("HERMES_HOME", dir.path());
-    sample.args(["sota", "flight", "sample", "--json"]);
-    let out = sample.assert().success().get_output().stdout.clone();
-    let text = std::str::from_utf8(&out).expect("utf8");
-    let report: serde_json::Value = serde_json::from_str(text).expect("sample json");
-    assert_eq!(report.get("event_count").and_then(|v| v.as_u64()), Some(1));
+    let replay_dir = dir.path().join("logs").join("replay");
+    fs::create_dir_all(&replay_dir).expect("mkdir replay");
+    fs::write(
+        replay_dir.join("session.jsonl"),
+        concat!(
+            "{\"seq\":1,\"event\":\"start\",\"trace_id\":\"t\",\"prev_hash\":null,\"event_hash\":\"a\"}\n",
+            "{\"seq\":2,\"event\":\"stop\",\"trace_id\":\"t\",\"prev_hash\":\"a\",\"event_hash\":\"b\"}\n"
+        ),
+    )
+    .expect("write replay");
 
     let mut show = Command::cargo_bin("hermes-agent-ultra").expect("binary exists");
     show.env("HERMES_HOME", dir.path());
-    show.args(["sota", "flight", "show", "--json"]);
+    show.args(["systems", "replay", "--json"]);
     let out = show.assert().success().get_output().stdout.clone();
     let text = std::str::from_utf8(&out).expect("utf8");
     let report: serde_json::Value = serde_json::from_str(text).expect("show json");
-    assert_eq!(report.get("event_count").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(report.get("log_count").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(report.get("passed").and_then(|v| v.as_bool()), Some(true));
 }

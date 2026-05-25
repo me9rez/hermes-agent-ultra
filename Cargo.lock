@@ -2202,6 +2202,7 @@ dependencies = [
 name = "hermes-telemetry"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hermes-config",
  "once_cell",
  "opentelemetry",

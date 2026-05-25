@@ -4,12 +4,57 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::fmt::format::{self, FormatEvent, FormatFields};
+use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Registry;
+
+/// Custom event formatter.
+///
+/// Output: `{local_rfc3339} {LEVEL:<5} [target file:line] ThreadId(n) message`
+struct LocalFormatter;
+
+impl<S, N> FormatEvent<S, N> for LocalFormatter
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
+        let meta = event.metadata();
+        let level = *meta.level();
+        let target = meta.target();
+
+        // file:line — both are `Option` in tracing metadata
+        let location = match (meta.file(), meta.line()) {
+            (Some(f), Some(l)) => format!(" {}:{}", f, l),
+            (Some(f), None) => format!(" {}", f),
+            _ => String::new(),
+        };
+
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("?");
+
+        write!(
+            writer,
+            "{} {:<5} [{}{}] thread={} ",
+            ts, level, target, location, thread_name
+        )?;
+        ctx.format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
 
 #[cfg(feature = "otlp")]
 mod otlp;
@@ -24,36 +69,63 @@ pub struct TelemetryConfig {
     pub otlp_endpoint: Option<String>,
 }
 
-struct TeeLogMakeWriter {
-    file_path: Option<PathBuf>,
+/// Log file handle cached for the process lifetime.
+///
+/// Opens once on first write; subsequent calls reuse the same `File`.
+/// Wrapped in `Mutex` because `MakeWriter::make_writer` requires `&self` and
+/// `tracing-subscriber` may call it from multiple threads concurrently.
+static LOG_FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
+
+fn open_log_file() -> Option<Mutex<File>> {
+    let path = default_log_file_path()?;
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()
+        .map(Mutex::new)
 }
+
+/// `MakeWriter` that tees every log line to stderr **and** a rotating log file.
+///
+/// The file handle is opened once (lazy, process-scoped) via [`LOG_FILE`].
+struct TeeLogMakeWriter;
 
 impl TeeLogMakeWriter {
     fn new() -> Self {
-        Self {
-            file_path: default_log_file_path(),
-        }
+        Self
     }
 }
 
 struct TeeLogWriter {
     stderr: io::Stderr,
-    file: Option<File>,
+    buf: Vec<u8>,
 }
 
 impl Write for TeeLogWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if let Some(file) = self.file.as_mut() {
-            let _ = file.write_all(buf);
-        }
-        self.stderr.write(buf)
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if let Some(file) = self.file.as_mut() {
-            let _ = file.flush();
+        let _ = self.stderr.write_all(&self.buf);
+        let _ = self.stderr.flush();
+        // Write buffered bytes to the shared file handle under the lock.
+        if let Some(Some(mutex)) = LOG_FILE.get()
+            && let Ok(mut f) = mutex.lock()
+        {
+            let _ = f.write_all(&self.buf);
+            let _ = f.flush();
         }
-        self.stderr.flush()
+        self.buf.clear();
+        Ok(())
+    }
+}
+
+impl Drop for TeeLogWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 
@@ -61,16 +133,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TeeLogMakeWriter {
     type Writer = TeeLogWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
-        let file = self.file_path.as_ref().and_then(|path| {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
-        });
+        // Ensure the global file handle is initialised.
+        LOG_FILE.get_or_init(open_log_file);
         TeeLogWriter {
             stderr: io::stderr(),
-            file,
+            buf: Vec::with_capacity(256),
         }
     }
 }
@@ -160,10 +227,13 @@ pub fn init_telemetry(config: &TelemetryConfig) {
     };
 
     let fmt_base = tracing_subscriber::fmt::layer()
-        .with_target(false)
+        .event_format(LocalFormatter)
         .with_writer(TeeLogMakeWriter::new());
     let _ = if config.json {
-        reg.with(filter).with(fmt_base.json()).try_init()
+        let json_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(TeeLogMakeWriter::new());
+        reg.with(filter).with(json_layer).try_init()
     } else {
         reg.with(filter).with(fmt_base).try_init()
     };

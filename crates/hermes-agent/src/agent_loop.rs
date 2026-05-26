@@ -4277,12 +4277,8 @@ impl AgentLoop {
         if !self.context_compression_should_run(ctx).await {
             return;
         }
-        let message = format!(
-            "Context pressure at {}%, triggering compression",
-            (total_chars * 100) / max_c
-        );
-        tracing::info!("{message}");
-        self.emit_status("lifecycle", &message);
+        let pct = (total_chars * 100) / max_c;
+        tracing::info!("Context pressure at {}%, triggering compression", pct);
         if let Some(note) = self.memory_pre_compress_note(ctx.get_messages()) {
             ctx.add_message(Message::system(note));
         }
@@ -4398,55 +4394,89 @@ impl AgentLoop {
         }
     }
 
+    /// Drop oldest non-system messages until context is at or below `target_percent` of max.
+    fn emergency_trim_context_to_percent(&self, ctx: &mut ContextManager, target_percent: usize) {
+        let max_c = ctx.max_context_chars().max(1);
+        let target_chars = (max_c * target_percent.min(100)) / 100;
+        if ctx.total_chars() <= target_chars {
+            return;
+        }
+        let before = ctx.total_chars();
+        let budget = hermes_core::BudgetConfig {
+            max_aggregate_chars: target_chars,
+            max_result_size_chars: 100_000,
+        };
+        ctx.truncate_to_budget(&budget);
+        let after = ctx.total_chars();
+        tracing::warn!(
+            "Emergency context trim: {} -> {} chars (target {}% of {} max)",
+            before,
+            after,
+            target_percent,
+            max_c
+        );
+    }
+
     /// Emit explicit preflight compression status before first LLM call.
     async fn preflight_context_compress_with_status(&self, ctx: &mut ContextManager) {
         let max_c = ctx.max_context_chars().max(1);
         let before = ctx.total_chars();
         let before_pct = (before * 100) / max_c;
         if !self.context_compression_should_run(ctx).await {
-            self.emit_status(
-                "lifecycle",
-                &format!(
-                    "Preflight compression check: {}% context usage, no compression needed",
-                    before_pct
-                ),
+            tracing::debug!(
+                "Preflight compression check: {}% context usage, no compression needed",
+                before_pct
             );
             return;
         }
-        self.emit_status(
-            "lifecycle",
-            &format!(
-                "Preflight compression check: {}% context usage, compressing before first turn",
-                before_pct
-            ),
+        tracing::info!(
+            "Preflight compression: {}% context usage, preparing session",
+            before_pct
         );
+        // Avoid auxiliary summarisation on multi-megabyte histories (very slow, often ineffective).
+        if before_pct > 150 {
+            let trim_target = if before_pct > 400 { 40 } else { 60 };
+            self.emergency_trim_context_to_percent(ctx, trim_target);
+            if !self.context_compression_should_run(ctx).await {
+                let after_pct = (ctx.total_chars() * 100) / max_c;
+                tracing::info!(
+                    "Preflight: emergency trim sufficient ({}% -> {}%)",
+                    before_pct,
+                    after_pct
+                );
+                return;
+            }
+        }
         self.auto_compress_if_over_threshold(ctx).await;
-        let after = ctx.total_chars();
-        let after_pct = (after * 100) / max_c;
-        self.emit_status(
-            "lifecycle",
-            &format!(
-                "Preflight compression complete: {}% -> {}% context usage",
-                before_pct, after_pct
-            ),
-        );
+        let mut after = ctx.total_chars();
+        let mut after_pct = (after * 100) / max_c;
         let threshold_pct = {
             let compressor = self.context_compressor.lock().await;
             (compressor.threshold_percent() * 100.0) as usize
         };
         if after_pct >= threshold_pct {
+            self.emergency_trim_context_to_percent(ctx, 50);
+            after = ctx.total_chars();
+            after_pct = (after * 100) / max_c;
+        }
+        tracing::info!(
+            "Preflight compression complete: {}% -> {}% context usage",
+            before_pct,
+            after_pct
+        );
+        if after_pct >= threshold_pct {
             self.emit_status(
                 "lifecycle",
                 &format!(
-                    "Context still at {}% after compression (auxiliary summary unavailable). \
-                     Consider starting a new session to avoid LLM context limit errors.",
+                    "会话上下文仍超过窗口容量（约 {}%）。请发送 /new 或 /reset 开始新会话后再问。",
                     after_pct
                 ),
             );
             tracing::warn!(
-                "Preflight compression did not reduce context ({}% -> {}%): \
-                 auxiliary summary failed, LLM call may hit context limit",
-                before_pct, after_pct
+                "Preflight compression did not reduce context enough ({}% -> {}%): \
+                 LLM call may hit context limit",
+                before_pct,
+                after_pct
             );
         }
     }
@@ -4458,6 +4488,32 @@ impl AgentLoop {
         if let Some(cb) = self.callbacks.status_callback.as_ref() {
             cb(event_type, message);
         }
+    }
+
+    /// Surface provider chain-of-thought to UIs (`on_thinking` / gateway stream).
+    fn emit_thinking_delta(&self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Some(cb) = self.callbacks.on_thinking.as_ref() {
+            cb(text);
+        }
+    }
+
+    fn emit_reasoning_from_message(&self, message: &Message) {
+        if let Some(reasoning) = message.reasoning_content.as_deref() {
+            self.emit_thinking_delta(reasoning);
+        }
+    }
+
+    /// DeepSeek / thinking models may return structured reasoning before visible content.
+    fn handle_reasoning_only_prefill(&self, message: &Message, attempt: u32, max_attempts: u32) {
+        self.emit_reasoning_from_message(message);
+        tracing::debug!(
+            "reasoning-only assistant response; prefill continuation ({}/{})",
+            attempt,
+            max_attempts
+        );
     }
 
     fn should_emit_context_pressure_warning(
@@ -5332,6 +5388,7 @@ impl AgentLoop {
                     }
                     if let Some(ref extra) = delta.extra {
                         if let Some(thinking) = extra.get("thinking").and_then(|v| v.as_str()) {
+                            deltas_were_sent = true;
                             reasoning_content.push_str(thinking);
                             if let Some(ref cb) = self.callbacks.on_thinking {
                                 cb(thinking);
@@ -5852,13 +5909,10 @@ impl AgentLoop {
                     && inner_thinking < self.config().thinking_prefill_max_retries
                 {
                     inner_thinking += 1;
-                    self.emit_status(
-                        "lifecycle",
-                        &format!(
-                            "Reasoning-only response - retrying ({}/{})",
-                            inner_thinking,
-                            self.config().thinking_prefill_max_retries
-                        ),
+                    self.handle_reasoning_only_prefill(
+                        &r.message,
+                        inner_thinking,
+                        self.config().thinking_prefill_max_retries,
                     );
                     ctx.add_message(r.message.clone());
                     continue;
@@ -6727,14 +6781,12 @@ impl AgentLoop {
                     &mut context_pressure_last_warn_at,
                     &mut context_pressure_last_warn_percent,
                 ) {
-                    let message = format!(
+                    tracing::warn!(
                         "Context pressure {:.0}% of compaction threshold ({} / {})",
                         progress * 100.0,
                         total_chars,
                         threshold
                     );
-                    tracing::warn!("{}", message);
-                    self.emit_status("lifecycle", &message);
                 }
             }
 
@@ -7254,13 +7306,10 @@ impl AgentLoop {
                     && inner_thinking < self.config().thinking_prefill_max_retries
                 {
                     inner_thinking += 1;
-                    self.emit_status(
-                        "lifecycle",
-                        &format!(
-                            "Reasoning-only response - retrying ({}/{})",
-                            inner_thinking,
-                            self.config().thinking_prefill_max_retries
-                        ),
+                    self.handle_reasoning_only_prefill(
+                        &r.message,
+                        inner_thinking,
+                        self.config().thinking_prefill_max_retries,
                     );
                     ctx.add_message(r.message.clone());
                     continue;
@@ -8176,14 +8225,12 @@ impl AgentLoop {
                     &mut context_pressure_last_warn_at,
                     &mut context_pressure_last_warn_percent,
                 ) {
-                    let message = format!(
+                    tracing::warn!(
                         "Context pressure {:.0}% of compaction threshold ({} / {})",
                         progress * 100.0,
                         total_chars,
                         threshold
                     );
-                    tracing::warn!("{}", message);
-                    self.emit_status("lifecycle", &message);
                 }
             }
 

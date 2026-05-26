@@ -2911,45 +2911,21 @@ async fn run_gateway(
                                 let _ = gw.send_message(&platform, &chat_id, &msg, None).await;
                             });
                         });
-                        let gateway_for_status = gateway_for_review.clone();
-                        let gateway_for_status_hook = gateway_for_review.clone();
-                        let platform_for_status = ctx.platform.clone();
-                        let chat_for_status = ctx.chat_id.clone();
-                        let platform_for_status_hook = ctx.platform.clone();
-                        let user_for_status_hook = ctx.user_id.clone();
-                        let session_for_status_hook = ctx.session_key.clone();
-                        let status_cb = Arc::new(move |event_type: &str, message: &str| {
-                            if message.trim().is_empty() {
-                                return;
-                            }
-                            let gw = gateway_for_status.clone();
-                            let platform = platform_for_status.clone();
-                            let chat_id = chat_for_status.clone();
-                            let msg = message.to_string();
-                            tokio::spawn(async move {
-                                let _ = gw.send_message(&platform, &chat_id, &msg, None).await;
-                            });
-                            let gw_hook = gateway_for_status_hook.clone();
-                            let platform = platform_for_status_hook.clone();
-                            let user_id = user_for_status_hook.clone();
-                            let session_id = session_for_status_hook.clone();
-                            let event_type = event_type.to_string();
-                            let message = message.to_string();
-                            tokio::spawn(async move {
-                                gw_hook
-                                    .emit_hook_event(
-                                        "agent:status",
-                                        serde_json::json!({
-                                            "platform": platform,
-                                            "user_id": user_id,
-                                            "session_id": session_id,
-                                            "event_type": event_type,
-                                            "message": message
-                                        }),
-                                    )
-                                    .await;
-                            });
-                        });
+                        let status_cb =
+                            hermes_cli::gateway_inbound_wiring::make_gateway_status_callback(
+                                gateway_for_review.clone(),
+                                ctx.platform.clone(),
+                                ctx.chat_id.clone(),
+                                ctx.user_id.clone(),
+                                ctx.session_key.clone(),
+                            );
+                        let on_thinking =
+                            hermes_cli::gateway_inbound_wiring::make_gateway_on_thinking_callback(
+                                gateway_for_review.clone(),
+                                ctx.platform.clone(),
+                                ctx.chat_id.clone(),
+                                None,
+                            );
                         let tool_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
                         let tool_events_for_start = tool_events.clone();
                         let on_tool_start: Box<dyn Fn(&str, &serde_json::Value) + Send + Sync> =
@@ -3023,6 +2999,7 @@ async fn run_gateway(
                         let callbacks = AgentCallbacks {
                             background_review_callback: Some(review_cb),
                             status_callback: Some(status_cb),
+                            on_thinking: Some(on_thinking),
                             on_tool_start: Some(on_tool_start),
                             on_tool_complete: Some(on_tool_complete),
                             on_step_complete: Some(on_step_complete),
@@ -3130,45 +3107,21 @@ async fn run_gateway(
                                 let _ = gw.send_message(&platform, &chat_id, &msg, None).await;
                             });
                         });
-                        let gateway_for_status = gateway_for_review.clone();
-                        let gateway_for_status_hook = gateway_for_review.clone();
-                        let platform_for_status = ctx.platform.clone();
-                        let chat_for_status = ctx.chat_id.clone();
-                        let platform_for_status_hook = ctx.platform.clone();
-                        let user_for_status_hook = ctx.user_id.clone();
-                        let session_for_status_hook = ctx.session_key.clone();
-                        let status_cb = Arc::new(move |event_type: &str, message: &str| {
-                            if message.trim().is_empty() {
-                                return;
-                            }
-                            let gw = gateway_for_status.clone();
-                            let platform = platform_for_status.clone();
-                            let chat_id = chat_for_status.clone();
-                            let msg = message.to_string();
-                            tokio::spawn(async move {
-                                let _ = gw.send_message(&platform, &chat_id, &msg, None).await;
-                            });
-                            let gw_hook = gateway_for_status_hook.clone();
-                            let platform = platform_for_status_hook.clone();
-                            let user_id = user_for_status_hook.clone();
-                            let session_id = session_for_status_hook.clone();
-                            let event_type = event_type.to_string();
-                            let message = message.to_string();
-                            tokio::spawn(async move {
-                                gw_hook
-                                    .emit_hook_event(
-                                        "agent:status",
-                                        serde_json::json!({
-                                            "platform": platform,
-                                            "user_id": user_id,
-                                            "session_id": session_id,
-                                            "event_type": event_type,
-                                            "message": message
-                                        }),
-                                    )
-                                    .await;
-                            });
-                        });
+                        let status_cb =
+                            hermes_cli::gateway_inbound_wiring::make_gateway_status_callback(
+                                gateway_for_review.clone(),
+                                ctx.platform.clone(),
+                                ctx.chat_id.clone(),
+                                ctx.user_id.clone(),
+                                ctx.session_key.clone(),
+                            );
+                        let on_thinking =
+                            hermes_cli::gateway_inbound_wiring::make_gateway_on_thinking_callback(
+                                gateway_for_review.clone(),
+                                ctx.platform.clone(),
+                                ctx.chat_id.clone(),
+                                None,
+                            );
                         let tool_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
                         let tool_events_for_start = tool_events.clone();
                         let on_tool_start: Box<dyn Fn(&str, &serde_json::Value) + Send + Sync> =
@@ -3242,6 +3195,7 @@ async fn run_gateway(
                         let callbacks = AgentCallbacks {
                             background_review_callback: Some(review_cb),
                             status_callback: Some(status_cb),
+                            on_thinking: Some(on_thinking),
                             on_tool_start: Some(on_tool_start),
                             on_tool_complete: Some(on_tool_complete),
                             on_step_complete: Some(on_step_complete),

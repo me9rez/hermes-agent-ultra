@@ -1916,6 +1916,32 @@ impl LlmProvider for OpenRouterProvider {
 // SSE chunk parsing helpers
 // ---------------------------------------------------------------------------
 
+/// Map OpenAI-compatible stream delta reasoning fields to `StreamDelta::extra.thinking`.
+///
+/// DeepSeek and other OpenAI-compat providers emit chain-of-thought in
+/// `delta.reasoning_content` / `delta.reasoning` rather than `content`. The agent
+/// loop accumulates `extra.thinking` into `Message::reasoning_content` and surfaces
+/// it via `on_thinking`.
+fn reasoning_extra_from_stream_delta(delta_obj: &Value) -> Option<Value> {
+    if let Some(s) = delta_obj.get("reasoning_content").and_then(|v| v.as_str()) {
+        if !s.is_empty() {
+            return Some(serde_json::json!({"thinking": s}));
+        }
+    }
+    if let Some(s) = delta_obj.get("reasoning").and_then(|v| v.as_str()) {
+        if !s.is_empty() {
+            return Some(serde_json::json!({"thinking": s}));
+        }
+    }
+    if let Some(details) = delta_obj.get("reasoning_details").and_then(|v| v.as_array()) {
+        let text = crate::reasoning::extract_reasoning_details(details);
+        if !text.is_empty() {
+            return Some(serde_json::json!({"thinking": text}));
+        }
+    }
+    None
+}
+
 /// Parse a single SSE data JSON object into a StreamChunk (OpenAI format).
 fn parse_sse_chunk(json: &Value) -> Option<StreamChunk> {
     let choices = json.get("choices").and_then(|c| c.as_array())?;
@@ -1955,11 +1981,13 @@ fn parse_sse_chunk(json: &Value) -> Option<StreamChunk> {
                 .collect::<Vec<_>>()
         });
 
-    let delta = if content.is_some() || tool_calls.is_some() {
+    let extra = reasoning_extra_from_stream_delta(delta_obj);
+
+    let delta = if content.is_some() || tool_calls.is_some() || extra.is_some() {
         Some(StreamDelta {
             content,
             tool_calls,
-            extra: None,
+            extra,
         })
     } else {
         None
@@ -2065,11 +2093,8 @@ fn parse_openai_response(json: &Value) -> Result<LlmResponse, AgentError> {
         .and_then(|r| r.as_str())
         .unwrap_or("assistant");
 
-    // Extract reasoning content
-    let reasoning_content = message_obj
-        .get("reasoning_content")
-        .and_then(|r| r.as_str())
-        .map(|s| s.to_string());
+    // Extract reasoning content (DeepSeek `reasoning_content`, R1 `reasoning`, OpenRouter details)
+    let reasoning_content = crate::reasoning::parse_reasoning(message_obj);
 
     let message = Message {
         role: match role {
@@ -2404,6 +2429,43 @@ mod tests {
         let chunk = parse_sse_chunk(&json).unwrap();
         assert_eq!(chunk.finish_reason.as_deref(), Some("stop"));
         assert_eq!(chunk.usage.as_ref().unwrap().total_tokens, 150);
+    }
+
+    #[test]
+    fn test_parse_sse_chunk_reasoning_content_delta() {
+        let json = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_content": "Let me think step by step."
+                },
+                "finish_reason": null
+            }]
+        });
+        let chunk = parse_sse_chunk(&json).unwrap();
+        let delta = chunk.delta.as_ref().unwrap();
+        assert!(delta.content.is_none());
+        assert_eq!(
+            delta.extra.as_ref().and_then(|e| e.get("thinking")).and_then(|v| v.as_str()),
+            Some("Let me think step by step.")
+        );
+    }
+
+    #[test]
+    fn test_parse_sse_chunk_reasoning_delta_without_content() {
+        let json = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning": "DeepSeek-R1 style reasoning"
+                },
+                "finish_reason": null
+            }]
+        });
+        let chunk = parse_sse_chunk(&json).unwrap();
+        let delta = chunk.delta.as_ref().unwrap();
+        assert_eq!(
+            delta.extra.as_ref().and_then(|e| e.get("thinking")).and_then(|v| v.as_str()),
+            Some("DeepSeek-R1 style reasoning")
+        );
     }
 
     #[test]

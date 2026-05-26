@@ -71,3 +71,143 @@ pub async fn wire_gateway_inbound_vision(
     let manager = Arc::new(VoiceManager::with_stt_config(voice_cfg, stt_config));
     gateway.set_voice_runtime(manager, stt_enabled).await;
 }
+
+/// Truncate text for gateway status / thinking previews (Unicode-safe).
+pub fn truncate_gateway_preview(raw: &str, max_chars: usize) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let prefix: String = trimmed.chars().take(max_chars).collect();
+    format!("{prefix}…")
+}
+
+/// Format reasoning / chain-of-thought for a standalone chat message.
+pub fn format_gateway_thinking_message(text: &str) -> String {
+    let preview = truncate_gateway_preview(text, 2000);
+    if preview.is_empty() {
+        return String::new();
+    }
+    format!("🧠 {preview}")
+}
+
+/// Suppress noisy lifecycle lines that duplicate streamed thinking output.
+///
+/// Compression / context-pressure status is still emitted to `agent:status` hooks
+/// but must not become separate WeCom/Telegram chat messages (each costs a round trip).
+pub fn gateway_status_message_visible(event_type: &str, message: &str) -> bool {
+    if message.trim().is_empty() {
+        return false;
+    }
+    if event_type != "lifecycle" {
+        return true;
+    }
+    let suppressed = [
+        "Reasoning-only response",
+        "Preflight compression",
+        "Context pressure",
+        "Context still at",
+        "triggering compression",
+        "ContextLattice",
+        "Compaction governance",
+    ];
+    !suppressed.iter().any(|needle| message.contains(needle))
+}
+
+/// Status + hook emitter for gateway agent runs (compression, context pressure, etc.).
+pub fn make_gateway_status_callback(
+    gateway: Arc<Gateway>,
+    platform: String,
+    chat_id: String,
+    user_id: String,
+    session_id: String,
+) -> Arc<dyn Fn(&str, &str) + Send + Sync> {
+    Arc::new(move |event_type: &str, message: &str| {
+        if !gateway_status_message_visible(event_type, message) {
+            return;
+        }
+        let outbound = if event_type == "thinking" {
+            format_gateway_thinking_message(message)
+        } else {
+            message.to_string()
+        };
+        if outbound.trim().is_empty() {
+            return;
+        }
+        let gw = gateway.clone();
+        let platform_msg = platform.clone();
+        let chat_id_msg = chat_id.clone();
+        let msg = outbound;
+        tokio::spawn(async move {
+            let _ = gw
+                .send_message(&platform_msg, &chat_id_msg, &msg, None)
+                .await;
+        });
+        let gw_hook = gateway.clone();
+        let platform_hook = platform.clone();
+        let user_id = user_id.clone();
+        let session_id = session_id.clone();
+        let event_type = event_type.to_string();
+        let message = message.to_string();
+        tokio::spawn(async move {
+            gw_hook
+                .emit_hook_event(
+                    "agent:status",
+                    serde_json::json!({
+                        "platform": platform_hook,
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "event_type": event_type,
+                        "message": message
+                    }),
+                )
+                .await;
+        });
+    })
+}
+
+/// Gateway thinking handler — log only; do not send per-delta WeCom messages.
+///
+/// Reasoning must not be multiplexed into the answer stream (pollutes the reply) and
+/// must not be sent as separate chat messages per token (very slow on WeCom).
+/// Native streaming already shows a「思考中…」placeholder until content arrives.
+pub fn make_gateway_on_thinking_callback(
+    _gateway: Arc<Gateway>,
+    _platform: String,
+    _chat_id: String,
+    _stream_emit: Option<Arc<dyn Fn(String) + Send + Sync>>,
+) -> Box<dyn Fn(&str) + Send + Sync> {
+    Box::new(move |thinking: &str| {
+        if thinking.trim().is_empty() {
+            return;
+        }
+        tracing::debug!(
+            thinking_chars = thinking.chars().count(),
+            "gateway thinking delta (not sent to chat)"
+        );
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_status_hides_compression_lifecycle() {
+        assert!(!gateway_status_message_visible(
+            "lifecycle",
+            "Preflight compression check: 837% context usage"
+        ));
+        assert!(!gateway_status_message_visible(
+            "lifecycle",
+            "Context pressure at 760%, triggering compression"
+        ));
+        assert!(gateway_status_message_visible(
+            "lifecycle",
+            "会话上下文仍超过窗口容量（约 90%）。请发送 /new"
+        ));
+    }
+}

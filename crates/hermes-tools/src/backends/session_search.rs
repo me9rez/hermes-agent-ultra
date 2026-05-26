@@ -39,6 +39,53 @@ struct SummaryTask {
 }
 
 impl SqliteSessionSearchBackend {
+    fn ensure_fts_triggers(conn: &Connection) -> Result<(), ToolError> {
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, session_id, role)
+                VALUES('delete', old.id, old.content, old.session_id, old.role);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, session_id, role)
+                VALUES('delete', old.id, old.content, old.session_id, old.role);
+                INSERT INTO messages_fts(rowid, content, session_id, role)
+                VALUES (new.id, new.content, new.session_id, new.role);
+            END;",
+        )
+        .map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to ensure FTS triggers: {}", e))
+        })?;
+        Ok(())
+    }
+
+    fn maybe_rebuild_fts_index(conn: &Connection) -> Result<(), ToolError> {
+        const META_KEY: &str = "fts_external_triggers_v1";
+        let done: bool = conn
+            .query_row(
+                "SELECT 1 FROM state_meta WHERE key = ?1",
+                rusqlite::params![META_KEY],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if done {
+            return Ok(());
+        }
+        conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')", [])
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("Failed to rebuild messages_fts: {}", e))
+            })?;
+        conn.execute(
+            "INSERT INTO state_meta (key, value) VALUES (?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![META_KEY],
+        )
+        .map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to record FTS rebuild marker: {}", e))
+        })?;
+        Ok(())
+    }
+
     fn ensure_parent_session_column(conn: &Connection) -> Result<(), ToolError> {
         match conn.execute(
             "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
@@ -360,12 +407,18 @@ impl SqliteSessionSearchBackend {
             CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
                 INSERT INTO messages_fts(rowid, content, session_id, role)
                 VALUES (new.id, new.content, new.session_id, new.role);
-            END;",
+            END;
+            CREATE TABLE IF NOT EXISTS state_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );",
         )
         .map_err(|e| {
             ToolError::ExecutionFailed(format!("Failed to ensure session schema: {}", e))
         })?;
 
+        Self::ensure_fts_triggers(&conn)?;
+        Self::maybe_rebuild_fts_index(&conn)?;
         Self::ensure_parent_session_column(&conn)?;
 
         Ok(Self {

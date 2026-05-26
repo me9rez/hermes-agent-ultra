@@ -1,7 +1,8 @@
 //! Context management for conversation history.
 //!
-//! The `ContextManager` tracks messages, enforces budget constraints on the
-//! conversation window, and provides context compression via `ContextCompressor`.
+//! The `ContextManager` tracks messages and enforces budget constraints on the
+//! conversation window. Context compression is performed by
+//! [`crate::compression::ContextCompressor`] via [`crate::agent_loop::AgentLoop`].
 //!
 //! Also provides SOUL.md personality loading, context file injection, and
 //! full system prompt assembly (corresponding to Python `run_agent.py`'s
@@ -12,223 +13,20 @@ use std::path::{Path, PathBuf};
 
 use hermes_core::{BudgetConfig, Message, MessageRole};
 
-/// Number of recent messages to preserve during compression.
-const DEFAULT_RECENT_MESSAGES: usize = 4;
 const MEMORY_ENTRY_DELIMITER: &str = "\n§\n";
 const MEMORY_CHAR_LIMIT: usize = 2200;
 const USER_CHAR_LIMIT: usize = 1375;
 
 // ---------------------------------------------------------------------------
-// ContextCompressor
-// ---------------------------------------------------------------------------
-
-/// Compresses conversation history by summarizing older messages.
-///
-/// When the conversation grows too long, the compressor replaces the middle
-/// portion of the history with a single system message containing a summary,
-/// while preserving the leading system prompt(s) and the most recent N
-/// messages intact.
-#[derive(Debug, Clone)]
-pub struct ContextCompressor {
-    /// Number of the most recent messages to keep unchanged.
-    pub recent_messages_count: usize,
-}
-
-impl ContextCompressor {
-    /// Create a new compressor that keeps the last `recent_messages_count`
-    /// messages intact (plus any leading system prompt messages).
-    pub fn new(recent_messages_count: usize) -> Self {
-        Self {
-            recent_messages_count,
-        }
-    }
-
-    /// Create a compressor with the default retention count (4 recent messages).
-    pub fn default_compressor() -> Self {
-        Self::new(DEFAULT_RECENT_MESSAGES)
-    }
-
-    /// Compress a slice of messages into a shorter `Vec<Message>`.
-    ///
-    /// The resulting vector has the following layout:
-    ///
-    /// ```text
-    /// [system prompt(s)] [summary system message] [last N messages]
-    /// ```
-    ///
-    /// - All leading `System`-role messages are preserved verbatim.
-    /// - Messages between the system prompt block and the last
-    ///   `recent_messages_count` messages are condensed into a single
-    ///   system message whose content is a truncated plain-text summary.
-    /// - The last `recent_messages_count` messages are kept as-is.
-    ///
-    /// If there are not enough messages to warrant compression, the input
-    /// is returned unchanged (as a new `Vec`).
-    pub fn compress(&self, messages: &[Message]) -> Vec<Message> {
-        if messages.is_empty() {
-            return messages.to_vec();
-        }
-
-        // 1. Identify the leading system messages (preserved verbatim).
-        let system_end = messages
-            .iter()
-            .take_while(|m| m.role == MessageRole::System)
-            .count();
-
-        // 2. The "recent" block: the last N messages (also kept as-is).
-        //    recent_start must be at least system_end so the middle block is
-        //    never overlapping with the system block.
-        let recent_start = messages
-            .len()
-            .saturating_sub(self.recent_messages_count)
-            .max(system_end);
-
-        // 3. The "middle" block: everything between system_end and recent_start.
-        //    If the middle block is empty or only has one message, there is
-        //    nothing worth compressing — return unchanged.
-        let middle_slice = &messages[system_end..recent_start];
-        if middle_slice.is_empty() {
-            return messages.to_vec();
-        }
-
-        // 4. Build a compact summary from the middle messages.
-        let summary = Self::build_summary(middle_slice);
-
-        // 5. Assemble the compressed message list.
-        let mut compressed = Vec::with_capacity(system_end + 1 + self.recent_messages_count);
-
-        // Preserve leading system messages.
-        compressed.extend_from_slice(&messages[..system_end]);
-
-        // Insert the summary as a single system message.
-        compressed.push(Message::system(summary));
-
-        // Preserve the most recent messages.
-        if recent_start < messages.len() {
-            compressed.extend_from_slice(&messages[recent_start..]);
-        }
-
-        compressed
-    }
-
-    /// Build a plain-text summary string from a slice of messages.
-    fn build_summary(messages: &[Message]) -> String {
-        const MAX_SUMMARY_CHARS: usize = 2048;
-        const MAX_ITEMS_PER_SECTION: usize = 5;
-        const MAX_ITEM_CHARS: usize = 180;
-
-        let mut goals: Vec<String> = Vec::new();
-        let mut assistant_updates: Vec<String> = Vec::new();
-        let mut tool_updates: Vec<String> = Vec::new();
-
-        for msg in messages.iter().rev() {
-            let content = msg.content.as_deref().unwrap_or("").trim();
-            if content.is_empty() {
-                continue;
-            }
-            let compact = Self::compact_whitespace(content);
-            let concise = Self::truncate_item(&compact, MAX_ITEM_CHARS);
-            if concise.is_empty() {
-                continue;
-            }
-
-            match msg.role {
-                MessageRole::User if goals.len() < MAX_ITEMS_PER_SECTION => {
-                    if !goals.contains(&concise) {
-                        goals.push(concise);
-                    }
-                }
-                MessageRole::Assistant if assistant_updates.len() < MAX_ITEMS_PER_SECTION => {
-                    if !assistant_updates.contains(&concise) {
-                        assistant_updates.push(concise);
-                    }
-                }
-                MessageRole::Tool if tool_updates.len() < MAX_ITEMS_PER_SECTION => {
-                    if !tool_updates.contains(&concise) {
-                        tool_updates.push(concise);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        goals.reverse();
-        assistant_updates.reverse();
-        tool_updates.reverse();
-
-        let mut lines: Vec<String> = vec![
-            "[Conversation summary] Earlier conversation compressed into key points:".to_string(),
-        ];
-        if !goals.is_empty() {
-            lines.push("User goals and requests:".to_string());
-            for item in &goals {
-                lines.push(format!("- {item}"));
-            }
-        }
-        if !assistant_updates.is_empty() {
-            lines.push("Assistant commitments and guidance:".to_string());
-            for item in &assistant_updates {
-                lines.push(format!("- {item}"));
-            }
-        }
-        if !tool_updates.is_empty() {
-            lines.push("Tool outputs and execution state:".to_string());
-            for item in &tool_updates {
-                lines.push(format!("- {item}"));
-            }
-        }
-
-        if goals.is_empty() && assistant_updates.is_empty() && tool_updates.is_empty() {
-            lines.push(format!("- {} message(s) were compressed.", messages.len()));
-        }
-
-        let mut out = lines.join("\n");
-        if out.chars().count() > MAX_SUMMARY_CHARS {
-            out = out.chars().take(MAX_SUMMARY_CHARS).collect::<String>() + "...";
-        }
-        out
-    }
-
-    fn compact_whitespace(input: &str) -> String {
-        input.split_whitespace().collect::<Vec<_>>().join(" ")
-    }
-
-    fn truncate_item(input: &str, max_chars: usize) -> String {
-        if input.is_empty() {
-            return String::new();
-        }
-        let mut clipped = input.to_string();
-        if let Some((idx, _)) = input
-            .char_indices()
-            .find(|(_, c)| matches!(c, '.' | '!' | '?' | '\n'))
-        {
-            clipped = input[..=idx].to_string();
-        }
-        if clipped.chars().count() <= max_chars {
-            return clipped;
-        }
-        clipped.chars().take(max_chars).collect::<String>() + "..."
-    }
-}
-
-impl Default for ContextCompressor {
-    fn default() -> Self {
-        Self::default_compressor()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // ContextManager
 // ---------------------------------------------------------------------------
 
-/// Manages conversation history with budget-aware truncation and compression.
+/// Manages conversation history with budget-aware truncation.
 #[derive(Debug, Clone)]
 pub struct ContextManager {
     messages: Vec<Message>,
     /// Maximum total characters for the conversation (excluding system messages).
     max_context_chars: usize,
-    /// Compressor used when the context exceeds the budget threshold.
-    compressor: ContextCompressor,
 }
 
 impl ContextManager {
@@ -237,7 +35,6 @@ impl ContextManager {
         Self {
             messages: Vec::new(),
             max_context_chars,
-            compressor: ContextCompressor::default(),
         }
     }
 
@@ -246,13 +43,9 @@ impl ContextManager {
         Self::new(200_000)
     }
 
-    /// Create a context manager with a custom compressor.
-    pub fn with_compressor(max_context_chars: usize, compressor: ContextCompressor) -> Self {
-        Self {
-            messages: Vec::new(),
-            max_context_chars,
-            compressor,
-        }
+    /// Replace the full message list (e.g. after [`crate::compression::ContextCompressor`]).
+    pub fn replace_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
     }
 
     /// Add a message to the conversation history.
@@ -329,35 +122,6 @@ impl ContextManager {
             let remove_idx = system_end;
             self.messages.remove(remove_idx);
         }
-    }
-
-    /// Compress the conversation history when it exceeds the budget.
-    ///
-    /// If the total character count of all messages exceeds 80% of
-    /// `max_context_chars`, the `ContextCompressor` is invoked to produce a
-    /// shorter message list where older messages are replaced by a single
-    /// summary system message and the most recent messages are kept intact.
-    pub fn compress(&mut self) {
-        let threshold = (self.max_context_chars as f64 * 0.8) as usize;
-        let total = self.total_chars();
-
-        if total <= threshold {
-            tracing::debug!(
-                total_chars = total,
-                threshold,
-                "Context under compression threshold, skipping"
-            );
-            return;
-        }
-
-        tracing::info!(
-            total_chars = total,
-            threshold,
-            "Compressing conversation history (exceeds 80% budget)"
-        );
-
-        let compressed = self.compressor.compress(&self.messages);
-        self.messages = compressed;
     }
 
     /// Reset the conversation history, clearing all messages.
@@ -946,125 +710,6 @@ mod tests {
         assert_eq!(cm.get_messages()[0].role, MessageRole::System);
         // Last message should be the user question
         assert_eq!(cm.get_messages().last().unwrap().role, MessageRole::User);
-    }
-
-    // ---- ContextCompressor tests ----
-
-    #[test]
-    fn test_compressor_no_op_when_small() {
-        let compressor = ContextCompressor::new(4);
-        let msgs = vec![
-            Message::system("You are helpful"),
-            Message::user("Hi"),
-            Message::assistant("Hello!"),
-        ];
-        let result = compressor.compress(&msgs);
-        // Only 3 messages total, recent_count=4 covers all, middle is empty => no-op.
-        assert_eq!(result.len(), msgs.len());
-    }
-
-    #[test]
-    fn test_compressor_replaces_middle_with_summary() {
-        let compressor = ContextCompressor::new(2);
-        let msgs = vec![
-            Message::system("System prompt"),
-            Message::user("Question 1"),
-            Message::assistant("Answer 1"),
-            Message::user("Question 2"),
-            Message::assistant("Answer 2"),
-            Message::user("Question 3"),
-            Message::assistant("Answer 3"),
-        ];
-
-        let result = compressor.compress(&msgs);
-
-        // Expected layout: [system prompt] [summary] [last 2 messages]
-        assert!(result.len() <= msgs.len());
-        // First message is still the system prompt.
-        assert_eq!(result[0].role, MessageRole::System);
-        assert_eq!(result[0].content.as_deref(), Some("System prompt"));
-        // Second message is the summary (also System role).
-        assert_eq!(result[1].role, MessageRole::System);
-        assert!(result[1]
-            .content
-            .as_deref()
-            .unwrap_or("")
-            .contains("[Conversation summary]"));
-        // Last 2 messages preserved.
-        assert_eq!(result[result.len() - 2].role, MessageRole::User);
-        assert_eq!(result[result.len() - 1].role, MessageRole::Assistant);
-    }
-
-    #[test]
-    fn test_context_manager_compress_under_threshold() {
-        // With 10k budget, 80% = 8k. Short messages won't trigger compression.
-        let mut cm = ContextManager::new(10_000);
-        cm.add_message(Message::system("System prompt"));
-        cm.add_message(Message::user("Hi"));
-        cm.add_message(Message::assistant("Hello!"));
-
-        let len_before = cm.len();
-        cm.compress();
-        assert_eq!(cm.len(), len_before);
-    }
-
-    #[test]
-    fn test_context_manager_compress_over_threshold() {
-        // Budget large enough for the summary + recent messages, but small
-        // enough that the 80% threshold (240 chars) is exceeded by the
-        // full conversation.
-        let mut cm = ContextManager::with_compressor(
-            300, // 300 chars budget => 80% threshold = 240 chars
-            ContextCompressor::new(2),
-        );
-        cm.add_message(Message::system("System prompt"));
-        // Add enough messages to exceed 240 chars.
-        for i in 0..10 {
-            cm.add_message(Message::user(format!(
-                "This is question number {i} with enough text to be long"
-            )));
-            cm.add_message(Message::assistant(format!(
-                "This is answer number {i} also fairly long to fill up the budget"
-            )));
-        }
-        cm.add_message(Message::user("Short q"));
-        cm.add_message(Message::assistant("Short a"));
-
-        let len_before = cm.len();
-        assert!(
-            cm.total_chars() > 240,
-            "should be over threshold before compress"
-        );
-        cm.compress();
-        // After compression the message count should be smaller.
-        assert!(
-            cm.len() < len_before,
-            "compression should reduce message count"
-        );
-        // System prompt preserved.
-        assert_eq!(
-            cm.get_messages()[0].content.as_deref(),
-            Some("System prompt")
-        );
-        // A summary message should appear after the system prompt.
-        assert!(cm.get_messages().len() >= 2);
-        assert_eq!(cm.get_messages()[1].role, MessageRole::System);
-        assert!(cm.get_messages()[1]
-            .content
-            .as_deref()
-            .unwrap_or("")
-            .contains("[Conversation summary]"));
-    }
-
-    #[test]
-    fn test_build_summary_truncates() {
-        let msgs: Vec<Message> = (0..100)
-            .map(|i| Message::user(format!("Message number {i} with some extra content")))
-            .collect();
-        let summary = ContextCompressor::build_summary(&msgs);
-        // Summary must be capped at ~2048 chars.
-        assert!(summary.len() <= 2100, "summary should be roughly capped");
-        assert!(summary.contains("[Conversation summary]"));
     }
 
     // ---- SOUL.md and SystemPromptBuilder tests ----

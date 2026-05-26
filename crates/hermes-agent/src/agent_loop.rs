@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use hermes_auth::{OAuth2Endpoints, exchange_refresh_token};
+use hermes_intelligence::auxiliary::AuxiliaryConfig;
 use hermes_intelligence::get_model_context_length;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -30,8 +31,10 @@ use hermes_core::{
 };
 
 use crate::api_bridge::CodexProvider;
+use crate::auxiliary_builder::{build_auxiliary_client, AuxiliaryBuildParams};
 use crate::budget;
 use crate::code_index::CodeIndex;
+use crate::compression::{estimate_messages_tokens, CompressorConfig, ContextCompressor};
 use crate::context::{
     ContextManager, SystemPromptBuilder, load_builtin_memory_snapshot, load_soul_md,
     resolve_personality,
@@ -1930,6 +1933,8 @@ pub struct AgentLoop {
     pending_steer: PendingSteer,
     /// Active turn task id (Python `_current_task_id`).
     pub(crate) current_task_id: Arc<Mutex<Option<String>>>,
+    /// Python `agent.context_compressor.ContextCompressor` (LLM summary + boundary alignment).
+    context_compressor: Arc<tokio::sync::Mutex<ContextCompressor>>,
 }
 
 /// Async tool execution hook (gateway: `hermes_tools::ToolRegistry::dispatch_async`).
@@ -1958,6 +1963,24 @@ struct TurnRuntimeRoute {
     route_label: Option<String>,
     routing_reason: Option<String>,
     signature: TurnRouteSignature,
+}
+
+fn build_context_compressor_for_config(config: &AgentConfig) -> Arc<tokio::sync::Mutex<ContextCompressor>> {
+    let (auxiliary, _) = build_auxiliary_client(AuxiliaryBuildParams {
+        config: AuxiliaryConfig::default(),
+        primary_provider: config.provider.clone(),
+        primary_model: Some(config.model.clone()),
+        llm_providers: HashMap::new(),
+    });
+    let compressor_config = CompressorConfig {
+        context_length: get_model_context_length(&config.model),
+        quiet_mode: config.quiet_mode,
+        ..CompressorConfig::default()
+    };
+    Arc::new(tokio::sync::Mutex::new(ContextCompressor::new(
+        compressor_config,
+        Arc::new(auxiliary),
+    )))
 }
 
 impl AgentLoop {
@@ -2291,6 +2314,7 @@ impl AgentLoop {
         let lsp_context = Self::build_lsp_context_config(&config);
         let stored_primary_runtime = Self::primary_runtime_from_config(&config);
         let active_runtime = Mutex::new(stored_primary_runtime.clone());
+        let context_compressor = build_context_compressor_for_config(&config);
         Self {
             config_runtime: std::sync::RwLock::new(config),
             tool_registry,
@@ -2313,6 +2337,7 @@ impl AgentLoop {
             async_tool_dispatch: None,
             pending_steer: PendingSteer::new(),
             current_task_id: Arc::new(Mutex::new(None)),
+            context_compressor,
         }
     }
 
@@ -2350,6 +2375,7 @@ impl AgentLoop {
         let lsp_context = Self::build_lsp_context_config(&config);
         let stored_primary_runtime = Self::primary_runtime_from_config(&config);
         let active_runtime = Mutex::new(stored_primary_runtime.clone());
+        let context_compressor = build_context_compressor_for_config(&config);
         Self {
             config_runtime: std::sync::RwLock::new(config),
             tool_registry,
@@ -2372,6 +2398,7 @@ impl AgentLoop {
             async_tool_dispatch: None,
             pending_steer: PendingSteer::new(),
             current_task_id: Arc::new(Mutex::new(None)),
+            context_compressor,
         }
     }
 
@@ -4199,12 +4226,37 @@ impl AgentLoop {
         )
     }
 
-    /// Compress when total chars exceed 80% of the context budget (Python auto-compaction).
-    fn auto_compress_if_over_threshold(&self, ctx: &mut ContextManager) {
+    fn context_compression_should_run(&self, ctx: &ContextManager) -> bool {
         let total_chars = ctx.total_chars();
         let max_c = ctx.max_context_chars().max(1);
-        let threshold = (max_c as f64 * 0.8) as usize;
-        if total_chars <= threshold {
+        let char_threshold = (max_c as f64 * 0.8) as usize;
+        if total_chars > char_threshold {
+            return true;
+        }
+        let estimated = estimate_messages_tokens(ctx.get_messages());
+        self.context_compressor
+            .blocking_lock()
+            .should_compress(Some(estimated))
+    }
+
+    /// Run Python-parity context compression on `ctx` (auxiliary LLM summary + tool-pair sanitiser).
+    async fn compress_context(&self, ctx: &mut ContextManager) {
+        let context_length = get_model_context_length(&self.active_model());
+        let messages = ctx.get_messages().to_vec();
+        let estimated_tokens = estimate_messages_tokens(&messages);
+        let mut compressor = self.context_compressor.lock().await;
+        compressor.set_context_length(context_length);
+        let compressed = compressor
+            .compress(messages, Some(estimated_tokens))
+            .await;
+        ctx.replace_messages(compressed);
+    }
+
+    /// Compress when char budget or model token threshold is exceeded (Python auto-compaction).
+    async fn auto_compress_if_over_threshold(&self, ctx: &mut ContextManager) {
+        let total_chars = ctx.total_chars();
+        let max_c = ctx.max_context_chars().max(1);
+        if !self.context_compression_should_run(ctx) {
             return;
         }
         let message = format!(
@@ -4216,7 +4268,7 @@ impl AgentLoop {
         if let Some(note) = self.memory_pre_compress_note(ctx.get_messages()) {
             ctx.add_message(Message::system(note));
         }
-        ctx.compress();
+        self.compress_context(ctx).await;
         let after_chars = ctx.total_chars();
         self.emit_compaction_contextlattice_checkpoint(total_chars, after_chars, max_c);
     }
@@ -4329,12 +4381,11 @@ impl AgentLoop {
     }
 
     /// Emit explicit preflight compression status before first LLM call.
-    fn preflight_context_compress_with_status(&self, ctx: &mut ContextManager) {
+    async fn preflight_context_compress_with_status(&self, ctx: &mut ContextManager) {
         let max_c = ctx.max_context_chars().max(1);
         let before = ctx.total_chars();
-        let threshold = (max_c as f64 * 0.8) as usize;
         let before_pct = (before * 100) / max_c;
-        if before <= threshold {
+        if !self.context_compression_should_run(ctx) {
             self.emit_status(
                 "lifecycle",
                 &format!(
@@ -4351,7 +4402,7 @@ impl AgentLoop {
                 before_pct
             ),
         );
-        self.auto_compress_if_over_threshold(ctx);
+        self.auto_compress_if_over_threshold(ctx).await;
         let after = ctx.total_chars();
         let after_pct = (after * 100) / max_c;
         self.emit_status(
@@ -4891,7 +4942,7 @@ impl AgentLoop {
                                     "lifecycle",
                                     "Context window exceeded; compressing history and retrying",
                                 );
-                                ctx.compress();
+                                self.compress_context(ctx).await;
                                 continue;
                             }
                             return Err(AgentError::LlmApi(err_str));
@@ -5482,7 +5533,7 @@ impl AgentLoop {
         }
 
         if self.config().preflight_context_compress {
-            self.preflight_context_compress_with_status(&mut ctx);
+            self.preflight_context_compress_with_status(&mut ctx).await;
         }
         let replay = ReplayRecorder::for_session(&self.config(), session_id);
         let max_turns_limit = effective_max_turns(self.config().max_turns);
@@ -6650,7 +6701,7 @@ impl AgentLoop {
                 }
             }
 
-            self.auto_compress_if_over_threshold(&mut ctx);
+            self.auto_compress_if_over_threshold(&mut ctx).await;
         }
     }
 
@@ -6832,7 +6883,7 @@ impl AgentLoop {
         }
 
         if self.config().preflight_context_compress {
-            self.preflight_context_compress_with_status(&mut ctx);
+            self.preflight_context_compress_with_status(&mut ctx).await;
         }
         let replay = ReplayRecorder::for_session(&self.config(), session_id);
         let max_turns_limit = effective_max_turns(self.config().max_turns);
@@ -8099,7 +8150,7 @@ impl AgentLoop {
                 }
             }
 
-            self.auto_compress_if_over_threshold(&mut ctx);
+            self.auto_compress_if_over_threshold(&mut ctx).await;
         }
     }
 
@@ -11070,8 +11121,8 @@ mod tests {
         assert_eq!(content.as_deref(), Some("after"));
     }
 
-    #[test]
-    fn preflight_compression_status_reports_skipped_when_under_threshold() {
+    #[tokio::test]
+    async fn preflight_compression_status_reports_skipped_when_under_threshold() {
         use futures::stream::BoxStream;
 
         struct DummyProvider;
@@ -11127,7 +11178,7 @@ mod tests {
         .with_callbacks(callbacks);
         let mut ctx = ContextManager::new(100);
         ctx.add_message(Message::user("small"));
-        agent.preflight_context_compress_with_status(&mut ctx);
+        agent.preflight_context_compress_with_status(&mut ctx).await;
 
         let rows = captured.lock().expect("captured lock");
         assert!(
@@ -11137,8 +11188,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn preflight_compression_status_reports_when_compressing() {
+    #[tokio::test]
+    async fn preflight_compression_status_reports_when_compressing() {
         use futures::stream::BoxStream;
 
         struct DummyProvider;
@@ -11194,7 +11245,7 @@ mod tests {
         .with_callbacks(callbacks);
         let mut ctx = ContextManager::new(100);
         ctx.add_message(Message::user("x".repeat(95)));
-        agent.preflight_context_compress_with_status(&mut ctx);
+        agent.preflight_context_compress_with_status(&mut ctx).await;
 
         let rows = captured.lock().expect("captured lock");
         assert!(rows.iter().any(|(kind, msg)| {
@@ -11206,8 +11257,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn status_callback_receives_context_pressure_messages() {
+    #[tokio::test]
+    async fn status_callback_receives_context_pressure_messages() {
         use futures::stream::BoxStream;
 
         struct DummyProvider;
@@ -11264,7 +11315,7 @@ mod tests {
 
         let mut ctx = ContextManager::new(100);
         ctx.add_message(Message::user("x".repeat(90)));
-        agent.auto_compress_if_over_threshold(&mut ctx);
+        agent.auto_compress_if_over_threshold(&mut ctx).await;
 
         let rows = captured.lock().expect("captured lock");
         assert!(
@@ -12255,8 +12306,8 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn quiet_mode_suppresses_status_callback() {
+    #[tokio::test]
+    async fn quiet_mode_suppresses_status_callback() {
         use futures::stream::BoxStream;
 
         struct DummyProvider;
@@ -12312,7 +12363,7 @@ mod tests {
             .with_callbacks(callbacks);
         let mut ctx = ContextManager::new(100);
         ctx.add_message(Message::user("x".repeat(90)));
-        agent.auto_compress_if_over_threshold(&mut ctx);
+        agent.auto_compress_if_over_threshold(&mut ctx).await;
 
         assert!(captured.lock().expect("captured lock").is_empty());
     }

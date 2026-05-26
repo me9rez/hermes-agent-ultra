@@ -264,6 +264,15 @@ impl ContextCompressor {
         self.last_prompt_tokens = prompt_tokens;
     }
 
+    /// Re-target token budgets when the active model changes mid-session.
+    pub fn set_context_length(&mut self, context_length: u64) {
+        let summary_ratio = self.config.summary_target_ratio;
+        self.config.context_length = context_length;
+        self.threshold_tokens = (context_length as f64 * self.config.threshold_percent) as u64;
+        self.tail_token_budget = (self.threshold_tokens as f64 * summary_ratio) as u64;
+        self.max_summary_tokens = ((context_length as f64 * 0.05) as u64).min(SUMMARY_TOKENS_CEILING);
+    }
+
     /// Compression trigger predicate.
     pub fn should_compress(&self, current_prompt_tokens: Option<u64>) -> bool {
         current_prompt_tokens.unwrap_or(self.last_prompt_tokens) >= self.threshold_tokens
@@ -957,7 +966,8 @@ fn take_chars_back(s: &str, n: usize) -> String {
     s[start..].to_string()
 }
 
-fn estimate_messages_tokens(messages: &[Message]) -> u64 {
+/// Rough token estimate for compression trigger checks (Python `estimate_tokens` parity).
+pub fn estimate_messages_tokens(messages: &[Message]) -> u64 {
     let mut total: usize = 0;
     for msg in messages {
         total += content_len(msg) + 10;

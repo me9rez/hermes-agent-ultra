@@ -291,6 +291,8 @@ pub struct Gateway {
     stt_enabled: RwLock<bool>,
     /// Current inbound channel for `send_message` session fallback.
     messaging_session: RwLock<Option<Arc<MessagingSessionContext>>>,
+    /// Per-session mutex so concurrent inbound messages for one chat queue (Python `_running_agents` guard).
+    session_serial: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,7 +375,22 @@ impl Gateway {
             voice_manager: RwLock::new(None),
             stt_enabled: RwLock::new(true),
             messaging_session: RwLock::new(None),
+            session_serial: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Hold the per-session lock for the full `route_message` pipeline (agent + session writes).
+    async fn acquire_session_serial(
+        &self,
+        session_key: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let mutex = {
+            let mut map = self.session_serial.write().await;
+            map.entry(session_key.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        mutex.lock_owned().await
     }
 
     /// Register the agent inbound preparer (vision enrich, native multimodal, etc.).
@@ -672,12 +689,14 @@ impl Gateway {
             }
         }
 
-        // 2. Get or create session
         let session_key = self.session_manager.compose_session_key(
             &incoming.platform,
             &incoming.chat_id,
             &incoming.user_id,
         );
+        let _session_serial = self.acquire_session_serial(&session_key).await;
+
+        // 2. Get or create session
         let existing_session = self.session_manager.get_session(&session_key).await;
         let session = self
             .session_manager

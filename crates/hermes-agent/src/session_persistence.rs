@@ -151,6 +151,9 @@ impl SessionPersistence {
         )
         .map_err(|e| AgentError::Io(format!("Failed to create tables: {e}")))?;
 
+        self.ensure_fts_triggers(&conn)?;
+        self.maybe_rebuild_fts_index(&conn)?;
+
         if let Err(e) = conn.execute("ALTER TABLE sessions ADD COLUMN system_prompt TEXT", []) {
             let msg = e.to_string();
             if !msg.contains("duplicate column") {
@@ -168,6 +171,49 @@ impl SessionPersistence {
             }
         }
 
+        Ok(())
+    }
+
+    /// FTS5 external-content triggers for DELETE/UPDATE (SQLite docs).
+    fn ensure_fts_triggers(&self, conn: &rusqlite::Connection) -> Result<(), AgentError> {
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, session_id, role)
+                VALUES('delete', old.id, old.content, old.session_id, old.role);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, session_id, role)
+                VALUES('delete', old.id, old.content, old.session_id, old.role);
+                INSERT INTO messages_fts(rowid, content, session_id, role)
+                VALUES (new.id, new.content, new.session_id, new.role);
+            END;",
+        )
+        .map_err(|e| AgentError::Io(format!("Failed to ensure FTS triggers: {e}")))?;
+        Ok(())
+    }
+
+    /// One-time rebuild so legacy rows stay searchable after adding DELETE triggers.
+    fn maybe_rebuild_fts_index(&self, conn: &rusqlite::Connection) -> Result<(), AgentError> {
+        const META_KEY: &str = "fts_external_triggers_v1";
+        let done: bool = conn
+            .query_row(
+                "SELECT 1 FROM state_meta WHERE key = ?1",
+                rusqlite::params![META_KEY],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if done {
+            return Ok(());
+        }
+        conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')", [])
+            .map_err(|e| AgentError::Io(format!("Failed to rebuild messages_fts: {e}")))?;
+        conn.execute(
+            "INSERT INTO state_meta (key, value) VALUES (?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![META_KEY],
+        )
+        .map_err(|e| AgentError::Io(format!("Failed to record FTS rebuild marker: {e}")))?;
         Ok(())
     }
 
@@ -241,11 +287,6 @@ impl SessionPersistence {
             .unchecked_transaction()
             .map_err(|e| AgentError::Io(format!("Failed to open prune transaction: {e}")))?;
         for sid in &session_ids {
-            tx.execute(
-                "DELETE FROM messages_fts WHERE session_id = ?1",
-                rusqlite::params![sid],
-            )
-            .map_err(|e| AgentError::Io(format!("Failed to delete messages_fts rows: {e}")))?;
             tx.execute(
                 "DELETE FROM messages WHERE session_id = ?1",
                 rusqlite::params![sid],
@@ -335,8 +376,11 @@ impl SessionPersistence {
 
         let now = Utc::now().to_rfc3339();
 
-        // Upsert session record
-        conn.execute(
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| AgentError::Io(format!("Failed to open persist transaction: {e}")))?;
+
+        tx.execute(
             "INSERT INTO sessions (id, model, platform, created_at, updated_at, title, message_count, system_prompt)
              VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
@@ -356,21 +400,22 @@ impl SessionPersistence {
         )
         .map_err(|e| AgentError::Io(format!("Failed to upsert session: {e}")))?;
 
-        // Batch insert messages
-        self.flush_messages_to_session_db(&conn, session_id, messages)?;
+        self.flush_messages_in_transaction(&tx, session_id, messages)?;
+
+        tx.commit()
+            .map_err(|e| AgentError::Io(format!("Failed to commit persist transaction: {e}")))?;
 
         Ok(())
     }
 
-    /// Batch insert messages into the database for FTS5 indexing.
-    fn flush_messages_to_session_db(
+    /// Batch replace messages for a session inside an open transaction.
+    fn flush_messages_in_transaction(
         &self,
-        conn: &rusqlite::Connection,
+        tx: &rusqlite::Transaction<'_>,
         session_id: &str,
         messages: &[Message],
     ) -> Result<(), AgentError> {
-        // Delete existing messages for this session (full replace)
-        conn.execute(
+        tx.execute(
             "DELETE FROM messages WHERE session_id = ?1",
             rusqlite::params![session_id],
         )
@@ -378,7 +423,7 @@ impl SessionPersistence {
 
         let now = Utc::now().to_rfc3339();
 
-        let mut stmt = conn
+        let mut stmt = tx
             .prepare(
                 "INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls, reasoning_content, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -743,6 +788,45 @@ mod tests {
 
         let loaded = sp.load_session("replace-test").unwrap();
         assert_eq!(loaded.len(), 3);
+    }
+
+    #[test]
+    fn test_fts_stays_in_sync_after_persist_replace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sp = SessionPersistence::new(tmp.path());
+
+        sp.persist_session("fts-sync", &[Message::user("alpha")], None, None, None, None)
+            .unwrap();
+        sp.persist_session("fts-sync", &[Message::user("beta")], None, None, None, None)
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&sp.db_path).unwrap();
+        let fts_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages_fts WHERE session_id = ?1",
+                rusqlite::params!["fts-sync"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 1);
+
+        let beta_hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?1 AND session_id = ?2",
+                rusqlite::params!["beta", "fts-sync"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(beta_hits, 1);
+
+        let alpha_hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?1 AND session_id = ?2",
+                rusqlite::params!["alpha", "fts-sync"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(alpha_hits, 0);
     }
 
     #[test]

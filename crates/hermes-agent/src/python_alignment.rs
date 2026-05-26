@@ -36,6 +36,10 @@ lazy_static::lazy_static! {
         r"(?i)\b(i[''']ll|i will|let me|i can do that|i can help with that)\b"
     )
     .expect("valid regex");
+    static ref CODEX_FUTURE_ACK_ZH_RE: Regex = Regex::new(
+        r"(我会|我将|我先|我来|我去|接下来|现在(开始)?|马上|正在|先去|先检查|先看|先更新)"
+    )
+    .expect("valid regex");
     static ref ACK_RED: Regex =
         Regex::new(r"(?s)<redacted_thinking>.*?</redacted_thinking>").expect("regex");
     static ref ACK_THINK: Regex = Regex::new(r"(?is)<thinking>.*?</thinking>").expect("regex");
@@ -153,7 +157,9 @@ pub fn looks_like_codex_intermediate_ack(
     if assistant_text.is_empty() || assistant_text.len() > 1200 {
         return false;
     }
-    if !CODEX_FUTURE_ACK_RE.is_match(&assistant_text) {
+    if !CODEX_FUTURE_ACK_RE.is_match(&assistant_text)
+        && !CODEX_FUTURE_ACK_ZH_RE.is_match(&assistant_text)
+    {
         return false;
     }
     let action_markers: &[&str] = &[
@@ -176,6 +182,21 @@ pub fn looks_like_codex_intermediate_ack(
         "walkthrough",
         "report back",
         "summarize",
+        "检查",
+        "看",
+        "查看",
+        "分析",
+        "排查",
+        "检索",
+        "搜索",
+        "运行",
+        "执行",
+        "修复",
+        "更新",
+        "处理",
+        "整理",
+        "汇总",
+        "总结",
     ];
     let workspace_markers: &[&str] = &[
         "directory",
@@ -191,6 +212,13 @@ pub fn looks_like_codex_intermediate_ack(
         "file tree",
         "files",
         "path",
+        "目录",
+        "当前目录",
+        "仓库",
+        "代码库",
+        "项目",
+        "文件",
+        "路径",
     ];
     let user_text = user_message.trim().to_lowercase();
     let user_targets_workspace = workspace_markers.iter().any(|m| user_text.contains(*m))
@@ -264,5 +292,19 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::from_str(&results[0].content).unwrap();
         assert!(v["_budget_warning"].as_str().unwrap().contains("BUDGET"));
+    }
+
+    #[test]
+    fn codex_ack_detection_matches_chinese_intermediate_ack() {
+        let user = "请检查当前目录并更新todo";
+        let assistant = "找到了两个相关的 todo项，现在更新它们：";
+        assert!(looks_like_codex_intermediate_ack(user, assistant, false));
+    }
+
+    #[test]
+    fn codex_ack_detection_rejects_chinese_final_response_style() {
+        let user = "请检查当前目录并更新todo";
+        let assistant = "已完成更新。两个 todo 项都已处理完毕。";
+        assert!(!looks_like_codex_intermediate_ack(user, assistant, false));
     }
 }

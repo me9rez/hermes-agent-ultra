@@ -237,6 +237,7 @@ const OBJECTIVE_DEEP_AUDIT_MIN_WORKSTREAMS: usize = 3;
 const FINALIZER_EVIDENCE_MAX_RETRIES: u32 = 2;
 const FINALIZER_OUTPUT_QUALITY_MAX_RETRIES: u32 = 2;
 const FINALIZER_ACTION_EXECUTION_MAX_RETRIES: u32 = 2;
+const CONTINUATION_USER_MESSAGE: &str = "[System: Your previous response was incomplete due to generation limits. Continue exactly where you left off. Do not restart or repeat prior text. Finish the response directly.]";
 
 // Python `AIAgent._MEMORY_REVIEW_PROMPT` / `_SKILL_REVIEW_PROMPT` / `_COMBINED_REVIEW_PROMPT` (0.14.0)
 const MEMORY_REVIEW_PROMPT: &str = "Review the conversation above and consider saving to memory if appropriate.\n\n\
@@ -759,6 +760,14 @@ pub struct AgentConfig {
     #[serde(default = "default_truncated_tool_call_max_retries")]
     pub truncated_tool_call_max_retries: u32,
 
+    /// Max retries when assistant output is incomplete due to `finish_reason=length` or `pause_turn`.
+    #[serde(default = "default_continuation_max_retries")]
+    pub continuation_max_retries: u32,
+
+    /// Max retries for codex-style intermediate ack continuation nudges.
+    #[serde(default = "default_ack_continuation_max_retries")]
+    pub ack_continuation_max_retries: u32,
+
     /// Enable always-on workspace code indexing + repo-map prompt injection.
     #[serde(default = "default_code_index_enabled")]
     pub code_index_enabled: bool,
@@ -900,6 +909,14 @@ fn default_truncated_tool_call_max_retries() -> u32 {
     3
 }
 
+fn default_continuation_max_retries() -> u32 {
+    3
+}
+
+fn default_ack_continuation_max_retries() -> u32 {
+    2
+}
+
 fn default_code_index_enabled() -> bool {
     true
 }
@@ -989,6 +1006,8 @@ impl Default for AgentConfig {
             invalid_tool_call_max_retries: default_invalid_tool_call_max_retries(),
             invalid_tool_json_max_retries: default_invalid_tool_json_max_retries(),
             truncated_tool_call_max_retries: default_truncated_tool_call_max_retries(),
+            continuation_max_retries: default_continuation_max_retries(),
+            ack_continuation_max_retries: default_ack_continuation_max_retries(),
             code_index_enabled: default_code_index_enabled(),
             code_index_max_files: default_code_index_max_files(),
             code_index_max_symbols: default_code_index_max_symbols(),
@@ -1012,6 +1031,23 @@ pub struct TurnMetrics {
     /// Token usage for this turn (if reported by the provider).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageStats>,
+}
+
+#[derive(Debug, Clone)]
+struct FinalizationSignals {
+    finish_reason: Option<String>,
+    has_tool_calls: bool,
+    has_visible_text: bool,
+    has_visible_text_after_think: bool,
+    has_reasoning: bool,
+    continuation_required: bool,
+    ack_detected: bool,
+}
+
+impl FinalizationSignals {
+    fn final_gate_passed(&self) -> bool {
+        !self.has_tool_calls && !self.continuation_required && !self.ack_detected
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4413,6 +4449,42 @@ impl AgentLoop {
             .unwrap_or(false)
     }
 
+    fn finish_reason_requires_continuation(finish_reason: Option<&str>) -> bool {
+        matches!(finish_reason, Some("length" | "pause_turn"))
+    }
+
+    fn build_finalization_signals(
+        &self,
+        task_hint: &str,
+        history_includes_tool: bool,
+        message: &Message,
+        finish_reason: Option<&str>,
+    ) -> FinalizationSignals {
+        let has_tool_calls = message.tool_calls.as_ref().map_or(false, |v| !v.is_empty());
+        let has_visible_text = Self::assistant_visible_text(message);
+        let has_visible_text_after_think = Self::assistant_visible_text_after_think_blocks(message);
+        let has_reasoning = Self::assistant_has_reasoning(message);
+        let continuation_required = Self::finish_reason_requires_continuation(finish_reason);
+        let ack_detected = !has_tool_calls
+            && !continuation_required
+            && !history_includes_tool
+            && looks_like_codex_intermediate_ack(
+                task_hint,
+                message.content.as_deref().unwrap_or(""),
+                history_includes_tool,
+            );
+
+        FinalizationSignals {
+            finish_reason: finish_reason.map(str::to_string),
+            has_tool_calls,
+            has_visible_text,
+            has_visible_text_after_think,
+            has_reasoning,
+            continuation_required,
+            ack_detected,
+        }
+    }
+
     fn normalize_tool_call_arguments(tc: &mut ToolCall) -> Result<(), String> {
         let trimmed = tc.function.arguments.trim();
         if trimmed.is_empty() {
@@ -5437,7 +5509,11 @@ impl AgentLoop {
         let mut invalid_tool_retries: u32 = 0;
         let mut invalid_json_retries: u32 = 0;
         let mut truncated_tool_call_retries: u32 = 0;
+        let mut continuation_retries: u32 = 0;
         let mut last_content_with_tools: Option<String> = None;
+        let mut continuation_trigger_count: u32 = 0;
+        let mut ack_trigger_count: u32 = 0;
+        let mut premature_finalize_suspected_count: u32 = 0;
         let mut context_pressure_warned_at: f64 = 0.0;
         let mut context_pressure_last_warn_at: Option<Instant> = None;
         let mut context_pressure_last_warn_percent: f64 = 0.0;
@@ -5880,17 +5956,85 @@ impl AgentLoop {
             let tool_calls = if !parsed_tool_calls.is_empty() {
                 parsed_tool_calls
             } else {
-                if !tool_schemas.is_empty()
-                    && codex_ack_continuations < 2
-                    && looks_like_codex_intermediate_ack(
-                        &task_hint,
-                        assistant_msg.content.as_deref().unwrap_or(""),
-                        history_includes_tool,
-                    )
-                {
-                    codex_ack_continuations += 1;
-                    ctx.add_message(Message::user(CODEX_CONTINUE_USER_MESSAGE));
-                    continue;
+                let finalization_signals = self.build_finalization_signals(
+                    &task_hint,
+                    history_includes_tool,
+                    &assistant_msg,
+                    response.finish_reason.as_deref(),
+                );
+                tracing::debug!(
+                    turn = total_turns,
+                    finish_reason = ?finalization_signals.finish_reason,
+                    has_tool_calls = finalization_signals.has_tool_calls,
+                    has_visible_text = finalization_signals.has_visible_text,
+                    has_visible_text_after_think = finalization_signals.has_visible_text_after_think,
+                    has_reasoning = finalization_signals.has_reasoning,
+                    continuation_required = finalization_signals.continuation_required,
+                    ack_detected = finalization_signals.ack_detected,
+                    final_gate_passed = finalization_signals.final_gate_passed(),
+                    "finalization gate evaluation"
+                );
+                replay.record(
+                    "final_gate",
+                    serde_json::json!({
+                        "turn": total_turns,
+                        "finish_reason": finalization_signals.finish_reason,
+                        "has_tool_calls": finalization_signals.has_tool_calls,
+                        "has_visible_text": finalization_signals.has_visible_text,
+                        "has_visible_text_after_think": finalization_signals.has_visible_text_after_think,
+                        "has_reasoning": finalization_signals.has_reasoning,
+                        "continuation_required": finalization_signals.continuation_required,
+                        "ack_detected": finalization_signals.ack_detected,
+                        "final_gate_passed": finalization_signals.final_gate_passed(),
+                    }),
+                );
+                if finalization_signals.continuation_required {
+                    if continuation_retries < self.config().continuation_max_retries {
+                        continuation_retries = continuation_retries.saturating_add(1);
+                        continuation_trigger_count = continuation_trigger_count.saturating_add(1);
+                        self.emit_status(
+                            "lifecycle",
+                            &format!(
+                                "Assistant response incomplete ({:?}) - requesting continuation ({}/{})",
+                                response.finish_reason,
+                                continuation_retries,
+                                self.config().continuation_max_retries
+                            ),
+                        );
+                        ctx.add_message(Message::user(CONTINUATION_USER_MESSAGE));
+                        continue;
+                    }
+                    premature_finalize_suspected_count =
+                        premature_finalize_suspected_count.saturating_add(1);
+                    self.emit_status(
+                        "lifecycle",
+                        &format!(
+                            "Continuation retries exhausted ({}) - finalizing with best effort output",
+                            self.config().continuation_max_retries
+                        ),
+                    );
+                } else {
+                    continuation_retries = 0;
+                }
+                if finalization_signals.ack_detected {
+                    if !tool_schemas.is_empty()
+                        && codex_ack_continuations < self.config().ack_continuation_max_retries
+                    {
+                        codex_ack_continuations = codex_ack_continuations.saturating_add(1);
+                        ack_trigger_count = ack_trigger_count.saturating_add(1);
+                        self.emit_status(
+                            "lifecycle",
+                            &format!(
+                                "Detected intermediate ack - requesting continuation ({}/{})",
+                                codex_ack_continuations,
+                                self.config().ack_continuation_max_retries
+                            ),
+                        );
+                        ctx.add_message(Message::user(CODEX_CONTINUE_USER_MESSAGE));
+                        continue;
+                    }
+                    premature_finalize_suspected_count =
+                        premature_finalize_suspected_count.saturating_add(1);
                 }
                 if !Self::assistant_visible_text_after_think_blocks(&assistant_msg) {
                     if let Some(fallback) = last_content_with_tools.take() {
@@ -6033,6 +6177,9 @@ impl AgentLoop {
                         "reason": "finished_naturally",
                         "total_turns": total_turns,
                         "session_cost_usd": session_cost_usd,
+                        "continuation_trigger_count": continuation_trigger_count,
+                        "ack_trigger_count": ack_trigger_count,
+                        "premature_finalize_suspected_count": premature_finalize_suspected_count,
                     }),
                 );
                 return Ok(self.finalize_agent_result(AgentResult {
@@ -6711,7 +6858,11 @@ impl AgentLoop {
         let mut invalid_tool_retries: u32 = 0;
         let mut invalid_json_retries: u32 = 0;
         let mut truncated_tool_call_retries: u32 = 0;
+        let mut continuation_retries: u32 = 0;
         let mut last_content_with_tools: Option<String> = None;
+        let mut continuation_trigger_count: u32 = 0;
+        let mut ack_trigger_count: u32 = 0;
+        let mut premature_finalize_suspected_count: u32 = 0;
         let mut context_pressure_warned_at: f64 = 0.0;
         let mut context_pressure_last_warn_at: Option<Instant> = None;
         let mut context_pressure_last_warn_percent: f64 = 0.0;
@@ -7214,17 +7365,86 @@ impl AgentLoop {
                 .collect();
 
             if tool_calls.is_empty() {
-                if !tool_schemas.is_empty()
-                    && codex_ack_continuations < 2
-                    && looks_like_codex_intermediate_ack(
-                        &task_hint,
-                        assistant_msg.content.as_deref().unwrap_or(""),
-                        history_includes_tool,
-                    )
-                {
-                    codex_ack_continuations += 1;
-                    ctx.add_message(Message::user(CODEX_CONTINUE_USER_MESSAGE));
-                    continue;
+                let finalization_signals = self.build_finalization_signals(
+                    &task_hint,
+                    history_includes_tool,
+                    &assistant_msg,
+                    response.finish_reason.as_deref(),
+                );
+                tracing::debug!(
+                    turn = total_turns,
+                    finish_reason = ?finalization_signals.finish_reason,
+                    has_tool_calls = finalization_signals.has_tool_calls,
+                    has_visible_text = finalization_signals.has_visible_text,
+                    has_visible_text_after_think = finalization_signals.has_visible_text_after_think,
+                    has_reasoning = finalization_signals.has_reasoning,
+                    continuation_required = finalization_signals.continuation_required,
+                    ack_detected = finalization_signals.ack_detected,
+                    final_gate_passed = finalization_signals.final_gate_passed(),
+                    "finalization gate evaluation (stream)"
+                );
+                replay.record(
+                    "final_gate",
+                    serde_json::json!({
+                        "turn": total_turns,
+                        "stream": true,
+                        "finish_reason": finalization_signals.finish_reason,
+                        "has_tool_calls": finalization_signals.has_tool_calls,
+                        "has_visible_text": finalization_signals.has_visible_text,
+                        "has_visible_text_after_think": finalization_signals.has_visible_text_after_think,
+                        "has_reasoning": finalization_signals.has_reasoning,
+                        "continuation_required": finalization_signals.continuation_required,
+                        "ack_detected": finalization_signals.ack_detected,
+                        "final_gate_passed": finalization_signals.final_gate_passed(),
+                    }),
+                );
+                if finalization_signals.continuation_required {
+                    if continuation_retries < self.config().continuation_max_retries {
+                        continuation_retries = continuation_retries.saturating_add(1);
+                        continuation_trigger_count = continuation_trigger_count.saturating_add(1);
+                        self.emit_status(
+                            "lifecycle",
+                            &format!(
+                                "Assistant response incomplete ({:?}) - requesting continuation ({}/{})",
+                                response.finish_reason,
+                                continuation_retries,
+                                self.config().continuation_max_retries
+                            ),
+                        );
+                        ctx.add_message(Message::user(CONTINUATION_USER_MESSAGE));
+                        continue;
+                    }
+                    premature_finalize_suspected_count =
+                        premature_finalize_suspected_count.saturating_add(1);
+                    self.emit_status(
+                        "lifecycle",
+                        &format!(
+                            "Continuation retries exhausted ({}) - finalizing with best effort output",
+                            self.config().continuation_max_retries
+                        ),
+                    );
+                } else {
+                    continuation_retries = 0;
+                }
+                if finalization_signals.ack_detected {
+                    if !tool_schemas.is_empty()
+                        && codex_ack_continuations < self.config().ack_continuation_max_retries
+                    {
+                        codex_ack_continuations = codex_ack_continuations.saturating_add(1);
+                        ack_trigger_count = ack_trigger_count.saturating_add(1);
+                        self.emit_status(
+                            "lifecycle",
+                            &format!(
+                                "Detected intermediate ack - requesting continuation ({}/{})",
+                                codex_ack_continuations,
+                                self.config().ack_continuation_max_retries
+                            ),
+                        );
+                        ctx.add_message(Message::user(CODEX_CONTINUE_USER_MESSAGE));
+                        continue;
+                    }
+                    premature_finalize_suspected_count =
+                        premature_finalize_suspected_count.saturating_add(1);
                 }
                 if !Self::assistant_visible_text_after_think_blocks(&assistant_msg) {
                     if let Some(fallback) = last_content_with_tools.take() {
@@ -7354,6 +7574,9 @@ impl AgentLoop {
                         "reason": "finished_naturally",
                         "total_turns": total_turns,
                         "session_cost_usd": session_cost_usd,
+                        "continuation_trigger_count": continuation_trigger_count,
+                        "ack_trigger_count": ack_trigger_count,
+                        "premature_finalize_suspected_count": premature_finalize_suspected_count,
                     }),
                 );
                 if stream_mute.swap(false, Ordering::AcqRel) {

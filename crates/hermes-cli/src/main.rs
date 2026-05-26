@@ -3785,215 +3785,332 @@ async fn configure_platform_basic_prompts(
     Ok(())
 }
 
+struct GatewayPlatformEntry {
+    key: &'static str,
+    label: &'static str,
+    emoji: &'static str,
+}
+
+const GATEWAY_PLATFORM_CATALOG: &[GatewayPlatformEntry] = &[
+    GatewayPlatformEntry {
+        key: "telegram",
+        label: "Telegram",
+        emoji: "📱",
+    },
+    GatewayPlatformEntry {
+        key: "discord",
+        label: "Discord",
+        emoji: "💬",
+    },
+    GatewayPlatformEntry {
+        key: "slack",
+        label: "Slack",
+        emoji: "💼",
+    },
+    GatewayPlatformEntry {
+        key: "mattermost",
+        label: "Mattermost",
+        emoji: "💬",
+    },
+    GatewayPlatformEntry {
+        key: "whatsapp",
+        label: "WhatsApp",
+        emoji: "📲",
+    },
+    GatewayPlatformEntry {
+        key: "signal",
+        label: "Signal",
+        emoji: "📡",
+    },
+    GatewayPlatformEntry {
+        key: "email",
+        label: "Email",
+        emoji: "📧",
+    },
+    GatewayPlatformEntry {
+        key: "sms",
+        label: "SMS (Twilio)",
+        emoji: "📱",
+    },
+    GatewayPlatformEntry {
+        key: "dingtalk",
+        label: "DingTalk",
+        emoji: "💬",
+    },
+    GatewayPlatformEntry {
+        key: "feishu",
+        label: "Feishu / Lark",
+        emoji: "🪽",
+    },
+    GatewayPlatformEntry {
+        key: "wecom",
+        label: "WeCom (Enterprise WeChat)",
+        emoji: "💬",
+    },
+    GatewayPlatformEntry {
+        key: "wecom_callback",
+        label: "WeCom Callback (Self-Built App)",
+        emoji: "💬",
+    },
+    GatewayPlatformEntry {
+        key: "weixin",
+        label: "Weixin / WeChat",
+        emoji: "💬",
+    },
+    GatewayPlatformEntry {
+        key: "bluebubbles",
+        label: "BlueBubbles (iMessage)",
+        emoji: "💬",
+    },
+    GatewayPlatformEntry {
+        key: "qqbot",
+        label: "QQ Bot",
+        emoji: "🐧",
+    },
+    GatewayPlatformEntry {
+        key: "matrix",
+        label: "Matrix",
+        emoji: "🔗",
+    },
+    GatewayPlatformEntry {
+        key: "homeassistant",
+        label: "Home Assistant",
+        emoji: "🏠",
+    },
+    GatewayPlatformEntry {
+        key: "webhook",
+        label: "Webhook",
+        emoji: "🪝",
+    },
+    GatewayPlatformEntry {
+        key: "api_server",
+        label: "API Server",
+        emoji: "🌐",
+    },
+];
+
+fn platform_extra_nonempty(platform: &PlatformConfig, key: &str) -> bool {
+    platform
+        .extra
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+}
+
+fn gateway_platform_is_configured(key: &str, platform: Option<&PlatformConfig>) -> bool {
+    let Some(platform) = platform else {
+        return false;
+    };
+    if !platform.enabled {
+        return false;
+    }
+    match key {
+        "telegram" | "discord" | "slack" | "whatsapp" | "signal" | "matrix" | "mattermost"
+        | "bluebubbles" | "email" | "homeassistant" => platform_token_or_extra(platform).is_some(),
+        "weixin" => {
+            platform_token_or_extra(platform).is_some()
+                && platform_extra_nonempty(platform, "account_id")
+        }
+        "qqbot" => platform_extra_nonempty(platform, "app_id") && platform_extra_nonempty(platform, "client_secret"),
+        "wecom" => platform_extra_nonempty(platform, "bot_id") && platform_extra_nonempty(platform, "secret"),
+        "wecom_callback" => {
+            platform_extra_nonempty(platform, "corp_id")
+                && platform_extra_nonempty(platform, "corp_secret")
+                && platform_extra_nonempty(platform, "agent_id")
+                && platform_extra_nonempty(platform, "encoding_aes_key")
+        }
+        "dingtalk" => {
+            platform_extra_nonempty(platform, "client_id") && platform_extra_nonempty(platform, "client_secret")
+        }
+        "feishu" => {
+            platform_extra_nonempty(platform, "app_id") && platform_extra_nonempty(platform, "app_secret")
+        }
+        "sms" => {
+            platform_extra_nonempty(platform, "account_sid") && platform_extra_nonempty(platform, "auth_token")
+        }
+        "webhook" => platform_extra_nonempty(platform, "secret"),
+        "api_server" => true,
+        _ => false,
+    }
+}
+
+fn gateway_platform_menu_label(entry: &GatewayPlatformEntry, platform: Option<&PlatformConfig>) -> String {
+    let status = if gateway_platform_is_configured(entry.key, platform) {
+        "configured"
+    } else {
+        "not configured"
+    };
+    format!("{} {}  ({status})", entry.emoji, entry.label)
+}
+
+async fn configure_gateway_platform(
+    cli: &Cli,
+    disk: &mut hermes_config::GatewayConfig,
+    cfg_path: &std::path::Path,
+    key: &str,
+) -> Result<(), AgentError> {
+    match key {
+        "weixin" => {
+            run_auth(
+                cli.clone(),
+                Some("login".to_string()),
+                Some("weixin".to_string()),
+                None,
+                None,
+                None,
+                None,
+                true,
+            )
+            .await?;
+            *disk = load_user_config_file(cfg_path).map_err(|e| AgentError::Config(e.to_string()))?;
+            let wx = disk
+                .platforms
+                .entry("weixin".to_string())
+                .or_insert_with(PlatformConfig::default);
+            wx.enabled = true;
+            println!("Direct message policy: 1)pairing 2)open 3)allowlist 4)disabled");
+            let dm_choice = prompt_line("Choose [1-4] (default 1): ").await?;
+            match dm_choice.trim() {
+                "2" => {
+                    wx.extra
+                        .insert("dm_policy".to_string(), serde_json::json!("open"));
+                    wx.extra
+                        .insert("allow_from".to_string(), serde_json::json!([]));
+                }
+                "3" => {
+                    let ids = parse_csv_list(
+                        &prompt_line("Allowed Weixin user IDs (comma-separated): ").await?,
+                    );
+                    wx.extra
+                        .insert("dm_policy".to_string(), serde_json::json!("allowlist"));
+                    wx.extra.insert(
+                        "allow_from".to_string(),
+                        serde_json::Value::Array(
+                            ids.into_iter().map(serde_json::Value::String).collect(),
+                        ),
+                    );
+                }
+                "4" => {
+                    wx.extra
+                        .insert("dm_policy".to_string(), serde_json::json!("disabled"));
+                    wx.extra
+                        .insert("allow_from".to_string(), serde_json::json!([]));
+                }
+                _ => {
+                    wx.extra
+                        .insert("dm_policy".to_string(), serde_json::json!("pairing"));
+                    wx.extra
+                        .insert("allow_from".to_string(), serde_json::json!([]));
+                }
+            }
+            println!("Group policy: 1)disabled 2)open 3)allowlist");
+            let group_choice = prompt_line("Choose [1-3] (default 1): ").await?;
+            match group_choice.trim() {
+                "2" => {
+                    wx.extra
+                        .insert("group_policy".to_string(), serde_json::json!("open"));
+                    wx.extra
+                        .insert("group_allow_from".to_string(), serde_json::json!([]));
+                }
+                "3" => {
+                    let ids = parse_csv_list(
+                        &prompt_line("Allowed Weixin group IDs (comma-separated): ").await?,
+                    );
+                    wx.extra
+                        .insert("group_policy".to_string(), serde_json::json!("allowlist"));
+                    wx.extra.insert(
+                        "group_allow_from".to_string(),
+                        serde_json::Value::Array(
+                            ids.into_iter().map(serde_json::Value::String).collect(),
+                        ),
+                    );
+                }
+                _ => {
+                    wx.extra
+                        .insert("group_policy".to_string(), serde_json::json!("disabled"));
+                    wx.extra
+                        .insert("group_allow_from".to_string(), serde_json::json!([]));
+                }
+            }
+            let home = prompt_line("Weixin home channel (optional): ").await?;
+            if !home.trim().is_empty() {
+                wx.home_channel = Some(home.trim().to_string());
+            }
+        }
+        "telegram" => {
+            run_auth(
+                cli.clone(),
+                Some("login".to_string()),
+                Some("telegram".to_string()),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .await?;
+            *disk = load_user_config_file(cfg_path).map_err(|e| AgentError::Config(e.to_string()))?;
+            let tg = disk
+                .platforms
+                .entry("telegram".to_string())
+                .or_insert_with(PlatformConfig::default);
+            tg.enabled = true;
+            let polling = prompt_yes_no("Telegram use polling mode?", true).await?;
+            tg.extra
+                .insert("polling".to_string(), serde_json::Value::Bool(polling));
+            if !polling {
+                let webhook_url = prompt_line("Telegram webhook URL: ").await?;
+                if !webhook_url.trim().is_empty() {
+                    tg.webhook_url = Some(webhook_url.trim().to_string());
+                }
+            }
+            let home = prompt_line("Telegram home channel (optional): ").await?;
+            if !home.trim().is_empty() {
+                tg.home_channel = Some(home.trim().to_string());
+            }
+        }
+        other => configure_platform_basic_prompts(disk, other).await?,
+    }
+    Ok(())
+}
+
 async fn run_gateway_setup(cli: &Cli) -> Result<(), AgentError> {
     println!("Gateway setup wizard");
     println!("--------------------");
     let cfg_path = hermes_state_root(cli).join("config.yaml");
     let mut disk =
         load_user_config_file(&cfg_path).map_err(|e| AgentError::Config(e.to_string()))?;
-    let platform_catalog: &[(&str, &str)] = &[
-        ("weixin", "Weixin"),
-        ("qqbot", "QQBot"),
-        ("telegram", "Telegram"),
-        ("discord", "Discord"),
-        ("slack", "Slack"),
-        ("matrix", "Matrix"),
-        ("mattermost", "Mattermost"),
-        ("whatsapp", "WhatsApp"),
-        ("signal", "Signal"),
-        ("dingtalk", "DingTalk"),
-        ("feishu", "Feishu"),
-        ("wecom", "WeCom"),
-        ("wecom_callback", "WeCom Callback"),
-        ("bluebubbles", "BlueBubbles"),
-        ("email", "Email"),
-        ("sms", "SMS"),
-        ("homeassistant", "HomeAssistant"),
-        ("webhook", "Webhook"),
-        ("api_server", "API Server"),
-    ];
-    println!("This wizard configures messaging platforms in config.yaml.");
-    println!("Current platform status:");
-    for (k, label) in platform_catalog {
-        println!("  - {:<13} {}", label, enabled_flag(disk.platforms.get(*k)));
-    }
-    println!();
-    println!("Use SPACE to toggle platforms and ENTER to confirm.");
-    let mut pre_selected: HashSet<usize> = HashSet::new();
-    for (idx, (key, _)) in platform_catalog.iter().enumerate() {
-        if disk
-            .platforms
-            .get(*key)
-            .map(|cfg| cfg.enabled)
-            .unwrap_or(false)
-        {
-            pre_selected.insert(idx);
-        }
-    }
-    let selection_items: Vec<String> = platform_catalog
-        .iter()
-        .map(|(key, label)| format!("{:<13} {}", label, enabled_flag(disk.platforms.get(*key))))
-        .collect();
-    let selected_result = hermes_cli::curses_checklist(
-        "Select platforms to configure",
-        &selection_items,
-        &pre_selected,
-        Some(&|selected| {
-            if selected.is_empty() {
-                "none selected".to_string()
-            } else {
-                format!("{} selected", selected.len())
-            }
-        }),
-    );
-    if !selected_result.confirmed {
-        println!("Gateway setup cancelled.");
-        return Ok(());
-    }
-    let mut selected: Vec<String> = selected_result
-        .selected
-        .iter()
-        .copied()
-        .filter_map(|idx| platform_catalog.get(idx).map(|(key, _)| key.to_string()))
-        .collect();
-    selected.sort();
-    selected.dedup();
-    if selected.is_empty() {
-        println!("No valid platforms selected.");
-        return Ok(());
-    }
 
-    for key in selected {
+    loop {
+        let mut menu_items: Vec<String> = GATEWAY_PLATFORM_CATALOG
+            .iter()
+            .map(|entry| gateway_platform_menu_label(entry, disk.platforms.get(entry.key)))
+            .collect();
+        menu_items.push("Done".to_string());
+        let done_index = menu_items.len() - 1;
+
+        let pick = hermes_cli::prompt_choice(
+            "Messaging Platforms",
+            "Select a platform to configure:",
+            &menu_items,
+            done_index,
+        );
+        if !pick.confirmed || pick.index == done_index {
+            break;
+        }
+
+        let Some(entry) = GATEWAY_PLATFORM_CATALOG.get(pick.index) else {
+            println!("Invalid platform selection.");
+            continue;
+        };
+
         println!();
-        println!("Configuring {}...", key);
-        match key.as_str() {
-            "weixin" => {
-                run_auth(
-                    cli.clone(),
-                    Some("login".to_string()),
-                    Some("weixin".to_string()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    true,
-                )
-                .await?;
-                disk = load_user_config_file(&cfg_path)
-                    .map_err(|e| AgentError::Config(e.to_string()))?;
-                let wx = disk
-                    .platforms
-                    .entry("weixin".to_string())
-                    .or_insert_with(PlatformConfig::default);
-                wx.enabled = true;
-                println!("Direct message policy: 1)pairing 2)open 3)allowlist 4)disabled");
-                let dm_choice = prompt_line("Choose [1-4] (default 1): ").await?;
-                match dm_choice.trim() {
-                    "2" => {
-                        wx.extra
-                            .insert("dm_policy".to_string(), serde_json::json!("open"));
-                        wx.extra
-                            .insert("allow_from".to_string(), serde_json::json!([]));
-                    }
-                    "3" => {
-                        let ids = parse_csv_list(
-                            &prompt_line("Allowed Weixin user IDs (comma-separated): ").await?,
-                        );
-                        wx.extra
-                            .insert("dm_policy".to_string(), serde_json::json!("allowlist"));
-                        wx.extra.insert(
-                            "allow_from".to_string(),
-                            serde_json::Value::Array(
-                                ids.into_iter().map(serde_json::Value::String).collect(),
-                            ),
-                        );
-                    }
-                    "4" => {
-                        wx.extra
-                            .insert("dm_policy".to_string(), serde_json::json!("disabled"));
-                        wx.extra
-                            .insert("allow_from".to_string(), serde_json::json!([]));
-                    }
-                    _ => {
-                        wx.extra
-                            .insert("dm_policy".to_string(), serde_json::json!("pairing"));
-                        wx.extra
-                            .insert("allow_from".to_string(), serde_json::json!([]));
-                    }
-                }
-                println!("Group policy: 1)disabled 2)open 3)allowlist");
-                let group_choice = prompt_line("Choose [1-3] (default 1): ").await?;
-                match group_choice.trim() {
-                    "2" => {
-                        wx.extra
-                            .insert("group_policy".to_string(), serde_json::json!("open"));
-                        wx.extra
-                            .insert("group_allow_from".to_string(), serde_json::json!([]));
-                    }
-                    "3" => {
-                        let ids = parse_csv_list(
-                            &prompt_line("Allowed Weixin group IDs (comma-separated): ").await?,
-                        );
-                        wx.extra
-                            .insert("group_policy".to_string(), serde_json::json!("allowlist"));
-                        wx.extra.insert(
-                            "group_allow_from".to_string(),
-                            serde_json::Value::Array(
-                                ids.into_iter().map(serde_json::Value::String).collect(),
-                            ),
-                        );
-                    }
-                    _ => {
-                        wx.extra
-                            .insert("group_policy".to_string(), serde_json::json!("disabled"));
-                        wx.extra
-                            .insert("group_allow_from".to_string(), serde_json::json!([]));
-                    }
-                }
-                let home = prompt_line("Weixin home channel (optional): ").await?;
-                if !home.trim().is_empty() {
-                    wx.home_channel = Some(home.trim().to_string());
-                }
-            }
-            "telegram" => {
-                run_auth(
-                    cli.clone(),
-                    Some("login".to_string()),
-                    Some("telegram".to_string()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                )
-                .await?;
-                disk = load_user_config_file(&cfg_path)
-                    .map_err(|e| AgentError::Config(e.to_string()))?;
-                let tg = disk
-                    .platforms
-                    .entry("telegram".to_string())
-                    .or_insert_with(PlatformConfig::default);
-                tg.enabled = true;
-                let polling = prompt_yes_no("Telegram use polling mode?", true).await?;
-                tg.extra
-                    .insert("polling".to_string(), serde_json::Value::Bool(polling));
-                if !polling {
-                    let webhook_url = prompt_line("Telegram webhook URL: ").await?;
-                    if !webhook_url.trim().is_empty() {
-                        tg.webhook_url = Some(webhook_url.trim().to_string());
-                    }
-                }
-                let home = prompt_line("Telegram home channel (optional): ").await?;
-                if !home.trim().is_empty() {
-                    tg.home_channel = Some(home.trim().to_string());
-                }
-            }
-            other => configure_platform_basic_prompts(&mut disk, other).await?,
-        }
+        println!("Configuring {}...", entry.label);
+        configure_gateway_platform(cli, &mut disk, &cfg_path, entry.key).await?;
+        validate_config(&disk).map_err(|e| AgentError::Config(e.to_string()))?;
+        save_config_yaml(&cfg_path, &disk).map_err(|e| AgentError::Config(e.to_string()))?;
     }
-
-    validate_config(&disk).map_err(|e| AgentError::Config(e.to_string()))?;
-    save_config_yaml(&cfg_path, &disk).map_err(|e| AgentError::Config(e.to_string()))?;
 
     println!();
     println!("Gateway setup complete.");
@@ -13699,6 +13816,20 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .expect("env lock poisoned")
+    }
+
+    #[test]
+    fn gateway_platform_menu_label_marks_configured_platforms() {
+        let entry = &GATEWAY_PLATFORM_CATALOG[0];
+        assert_eq!(entry.key, "telegram");
+        let mut configured = make_platform(true, Some("tg-token"));
+        let label = gateway_platform_menu_label(entry, Some(&configured));
+        assert!(label.contains("Telegram"));
+        assert!(label.contains("(configured)"));
+
+        configured.token = None;
+        let label = gateway_platform_menu_label(entry, Some(&configured));
+        assert!(label.contains("(not configured)"));
     }
 
     fn cli_for_temp_state_root(temp_root: &std::path::Path) -> Cli {

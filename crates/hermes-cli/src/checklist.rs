@@ -6,8 +6,9 @@
 //! numbered text fallback for non-TTY terminals.
 
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -57,6 +58,19 @@ pub struct SelectResult {
     pub confirmed: bool,
 }
 
+/// Whether to use the visible numbered checklist instead of curses alternate-screen UI.
+///
+/// Windows terminals (including Cursor/PowerShell) often fail to render curses pickers,
+/// which makes pre-selected items look like they were confirmed without user input.
+pub fn prefer_plain_checklist() -> bool {
+    if std::env::consts::OS == "windows" {
+        return true;
+    }
+    std::env::var("HERMES_PLAIN_CHECKLIST")
+        .ok()
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
+
 /// Run an interactive multi-select checklist in the terminal.
 ///
 /// # Arguments
@@ -73,8 +87,14 @@ pub fn curses_checklist(
     selected: &HashSet<usize>,
     status_fn: Option<&dyn Fn(&HashSet<usize>) -> String>,
 ) -> ChecklistResult {
-    // If not a TTY, fall back to numbered text input
-    if !atty_is_tty() {
+    if items.is_empty() {
+        return ChecklistResult {
+            selected: selected.clone(),
+            confirmed: true,
+        };
+    }
+
+    if !atty_is_tty() || prefer_plain_checklist() {
         return numbered_fallback(title, items, selected, status_fn);
     }
 
@@ -100,7 +120,7 @@ pub fn curses_select(title: &str, items: &[String], initial_index: usize) -> Sel
     }
 
     let clamped_initial = initial_index.min(items.len().saturating_sub(1));
-    if !atty_is_tty() {
+    if !atty_is_tty() || prefer_plain_checklist() {
         return numbered_select_fallback(title, items, clamped_initial);
     }
 
@@ -132,11 +152,23 @@ pub fn curses_select_embedded(title: &str, items: &[String], initial_index: usiz
     }
 }
 
-/// Check if stdin is a TTY (best-effort).
+/// Check if stdin is an interactive terminal.
 fn atty_is_tty() -> bool {
-    // crossterm's is_raw_mode_enabled is not what we want;
-    // use a simple heuristic: try to get terminal size
-    terminal::size().is_ok()
+    io::stdin().is_terminal()
+}
+
+/// Discard queued key events (for example Enter from the launching shell).
+fn drain_pending_key_events() {
+    let deadline = Instant::now() + Duration::from_millis(150);
+    while Instant::now() < deadline {
+        match event::poll(Duration::from_millis(10)) {
+            Ok(true) => {
+                let _ = event::read();
+            }
+            Ok(false) => {}
+            Err(_) => break,
+        }
+    }
 }
 
 fn truncate_for_terminal(text: &str, max_chars: usize) -> String {
@@ -194,6 +226,7 @@ fn curses_checklist_inner(
 
     enable_raw_mode()?;
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
+    drain_pending_key_events();
 
     let result = loop {
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
@@ -328,10 +361,71 @@ fn numbered_fallback(
     initial_selected: &HashSet<usize>,
     status_fn: Option<&dyn Fn(&HashSet<usize>) -> String>,
 ) -> ChecklistResult {
+    numbered_fallback_with_reader(
+        title,
+        items,
+        initial_selected,
+        status_fn,
+        |prompt| read_line_prompt(prompt),
+    )
+}
+
+fn read_line_prompt(prompt: &str) -> io::Result<String> {
+    print!("{prompt}");
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input)
+}
+
+fn apply_numbered_checklist_input(
+    trimmed: &str,
+    items_len: usize,
+    chosen: &mut HashSet<usize>,
+) -> Option<ChecklistResult> {
+    if trimmed.eq_ignore_ascii_case("done") {
+        return Some(ChecklistResult {
+            selected: chosen.clone(),
+            confirmed: true,
+        });
+    }
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(idx) = trimmed.parse::<usize>() {
+        let idx = idx.saturating_sub(1);
+        if idx < items_len {
+            if chosen.contains(&idx) {
+                chosen.remove(&idx);
+            } else {
+                chosen.insert(idx);
+            }
+        }
+    }
+    None
+}
+
+fn numbered_fallback_with_reader<R>(
+    title: &str,
+    items: &[String],
+    initial_selected: &HashSet<usize>,
+    status_fn: Option<&dyn Fn(&HashSet<usize>) -> String>,
+    mut read_line: R,
+) -> ChecklistResult
+where
+    R: FnMut(&str) -> io::Result<String>,
+{
+    if items.is_empty() {
+        return ChecklistResult {
+            selected: initial_selected.clone(),
+            confirmed: true,
+        };
+    }
+
     let mut chosen = initial_selected.clone();
 
     println!("\n  \x1b[33m{}\x1b[0m", title);
-    println!("  \x1b[2mToggle by number, Enter to confirm.\x1b[0m\n");
+    println!("  \x1b[2mEnter a number to toggle an item, then type done to confirm.\x1b[0m\n");
 
     loop {
         for (i, label) in items.iter().enumerate() {
@@ -352,28 +446,14 @@ fn numbered_fallback(
         }
 
         println!();
-        print!("  \x1b[2mToggle # (or Enter to confirm): \x1b[0m");
-        io::stdout().flush().ok();
-
-        let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-            Ok(_) => {
+        let prompt = "  \x1b[2mToggle # or type done to confirm: \x1b[0m";
+        match read_line(prompt) {
+            Ok(input) => {
                 let trimmed = input.trim();
-                if trimmed.is_empty() {
-                    return ChecklistResult {
-                        selected: chosen,
-                        confirmed: true,
-                    };
-                }
-                if let Ok(idx) = trimmed.parse::<usize>() {
-                    let idx = idx.saturating_sub(1);
-                    if idx < items.len() {
-                        if chosen.contains(&idx) {
-                            chosen.remove(&idx);
-                        } else {
-                            chosen.insert(idx);
-                        }
-                    }
+                if let Some(result) =
+                    apply_numbered_checklist_input(trimmed, items.len(), &mut chosen)
+                {
+                    return result;
                 }
             }
             Err(_) => {
@@ -400,6 +480,7 @@ fn curses_select_inner(
     if manage_terminal {
         enable_raw_mode()?;
         execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
+        drain_pending_key_events();
     } else {
         execute!(stdout, cursor::Hide)?;
     }
@@ -501,6 +582,78 @@ fn curses_select_inner(
     Ok(result)
 }
 
+/// Official Hermes-style numbered single-select menu (section header + Done default).
+pub fn prompt_choice(
+    section_title: &str,
+    question: &str,
+    items: &[String],
+    default_index: usize,
+) -> SelectResult {
+    if items.is_empty() {
+        return SelectResult {
+            index: 0,
+            confirmed: false,
+        };
+    }
+
+    let clamped_default = default_index.min(items.len().saturating_sub(1));
+    if !atty_is_tty() || prefer_plain_checklist() {
+        return official_numbered_select(section_title, question, items, clamped_default);
+    }
+
+    match curses_select_inner(question, items, clamped_default, true) {
+        Ok(result) => result,
+        Err(_) => official_numbered_select(section_title, question, items, clamped_default),
+    }
+}
+
+fn official_numbered_select(
+    section_title: &str,
+    question: &str,
+    items: &[String],
+    default_index: usize,
+) -> SelectResult {
+    println!("\n◆ {section_title}\n");
+    println!("  {question}");
+    println!("  Select by number, Enter to confirm.\n");
+    for (i, label) in items.iter().enumerate() {
+        let marker = if i == default_index { "(●)" } else { "(○)" };
+        let clean = truncate_for_terminal(&sanitize_display_text(label), 160);
+        println!("  {marker} {:>2}. {clean}", i + 1);
+    }
+    println!();
+    print!(
+        " Choice [default {}]: ",
+        default_index + 1
+    );
+    io::stdout().flush().ok();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_ok() {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return SelectResult {
+                index: default_index,
+                confirmed: true,
+            };
+        }
+        if let Ok(choice) = trimmed.parse::<usize>() {
+            let idx = choice.saturating_sub(1);
+            if idx < items.len() {
+                return SelectResult {
+                    index: idx,
+                    confirmed: true,
+                };
+            }
+        }
+    }
+
+    SelectResult {
+        index: default_index,
+        confirmed: false,
+    }
+}
+
 fn numbered_select_fallback(title: &str, items: &[String], initial_index: usize) -> SelectResult {
     println!("\n  \x1b[33m{}\x1b[0m", title);
     for (i, label) in items.iter().enumerate() {
@@ -574,5 +727,50 @@ mod tests {
         let raw = "line1\nline2\tline3\rline4";
         let clean = sanitize_display_text(raw);
         assert_eq!(clean, "line1 line2 line3 line4");
+    }
+
+    #[test]
+    fn numbered_checklist_empty_enter_does_not_confirm() {
+        let mut chosen = HashSet::from([0usize]);
+        assert!(apply_numbered_checklist_input("", 2, &mut chosen).is_none());
+        assert_eq!(chosen, HashSet::from([0usize]));
+    }
+
+    #[test]
+    fn numbered_checklist_done_confirms() {
+        let mut chosen = HashSet::from([0usize, 1usize]);
+        let result = apply_numbered_checklist_input("done", 2, &mut chosen)
+            .expect("done should confirm");
+        assert!(result.confirmed);
+        assert_eq!(result.selected, HashSet::from([0usize, 1usize]));
+    }
+
+    #[test]
+    fn numbered_checklist_toggle_updates_selection() {
+        let mut chosen = HashSet::from([0usize]);
+        assert!(apply_numbered_checklist_input("2", 2, &mut chosen).is_none());
+        assert_eq!(chosen, HashSet::from([0usize, 1usize]));
+    }
+
+    #[test]
+    fn numbered_fallback_with_reader_requires_done() {
+        let items = vec!["Telegram".to_string(), "Discord".to_string()];
+        let mut inputs = vec!["1".to_string(), "2".to_string(), "done".to_string()];
+        let result = numbered_fallback_with_reader(
+            "Select platforms",
+            &items,
+            &HashSet::new(),
+            None,
+            |_| Ok(inputs.remove(0)),
+        );
+        assert!(result.confirmed);
+        assert_eq!(result.selected, HashSet::from([0usize, 1usize]));
+    }
+
+    #[test]
+    fn prefer_plain_checklist_is_true_on_windows() {
+        if std::env::consts::OS == "windows" {
+            assert!(prefer_plain_checklist());
+        }
     }
 }

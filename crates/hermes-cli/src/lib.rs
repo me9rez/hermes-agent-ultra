@@ -53,7 +53,8 @@ pub(crate) mod test_env_lock;
 // Re-export primary types
 pub use app::App;
 pub use checklist::{
-    curses_checklist, curses_select, curses_select_embedded, ChecklistResult, SelectResult,
+    curses_checklist, curses_select, curses_select_embedded, prefer_plain_checklist, prompt_choice,
+    ChecklistResult, SelectResult,
 };
 pub use claw_migrate::{run_migration, MigrateOptions, MigrationResult};
 pub use cli::{completion_command, Cli, CliCommand};

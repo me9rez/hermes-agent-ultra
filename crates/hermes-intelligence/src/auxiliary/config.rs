@@ -16,6 +16,19 @@ use serde::{Deserialize, Serialize};
 
 use super::task::AuxiliaryTask;
 
+/// A single entry in a per-task `fallback_chain` list.
+/// Mirrors `auxiliary.<task>.fallback_chain[*]` in config.yaml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FallbackChainEntry {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
 /// Per-task overrides loaded from a configuration file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskOverride {
@@ -30,6 +43,10 @@ pub struct TaskOverride {
     /// Per-task timeout in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Ordered list of fallback providers tried after the main chain fails for this task.
+    /// Mirrors `auxiliary.<task>.fallback_chain` in config.yaml.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_chain: Vec<FallbackChainEntry>,
 }
 
 /// Top-level configuration consumed by [`super::client::AuxiliaryClient`].

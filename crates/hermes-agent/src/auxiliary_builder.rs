@@ -7,7 +7,8 @@ use std::sync::Arc;
 use hermes_config::config::LlmProviderConfig;
 use hermes_core::LlmProvider;
 use hermes_intelligence::auxiliary::{
-    AuxiliaryClient, AuxiliaryConfig, AuxiliarySource, AuxiliaryTask, ProviderCandidate,
+    AuxiliaryClient, AuxiliaryConfig, AuxiliarySource, AuxiliaryTask, FallbackChainEntry,
+    ProviderCandidate, ProviderChain,
 };
 
 use crate::provider::{AnthropicProvider, GenericProvider, OpenRouterProvider};
@@ -66,10 +67,83 @@ pub fn build_auxiliary_client(
     chain_candidates.extend(env_candidates);
 
     let mut builder = AuxiliaryClient::builder()
-        .config(params.config)
+        .config(params.config.clone())
         .primary_context(params.primary_provider.clone(), params.primary_model.clone());
     builder = builder.extend_candidates(chain_candidates);
+
+    // Wire per-task fallback_chain entries from config into the builder.
+    for (task_key, task_override) in &params.config.tasks {
+        if task_override.fallback_chain.is_empty() {
+            continue;
+        }
+        let mut fb_chain = ProviderChain::new();
+        for entry in &task_override.fallback_chain {
+            if let Some(candidate) = build_fallback_chain_candidate(entry, &params.llm_providers) {
+                fb_chain.push(candidate);
+            }
+        }
+        if !fb_chain.is_empty() {
+            builder = builder.add_task_fallback_chain(task_key.clone(), fb_chain);
+        }
+    }
+
     (builder.build(), summary)
+}
+
+/// Resolve a single `FallbackChainEntry` into a `ProviderCandidate`.
+fn build_fallback_chain_candidate(
+    entry: &FallbackChainEntry,
+    llm_providers: &HashMap<String, LlmProviderConfig>,
+) -> Option<ProviderCandidate> {
+    let provider_name = entry.provider.trim().to_lowercase();
+    if provider_name.is_empty() {
+        return None;
+    }
+
+    // api_key: explicit in entry > llm_providers config > env
+    let api_key = entry
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            llm_providers
+                .get(&provider_name)
+                .and_then(|cfg| resolve_provider_api_key(cfg, &provider_name))
+        })
+        .or_else(|| provider_api_key_from_env(&provider_name))?;
+
+    let base_url = entry
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            llm_providers
+                .get(&provider_name)
+                .and_then(|cfg| cfg.base_url.clone())
+        })
+        .or_else(|| default_base_url(&provider_name))?;
+
+    let model = entry
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| provider_name.clone());
+
+    let source = match provider_name.as_str() {
+        "openrouter" => AuxiliarySource::OpenRouter,
+        "anthropic" => AuxiliarySource::Anthropic,
+        "custom" => AuxiliarySource::Custom,
+        other => AuxiliarySource::DirectKey(other.to_string()),
+    };
+
+    let llm: Arc<dyn LlmProvider> = Arc::new(GenericProvider::new(base_url, api_key, model.clone()));
+    Some(ProviderCandidate::new(source, model, llm))
 }
 
 fn vision_task_provider_is_auto(config: &AuxiliaryConfig) -> bool {

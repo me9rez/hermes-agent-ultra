@@ -17,7 +17,8 @@
 //! [`hermes_core::LlmProvider`] trait.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use hermes_core::{LlmResponse, Message, ToolSchema};
 use serde_json::Value;
@@ -28,10 +29,13 @@ use super::config::{
     resolve_task_settings, AuxiliaryConfig, ExplicitOverrides, ResolvedTaskSettings,
 };
 use super::error::{
-    is_unsupported_parameter_error, is_unsupported_temperature_error, should_fallback,
-    AuxiliaryError, AuxiliaryResult,
+    is_payment_error, is_unsupported_parameter_error, is_unsupported_temperature_error,
+    should_fallback, AuxiliaryError, AuxiliaryResult,
 };
 use super::task::AuxiliaryTask;
+
+/// TTL for unhealthy provider entries — matches Python `_AUX_UNHEALTHY_TTL_SECONDS`.
+const UNHEALTHY_TTL: Duration = Duration::from_secs(600);
 
 // ---------------------------------------------------------------------------
 // AuxiliaryRequest / Response
@@ -117,10 +121,16 @@ pub struct AuxiliaryClient {
     /// provider is anything other than `"auto"`.
     by_label: HashMap<String, ProviderCandidate>,
     config: AuxiliaryConfig,
-    /// Active primary provider (for vision debug comparison).
+    /// Active primary provider (for vision debug comparison and main-agent fallback).
     primary_provider: Option<String>,
-    /// Active primary model slug (for vision debug comparison).
+    /// Active primary model slug (for vision debug comparison and main-agent fallback).
     primary_model: Option<String>,
+    /// Per-task fallback chains, keyed by `AuxiliaryTask::as_key()`.
+    /// Tried after the base chain is exhausted, before giving up.
+    task_fallback_chains: HashMap<String, ProviderChain>,
+    /// Providers currently marked unhealthy (label → expiry).
+    /// Mirrors Python `_aux_unhealthy_until`.
+    unhealthy: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 fn remove_extra_body_param(extra_body: Option<Value>, key: &str) -> Option<Value> {
@@ -186,6 +196,54 @@ impl AuxiliaryClient {
         &self.config
     }
 
+    /// Mark a provider unhealthy for `UNHEALTHY_TTL`. Mirrors Python `_mark_provider_unhealthy`.
+    pub fn mark_unhealthy(&self, label: &str) {
+        if label.is_empty() {
+            return;
+        }
+        let expiry = Instant::now() + UNHEALTHY_TTL;
+        if let Ok(mut map) = self.unhealthy.lock() {
+            map.insert(label.to_string(), expiry);
+        }
+        tracing::warn!(
+            provider = %label,
+            ttl_secs = UNHEALTHY_TTL.as_secs(),
+            "auxiliary: marking provider unhealthy (payment/credit error); \
+             subsequent calls will skip it until TTL expires"
+        );
+    }
+
+    /// Returns `true` if the label is currently in the unhealthy cache (TTL not expired).
+    fn is_unhealthy(&self, label: &str) -> bool {
+        let Ok(mut map) = self.unhealthy.lock() else {
+            return false;
+        };
+        let Some(expiry) = map.get(label).copied() else {
+            return false;
+        };
+        if Instant::now() >= expiry {
+            map.remove(label);
+            return false;
+        }
+        true
+    }
+
+    /// Filter a chain by removing any candidate whose label is currently unhealthy.
+    fn filter_unhealthy<'a>(&self, chain: &'a ProviderChain) -> Vec<&'a ProviderCandidate> {
+        chain
+            .iter()
+            .filter(|c| {
+                let label = c.label();
+                if self.is_unhealthy(&label) {
+                    tracing::debug!(provider = %label, "auxiliary: skipping unhealthy provider");
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect()
+    }
+
     /// Execute one auxiliary call, walking the resolved chain on retryable
     /// errors. The first error that is *not* a payment / connection failure
     /// short-circuits the chain and is returned to the caller.
@@ -223,7 +281,10 @@ impl AuxiliaryClient {
 
         let mut errors: Vec<(String, String)> = Vec::new();
 
-        for candidate in chain.iter() {
+        // Build iteration order: unhealthy candidates are skipped (logged once per call).
+        let candidates: Vec<&ProviderCandidate> = self.filter_unhealthy(&chain);
+
+        for candidate in candidates {
             let model = settings
                 .model
                 .clone()
@@ -327,6 +388,9 @@ impl AuxiliaryClient {
                                 label,
                                 err
                             );
+                            if is_payment_error(&err) {
+                                self.mark_unhealthy(&label);
+                            }
                             errors.push((label.clone(), err.to_string()));
                             break;
                         }
@@ -348,6 +412,119 @@ impl AuxiliaryClient {
                             format!("timeout after {:?}", settings.timeout),
                         ));
                         break;
+                    }
+                }
+            }
+        }
+
+        // ── Per-task fallback chain (mirrors Python `_try_configured_fallback_chain`) ──
+        if let Some(task_chain) = self.task_fallback_chains.get(task.as_key()) {
+            let failed_labels: std::collections::HashSet<&str> =
+                errors.iter().map(|(l, _)| l.as_str()).collect();
+            let fb_candidates: Vec<&ProviderCandidate> = self
+                .filter_unhealthy(task_chain)
+                .into_iter()
+                .filter(|c| !failed_labels.contains(c.label().as_str()))
+                .collect();
+            if !fb_candidates.is_empty() {
+                for candidate in fb_candidates {
+                    let model = candidate.default_model.clone();
+                    let label = format!("fallback_chain({})", candidate.label());
+                    let provider = candidate.provider.clone();
+                    let call_fut = {
+                        let msgs = request.messages.clone();
+                        let tools = request.tools.clone();
+                        let m = model.clone();
+                        let t = temperature;
+                        let mt = max_tokens;
+                        let eb = extra_body.clone();
+                        async move {
+                            provider
+                                .chat_completion(&msgs, &tools, mt, t, Some(&m), eb.as_ref())
+                                .await
+                        }
+                    };
+                    match timeout(settings.timeout, call_fut).await {
+                        Ok(Ok(response)) => {
+                            tracing::info!(
+                                "auxiliary {}: configured fallback succeeded via {}",
+                                task.as_key(),
+                                label
+                            );
+                            return Ok(AuxiliaryResponse {
+                                provider_label: label,
+                                model,
+                                response,
+                            });
+                        }
+                        Ok(Err(err)) => {
+                            if is_payment_error(&err) {
+                                self.mark_unhealthy(&candidate.label());
+                            }
+                            errors.push((label, err.to_string()));
+                        }
+                        Err(_) => {
+                            errors.push((label, format!("timeout after {:?}", settings.timeout)));
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Primary-model safety-net fallback (mirrors Python `_try_main_agent_model_fallback`) ──
+        //
+        // After the whole chain (including task fallback_chain) is exhausted, try the
+        // primary provider once more — unless it was already in the failed set.
+        if let (Some(primary_provider), Some(primary_model)) =
+            (&self.primary_provider, &self.primary_model)
+        {
+            let failed_labels: std::collections::HashSet<&str> =
+                errors.iter().map(|(l, _)| l.as_str()).collect();
+            let primary_label = primary_provider.as_str();
+            let already_tried = failed_labels.contains(primary_label)
+                || failed_labels
+                    .iter()
+                    .any(|l| l.starts_with("fallback_chain(") && l.contains(primary_label));
+            if !already_tried && !self.is_unhealthy(primary_label) {
+                if let Some(candidate) = self.by_label.get(primary_label) {
+                    let provider = candidate.provider.clone();
+                    let model = primary_model.clone();
+                    let label = format!("main-agent({})", primary_label);
+                    let call_fut = {
+                        let msgs = request.messages.clone();
+                        let tools = request.tools.clone();
+                        let m = model.clone();
+                        let t = temperature;
+                        let mt = max_tokens;
+                        let eb = extra_body.clone();
+                        async move {
+                            provider
+                                .chat_completion(&msgs, &tools, mt, t, Some(&m), eb.as_ref())
+                                .await
+                        }
+                    };
+                    tracing::info!(
+                        "auxiliary {}: chain exhausted — falling back to main-agent provider {}",
+                        task.as_key(),
+                        primary_label
+                    );
+                    match timeout(settings.timeout, call_fut).await {
+                        Ok(Ok(response)) => {
+                            return Ok(AuxiliaryResponse {
+                                provider_label: label,
+                                model,
+                                response,
+                            });
+                        }
+                        Ok(Err(err)) => {
+                            if is_payment_error(&err) {
+                                self.mark_unhealthy(primary_label);
+                            }
+                            errors.push((label, err.to_string()));
+                        }
+                        Err(_) => {
+                            errors.push((label, format!("timeout after {:?}", settings.timeout)));
+                        }
                     }
                 }
             }
@@ -394,6 +571,8 @@ pub struct AuxiliaryClientBuilder {
     config: AuxiliaryConfig,
     primary_provider: Option<String>,
     primary_model: Option<String>,
+    /// Per-task fallback chains keyed by `AuxiliaryTask::as_key()`.
+    task_fallback_chains: HashMap<String, ProviderChain>,
 }
 
 impl AuxiliaryClientBuilder {
@@ -427,6 +606,17 @@ impl AuxiliaryClientBuilder {
         self
     }
 
+    /// Register a per-task fallback chain (mirrors `auxiliary.<task>.fallback_chain` in config.yaml).
+    /// Called by the binary layer after resolving concrete providers for each entry.
+    pub fn add_task_fallback_chain(
+        mut self,
+        task_key: impl Into<String>,
+        chain: ProviderChain,
+    ) -> Self {
+        self.task_fallback_chains.insert(task_key.into(), chain);
+        self
+    }
+
     pub fn build(self) -> AuxiliaryClient {
         let mut by_label = HashMap::new();
         for c in self.chain.iter() {
@@ -438,6 +628,8 @@ impl AuxiliaryClientBuilder {
             config: self.config,
             primary_provider: self.primary_provider,
             primary_model: self.primary_model,
+            task_fallback_chains: self.task_fallback_chains,
+            unhealthy: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

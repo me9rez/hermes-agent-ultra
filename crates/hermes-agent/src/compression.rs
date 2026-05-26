@@ -239,6 +239,11 @@ impl ContextCompressor {
         self.threshold_tokens
     }
 
+    /// Fraction of context window at which compression triggers (0.0–1.0).
+    pub fn threshold_percent(&self) -> f64 {
+        self.config.threshold_percent
+    }
+
     /// How many compactions this instance has performed.
     pub fn compression_count(&self) -> u64 {
         self.compression_count

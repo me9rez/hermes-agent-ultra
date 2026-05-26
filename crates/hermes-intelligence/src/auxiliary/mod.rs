@@ -51,7 +51,8 @@ pub use builtins::{
 pub use candidate::{AuxiliarySource, ProviderCandidate, ProviderChain};
 pub use client::{AuxiliaryClient, AuxiliaryClientBuilder, AuxiliaryRequest, AuxiliaryResponse};
 pub use config::{
-    resolve_task_settings, AuxiliaryConfig, ExplicitOverrides, ResolvedTaskSettings, TaskOverride,
+    resolve_task_settings, AuxiliaryConfig, ExplicitOverrides, FallbackChainEntry,
+    ResolvedTaskSettings, TaskOverride,
 };
 pub use error::{is_connection_error, is_payment_error, AuxiliaryError, AuxiliaryResult};
 pub use task::AuxiliaryTask;

@@ -4479,6 +4479,10 @@ async fn run_gateway_incoming_loop(
     while let Some(incoming) = rx.recv().await {
         if let Err(err) = gateway.route_message(&incoming).await {
             tracing::warn!("Failed to route {} message: {}", platform, err);
+            let err_text = format!("⚠️ 请求处理失败，请稍后重试。({})", err);
+            let _ = gateway
+                .send_message(&incoming.platform, &incoming.chat_id, &err_text, None)
+                .await;
         }
     }
 }

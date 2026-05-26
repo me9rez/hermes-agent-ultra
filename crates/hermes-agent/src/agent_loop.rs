@@ -1966,11 +1966,28 @@ struct TurnRuntimeRoute {
 }
 
 fn build_context_compressor_for_config(config: &AgentConfig) -> Arc<tokio::sync::Mutex<ContextCompressor>> {
+    let llm_providers: HashMap<String, hermes_config::config::LlmProviderConfig> = config
+        .runtime_providers
+        .iter()
+        .map(|(name, rp)| {
+            (
+                name.clone(),
+                hermes_config::config::LlmProviderConfig {
+                    api_key: rp.api_key.clone(),
+                    api_key_env: rp.api_key_env.clone(),
+                    base_url: rp.base_url.clone(),
+                    command: rp.command.clone(),
+                    args: rp.args.clone(),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
     let (auxiliary, _) = build_auxiliary_client(AuxiliaryBuildParams {
         config: AuxiliaryConfig::default(),
         primary_provider: config.provider.clone(),
         primary_model: Some(config.model.clone()),
-        llm_providers: HashMap::new(),
+        llm_providers,
     });
     let compressor_config = CompressorConfig {
         context_length: get_model_context_length(&config.model),
@@ -4413,6 +4430,25 @@ impl AgentLoop {
                 before_pct, after_pct
             ),
         );
+        let threshold_pct = {
+            let compressor = self.context_compressor.lock().await;
+            (compressor.threshold_percent() * 100.0) as usize
+        };
+        if after_pct >= threshold_pct {
+            self.emit_status(
+                "lifecycle",
+                &format!(
+                    "Context still at {}% after compression (auxiliary summary unavailable). \
+                     Consider starting a new session to avoid LLM context limit errors.",
+                    after_pct
+                ),
+            );
+            tracing::warn!(
+                "Preflight compression did not reduce context ({}% -> {}%): \
+                 auxiliary summary failed, LLM call may hit context limit",
+                before_pct, after_pct
+            );
+        }
     }
 
     fn emit_status(&self, event_type: &str, message: &str) {

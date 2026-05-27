@@ -255,10 +255,15 @@ pub fn redact_pii(text: &str, rules: &[RedactionRule]) -> String {
 pub struct SessionManager {
     sessions: RwLock<HashMap<String, Session>>,
     config: SessionConfig,
-    history_loader: Option<Arc<dyn Fn(&str) -> Vec<Message> + Send + Sync>>,
+    /// Returns `(messages, session_id_override)`.  When `session_id_override` is
+    /// `Some(uuid)` the caller should store that UUID as `session.id` so that
+    /// subsequent agent turns persist under the same UUID (Python-style rotation).
+    history_loader: Option<Arc<dyn Fn(&str) -> (Vec<Message>, Option<String>) + Send + Sync>>,
+    /// Called on explicit `/new` / `/reset` with `(session_key, new_uuid)`.
+    /// Implementations persist the mapping so cross-restart loads stay consistent.
+    session_id_rotator: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
 
     /// Index: (user_id) -> Set of session IDs for cross-platform continuity.
-    /// This allows the same user on different platforms to share context.
     user_sessions: RwLock<HashMap<String, Vec<String>>>,
 
     /// Whether group sessions use per-user isolation.
@@ -273,6 +278,7 @@ impl SessionManager {
             sessions: RwLock::new(HashMap::new()),
             config,
             history_loader: None,
+            session_id_rotator: None,
             user_sessions: RwLock::new(HashMap::new()),
             group_sessions_per_user,
         }
@@ -284,17 +290,34 @@ impl SessionManager {
             sessions: RwLock::new(HashMap::new()),
             config,
             history_loader: None,
+            session_id_rotator: None,
             user_sessions: RwLock::new(HashMap::new()),
             group_sessions_per_user,
         }
     }
 
     /// Attach a loader for persisted conversation history.
+    ///
+    /// The loader returns `(messages, session_id_override)`.  When the override
+    /// is `Some(uuid)` the session's `id` is set to that UUID so subsequent
+    /// agent turns persist under the same key (Python-style session_id rotation).
     pub fn with_history_loader(
         mut self,
-        loader: impl Fn(&str) -> Vec<Message> + Send + Sync + 'static,
+        loader: impl Fn(&str) -> (Vec<Message>, Option<String>) + Send + Sync + 'static,
     ) -> Self {
         self.history_loader = Some(Arc::new(loader));
+        self
+    }
+
+    /// Attach a rotator called with `(session_key, new_uuid)` on explicit reset.
+    ///
+    /// Implementations persist the mapping so the correct session_id is used
+    /// after a server restart (mirrors Python's `sessions.json` write in reset_session).
+    pub fn with_session_id_rotator(
+        mut self,
+        rotator: impl Fn(&str, &str) + Send + Sync + 'static,
+    ) -> Self {
+        self.session_id_rotator = Some(Arc::new(rotator));
         self
     }
 
@@ -365,8 +388,17 @@ impl SessionManager {
 
         // Create new session, hydrating persisted history when available.
         let mut session = Session::new(platform, chat_id, user_id, session_type, reset_policy);
+        // Default: use session_key as the SQLite key (backward-compat, pre-rotation).
+        session.id = session_key.clone();
         if let Some(loader) = &self.history_loader {
-            session.messages = loader(&session_key);
+            let (messages, session_id_override) = loader(&session_key);
+            session.messages = messages;
+            // When a UUID override is returned it means a rotation has been
+            // persisted (Python-style): reuse that UUID so agent turns continue
+            // to write under the same key across restarts.
+            if let Some(uuid) = session_id_override {
+                session.id = uuid;
+            }
         }
         let session_clone = session.clone();
 
@@ -382,13 +414,26 @@ impl SessionManager {
         session_clone
     }
 
-    /// Reset a session by ID, clearing all messages.
-    pub async fn reset_session(&self, session_id: &str) {
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.messages.clear();
-            session.created_at = Utc::now();
-            session.last_active_at = Utc::now();
+    /// Reset a session by rotating its `session_id` to a fresh UUID and clearing
+    /// in-memory messages (Python `SessionStore.reset_session` parity).
+    ///
+    /// The `session_id_rotator` callback (if set) is called with
+    /// `(session_key, new_uuid)` so the mapping can be persisted to SQLite.
+    /// On the next server restart the loader will find the UUID in the index
+    /// and correctly load the (empty) new session instead of old messages.
+    pub async fn reset_session(&self, session_key: &str) {
+        let new_uuid = Uuid::new_v4().to_string();
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(session) = sessions.get_mut(session_key) {
+                session.messages.clear();
+                session.id = new_uuid.clone();
+                session.created_at = Utc::now();
+                session.last_active_at = Utc::now();
+            }
+        }
+        if let Some(rotator) = &self.session_id_rotator {
+            rotator(session_key, &new_uuid);
         }
     }
 
@@ -637,12 +682,15 @@ mod tests {
         let config = SessionConfig::default();
         let manager = SessionManager::new(config).with_history_loader(|session_key| {
             if session_key == "telegram:chat1" {
-                vec![
-                    Message::user("before restart"),
-                    Message::assistant("persisted reply"),
-                ]
+                (
+                    vec![
+                        Message::user("before restart"),
+                        Message::assistant("persisted reply"),
+                    ],
+                    None,
+                )
             } else {
-                Vec::new()
+                (Vec::new(), None)
             }
         });
 

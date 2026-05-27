@@ -147,6 +147,10 @@ pub type MessageHandler = Arc<
 #[derive(Debug, Clone, Default)]
 pub struct GatewayRuntimeContext {
     pub session_key: String,
+    /// Rotatable session UUID (Python-style).  Equals `session_key` for sessions
+    /// that have never been reset; becomes a fresh UUID after each `/new` / `/reset`.
+    /// Use this — not `session_key` — as the agent's `session_id` for SQLite persistence.
+    pub session_id: String,
     pub platform: String,
     pub chat_id: String,
     pub user_id: String,
@@ -1816,8 +1820,16 @@ impl Gateway {
             .unwrap_or_default();
         let mcp_reload_generation = *self.mcp_reload_generation.read().await;
 
+        let session_id = self
+            .session_manager
+            .get_session(session_key)
+            .await
+            .map(|s| s.id)
+            .unwrap_or_else(|| session_key.to_string());
+
         GatewayRuntimeContext {
             session_key: session_key.to_string(),
+            session_id,
             platform: incoming.platform.clone(),
             chat_id: incoming.chat_id.clone(),
             user_id: incoming.user_id.clone(),

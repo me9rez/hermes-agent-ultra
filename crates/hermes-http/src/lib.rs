@@ -342,19 +342,46 @@ fn gateway_session_manager_with_persistence(config: &GatewayConfig) -> SessionMa
     if let Err(err) = sp.ensure_db() {
         tracing::debug!("sessions db init skipped for gateway history hydration: {}", err);
     }
-    SessionManager::new(config.session.clone()).with_history_loader(move |session_id| {
-        match sp.load_session(session_id) {
-            Ok(messages) => messages,
-            Err(err) => {
-                tracing::debug!(
-                    session_id = %session_id,
-                    "gateway history hydration skipped: {}",
+    let sp_rotator = sp.clone();
+    SessionManager::new(config.session.clone())
+        .with_history_loader(move |session_key| {
+            match sp.get_indexed_session_id(session_key) {
+                Ok(Some(uuid)) => {
+                    return match sp.load_session(&uuid) {
+                        Ok(msgs) => (msgs, Some(uuid)),
+                        Err(err) => {
+                            tracing::debug!(
+                                session_key = %session_key,
+                                "gateway history hydration skipped (uuid): {}",
+                                err
+                            );
+                            (Vec::new(), None)
+                        }
+                    };
+                }
+                _ => {}
+            }
+            match sp.load_session(session_key) {
+                Ok(messages) => (messages, None),
+                Err(err) => {
+                    tracing::debug!(
+                        session_key = %session_key,
+                        "gateway history hydration skipped: {}",
+                        err
+                    );
+                    (Vec::new(), None)
+                }
+            }
+        })
+        .with_session_id_rotator(move |session_key, new_uuid| {
+            if let Err(err) = sp_rotator.upsert_session_index(session_key, new_uuid) {
+                tracing::warn!(
+                    session_key = %session_key,
+                    "gateway session_id rotation persist failed: {}",
                     err
                 );
-                Vec::new()
             }
-        }
-    })
+        })
 }
 
 #[derive(Debug, Serialize)]
@@ -901,8 +928,13 @@ fn build_agent_for_gateway_context(
     if let Some(personality) = ctx.personality.clone() {
         agent_config.personality = Some(personality);
     }
-    if !ctx.session_key.trim().is_empty() {
-        agent_config.session_id = Some(ctx.session_key.clone());
+    let effective_session_id = if !ctx.session_id.trim().is_empty() {
+        ctx.session_id.clone()
+    } else {
+        ctx.session_key.clone()
+    };
+    if !effective_session_id.trim().is_empty() {
+        agent_config.session_id = Some(effective_session_id);
     }
     let home = ctx
         .home

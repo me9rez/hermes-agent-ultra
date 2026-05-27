@@ -154,6 +154,14 @@ impl SessionPersistence {
         self.ensure_fts_triggers(&conn)?;
         self.maybe_rebuild_fts_index(&conn)?;
 
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS gateway_session_index (
+                session_key TEXT PRIMARY KEY,
+                session_id  TEXT NOT NULL
+            );",
+        )
+        .map_err(|e| AgentError::Io(format!("Failed to create gateway_session_index: {e}")))?;
+
         if let Err(e) = conn.execute("ALTER TABLE sessions ADD COLUMN system_prompt TEXT", []) {
             let msg = e.to_string();
             if !msg.contains("duplicate column") {
@@ -544,6 +552,36 @@ impl SessionPersistence {
             .map_err(|e| AgentError::Io(format!("Failed to write trajectory: {e}")))?;
 
         Ok(path)
+    }
+
+    /// Return the current rotated session_id UUID for a gateway session_key, if one was set by `/new`.
+    pub fn get_indexed_session_id(&self, session_key: &str) -> Result<Option<String>, AgentError> {
+        self.ensure_db()?;
+        let conn = rusqlite::Connection::open(&self.db_path)
+            .map_err(|e| AgentError::Io(format!("Failed to open sessions db: {e}")))?;
+        let mut stmt = conn
+            .prepare("SELECT session_id FROM gateway_session_index WHERE session_key = ?1")
+            .map_err(|e| AgentError::Io(format!("Failed to prepare index query: {e}")))?;
+        match stmt.query_row(rusqlite::params![session_key], |r| r.get::<_, String>(0)) {
+            Ok(s) => Ok(Some(s)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(AgentError::Io(format!("Failed to read session index: {e}"))),
+        }
+    }
+
+    /// Persist the mapping session_key → session_id (called on `/new` / session reset).
+    pub fn upsert_session_index(&self, session_key: &str, session_id: &str) -> Result<(), AgentError> {
+        self.ensure_db()?;
+        let conn = rusqlite::Connection::open(&self.db_path)
+            .map_err(|e| AgentError::Io(format!("Failed to open sessions db: {e}")))?;
+        conn.execute(
+            "INSERT INTO gateway_session_index (session_key, session_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(session_key) DO UPDATE SET session_id = ?2",
+            rusqlite::params![session_key, session_id],
+        )
+        .map_err(|e| AgentError::Io(format!("Failed to upsert session index: {e}")))?;
+        Ok(())
     }
 
     /// Load persisted full system prompt for prefix-cache continuity (Python `sessions.system_prompt`).

@@ -29,6 +29,7 @@ use super::session::{
 use crate::adapter::BasePlatformAdapter;
 use crate::commands::is_known_gateway_command;
 use crate::gateway::IncomingMessage;
+use crate::ws_proxy::connect_websocket;
 
 const RECONNECT_SECS: &[u64] = &[2, 5, 10, 30, 60];
 
@@ -487,19 +488,20 @@ pub async fn gateway_loop(inner: Arc<DiscordInner>) {
         };
 
         info!("Discord gateway connecting…");
-        match tokio_tungstenite::connect_async(&gateway_url).await {
+        match connect_websocket(&gateway_url, &inner.config.proxy).await {
             Ok((ws_stream, _)) => {
                 backoff_idx = 0;
                 let (mut write, mut read) = ws_stream.split();
                 let mut heartbeat_interval: Option<tokio::time::Interval> = None;
                 let mut needs_reconnect = false;
 
+                // Fresh TCP/TLS connection: do not treat an in-flight heartbeat ACK from the
+                // previous socket as a zombie — `is_zombie()` is only evaluated when a new
+                // heartbeat tick is due (see heartbeat branch below).
+                gateway_session.heartbeat_acknowledged = true;
+
                 loop {
                     if !inner.base.is_running() {
-                        break;
-                    }
-                    if session_is_zombie_and_should_reconnect(&gateway_session) {
-                        needs_reconnect = true;
                         break;
                     }
 
@@ -518,6 +520,11 @@ pub async fn gateway_loop(inner: Arc<DiscordInner>) {
                         } => {
                             let _ = tick;
                             if gateway_session.heartbeat_interval_ms.is_some() {
+                                if gateway_session.identified && !gateway_session.heartbeat_acknowledged {
+                                    warn!("Discord heartbeat ACK missed, reconnecting");
+                                    needs_reconnect = true;
+                                    break;
+                                }
                                 let hb = build_heartbeat_payload(gateway_session.sequence);
                                 if send_gateway_payload(&mut write, &mut gateway_session, &hb).await.is_err() {
                                     needs_reconnect = true;
@@ -594,10 +601,6 @@ pub async fn gateway_loop(inner: Arc<DiscordInner>) {
         backoff_idx = (backoff_idx + 1).min(RECONNECT_SECS.len() - 1);
         tokio::time::sleep(Duration::from_secs(delay)).await;
     }
-}
-
-fn session_is_zombie_and_should_reconnect(session: &GatewaySession) -> bool {
-    session.identified && session.is_zombie()
 }
 
 #[cfg(test)]

@@ -114,6 +114,7 @@ pub use shell_hooks::set_process_accept_hooks;
 pub use skill_orchestrator::SkillOrchestrator;
 
 // Re-export session persistence
+pub use python_alignment::strip_system_messages_from_history;
 pub use session_persistence::{leading_system_prompt_for_persist, SessionPersistence};
 
 // Re-export context files

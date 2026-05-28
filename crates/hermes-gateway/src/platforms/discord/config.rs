@@ -175,7 +175,7 @@ impl DiscordConfig {
         Self {
             token,
             application_id: extra_string(platform_cfg, "application_id"),
-            proxy: AdapterProxyConfig::default(),
+            proxy: parse_proxy_config(platform_cfg),
             require_mention: platform_cfg.require_mention.unwrap_or(true),
             intents: platform_cfg
                 .extra
@@ -245,6 +245,88 @@ impl DiscordConfig {
             auto_thread: false,
             no_thread_channels: ChannelIdSet::new(),
         }
+    }
+}
+
+/// Resolve proxy for Discord (REST + Gateway WebSocket).
+///
+/// Precedence: `DISCORD_PROXY` → `platforms.discord.extra.proxy` → `HTTPS_PROXY` / `ALL_PROXY` / `HTTP_PROXY`.
+pub fn parse_proxy_config(platform_cfg: &PlatformConfig) -> AdapterProxyConfig {
+    if let Some(p) = env_proxy("DISCORD_PROXY") {
+        return p;
+    }
+    if let Some(value) = platform_cfg.extra.get("proxy") {
+        if let Some(p) = proxy_from_json(value) {
+            return p;
+        }
+    }
+    for name in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ] {
+        if let Some(p) = env_proxy(name) {
+            return p;
+        }
+    }
+    AdapterProxyConfig::default()
+}
+
+fn env_proxy(name: &str) -> Option<AdapterProxyConfig> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .and_then(|url| proxy_from_url(&url))
+}
+
+fn proxy_from_json(value: &serde_json::Value) -> Option<AdapterProxyConfig> {
+    if let Some(text) = value.as_str() {
+        return proxy_from_url(text);
+    }
+    let obj = value.as_object()?;
+    let http = obj
+        .get("http_proxy")
+        .or_else(|| obj.get("http"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let socks = obj
+        .get("socks_proxy")
+        .or_else(|| obj.get("socks5"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if http.is_none() && socks.is_none() {
+        return None;
+    }
+    Some(AdapterProxyConfig {
+        http_proxy: http,
+        socks_proxy: socks,
+    })
+}
+
+fn proxy_from_url(url: &str) -> Option<AdapterProxyConfig> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("socks5://") || lower.starts_with("socks5h://") {
+        Some(AdapterProxyConfig {
+            http_proxy: None,
+            socks_proxy: Some(trimmed.to_string()),
+        })
+    } else {
+        Some(AdapterProxyConfig {
+            http_proxy: Some(trimmed.to_string()),
+            socks_proxy: None,
+        })
     }
 }
 
@@ -417,5 +499,16 @@ mod tests {
         assert_ne!(i & (1 << 1), 0, "GUILD_MEMBERS");
         assert_ne!(i & (1 << 12), 0, "DIRECT_MESSAGES");
         assert_ne!(i & (1 << 15), 0, "MESSAGE_CONTENT");
+    }
+
+    #[test]
+    fn proxy_from_url_http_and_socks() {
+        let http = proxy_from_url("http://127.0.0.1:7897").unwrap();
+        assert_eq!(http.http_proxy.as_deref(), Some("http://127.0.0.1:7897"));
+        assert!(http.socks_proxy.is_none());
+
+        let socks = proxy_from_url("socks5://127.0.0.1:7897").unwrap();
+        assert!(socks.http_proxy.is_none());
+        assert_eq!(socks.socks_proxy.as_deref(), Some("socks5://127.0.0.1:7897"));
     }
 }

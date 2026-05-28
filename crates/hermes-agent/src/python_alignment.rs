@@ -23,6 +23,19 @@ use serde_json::Value;
 
 use hermes_core::{Message, MessageRole, ToolResult};
 
+/// Strip persisted/ephemeral system prompts from gateway history before `run_conversation`.
+///
+/// Python `gateway` paths use `_filter_history` so `agent_history` is only user/assistant/tool
+/// turns. Without this, each turn prepends `stored_system_prompt` **and** replays old `system`
+/// rows from SQLite, then `leading_system_prompt_for_persist` concatenates them → exponential growth.
+pub fn strip_system_messages_from_history(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .filter(|m| m.role != MessageRole::System)
+        .cloned()
+        .collect()
+}
+
 /// Synthetic user nudge after a Codex intermediate ack (Python `run_agent.py`).
 pub const CODEX_CONTINUE_USER_MESSAGE: &str = "[System: Continue now. Execute the required tool calls and only send your final answer after completing the task.]";
 

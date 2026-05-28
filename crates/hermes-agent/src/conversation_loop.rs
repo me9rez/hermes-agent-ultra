@@ -10,7 +10,7 @@ use hermes_core::{AgentError, AgentResult, Message, MessageRole, StreamChunk, To
 
 use crate::agent_loop::AgentLoop;
 use crate::plugins::{HookResult, HookType};
-use crate::python_alignment::sanitize_surrogates;
+use crate::python_alignment::{sanitize_surrogates, strip_system_messages_from_history};
 use crate::session_persistence::{leading_system_prompt_for_persist, SessionPersistence};
 
 /// Inputs for one `run_conversation` call (Python `run_conversation` kwargs).
@@ -60,6 +60,7 @@ pub struct PreparedTurn {
 pub fn split_messages_for_run_conversation(
     messages: Vec<Message>,
 ) -> Option<(Vec<Message>, String)> {
+    let messages = strip_system_messages_from_history(&messages);
     let idx = messages
         .iter()
         .rposition(|m| m.role == MessageRole::User)?;
@@ -153,9 +154,11 @@ impl AgentLoop {
             *slot = Some(task_id.clone());
         }
 
-        self.hydrate_memory_nudge_counters_from_history(&params.conversation_history);
+        let conversation_history =
+            strip_system_messages_from_history(&params.conversation_history);
+        self.hydrate_memory_nudge_counters_from_history(&conversation_history);
 
-        let mut messages: Vec<Message> = params.conversation_history.clone();
+        let mut messages: Vec<Message> = conversation_history;
         messages.push(Message::user(user_message));
 
         self.apply_turn_message_prelude(&mut messages).await;
@@ -274,12 +277,14 @@ impl AgentLoop {
             return;
         }
         let sp = SessionPersistence::new(Path::new(home));
+        // Transcript: user/assistant/tool only — system belongs in `sessions.system_prompt`.
+        let transcript = strip_system_messages_from_history(messages);
         let sys = leading_system_prompt_for_persist(messages);
         let platform = cfg.platform.as_deref();
         let model = self.active_model();
         if let Err(err) = sp.persist_session(
             sid,
-            messages,
+            &transcript,
             Some(model.as_str()),
             platform,
             None,
@@ -301,6 +306,20 @@ impl AgentLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_messages_strips_system_from_history() {
+        let messages = vec![
+            Message::system("You are helpful."),
+            Message::user("old"),
+            Message::assistant("hi"),
+            Message::user("new"),
+        ];
+        let (hist, user) = split_messages_for_run_conversation(messages).expect("split");
+        assert_eq!(user, "new");
+        assert_eq!(hist.len(), 2);
+        assert!(hist.iter().all(|m| m.role != MessageRole::System));
+    }
 
     #[test]
     fn split_messages_peels_last_user() {

@@ -373,6 +373,19 @@ pub fn separate_text_and_calls(content: &str) -> (String, Vec<ToolCall>) {
     let bare_tool_call_re = Regex::new(r"(?s)<tool_call>\s*.*?\s*</tool_call>").unwrap();
     result = bare_tool_call_re.replace_all(&result, "").to_string();
 
+    // Remove namespace-prefixed tool_call wrappers (e.g. <minimax:tool_call>...</minimax:tool_call>)
+    let ns_tool_call_re =
+        Regex::new(r#"(?s)<\w+:tool_call[^>]*>.*?</\w+:tool_call>"#).unwrap();
+    result = ns_tool_call_re.replace_all(&result, "").to_string();
+
+    // Remove standalone <invoke name="...">...</invoke> blocks (without <function_calls>)
+    let standalone_invoke_re = Regex::new(r#"(?s)<invoke\s+name="[^"]+">.*?</invoke>"#).unwrap();
+    result = standalone_invoke_re.replace_all(&result, "").to_string();
+
+    // Remove orphan <parameter name="...">...</parameter> tags left behind
+    let parameter_re = Regex::new(r#"<parameter\s+name="[^"]+">.*?</parameter>"#).unwrap();
+    result = parameter_re.replace_all(&result, "").to_string();
+
     // Trim excessive whitespace left behind
     let result = result.trim().to_string();
 
@@ -699,5 +712,78 @@ Proceeding now.
         assert_eq!(args["count"], 42);
         assert_eq!(args["enabled"], true);
         assert_eq!(args["label"], "hello world");
+    }
+
+    #[test]
+    fn test_parse_standalone_invoke_not_parsed_without_function_calls_wrapper() {
+        let content = r#"<invoke name="dispatch_async">
+<parameter name="tool_name">send_message</parameter>
+<parameter name="params">{"platform": "wecom", "recipient": "self", "message": "hello"}</parameter>
+</invoke>"#;
+        let calls = parse_tool_calls(content).unwrap();
+        // Standalone <invoke> without <function_calls> wrapper should NOT be parsed
+        // as a tool call (avoids executing unintended tool dispatches in cron context).
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_minimax_tool_call_not_parsed() {
+        let content = r#"<minimax:tool_call>
+<invoke name="dispatch_async">
+<parameter name="tool_name">send_message</parameter>
+<parameter name="params">{"message": "hello"}</parameter>
+</invoke>
+</minimax:tool_call>"#;
+        let calls = parse_tool_calls(content).unwrap();
+        // Namespace-prefixed wrappers should NOT be parsed as tool calls.
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_separate_text_and_calls_strips_standalone_invoke() {
+        let content = r#"I will remind you.
+<invoke name="dispatch_async">
+<parameter name="tool_name">send_message</parameter>
+<parameter name="params">{"message": "time"}</parameter>
+</invoke>"#;
+        let (text, calls) = separate_text_and_calls(content);
+        // Standalone <invoke> without <function_calls> is NOT parsed as a tool call.
+        assert!(calls.is_empty());
+        // But the XML markup is still stripped from the plain text.
+        assert!(text.contains("I will remind you"));
+        assert!(!text.contains("<invoke"));
+    }
+
+    #[test]
+    fn test_separate_text_and_calls_strips_minimax_tool_call_wrapper() {
+        let content = r#"Proceeding.
+<minimax:tool_call>
+<invoke name="dispatch_async">
+<parameter name="tool_name">send_message</parameter>
+<parameter name="params">{"message": "hi"}</parameter>
+</invoke>
+</minimax:tool_call>"#;
+        let (text, calls) = separate_text_and_calls(content);
+        // Namespace-prefixed wrappers are NOT parsed as tool calls.
+        assert!(calls.is_empty());
+        // But the markup is stripped from the plain text.
+        assert_eq!(text.trim(), "Proceeding.");
+        assert!(!text.contains("minimax:tool_call"));
+        assert!(!text.contains("<invoke"));
+        assert!(!text.contains("<parameter"));
+    }
+
+    #[test]
+    fn test_parse_standalone_invoke_multiple_not_parsed() {
+        let content = r#"
+<invoke name="search">
+<parameter name="query">test</parameter>
+</invoke>
+<invoke name="read">
+<parameter name="path">file.txt</parameter>
+</invoke>"#;
+        let calls = parse_tool_calls(content).unwrap();
+        // Standalone <invoke> blocks without <function_calls> should NOT be parsed.
+        assert!(calls.is_empty());
     }
 }

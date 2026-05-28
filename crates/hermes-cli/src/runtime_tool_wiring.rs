@@ -65,8 +65,12 @@ pub fn wire_gateway_messaging_backend(
 pub fn wire_cron_scheduler_backend(
     tool_registry: &Arc<ToolRegistry>,
     scheduler: Arc<CronScheduler>,
+    session_context: Arc<MessagingSessionContext>,
 ) {
-    let backend = Arc::new(ScheduledCronjobBackend::new(scheduler));
+    let backend = Arc::new(ScheduledCronjobBackend::with_session_context(
+        scheduler,
+        session_context,
+    ));
     let handler: Arc<dyn ToolHandler> = Arc::new(CronjobHandler::new(backend));
     register_runtime_tool(
         tool_registry,
@@ -389,7 +393,8 @@ mod tests {
         let scheduler = Arc::new(CronScheduler::new(persistence, runner));
 
         let registry = Arc::new(ToolRegistry::new());
-        wire_cron_scheduler_backend(&registry, scheduler);
+        let session = MessagingSessionContext::new();
+        wire_cron_scheduler_backend(&registry, scheduler, session);
 
         let create = registry
             .dispatch_async(

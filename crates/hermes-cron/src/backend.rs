@@ -12,18 +12,36 @@ use serde_json::{json, Value};
 
 use hermes_core::ToolError;
 use hermes_tools::tools::cronjob::CronjobBackend;
+use hermes_tools::tools::messaging::MessagingSessionContext;
 
 use crate::job::{CronJob, JobStatus};
+use crate::python_job::JobOrigin;
 use crate::scheduler::{CronError, CronScheduler};
 
 /// A [`CronjobBackend`] that delegates to a running [`CronScheduler`].
 pub struct ScheduledCronjobBackend {
     scheduler: Arc<CronScheduler>,
+    /// Optional session context for auto-capturing origin (platform + chat_id).
+    session_context: Option<Arc<MessagingSessionContext>>,
 }
 
 impl ScheduledCronjobBackend {
     pub fn new(scheduler: Arc<CronScheduler>) -> Self {
-        Self { scheduler }
+        Self {
+            scheduler,
+            session_context: None,
+        }
+    }
+
+    /// Create a backend that auto-captures origin from the messaging session.
+    pub fn with_session_context(
+        scheduler: Arc<CronScheduler>,
+        session_context: Arc<MessagingSessionContext>,
+    ) -> Self {
+        Self {
+            scheduler,
+            session_context: Some(session_context),
+        }
     }
 
     pub fn scheduler(&self) -> &Arc<CronScheduler> {
@@ -144,6 +162,17 @@ impl CronjobBackend for ScheduledCronjobBackend {
             self.validate_context_refs_exist(refs).await?;
         }
         job.context_from = context_from.clone();
+
+        // Auto-capture origin from messaging session (platform + chat_id).
+        if let Some(ref session) = self.session_context {
+            if let Some((platform, chat_id)) = session.get() {
+                job.origin = Some(JobOrigin {
+                    platform,
+                    chat_id: Some(chat_id),
+                    thread_id: None,
+                });
+            }
+        }
 
         let id = self
             .scheduler

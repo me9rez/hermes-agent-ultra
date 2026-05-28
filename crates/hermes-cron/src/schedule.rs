@@ -1,6 +1,6 @@
 //! Python-parity schedule parsing and next-run computation (`cron/jobs.py`).
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset, Offset, Utc};
 use cron::Schedule;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -284,18 +284,77 @@ pub fn normalize_cron_expr(expr: &str) -> String {
     }
 }
 
+/// Get the cron timezone offset.
+///
+/// First checks `HERMES_CRON_TZ` env var (e.g. `+08:00`, `-5`).
+/// Falls back to the OS local timezone via `chrono::Local::now().offset()`.
+fn cron_timezone_offset() -> Option<FixedOffset> {
+    if let Some(offset) = std::env::var("HERMES_CRON_TZ")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|raw| parse_offset(&raw))
+    {
+        return Some(offset);
+    }
+    // Auto-detect from OS local timezone
+    let local_offset = chrono::Local::now().offset().fix();
+    if local_offset.local_minus_utc() == 0 {
+        // UTC: effectively no timezone adjustment needed
+        return None;
+    }
+    Some(local_offset)
+}
+
+fn parse_offset(raw: &str) -> Option<FixedOffset> {
+    let trimmed = raw.trim();
+    // "+08:00", "-05:00"
+    if let Some(rest) = trimmed.strip_prefix('+') {
+        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+        let hours: i32 = parts[0].parse().ok()?;
+        let mins: i32 = parts.get(1).unwrap_or(&"0").parse().ok()?;
+        return FixedOffset::east_opt(hours * 3600 + mins * 60);
+    }
+    if let Some(rest) = trimmed.strip_prefix('-') {
+        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+        let hours: i32 = parts[0].parse().ok()?;
+        let mins: i32 = parts.get(1).unwrap_or(&"0").parse().ok()?;
+        return FixedOffset::west_opt(hours * 3600 + mins * 60);
+    }
+    // bare number like "8" (positive = east)
+    if let Ok(hours) = trimmed.parse::<i32>() {
+        if hours >= 0 {
+            return FixedOffset::east_opt(hours * 3600);
+        } else {
+            return FixedOffset::west_opt((-hours) * 3600);
+        }
+    }
+    None
+}
+
+/// Compute next cron match, optionally interpreting the expression in a local timezone.
+///
+/// When `HERMES_CRON_TZ` is set (e.g. `+08:00`), cron expressions like `0 19 * * *`
+/// are interpreted as local time (19:00 Beijing → 11:00 UTC).
 fn parse_cron_next(expr: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let normalized = normalize_cron_expr(expr);
-    normalized
-        .parse::<Schedule>()
-        .ok()?
-        .after(&after)
-        .next()
+    let schedule = normalized.parse::<Schedule>().ok()?;
+
+    if let Some(offset) = cron_timezone_offset() {
+        // Convert `after` to local time, find next cron match, convert back to UTC.
+        let after_local = after.with_timezone(&offset);
+        schedule
+            .after(&after_local)
+            .next()
+            .map(|dt| dt.with_timezone(&Utc))
+    } else {
+        schedule.after(&after).next()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
 
     #[test]
     fn parse_every_2h() {
@@ -336,5 +395,52 @@ mod tests {
     #[test]
     fn invalid_schedule_rejected() {
         assert!(parse_schedule("not_a_schedule").is_err());
+    }
+
+    #[test]
+    fn parse_offset_positive() {
+        let offset = parse_offset("+08:00").expect("+08:00");
+        assert_eq!(offset, FixedOffset::east_opt(8 * 3600).unwrap());
+    }
+
+    #[test]
+    fn parse_offset_negative() {
+        let offset = parse_offset("-05:00").expect("-05:00");
+        assert_eq!(offset, FixedOffset::west_opt(5 * 3600).unwrap());
+    }
+
+    #[test]
+    fn parse_offset_bare_number() {
+        let offset = parse_offset("8").expect("8");
+        assert_eq!(offset, FixedOffset::east_opt(8 * 3600).unwrap());
+
+        let offset = parse_offset("-3").expect("-3");
+        assert_eq!(offset, FixedOffset::west_opt(3 * 3600).unwrap());
+    }
+
+    #[test]
+    fn parse_offset_invalid_returns_none() {
+        assert!(parse_offset("garbage").is_none());
+        assert!(parse_offset("").is_none());
+    }
+
+    #[test]
+    fn cron_next_with_timezone_offset() {
+        // Test that interpreting "0 19 * * *" in UTC+8 produces UTC 11:00.
+        // This is the core timezone logic, independent of the auto-detection env var.
+        let expr = "0 19 * * *";
+        let now_utc = Utc::now();
+
+        let offset = FixedOffset::east_opt(8 * 3600).unwrap();
+        let after_local = now_utc.with_timezone(&offset);
+        let schedule = normalize_cron_expr(expr).parse::<Schedule>().unwrap();
+        let next = schedule.after(&after_local).next().unwrap();
+        let next_utc = next.with_timezone(&Utc);
+        // 19:00 in UTC+8 → 11:00 UTC
+        assert_eq!(next_utc.hour(), 11);
+
+        // Without timezone conversion (pure UTC): 19:00 UTC stays 19:00
+        let next_utc_raw = schedule.after(&now_utc).next().unwrap();
+        assert_eq!(next_utc_raw.hour(), 19);
     }
 }

@@ -30,6 +30,7 @@ use hermes_core::ToolSchema;
 use hermes_core::{AgentError, LlmProvider};
 use hermes_cron::cron_scheduler_for_data_dir;
 use hermes_skills::{FileSkillStore, SkillManager};
+use hermes_tools::tools::messaging::MessagingSessionContext;
 use hermes_tools::ToolRegistry;
 
 use crate::alpha_runtime::{
@@ -2077,7 +2078,7 @@ impl App {
             .await
             .map_err(|e| AgentError::Config(format!("cron load: {e}")))?;
         cron_scheduler.start().await;
-        wire_cron_scheduler_backend(&tool_registry, cron_scheduler);
+        wire_cron_scheduler_backend(&tool_registry, cron_scheduler, MessagingSessionContext::new());
         let agent_tool_registry = Arc::new(bridge_tool_registry(&tool_registry));
         let tool_schemas =
             crate::platform_toolsets::resolve_platform_tool_schemas(&config, "cli", &tool_registry);

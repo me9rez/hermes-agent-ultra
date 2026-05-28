@@ -13,6 +13,7 @@ use std::time::Duration as StdDuration;
 
 use hermes_agent::agent_loop::ToolRegistry;
 use hermes_agent::{AgentConfig, AgentLoop};
+use hermes_core::tool_call_parser::separate_text_and_calls;
 use hermes_core::{AgentResult, LlmProvider, Message, ToolSchema};
 use regex::Regex;
 use tokio::process::Command;
@@ -322,6 +323,14 @@ impl CronRunner {
                 }
             })
             .unwrap_or_else(|| "(no output)".to_string());
+        // Strip any tool-call XML that may have leaked into the output
+        // (e.g. standalone <invoke> blocks, namespace-prefixed wrappers)
+        let (clean_text, _) = separate_text_and_calls(&text);
+        let text = if clean_text.trim().is_empty() {
+            text
+        } else {
+            clean_text
+        };
         if text.trim().is_empty() || text.trim_start().starts_with("[SILENT]") {
             tracing::debug!("Suppressing cron delivery due to silent response gate");
             return None;

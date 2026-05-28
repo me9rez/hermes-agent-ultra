@@ -50,6 +50,15 @@ pub async fn deliver_cron_completion_to_webhooks(
     let body =
         serde_json::to_value(event).map_err(|e| AgentError::Io(format!("webhook json: {e}")))?;
 
+    // Gracefully handle missing file (same as load_webhook_store).
+    if !webhooks_json.exists() {
+        tracing::debug!(
+            "webhooks file not found: {}; skip HTTP delivery",
+            webhooks_json.display()
+        );
+        return Ok(());
+    }
+
     let raw = tokio::fs::read_to_string(webhooks_json)
         .await
         .map_err(|e| AgentError::Io(format!("read {}: {}", webhooks_json.display(), e)))?;

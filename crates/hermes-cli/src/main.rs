@@ -3304,7 +3304,7 @@ async fn run_gateway(
                 .map_err(|e| AgentError::Config(format!("cron load: {e}")))?;
             cron_scheduler.start().await;
             let cron_scheduler = Arc::new(cron_scheduler);
-            wire_cron_scheduler_backend(&tool_registry, cron_scheduler.clone());
+            wire_cron_scheduler_backend(&tool_registry, cron_scheduler.clone(), messaging_session.clone());
             wire_gateway_messaging_backend(
                 &tool_registry,
                 gateway.clone(),

@@ -21,6 +21,7 @@ use hermes_core::AgentError;
 use hermes_intelligence::model_metadata::{get_model_context_length, get_model_info};
 use hermes_intelligence::models_dev::default_client;
 use hermes_intelligence::{build_swarm_execution_plan, swarm_runtime_status, SwarmExecutionMode};
+use hermes_tools::tools::messaging::MessagingSessionContext;
 use hermes_tools::ToolPolicyEngine;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -18860,7 +18861,7 @@ pub async fn handle_cli_chat(
             .await
             .map_err(|e| hermes_core::AgentError::Config(format!("cron load: {e}")))?;
         cron_scheduler.start().await;
-        wire_cron_scheduler_backend(&tool_registry, cron_scheduler);
+        wire_cron_scheduler_backend(&tool_registry, cron_scheduler, MessagingSessionContext::new());
         crate::platform_toolsets::resolve_platform_tool_schemas(&config, "cli", &tool_registry)
     } else {
         Vec::new()
@@ -24080,7 +24081,7 @@ pub async fn handle_cli_acp(action: Option<String>) -> Result<(), hermes_core::A
                 .await
                 .map_err(|e| hermes_core::AgentError::Config(format!("cron load: {e}")))?;
             cron_scheduler.start().await;
-            crate::runtime_tool_wiring::wire_cron_scheduler_backend(&tool_registry, cron_scheduler);
+            crate::runtime_tool_wiring::wire_cron_scheduler_backend(&tool_registry, cron_scheduler, MessagingSessionContext::new());
             let tool_schemas = crate::platform_toolsets::resolve_platform_tool_schemas(
                 &config,
                 "cli",

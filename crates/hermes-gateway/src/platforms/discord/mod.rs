@@ -1,5 +1,6 @@
 //! Discord Bot API adapter (REST outbound + Gateway WebSocket inbound).
 
+mod allowed_mentions;
 mod auth;
 mod config;
 mod dedup;
@@ -25,8 +26,10 @@ use crate::adapter::{describe_secret, BasePlatformAdapter};
 use crate::gateway::IncomingMessage;
 
 pub use config::{
-    default_intents, ChannelIdSet, DiscordConfig, DISCORD_API_BASE, MAX_MESSAGE_LENGTH,
+    default_intents, ChannelIdSet, DiscordConfig, ReplyToMode, DISCORD_API_BASE,
+    MAX_MESSAGE_LENGTH,
 };
+pub use allowed_mentions::{parse_bool_like, DiscordAllowedMentions};
 pub use dedup::MessageDedup;
 pub use filter::{should_accept_message, DiscordInboundConfig};
 pub use parse::{
@@ -110,6 +113,17 @@ impl DiscordAdapter {
         content: &str,
     ) -> Result<Vec<String>, GatewayError> {
         self.inner.send_text(channel_id, content).await
+    }
+
+    pub async fn send_text_with_reply(
+        &self,
+        channel_id: &str,
+        content: &str,
+        reply_to_message_id: Option<&str>,
+    ) -> Result<Vec<String>, GatewayError> {
+        self.inner
+            .send_text_with_reply(channel_id, content, reply_to_message_id)
+            .await
     }
 
     pub async fn edit_text(
@@ -284,9 +298,23 @@ impl PlatformAdapter for DiscordAdapter {
         &self,
         chat_id: &str,
         text: &str,
-        _parse_mode: Option<ParseMode>,
+        parse_mode: Option<ParseMode>,
     ) -> Result<Option<String>, GatewayError> {
-        let ids = self.send_text(chat_id, text).await?;
+        self.send_message_replying(chat_id, text, parse_mode, None)
+            .await
+    }
+
+    async fn send_message_replying(
+        &self,
+        chat_id: &str,
+        text: &str,
+        parse_mode: Option<ParseMode>,
+        reply_to_message_id: Option<&str>,
+    ) -> Result<Option<String>, GatewayError> {
+        let formatted = Self::format_outbound(text, parse_mode);
+        let ids = self
+            .send_text_with_reply(chat_id, &formatted, reply_to_message_id)
+            .await?;
         Ok(ids.into_iter().next())
     }
 
@@ -296,7 +324,8 @@ impl PlatformAdapter for DiscordAdapter {
         message_id: &str,
         text: &str,
     ) -> Result<(), GatewayError> {
-        self.edit_text(chat_id, message_id, text).await
+        let formatted = Self::format_outbound(text, None);
+        self.edit_text(chat_id, message_id, &formatted).await
     }
 
     async fn send_file(
@@ -373,6 +402,13 @@ impl PlatformAdapter for DiscordAdapter {
 }
 
 impl DiscordAdapter {
+    fn format_outbound(text: &str, parse_mode: Option<ParseMode>) -> String {
+        match parse_mode {
+            Some(ParseMode::Plain) => text.to_string(),
+            _ => crate::markdown_split::to_discord_markdown(text),
+        }
+    }
+
     fn map_reaction_emoji(emoji: &str) -> &str {
         match emoji {
             "eyes" => "👀",

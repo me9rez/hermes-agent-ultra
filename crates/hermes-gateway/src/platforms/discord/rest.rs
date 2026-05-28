@@ -4,7 +4,7 @@ use tracing::info;
 
 use hermes_core::errors::GatewayError;
 
-use super::config::{DISCORD_API_BASE, MAX_MESSAGE_LENGTH};
+use super::config::MAX_MESSAGE_LENGTH;
 use super::gateway_loop::DiscordInner;
 use super::types::{DiscordEmbed, DiscordMessage, DiscordThread, SlashCommand};
 
@@ -49,8 +49,48 @@ pub fn encode_emoji(emoji: &str) -> String {
 }
 
 impl DiscordInner {
+    fn rest_api(&self) -> &str {
+        &self.config.rest_api_base
+    }
+
     pub(crate) fn auth_header(&self) -> String {
         auth_header(&self.config.token)
+    }
+
+    async fn post_message(
+        &self,
+        channel_id: &str,
+        content: &str,
+        reply_to_message_id: Option<&str>,
+    ) -> Result<String, GatewayError> {
+        let url = format!("{}/channels/{channel_id}/messages", self.rest_api());
+        let mut body = serde_json::json!({
+            "content": content,
+            "allowed_mentions": self.config.allowed_mentions.to_api_value(),
+        });
+        if let Some(ref_id) = reply_to_message_id {
+            body["message_reference"] = serde_json::json!({
+                "message_id": ref_id,
+                "fail_if_not_exists": false,
+            });
+        }
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| GatewayError::SendFailed(format!("Discord send failed: {e}")))?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(GatewayError::SendFailed(format!("Discord API error: {text}")));
+        }
+        let msg: DiscordMessage = resp.json().await.map_err(|e| {
+            GatewayError::SendFailed(format!("Failed to parse Discord response: {e}"))
+        })?;
+        Ok(msg.id)
     }
 
     pub async fn send_text(
@@ -58,28 +98,22 @@ impl DiscordInner {
         channel_id: &str,
         content: &str,
     ) -> Result<Vec<String>, GatewayError> {
+        self.send_text_with_reply(channel_id, content, None).await
+    }
+
+    pub async fn send_text_with_reply(
+        &self,
+        channel_id: &str,
+        content: &str,
+        reply_to_message_id: Option<&str>,
+    ) -> Result<Vec<String>, GatewayError> {
         let chunks = split_message(content, MAX_MESSAGE_LENGTH);
+        let mode = self.config.reply_to_mode;
         let mut message_ids = Vec::new();
-        for chunk in &chunks {
-            let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
-            let body = serde_json::json!({ "content": chunk });
-            let resp = self
-                .client
-                .post(&url)
-                .header("Authorization", self.auth_header())
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| GatewayError::SendFailed(format!("Discord send failed: {e}")))?;
-            if !resp.status().is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(GatewayError::SendFailed(format!("Discord API error: {text}")));
-            }
-            let msg: DiscordMessage = resp.json().await.map_err(|e| {
-                GatewayError::SendFailed(format!("Failed to parse Discord response: {e}"))
-            })?;
-            message_ids.push(msg.id);
+        for (index, chunk) in chunks.iter().enumerate() {
+            let ref_id = mode.reference_for_index(index, reply_to_message_id);
+            let id = self.post_message(channel_id, chunk, ref_id).await?;
+            message_ids.push(id);
         }
         Ok(message_ids)
     }
@@ -91,10 +125,12 @@ impl DiscordInner {
         content: &str,
     ) -> Result<(), GatewayError> {
         let url = format!(
-            "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}"
+            "{}/channels/{channel_id}/messages/{message_id}",
+            self.rest_api()
         );
         let body = serde_json::json!({
             "content": &content[..content.len().min(MAX_MESSAGE_LENGTH)],
+            "allowed_mentions": self.config.allowed_mentions.to_api_value(),
         });
         let resp = self
             .client
@@ -118,7 +154,7 @@ impl DiscordInner {
         content: Option<&str>,
         embeds: &[DiscordEmbed],
     ) -> Result<String, GatewayError> {
-        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
+        let url = format!("{}/channels/{channel_id}/messages", self.rest_api());
         let mut body = serde_json::json!({ "embeds": embeds });
         if let Some(text) = content {
             body["content"] = serde_json::Value::String(text.to_string());
@@ -148,7 +184,7 @@ impl DiscordInner {
         file_path: &str,
         caption: Option<&str>,
     ) -> Result<String, GatewayError> {
-        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
+        let url = format!("{}/channels/{channel_id}/messages", self.rest_api());
         let file_bytes = tokio::fs::read(file_path).await.map_err(|e| {
             GatewayError::SendFailed(format!("Failed to read file {file_path}: {e}"))
         })?;
@@ -184,7 +220,7 @@ impl DiscordInner {
     }
 
     pub async fn trigger_typing(&self, channel_id: &str) -> Result<(), GatewayError> {
-        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/typing");
+        let url = format!("{}/channels/{channel_id}/typing", self.rest_api());
         let resp = self
             .client
             .post(&url)
@@ -210,7 +246,8 @@ impl DiscordInner {
     ) -> Result<(), GatewayError> {
         let encoded = encode_emoji(emoji);
         let url = format!(
-            "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me"
+            "{}/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me",
+            self.rest_api()
         );
         let resp = self
             .client
@@ -237,7 +274,8 @@ impl DiscordInner {
     ) -> Result<(), GatewayError> {
         let encoded = encode_emoji(emoji);
         let url = format!(
-            "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me"
+            "{}/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me",
+            self.rest_api()
         );
         let resp = self
             .client
@@ -263,7 +301,8 @@ impl DiscordInner {
         auto_archive_duration: Option<u32>,
     ) -> Result<DiscordThread, GatewayError> {
         let url = format!(
-            "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}/threads"
+            "{}/channels/{channel_id}/messages/{message_id}/threads",
+            self.rest_api()
         );
         let mut body = serde_json::json!({ "name": name });
         if let Some(dur) = auto_archive_duration {
@@ -293,7 +332,7 @@ impl DiscordInner {
         let app_id = self.config.application_id.as_deref().ok_or_else(|| {
             GatewayError::Platform("application_id required for slash commands".into())
         })?;
-        let url = format!("{DISCORD_API_BASE}/applications/{app_id}/commands");
+        let url = format!("{}/applications/{app_id}/commands", self.rest_api());
         let resp = self
             .client
             .put(&url)
@@ -321,7 +360,10 @@ impl DiscordInner {
         let app_id = self.config.application_id.as_deref().ok_or_else(|| {
             GatewayError::Platform("application_id required for slash commands".into())
         })?;
-        let url = format!("{DISCORD_API_BASE}/applications/{app_id}/guilds/{guild_id}/commands");
+        let url = format!(
+            "{}/applications/{app_id}/guilds/{guild_id}/commands",
+            self.rest_api()
+        );
         let resp = self
             .client
             .put(&url)
@@ -360,7 +402,8 @@ impl DiscordInner {
         ephemeral: bool,
     ) -> Result<(), GatewayError> {
         let url = format!(
-            "{DISCORD_API_BASE}/interactions/{interaction_id}/{interaction_token}/callback"
+            "{}/interactions/{interaction_id}/{interaction_token}/callback",
+            self.rest_api()
         );
         let mut data = serde_json::json!({
             "content": &content[..content.len().min(MAX_MESSAGE_LENGTH)],
@@ -399,7 +442,8 @@ impl DiscordInner {
     ) -> Result<(), GatewayError> {
         let app_id = self.interaction_application_id()?;
         let url = format!(
-            "{DISCORD_API_BASE}/webhooks/{app_id}/{interaction_token}/messages/@original"
+            "{}/webhooks/{app_id}/{interaction_token}/messages/@original",
+            self.rest_api()
         );
         let body = serde_json::json!({
             "content": &content[..content.len().min(MAX_MESSAGE_LENGTH)],
@@ -429,7 +473,10 @@ impl DiscordInner {
         content: &str,
     ) -> Result<(), GatewayError> {
         let app_id = self.interaction_application_id()?;
-        let url = format!("{DISCORD_API_BASE}/webhooks/{app_id}/{interaction_token}");
+        let url = format!(
+            "{}/webhooks/{app_id}/{interaction_token}",
+            self.rest_api()
+        );
         let body = serde_json::json!({
             "content": &content[..content.len().min(MAX_MESSAGE_LENGTH)],
         });
@@ -484,7 +531,8 @@ impl DiscordInner {
         interaction_token: &str,
     ) -> Result<(), GatewayError> {
         let url = format!(
-            "{DISCORD_API_BASE}/interactions/{interaction_id}/{interaction_token}/callback"
+            "{}/interactions/{interaction_id}/{interaction_token}/callback",
+            self.rest_api()
         );
         let body = serde_json::json!({ "type": 5 });
         let resp = self

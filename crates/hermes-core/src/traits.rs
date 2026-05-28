@@ -91,7 +91,22 @@ pub trait PlatformAdapter: Send + Sync {
         text: &str,
         parse_mode: Option<ParseMode>,
     ) -> Result<Option<String>, GatewayError> {
-        let _ = self.send_message(chat_id, text, parse_mode).await?;
+        let id = self
+            .send_message_replying(chat_id, text, parse_mode, None)
+            .await?;
+        Ok(id)
+    }
+
+    /// Send a text message, optionally reply-referencing an inbound message id.
+    async fn send_message_replying(
+        &self,
+        chat_id: &str,
+        text: &str,
+        parse_mode: Option<ParseMode>,
+        reply_to_message_id: Option<&str>,
+    ) -> Result<Option<String>, GatewayError> {
+        let _ = reply_to_message_id;
+        self.send_message(chat_id, text, parse_mode).await?;
         Ok(None)
     }
 

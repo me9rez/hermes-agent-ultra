@@ -6,6 +6,40 @@ use hermes_config::PlatformConfig;
 
 use crate::adapter::AdapterProxyConfig;
 
+use super::allowed_mentions::DiscordAllowedMentions;
+
+/// How outbound messages reference the triggering user message (P2-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplyToMode {
+    Off,
+    #[default]
+    First,
+    All,
+}
+
+impl ReplyToMode {
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("off") => Self::Off,
+            Some("all") => Self::All,
+            Some("first") => Self::First,
+            Some("") | None => Self::First,
+            Some(_) => Self::First,
+        }
+    }
+
+    /// Whether chunk `index` should include `message_reference` for `reply_to_id`.
+    pub fn reference_for_index(self, index: usize, reply_to_id: Option<&str>) -> Option<&str> {
+        let id = reply_to_id.filter(|s| !s.trim().is_empty())?;
+        match self {
+            ReplyToMode::Off => None,
+            ReplyToMode::First if index == 0 => Some(id),
+            ReplyToMode::All => Some(id),
+            _ => None,
+        }
+    }
+}
+
 /// Maximum message length for Discord (2000 characters).
 pub const MAX_MESSAGE_LENGTH: usize = 2000;
 
@@ -136,6 +170,15 @@ pub struct DiscordConfig {
 
     /// Channels where auto-thread is disabled.
     pub no_thread_channels: ChannelIdSet,
+
+    /// Reply-reference behavior for outbound messages (P2-1).
+    pub reply_to_mode: ReplyToMode,
+
+    /// Outbound mention policy (P2-2).
+    pub allowed_mentions: DiscordAllowedMentions,
+
+    /// REST API base URL (`https://discord.com/api/v10` in production).
+    pub rest_api_base: String,
 }
 
 impl DiscordConfig {
@@ -172,6 +215,8 @@ impl DiscordConfig {
     /// Build adapter config from gateway `PlatformConfig` + resolved bot token.
     pub fn from_platform(platform_cfg: &PlatformConfig, token: String) -> Self {
         let reactions_enabled = parse_reactions_enabled(platform_cfg);
+        let reply_to_mode = parse_reply_to_mode(platform_cfg);
+        let allowed_mentions = DiscordAllowedMentions::from_platform(platform_cfg);
         Self {
             token,
             application_id: extra_string(platform_cfg, "application_id"),
@@ -221,10 +266,13 @@ impl DiscordConfig {
                 env_channel_list("DISCORD_NO_THREAD_CHANNELS").as_deref(),
                 extra_string(platform_cfg, "no_thread_channels").as_deref(),
             ),
+            reply_to_mode,
+            allowed_mentions,
+            rest_api_base: DISCORD_API_BASE.to_string(),
         }
     }
 
-    #[cfg(test)]
+    /// Minimal config for unit/integration tests.
     pub fn for_test(token: &str) -> Self {
         Self {
             token: token.into(),
@@ -244,8 +292,21 @@ impl DiscordConfig {
             dm_role_auth_guild: None,
             auto_thread: false,
             no_thread_channels: ChannelIdSet::new(),
+            reply_to_mode: ReplyToMode::First,
+            allowed_mentions: DiscordAllowedMentions::default(),
+            rest_api_base: DISCORD_API_BASE.to_string(),
         }
     }
+}
+
+fn parse_reply_to_mode(platform_cfg: &PlatformConfig) -> ReplyToMode {
+    if let Some(text) = extra_string(platform_cfg, "reply_to_mode") {
+        return ReplyToMode::parse(Some(&text));
+    }
+    if let Ok(text) = std::env::var("DISCORD_REPLY_TO_MODE") {
+        return ReplyToMode::parse(Some(&text));
+    }
+    ReplyToMode::First
 }
 
 /// Resolve proxy for Discord (REST + Gateway WebSocket).
@@ -561,5 +622,23 @@ mod tests {
         let cfg = PlatformConfig::default();
         let discord = DiscordConfig::from_platform(&cfg, "token".into());
         assert!(discord.reactions_enabled);
+    }
+
+    #[test]
+    fn reply_to_mode_reference_for_index() {
+        assert_eq!(
+            ReplyToMode::First.reference_for_index(0, Some("m1")),
+            Some("m1")
+        );
+        assert_eq!(
+            ReplyToMode::First.reference_for_index(1, Some("m1")),
+            None
+        );
+        assert_eq!(
+            ReplyToMode::All.reference_for_index(2, Some("m1")),
+            Some("m1")
+        );
+        assert_eq!(ReplyToMode::Off.reference_for_index(0, Some("m1")), None);
+        assert_eq!(ReplyToMode::All.reference_for_index(0, None), None);
     }
 }

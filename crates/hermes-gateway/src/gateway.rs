@@ -1815,11 +1815,17 @@ impl Gateway {
                 .await;
             stream_id = Some(stream_handle.id.clone());
 
+            let reply_to = incoming
+                .interaction_id
+                .is_none()
+                .then(|| incoming.message_id.as_deref())
+                .flatten()
+                .filter(|id| !id.is_empty());
             let anchor_id = if let Some(adapter) =
                 self.get_adapter(&incoming.platform).await
             {
                 adapter
-                    .send_message_with_id(&incoming.chat_id, "...", None)
+                    .send_message_replying(&incoming.chat_id, "...", None, reply_to)
                     .await?
             } else {
                 self.send_message(&incoming.platform, &incoming.chat_id, "...", None)
@@ -2522,6 +2528,18 @@ impl Gateway {
                     .respond_interaction(interaction_id, interaction_token, text)
                     .await;
             }
+        }
+        let reply_to = incoming
+            .interaction_id
+            .is_none()
+            .then(|| incoming.message_id.as_deref())
+            .flatten()
+            .filter(|id| !id.is_empty());
+        if let Some(adapter) = self.get_adapter(&incoming.platform).await {
+            return adapter
+                .send_message_replying(&incoming.chat_id, text, parse_mode, reply_to)
+                .await
+                .map(|_| ());
         }
         self.send_message(&incoming.platform, &incoming.chat_id, text, parse_mode)
             .await

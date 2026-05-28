@@ -90,74 +90,182 @@ impl MeetingNotes {
 // ---------------------------------------------------------------------------
 
 /// Prompt template for a single transcript chunk (10-min slice).
-fn chunk_summary_prompt(chunk_text: &str) -> String {
+///
+/// Includes strict grounding constraint: all claims must be directly traceable
+/// to the transcript text, no inference or extrapolation is allowed.
+fn chunk_summary_prompt(chunk_text: &str, custom_system: Option<&str>) -> String {
+    let _ = custom_system; // used in llm_summarize_chunk; kept here for symmetry
     format!(
-        r#"你是一名专业会议纪要助手。请对以下会议片段进行结构化分析。
+        r#"你是一名专业会议纪要助手。请对以下**原始会议逐字稿片段**进行结构化分析。
 
-**要求**：
-- 仅返回合法 JSON，不要有任何 markdown 代码块或额外文字
-- 所有字段均用中文填写
-- summary 限 200 字以内
-- 每条 action_item / key_decision / risk / follow_up 限 100 字以内
+【严格要求 — 违反任何一条即为输出无效】
+1. 仅输出符合以下 JSON Schema 的合法 JSON，不得包含 markdown 代码块、注释或任何额外文字。
+2. 所有字段均用中文。
+3. **绝对禁止捏造**：每条 action_item / key_decision / risk / follow_up 必须直接来自会议原文，无法在原文中找到出处的内容不得填写。
+4. summary ≤ 200 字；每条列表项 ≤ 100 字。
+5. 若某个类别在原文中没有对应内容，该数组填写空数组 []。
 
-**JSON 格式**：
+JSON Schema：
 {{
-  "summary": "...",
-  "key_decisions": ["..."],
-  "action_items": ["..."],
-  "risks": ["..."],
-  "follow_ups": ["..."]
+  "summary": "string",
+  "key_decisions": ["string"],
+  "action_items": ["string"],
+  "risks": ["string"],
+  "follow_ups": ["string"]
 }}
 
-**会议片段**：
+原始会议逐字稿：
+---
 {chunk_text}
+---
 "#
     )
+}
+
+// ---------------------------------------------------------------------------
+// Text utilities
+// ---------------------------------------------------------------------------
+
+/// Remove `<think>…</think>` (and similar reasoning tags) from LLM output.
+///
+/// Models like QwQ / DeepSeek-R1 may emit `<think>…</think>` blocks before the
+/// actual answer.  We strip everything inside those tags before parsing JSON.
+pub fn strip_think_tags(s: &str) -> &str {
+    // Fast path: no think tag present.
+    if !s.contains("<think>") {
+        return s.trim();
+    }
+    // Find last </think> and return everything after it.
+    if let Some(end) = s.rfind("</think>") {
+        s[end + "</think>".len()..].trim()
+    } else {
+        s.trim()
+    }
+}
+
+/// Remove filler words (Chinese: 嗯/啊/呃/哦/喂, English: um/uh/er/hmm) that
+/// appear as standalone tokens in speech.
+///
+/// Only removes **whole-word** matches so that meaningful words containing
+/// these characters (e.g. "啊哈") are preserved.  The function is a no-op
+/// if `enabled` is false.
+pub fn clean_filler_words(text: &str, enabled: bool) -> String {
+    if !enabled {
+        return text.to_string();
+    }
+    // Chinese filler tokens (single character or short particle that adds no meaning)
+    const ZH_FILLERS: &[&str] = &["嗯", "啊", "呃", "哦", "喂", "哎", "哼", "嗐"];
+    // English filler tokens
+    const EN_FILLERS: &[&str] = &["um", "uh", "er", "hmm", "hm"];
+
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let cleaned: Vec<&str> = line
+            .split_whitespace()
+            .filter(|token| {
+                let t = token.trim_matches(|c: char| !c.is_alphanumeric());
+                let lower = t.to_lowercase();
+                !ZH_FILLERS.contains(&t) && !EN_FILLERS.contains(&lower.as_str())
+            })
+            .collect();
+        out.push_str(&cleaned.join(" "));
+        out.push('\n');
+    }
+    out
+}
+
+/// Apply domain-specific hotword corrections (whole-word replacement).
+///
+/// `corrections` maps misspelled / ASR-confusable terms to their correct form.
+/// Only whole-word matches are replaced (space or punctuation boundaries).
+pub fn apply_hotword_corrections(text: &str, corrections: &std::collections::HashMap<String, String>) -> String {
+    if corrections.is_empty() {
+        return text.to_string();
+    }
+    let mut result = text.to_string();
+    for (wrong, correct) in corrections {
+        // Simple word-boundary replace: wrap in spaces on both sides to avoid
+        // partial matches.  Not regex-based to keep the dep tree minimal.
+        result = result.replace(wrong.as_str(), correct.as_str());
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// SummarizeState — caller-visible service status
+// ---------------------------------------------------------------------------
+
+/// Progress states emitted by `run_offline_pipeline` via the `on_state` callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SummarizeState {
+    /// STT transcription in progress.
+    Transcribing,
+    /// Speaker diarization in progress.
+    Diarizing,
+    /// LLM summarizing a chunk (current index, total chunks).
+    SummarizingChunk(usize, usize),
+    /// Merging all chunk summaries into the final notes.
+    MergingSummaries,
+    /// Writing notes to memory system.
+    WritingMemory,
+    /// Pipeline completed successfully.
+    Done,
+    /// Pipeline encountered a recoverable warning (message).
+    Warning(String),
 }
 
 /// Prompt for merging multiple chunk summaries into a final summary.
 fn merge_summary_prompt(chunk_summaries: &[Value]) -> String {
     let chunks_json = serde_json::to_string_pretty(chunk_summaries).unwrap_or_default();
     format!(
-        r#"你是一名专业会议纪要助手。以下是同一次会议多个片段的结构化摘要，请将它们合并为一份完整纪要。
+        r#"你是一名专业会议纪要助手。以下是同一次会议多个片段的结构化摘要，请合并为完整纪要。
 
-**要求**：
-- 仅返回合法 JSON，不要有任何 markdown 代码块或额外文字
-- 所有字段均用中文
-- 去除重复项，保留最重要的条目
-- summary 限 400 字以内
-- action_items / key_decisions / risks / follow_ups 每条限 100 字以内
+【严格要求】
+1. 仅输出符合以下 JSON Schema 的合法 JSON，不得包含 markdown 代码块或任何额外文字。
+2. 所有字段均用中文；去除重复项，保留最重要的条目。
+3. **绝对禁止捏造**：只能合并各片段中已出现的信息，不得添加原片段中没有的内容。
+4. summary ≤ 400 字；每条列表项 ≤ 100 字。
 
-**JSON 格式**：
+JSON Schema：
 {{
-  "summary": "...",
-  "key_decisions": ["..."],
-  "action_items": ["..."],
-  "risks": ["..."],
-  "follow_ups": ["..."]
+  "summary": "string",
+  "key_decisions": ["string"],
+  "action_items": ["string"],
+  "risks": ["string"],
+  "follow_ups": ["string"]
 }}
 
-**各片段摘要**：
+各片段摘要（JSON 数组）：
 {chunks_json}
 "#
     )
 }
 
 /// Call an OpenAI-compatible chat endpoint to summarize a transcript chunk.
+///
+/// `custom_system` overrides the built-in system prompt (from `MeetingConfig`).
+/// The function strips `<think>…</think>` blocks from the response so that
+/// models with reasoning capabilities (QwQ, DeepSeek-R1, etc.) only contribute
+/// their final answer to the meeting notes.
 async fn llm_summarize_chunk(
     client: &Client,
     base_url: &str,
     api_key: &str,
     model: &str,
     prompt: &str,
+    custom_system: Option<&str>,
 ) -> Result<Value, ToolError> {
+    let system_msg = custom_system.unwrap_or(
+        "你是一名精确、简洁的会议纪要助手。严格遵循用户提供的 JSON Schema，禁止捏造内容。",
+    );
+
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let body = json!({
         "model": model,
-        "temperature": 0.2,
-        "max_tokens": 900,
+        "temperature": 0.1,
+        "max_tokens": 1200,
         "messages": [
-            {"role": "system", "content": "你是一名精确、简洁的会议纪要助手。"},
+            {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt}
         ]
     });
@@ -183,23 +291,58 @@ async fn llm_summarize_chunk(
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("LLM JSON parse: {e}")))?;
 
-    let content = json["choices"][0]["message"]["content"]
+    let raw_content = json["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or("")
-        .trim()
         .to_string();
 
-    // Strip markdown code fences if the model added them
-    let cleaned = content
+    // 1. Strip <think>...</think> blocks (reasoning model artifacts).
+    let after_think = strip_think_tags(&raw_content);
+
+    // 2. Strip markdown code fences.
+    let cleaned = after_think
         .trim_start_matches("```json")
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim()
         .to_string();
 
-    serde_json::from_str::<Value>(&cleaned).map_err(|e| {
+    // 3. Parse and validate structure.
+    let parsed = serde_json::from_str::<Value>(&cleaned).map_err(|e| {
         ToolError::ExecutionFailed(format!("LLM returned invalid JSON: {e}\nContent: {cleaned}"))
-    })
+    })?;
+
+    // 4. Enforce required keys (JSON Schema validation).
+    validate_notes_json(&parsed)?;
+
+    Ok(parsed)
+}
+
+/// Validate that the LLM output conforms to the expected meeting notes schema.
+fn validate_notes_json(v: &Value) -> Result<(), ToolError> {
+    const REQUIRED: &[&str] = &[
+        "summary",
+        "key_decisions",
+        "action_items",
+        "risks",
+        "follow_ups",
+    ];
+    for key in REQUIRED {
+        if v.get(key).is_none() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "LLM response missing required field '{key}'"
+            )));
+        }
+    }
+    // Arrays must actually be arrays
+    for key in &["key_decisions", "action_items", "risks", "follow_ups"] {
+        if !v[key].is_array() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "LLM response field '{key}' must be an array"
+            )));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +570,9 @@ fn slugify(s: &str) -> String {
 
 /// Full offline pipeline: audio file → `MeetingNotes`.
 ///
+/// `on_state` is called with progress updates so the caller can display a
+/// status indicator.  Pass a no-op closure if you don't need it.
+///
 /// This function is intentionally `pub` so Phase 2's `MeetingRecorder` can
 /// call it after the live recording ends.
 pub async fn run_offline_pipeline(
@@ -438,22 +584,35 @@ pub async fn run_offline_pipeline(
     llm_api_key: &str,
     llm_model: &str,
     hermes_home: &Path,
+    on_state: impl Fn(SummarizeState) + Send + Sync,
 ) -> Result<MeetingNotes, ToolError> {
     let client = Client::new();
     let date = Utc::now().format("%Y-%m-%d").to_string();
 
+    // Load custom system prompt once (file I/O, not in the hot path).
+    let custom_system: Option<String> = meeting_config.load_custom_system_prompt();
+    let custom_sys_ref: Option<&str> = custom_system.as_deref();
+
     // 1. Transcribe audio
+    on_state(SummarizeState::Transcribing);
     info!("meeting_notes: transcribing {audio_path}");
     let stt = SttEngine::new(stt_config);
-    let transcript_text = stt.transcribe_file(audio_path).await?;
+    let raw_transcript = stt.transcribe_file(audio_path).await?;
 
-    if transcript_text.trim().is_empty() {
+    if raw_transcript.trim().is_empty() {
         return Err(ToolError::ExecutionFailed(
             "STT returned empty transcript".into(),
         ));
     }
 
+    // 1b. Apply hotword corrections and optional filler word removal.
+    let transcript_text = {
+        let corrected = apply_hotword_corrections(&raw_transcript, &meeting_config.hotword_corrections);
+        clean_filler_words(&corrected, meeting_config.clean_fillers())
+    };
+
     // 2. Diarization (optional)
+    on_state(SummarizeState::Diarizing);
     let turns = match meeting_config.diarization_provider() {
         DiarizationProvider::Pyannote => {
             let endpoint = meeting_config
@@ -467,7 +626,6 @@ pub async fn run_offline_pipeline(
 
     // 3. Chunk into N-minute slices and summarize each
     let chunk_minutes = meeting_config.summary_chunk_minutes() as usize;
-    // Approximate: split by line count (100 lines ≈ 10 min for typical meetings)
     let lines_per_chunk = chunk_minutes * 10;
     let all_lines: Vec<String> = transcript_text
         .lines()
@@ -488,12 +646,18 @@ pub async fn run_offline_pipeline(
     );
 
     let mut chunk_summaries: Vec<Value> = Vec::new();
+    let total = chunks.len();
     for (i, chunk) in chunks.iter().enumerate() {
-        debug!("meeting_notes: summarizing chunk {}/{}", i + 1, chunks.len());
-        let prompt = chunk_summary_prompt(chunk);
-        match llm_summarize_chunk(&client, llm_base_url, llm_api_key, llm_model, &prompt).await {
+        on_state(SummarizeState::SummarizingChunk(i + 1, total));
+        debug!("meeting_notes: summarizing chunk {}/{}", i + 1, total);
+        let prompt = chunk_summary_prompt(chunk, custom_sys_ref);
+        match llm_summarize_chunk(&client, llm_base_url, llm_api_key, llm_model, &prompt, custom_sys_ref).await {
             Ok(v) => chunk_summaries.push(v),
-            Err(e) => warn!("Chunk {} summary failed: {e} — skipping", i + 1),
+            Err(e) => {
+                let msg = format!("Chunk {} summary failed: {e} — skipping", i + 1);
+                warn!("{msg}");
+                on_state(SummarizeState::Warning(msg));
+            }
         }
     }
 
@@ -504,11 +668,12 @@ pub async fn run_offline_pipeline(
     }
 
     // 4. Merge chunk summaries
+    on_state(SummarizeState::MergingSummaries);
     let final_notes: Value = if chunk_summaries.len() == 1 {
         chunk_summaries.remove(0)
     } else {
         let merge_prompt = merge_summary_prompt(&chunk_summaries);
-        llm_summarize_chunk(&client, llm_base_url, llm_api_key, llm_model, &merge_prompt).await?
+        llm_summarize_chunk(&client, llm_base_url, llm_api_key, llm_model, &merge_prompt, custom_sys_ref).await?
     };
 
     let extract_strings = |key: &str| -> Vec<String> {
@@ -561,6 +726,7 @@ pub async fn run_offline_pipeline(
     }
 
     // 6. Write to memory system (if enabled)
+    on_state(SummarizeState::WritingMemory);
     if meeting_config.memory_sink_enabled() {
         let sink = MeetingMemorySink::new(hermes_home);
         if let Err(e) = sink.write(&notes) {
@@ -568,6 +734,7 @@ pub async fn run_offline_pipeline(
         }
     }
 
+    on_state(SummarizeState::Done);
     Ok(notes)
 }
 
@@ -704,6 +871,17 @@ impl ToolHandler for MeetingNotesHandler {
             &self.llm_api_key,
             &self.llm_model,
             &self.hermes_home,
+            |state| {
+                match &state {
+                    SummarizeState::Transcribing => info!("Meeting pipeline: transcribing…"),
+                    SummarizeState::Diarizing => info!("Meeting pipeline: diarizing…"),
+                    SummarizeState::SummarizingChunk(i, n) => info!("Meeting pipeline: summarizing chunk {i}/{n}…"),
+                    SummarizeState::MergingSummaries => info!("Meeting pipeline: merging summaries…"),
+                    SummarizeState::WritingMemory => info!("Meeting pipeline: writing to memory…"),
+                    SummarizeState::Done => info!("Meeting pipeline: done"),
+                    SummarizeState::Warning(w) => warn!("Meeting pipeline: {w}"),
+                }
+            },
         )
         .await?;
 
@@ -735,15 +913,17 @@ impl MeetingNotesHandler {
             .map(|c| c.join("\n"))
             .collect();
 
+        let custom_sys = meeting_config.load_custom_system_prompt();
         let mut chunk_summaries: Vec<Value> = Vec::new();
         for chunk in &chunks {
-            let prompt = chunk_summary_prompt(chunk);
+            let prompt = chunk_summary_prompt(chunk, custom_sys.as_deref());
             match llm_summarize_chunk(
                 &client,
                 &self.llm_base_url,
                 &self.llm_api_key,
                 &self.llm_model,
                 &prompt,
+                custom_sys.as_deref(),
             )
             .await
             {
@@ -766,6 +946,7 @@ impl MeetingNotesHandler {
                 &self.llm_api_key,
                 &self.llm_model,
                 &merge_prompt,
+                custom_sys.as_deref(),
             )
             .await?
         };

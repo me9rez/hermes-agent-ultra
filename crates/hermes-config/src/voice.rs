@@ -302,8 +302,6 @@ pub struct MeetingConfig {
     pub pyannote_endpoint: Option<String>,
 
     /// Shell command template for local diarization.
-    /// `{audio}` is replaced with the input WAV path.
-    /// `{output}` is replaced with the RTTM output path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diarization_command: Option<String>,
 
@@ -318,6 +316,21 @@ pub struct MeetingConfig {
     /// Directory for storing raw transcript files (default: `$HERMES_HOME/meetings/`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcripts_dir: Option<String>,
+
+    /// Path to a custom system prompt file for the summarization LLM.
+    /// If set, overrides the built-in prompt.  The file must contain plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_system_prompt_file: Option<String>,
+
+    /// Remove filler words (嗯/啊/呃/um/uh) from transcript before summarizing.
+    /// Default: true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_fillers: Option<bool>,
+
+    /// Additional domain-specific hotword corrections applied after STT.
+    /// Format: `{"原词": "纠正词"}` — whole-word replacements only.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hotword_corrections: HashMap<String, String>,
 }
 
 impl MeetingConfig {
@@ -335,6 +348,16 @@ impl MeetingConfig {
 
     pub fn memory_sink_enabled(&self) -> bool {
         self.memory_sink_enabled.unwrap_or(true)
+    }
+
+    pub fn clean_fillers(&self) -> bool {
+        self.clean_fillers.unwrap_or(true)
+    }
+
+    /// Load custom system prompt from file if configured, else return `None`.
+    pub fn load_custom_system_prompt(&self) -> Option<String> {
+        let path = self.summary_system_prompt_file.as_deref()?;
+        std::fs::read_to_string(path).ok()
     }
 }
 

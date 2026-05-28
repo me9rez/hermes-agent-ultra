@@ -22,12 +22,16 @@
 //! channel closes (both sources exhausted) or `stop()` is called.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::frame::{AudioChannel, TaggedFrame};
+use crate::keepawake::KeepAwakeGuard;
 use crate::vad::{create_vad, VadBackend, VadConfig};
 
 // ---------------------------------------------------------------------------
@@ -117,13 +121,25 @@ impl StatsHandle {
 // ---------------------------------------------------------------------------
 
 /// One recognized speech segment from the meeting.
+///
+/// `audio_file` + `start_s`/`end_s` enable timeline-aware playback:
+/// the UI can jump to the exact position in the recorded audio file when
+/// the user clicks a transcript line.
 #[derive(Debug, Clone)]
 pub struct TranscriptSegment {
     /// "Speaker A" (mic) or "Speaker B" (loopback).
     pub speaker: String,
     pub text: String,
-    /// Approximate recording time in seconds from start (best effort).
-    pub offset_s: f32,
+    /// Seconds since recording start for the first sample of this segment.
+    pub start_s: f32,
+    /// Seconds since recording start for the last sample of this segment.
+    pub end_s: f32,
+    /// Path to the audio file segment (WAV) for this transcript line.
+    ///
+    /// Set to `Some` when `MeetingRecorder` is configured to save per-segment
+    /// audio clips (e.g. `segment_audio_dir` is provided).  `None` when only
+    /// streaming transcript is needed and no audio files are kept.
+    pub audio_file: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +182,69 @@ impl ChannelState {
 // MeetingRecorder
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Silence guard (warn when no real audio arrives)
+// ---------------------------------------------------------------------------
+
+/// Detects sustained microphone silence and fires a callback.
+///
+/// Silence is defined as every frame having RMS below `threshold_rms`.
+/// After `timeout_secs` of continuous silence the `on_silent` callback is
+/// invoked **once**.  It resets when a voiced frame is observed.
+pub struct SilenceGuard {
+    pub threshold_rms: f32,
+    pub timeout_secs: f32,
+    last_voiced: Option<Instant>,
+    fired: bool,
+}
+
+impl SilenceGuard {
+    pub fn new(threshold_rms: f32, timeout_secs: f32) -> Self {
+        Self {
+            threshold_rms,
+            timeout_secs,
+            last_voiced: None,
+            fired: false,
+        }
+    }
+
+    /// Feed one frame.  Returns `true` the first time the silence threshold
+    /// is crossed (i.e. the caller should warn the user).
+    pub fn feed(&mut self, samples: &[f32]) -> bool {
+        let rms = if samples.is_empty() {
+            0.0f32
+        } else {
+            let sq: f32 = samples.iter().map(|s| s * s).sum();
+            (sq / samples.len() as f32).sqrt()
+        };
+
+        if rms >= self.threshold_rms {
+            self.last_voiced = Some(Instant::now());
+            self.fired = false;
+            return false;
+        }
+
+        // Silent frame — check elapsed time
+        let elapsed = self
+            .last_voiced
+            .map(|t| t.elapsed().as_secs_f32())
+            .unwrap_or_else(|| {
+                // Never had a voiced frame: start counting from recording start
+                self.last_voiced.get_or_insert(Instant::now()).elapsed().as_secs_f32()
+            });
+
+        if !self.fired && elapsed >= self.timeout_secs {
+            self.fired = true;
+            return true;
+        }
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MeetingRecorder
+// ---------------------------------------------------------------------------
+
 /// Drives a `DualTrackMixer` stream through per-channel VAD and emits
 /// `TranscriptSegment` values whenever speech ends.
 pub struct MeetingRecorder {
@@ -173,8 +252,14 @@ pub struct MeetingRecorder {
     stt: Arc<dyn SttCallback>,
     /// Maximum recording length per segment (prevents runaway buffers).
     max_segment_secs: f32,
-    stop_flag: Arc<std::sync::atomic::AtomicBool>,
+    stop_flag: Arc<AtomicBool>,
+    /// Pause flag: when true the recorder drops incoming frames without processing.
+    pause_flag: Arc<AtomicBool>,
     stats: StatsHandle,
+    /// RMS floor below which a frame is considered silence (for SilenceGuard).
+    silence_threshold_rms: f32,
+    /// Seconds of continuous silence before warning the user.
+    silence_timeout_secs: f32,
 }
 
 impl MeetingRecorder {
@@ -183,15 +268,37 @@ impl MeetingRecorder {
             vad_config,
             stt,
             max_segment_secs: 60.0,
-            stop_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            pause_flag: Arc::new(AtomicBool::new(false)),
             stats: StatsHandle::default(),
+            silence_threshold_rms: 0.002,
+            silence_timeout_secs: 10.0,
         }
     }
 
     /// Request graceful shutdown.
     pub fn stop(&self) {
-        self.stop_flag
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.stop_flag.store(true, Ordering::Relaxed);
+    }
+
+    /// Pause recording: incoming frames are discarded until `resume()` is called.
+    ///
+    /// The current speech buffer is flushed to STT before pausing so no audio
+    /// is lost.  Use this for meeting breaks; prefer this over filling silence.
+    pub fn pause(&self) {
+        self.pause_flag.store(true, Ordering::Relaxed);
+        info!("MeetingRecorder: paused");
+    }
+
+    /// Resume recording after `pause()`.
+    pub fn resume(&self) {
+        self.pause_flag.store(false, Ordering::Relaxed);
+        info!("MeetingRecorder: resumed");
+    }
+
+    /// Whether recording is currently paused.
+    pub fn is_paused(&self) -> bool {
+        self.pause_flag.load(Ordering::Relaxed)
     }
 
     /// Snapshot of current pipeline performance statistics.
@@ -214,19 +321,55 @@ impl MeetingRecorder {
         let stt = Arc::clone(&self.stt);
         let max_secs = self.max_segment_secs;
         let stop = Arc::clone(&self.stop_flag);
+        let pause = Arc::clone(&self.pause_flag);
         let stats = self.stats.clone();
+        let silence_rms = self.silence_threshold_rms;
+        let silence_timeout = self.silence_timeout_secs;
 
         let handle = tokio::spawn(async move {
+            // Prevent OS sleep for the duration of this recording session.
+            let _keep_awake = KeepAwakeGuard::acquire("hermes meeting recorder");
+
             let mut channels: HashMap<AudioChannel, ChannelState> = HashMap::new();
             let start = Instant::now();
+            let mut silence_guard = SilenceGuard::new(silence_rms, silence_timeout);
 
             while let Some(frame) = frames_rx.recv().await {
-                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if stop.load(Ordering::Relaxed) {
                     debug!("MeetingRecorder: stop requested");
                     break;
                 }
                 if frame.samples.is_empty() {
                     continue;
+                }
+
+                // Pause: flush current buffers and drop new frames.
+                if pause.load(Ordering::Relaxed) {
+                    // flush any in-progress buffers so we don't lose audio
+                    for (ch, state) in channels.iter_mut() {
+                        if !state.buffer.is_empty() {
+                            let pcm = std::mem::take(&mut state.buffer);
+                            state.recording = false;
+                            let sr = frame.sample_rate;
+                            Self::spawn_stt(
+                                *ch, pcm, sr, start.elapsed().as_secs_f32(),
+                                Arc::clone(&stt), seg_tx.clone(), stats.clone(),
+                            );
+                        }
+                    }
+                    // Sleep briefly and keep draining the channel without processing
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+
+                // Silence guard: warn user if no real audio detected
+                if silence_guard.feed(&frame.samples) {
+                    warn!(
+                        "MeetingRecorder: no audio input detected for {:.0}s. \
+                         Check that your microphone is enabled and the correct \
+                         input device is selected (`hermes meeting devices`).",
+                        silence_timeout
+                    );
                 }
 
                 let elapsed_s = start.elapsed().as_secs_f32();
@@ -340,7 +483,9 @@ impl MeetingRecorder {
                 let _ = tx.send(TranscriptSegment {
                     speaker: ch.speaker_label().to_string(),
                     text,
-                    offset_s,
+                    start_s: offset_s,
+                    end_s: offset_s, // precise end_s set by caller when audio file is saved
+                    audio_file: None,
                 }).await;
             } else {
                 stats.with(|s| s.stt.record(t0.elapsed()));

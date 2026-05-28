@@ -11,7 +11,10 @@
 //! first is forwarded immediately. When one source closes, the mixer continues
 //! with the remaining source (graceful single-source degradation).
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -24,6 +27,8 @@ use crate::frame::{AudioChannel, TaggedFrame};
 pub struct DualTrackMixer {
     mic: Arc<dyn AudioCaptureSource>,
     loopback: Arc<dyn AudioCaptureSource>,
+    /// When true the mic task drops all frames (outputs silence).
+    mic_muted: Arc<AtomicBool>,
 }
 
 impl DualTrackMixer {
@@ -31,7 +36,33 @@ impl DualTrackMixer {
         mic: Arc<dyn AudioCaptureSource>,
         loopback: Arc<dyn AudioCaptureSource>,
     ) -> Self {
-        Self { mic, loopback }
+        Self { mic, loopback, mic_muted: Arc::new(AtomicBool::new(false)) }
+    }
+
+    /// Only capture the loopback (speaker output); mic channel produces silence.
+    ///
+    /// Use when you want to record remote participants without capturing yourself,
+    /// or when the user's microphone should not be recorded.
+    pub fn loopback_only(loopback: Arc<dyn AudioCaptureSource>) -> Self {
+        let sr = loopback.sample_rate();
+        Self::new(Arc::new(SilentSource::new(sr)), loopback)
+    }
+
+    /// Mute the microphone channel at runtime (frames are dropped, not sent).
+    pub fn mute_mic(&self) {
+        self.mic_muted.store(true, Ordering::Relaxed);
+        debug!("DualTrackMixer: mic muted");
+    }
+
+    /// Restore microphone capture after `mute_mic()`.
+    pub fn unmute_mic(&self) {
+        self.mic_muted.store(false, Ordering::Relaxed);
+        debug!("DualTrackMixer: mic unmuted");
+    }
+
+    /// Whether the mic channel is currently muted.
+    pub fn is_mic_muted(&self) -> bool {
+        self.mic_muted.load(Ordering::Relaxed)
     }
 
     /// Start mixing and return a `Receiver` that yields `TaggedFrame` values.
@@ -47,6 +78,7 @@ impl DualTrackMixer {
 
         let mic = self.mic;
         let loopback = self.loopback;
+        let mic_muted = Arc::clone(&self.mic_muted);
 
         // Mic task
         let tx_mic = tx.clone();
@@ -54,6 +86,10 @@ impl DualTrackMixer {
             loop {
                 match mic.read_chunk().await {
                     Some(samples) => {
+                        // Drop frame silently when muted
+                        if mic_muted.load(Ordering::Relaxed) {
+                            continue;
+                        }
                         let sr = mic.sample_rate();
                         let frame = TaggedFrame::new(AudioChannel::Mic, samples, sr);
                         if tx_mic.send(frame).await.is_err() {

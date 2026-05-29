@@ -50,7 +50,8 @@ use crate::credential_pool::CredentialPool;
 use crate::fallback::TurnFallbackState;
 use crate::interrupt::InterruptController;
 use crate::lsp_context::{LspContextConfig, build_lsp_context_note};
-use crate::memory_manager::MemoryManager;
+use crate::memory_manager::{build_memory_context_block, MemoryManager};
+use crate::session_persistence::{SessionFlushCursor, SessionPersistence};
 use crate::plugins::{HookResult, HookType, PluginManager};
 use crate::provider::{AnthropicProvider, GenericProvider, OpenAiProvider, OpenRouterProvider};
 use crate::providers_extra::{
@@ -62,7 +63,6 @@ use crate::python_alignment::{
     sanitize_surrogates, strip_budget_warnings_from_messages, strip_think_blocks_for_ack,
 };
 use crate::skill_orchestrator::SkillOrchestrator;
-use crate::session_persistence::SessionFlushCursor;
 pub use crate::smart_model_routing::{ApiMode, CheapModelRouteConfig, SmartModelRoutingConfig};
 use crate::smart_model_routing::{
     PrimaryRuntime, ResolveTurnOutcome, ResolvedCheapRuntime, TurnRouteSignature,
@@ -2169,6 +2169,10 @@ pub struct AgentLoop {
     pub(crate) current_task_id: Arc<Mutex<Option<String>>>,
     /// Python `AIAgent._last_flushed_db_idx` — incremental SQLite session writes.
     pub(crate) session_db_flush: Arc<Mutex<SessionFlushCursor>>,
+    /// Python `_cached_system_prompt` — built once per session, invalidated on compression.
+    cached_system_prompt: Arc<Mutex<Option<String>>>,
+    /// Python `_ext_prefetch_cache` — fetched once per turn, injected at API-call time only.
+    turn_ext_prefetch_cache: Arc<Mutex<String>>,
     /// Python `agent.context_compressor.ContextCompressor` (LLM summary + boundary alignment).
     context_compressor: Arc<tokio::sync::Mutex<ContextCompressor>>,
 }
@@ -2602,6 +2606,8 @@ impl AgentLoop {
             pending_steer: PendingSteer::new(),
             current_task_id: Arc::new(Mutex::new(None)),
             session_db_flush: Arc::new(Mutex::new(SessionFlushCursor::new())),
+            cached_system_prompt: Arc::new(Mutex::new(None)),
+            turn_ext_prefetch_cache: Arc::new(Mutex::new(String::new())),
             context_compressor,
         }
     }
@@ -2610,6 +2616,76 @@ impl AgentLoop {
     pub fn reset_session_db_flush_cursor(&self) {
         if let Ok(mut guard) = self.session_db_flush.lock() {
             guard.reset();
+        }
+    }
+
+    /// Invalidate session-scoped system prompt cache (compression / `/new`).
+    pub fn invalidate_cached_system_prompt(&self) {
+        if let Ok(mut guard) = self.cached_system_prompt.lock() {
+            *guard = None;
+        }
+    }
+
+    fn set_turn_ext_prefetch_cache(&self, prefetch: String) {
+        if let Ok(mut guard) = self.turn_ext_prefetch_cache.lock() {
+            *guard = prefetch;
+        }
+    }
+
+    fn session_persistence(&self) -> Option<SessionPersistence> {
+        self.config()
+            .hermes_home
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(|home| SessionPersistence::new(Path::new(home)))
+    }
+
+    fn compression_lock_holder(&self) -> String {
+        format!(
+            "pid={}:tid={:?}:agent={:p}:nonce={}",
+            std::process::id(),
+            std::thread::current().id(),
+            self,
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        )
+    }
+
+    fn new_compression_session_id() -> String {
+        let now = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        format!("{}_{}", now, &suffix[..6.min(suffix.len())])
+    }
+
+    /// Returns `(prompt, restored_from_storage)` using session-level cache when warm.
+    fn active_cached_system_prompt(
+        &self,
+        task_hint: &str,
+        tool_schemas: &[ToolSchema],
+    ) -> (String, bool) {
+        if let Ok(guard) = self.cached_system_prompt.lock() {
+            if let Some(ref cached) = *guard {
+                if !cached.trim().is_empty() {
+                    return (cached.clone(), true);
+                }
+            }
+        }
+        let (prompt, restored) = self.resolve_initial_system_prompt(task_hint, tool_schemas);
+        if let Ok(mut guard) = self.cached_system_prompt.lock() {
+            *guard = Some(prompt.clone());
+        }
+        (prompt, restored)
+    }
+
+    fn patch_leading_system_message(messages: &mut Vec<Message>, prompt: &str) {
+        if messages
+            .first()
+            .map(|m| m.role == MessageRole::System)
+            .unwrap_or(false)
+        {
+            messages[0].content = Some(prompt.to_string());
+        } else {
+            messages.insert(0, Message::system(prompt));
         }
     }
 
@@ -2673,6 +2749,8 @@ impl AgentLoop {
             pending_steer: PendingSteer::new(),
             current_task_id: Arc::new(Mutex::new(None)),
             session_db_flush: Arc::new(Mutex::new(SessionFlushCursor::new())),
+            cached_system_prompt: Arc::new(Mutex::new(None)),
+            turn_ext_prefetch_cache: Arc::new(Mutex::new(String::new())),
             context_compressor,
         }
     }
@@ -4401,6 +4479,27 @@ impl AgentLoop {
             .drain_pre_api_into_messages(ctx.get_messages_mut());
         self.interest_sync_user_messages(ctx.get_messages());
         let mut messages = ctx.get_messages().to_vec();
+
+        let prefetch = self
+            .turn_ext_prefetch_cache
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        if !prefetch.is_empty() {
+            if let Some(idx) = messages
+                .iter()
+                .rposition(|m| m.role == MessageRole::User)
+            {
+                let fenced = build_memory_context_block(&prefetch);
+                if !fenced.is_empty() {
+                    if let Some(msg) = messages.get_mut(idx) {
+                        let base = msg.content.clone().unwrap_or_default();
+                        msg.content = Some(format!("{base}\n\n{fenced}"));
+                    }
+                }
+            }
+        }
+
         if let Some(ephemeral) = self
             .config()
             .ephemeral_system_prompt
@@ -4620,16 +4719,100 @@ impl AgentLoop {
     }
 
     /// Run Python-parity context compression on `ctx` (auxiliary LLM summary + tool-pair sanitiser).
-    async fn compress_context(&self, ctx: &mut ContextManager) {
+    /// Returns `true` when messages were actually compressed and session rotation occurred.
+    async fn compress_context(&self, ctx: &mut ContextManager) -> bool {
+        let task_hint = ctx
+            .get_messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default();
+        let tool_schemas = self.tool_registry.schemas();
+        let old_session_id = self
+            .config()
+            .session_id
+            .clone()
+            .unwrap_or_default();
+        let lock_holder = self.compression_lock_holder();
+        let sp = self.session_persistence();
+        let lock_acquired = if old_session_id.is_empty() {
+            true
+        } else if let Some(ref db) = sp {
+            db.try_acquire_compression_lock(&old_session_id, &lock_holder, 300.0)
+                .unwrap_or(false)
+        } else {
+            true
+        };
+        if !lock_acquired {
+            if let (Some(db), true) = (&sp, !old_session_id.is_empty()) {
+                if let Ok(existing) = db.get_compression_lock_holder(&old_session_id) {
+                    tracing::warn!(
+                        session_id = %old_session_id,
+                        holder = ?existing,
+                        "compression skipped: another path holds the compression lock"
+                    );
+                }
+            }
+            return false;
+        }
+
+        let pre_len = ctx.get_messages().len();
         let context_length = get_model_context_length(&self.active_model());
         let messages = ctx.get_messages().to_vec();
         let estimated_tokens = estimate_messages_tokens(&messages);
-        let mut compressor = self.context_compressor.lock().await;
-        compressor.set_context_length(context_length);
-        let compressed = compressor
-            .compress(messages, Some(estimated_tokens))
-            .await;
-        ctx.replace_messages(compressed);
+        let compressed = {
+            let mut compressor = self.context_compressor.lock().await;
+            compressor.set_context_length(context_length);
+            compressor.compress(messages, Some(estimated_tokens)).await
+        };
+
+        let release_lock = || {
+            if let (Some(db), true) = (&sp, !old_session_id.is_empty()) {
+                let _ = db.release_compression_lock(&old_session_id, &lock_holder);
+            }
+        };
+
+        if compressed.len() >= pre_len {
+            release_lock();
+            return false;
+        }
+
+        self.invalidate_cached_system_prompt();
+        let (new_system, _) = self.active_cached_system_prompt(&task_hint, &tool_schemas);
+        let mut final_messages = compressed;
+        Self::patch_leading_system_message(&mut final_messages, &new_system);
+        ctx.replace_messages(final_messages.clone());
+
+        let new_session_id = Self::new_compression_session_id();
+        if let Ok(mut cfg) = self.config_runtime.write() {
+            cfg.session_id = Some(new_session_id.clone());
+        }
+        self.reset_session_db_flush_cursor();
+
+        if let Some(ref db) = sp {
+            let cfg = self.config();
+            let platform = cfg.platform.as_deref();
+            let model = self.active_model();
+            let _ = db.create_compression_continuation_session(
+                &new_session_id,
+                &old_session_id,
+                Some(model.as_str()),
+                platform,
+                &new_system,
+            );
+            let transcript: Vec<Message> = final_messages
+                .iter()
+                .filter(|m| m.role != MessageRole::System)
+                .cloned()
+                .collect();
+            let mut cursor = SessionFlushCursor::new();
+            let _ = db.replace_session_messages(&new_session_id, &transcript, &mut cursor);
+            let _ = db.update_system_prompt(&new_session_id, &new_system);
+        }
+
+        release_lock();
+        true
     }
 
     /// Compress when char budget or model token threshold is exceeded (Python auto-compaction).
@@ -5930,9 +6113,9 @@ impl AgentLoop {
         // Determine which tools to expose
         let tool_schemas: Vec<ToolSchema> = tools.unwrap_or_else(|| self.tool_registry.schemas());
 
-        // Build and inject system prompt (or reuse SQLite-cached prompt for session continuity)
+        // Build and inject system prompt (or reuse session-level cache for prefix stability)
         let (system_content, restored_system) =
-            self.resolve_initial_system_prompt(&task_hint, &tool_schemas);
+            self.active_cached_system_prompt(&task_hint, &tool_schemas);
         ctx.add_message(Message::system(&system_content));
 
         let mut session_started_hooks_fired = false;
@@ -6002,9 +6185,7 @@ impl AgentLoop {
             .and_then(|m| m.content.clone())
             .unwrap_or_default();
         let mem_ctx_raw = self.memory_prefetch(&first_user, session_id);
-        if !mem_ctx_raw.is_empty() {
-            ctx.add_message(Message::system(&mem_ctx_raw));
-        }
+        self.set_turn_ext_prefetch_cache(mem_ctx_raw);
 
         if self.config().preflight_context_compress {
             self.preflight_context_compress_with_status(&mut ctx).await;
@@ -7406,9 +7587,7 @@ impl AgentLoop {
             .and_then(|m| m.content.clone())
             .unwrap_or_default();
         let mem_ctx_raw = self.memory_prefetch(&first_user, session_id);
-        if !mem_ctx_raw.is_empty() {
-            ctx.add_message(Message::system(&mem_ctx_raw));
-        }
+        self.set_turn_ext_prefetch_cache(mem_ctx_raw);
 
         if self.config().preflight_context_compress {
             self.preflight_context_compress_with_status(&mut ctx).await;
@@ -9570,7 +9749,13 @@ impl AgentLoop {
                                     }
                                 }
                             }
-                            (entry.handler)(params)
+                            let handler = Arc::clone(&entry.handler);
+                            match tokio::task::spawn_blocking(move || handler(params)).await {
+                                Ok(result) => result,
+                                Err(e) => Err(ToolError::ExecutionFailed(format!(
+                                    "Tool blocking task join failed: {e}"
+                                ))),
+                            }
                         }
                         None => {
                             let available = registry.names().join(", ");

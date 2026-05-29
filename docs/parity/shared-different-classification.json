@@ -353,6 +353,13 @@
       "ticket": 304
     },
     {
+      "path": "plugins/model-providers/opencode-zen/__init__.py",
+      "classification": "intentional_divergence",
+      "rationale": "OpenCode Zen and Go provider behavior is covered by Rust provider normalization, env-key resolution, default base URLs, model catalog merge, and GenericProvider OpenCode Go reasoning controls; this legacy upstream Python provider profile is reference-only and is not used by the Rust-only runtime.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "plugins/model-providers/azure-foundry/plugin.yaml",
       "classification": "intentional_divergence",
       "rationale": "Local Azure Foundry manifest intentionally uses Azure AI Foundry naming while preserving provider registration metadata.",

@@ -940,14 +940,14 @@ async fn run_profile_command(
 fn init_tracing(verbose: bool, interactive_tui: bool) {
     let default = if interactive_tui {
         if verbose {
-            "info"
+            "info,rustls=warn,hyper=warn,h2=warn"
         } else {
-            "error"
+            "error,rustls=warn,hyper=warn,h2=warn"
         }
     } else if verbose {
-        "debug"
+        "debug,rustls=warn,hyper=warn,h2=warn"
     } else {
-        "warn"
+        "warn,rustls=warn,hyper=warn,h2=warn"
     };
     if interactive_tui
         && std::env::var("HERMES_TUI_ALLOW_STDERR_LOGS")

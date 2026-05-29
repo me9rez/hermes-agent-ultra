@@ -1,8 +1,4 @@
 //! Python `agent.conversation_loop.run_conversation` parity — single entry for one user turn.
-//!
-//! **B segment** (`prepare_turn`): sanitize, append user, hydrate counters, message prelude.
-//! **C–D segment**: delegated to [`AgentLoop::run_prepared`] / [`AgentLoop::run_stream_prepared`].
-//! **E segment** (`finalize_turn`): turn-level hooks, `ConversationResult` assembly, optional persist.
 
 use std::path::Path;
 

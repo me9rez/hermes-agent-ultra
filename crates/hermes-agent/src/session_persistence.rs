@@ -165,7 +165,17 @@ impl SessionPersistence {
             CREATE TABLE IF NOT EXISTS state_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT
-            );",
+            );
+
+            CREATE TABLE IF NOT EXISTS compression_locks (
+                session_id TEXT PRIMARY KEY,
+                holder TEXT NOT NULL,
+                acquired_at REAL NOT NULL,
+                expires_at REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_compression_locks_expires
+                ON compression_locks(expires_at);",
         )
         .map_err(|e| AgentError::Io(format!("Failed to create tables: {e}")))?;
 
@@ -653,6 +663,138 @@ impl SessionPersistence {
         )
         .map_err(|e| AgentError::Io(format!("Failed to upsert session index: {e}")))?;
         Ok(())
+    }
+
+    /// Store assembled system prompt snapshot (Python `SessionDB.update_system_prompt`).
+    pub fn update_system_prompt(
+        &self,
+        session_id: &str,
+        system_prompt: &str,
+    ) -> Result<(), AgentError> {
+        self.ensure_db()?;
+        let conn = rusqlite::Connection::open(&self.db_path)
+            .map_err(|e| AgentError::Io(format!("Failed to open sessions db: {e}")))?;
+        conn.execute(
+            "UPDATE sessions SET system_prompt = ?1 WHERE id = ?2",
+            rusqlite::params![system_prompt, session_id],
+        )
+        .map_err(|e| AgentError::Io(format!("Failed to update system_prompt: {e}")))?;
+        Ok(())
+    }
+
+    /// Create a continuation session row after compression rotation.
+    pub fn create_compression_continuation_session(
+        &self,
+        new_session_id: &str,
+        parent_session_id: &str,
+        model: Option<&str>,
+        platform: Option<&str>,
+        system_prompt: &str,
+    ) -> Result<(), AgentError> {
+        self.ensure_db()?;
+        let conn = rusqlite::Connection::open(&self.db_path)
+            .map_err(|e| AgentError::Io(format!("Failed to open sessions db: {e}")))?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO sessions (id, model, platform, created_at, updated_at, title, message_count, system_prompt)
+             VALUES (?1, ?2, ?3, ?4, ?4, NULL, 0, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                updated_at = ?4,
+                system_prompt = ?5",
+            rusqlite::params![
+                new_session_id,
+                model.unwrap_or("unknown"),
+                platform.unwrap_or("cli"),
+                now,
+                system_prompt,
+            ],
+        )
+        .map_err(|e| AgentError::Io(format!("Failed to create continuation session: {e}")))?;
+        let _ = parent_session_id;
+        Ok(())
+    }
+
+    /// Try to acquire the per-session compression lock (Python `try_acquire_compression_lock`).
+    pub fn try_acquire_compression_lock(
+        &self,
+        session_id: &str,
+        holder: &str,
+        ttl_seconds: f64,
+    ) -> Result<bool, AgentError> {
+        if session_id.is_empty() {
+            return Ok(false);
+        }
+        self.ensure_db()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let expires_at = now + ttl_seconds;
+        let conn = rusqlite::Connection::open(&self.db_path)
+            .map_err(|e| AgentError::Io(format!("Failed to open sessions db: {e}")))?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| AgentError::Io(format!("Failed to open lock transaction: {e}")))?;
+        tx.execute(
+            "DELETE FROM compression_locks WHERE session_id = ?1 AND expires_at < ?2",
+            rusqlite::params![session_id, now],
+        )
+        .map_err(|e| AgentError::Io(format!("Failed to reclaim expired compression lock: {e}")))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO compression_locks (session_id, holder, acquired_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, holder, now, expires_at],
+        )
+        .map_err(|e| AgentError::Io(format!("Failed to insert compression lock: {e}")))?;
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT holder FROM compression_locks WHERE session_id = ?1",
+                rusqlite::params![session_id],
+                |row| row.get(0),
+            )
+            .ok();
+        tx.commit()
+            .map_err(|e| AgentError::Io(format!("Failed to commit compression lock: {e}")))?;
+        Ok(owner.as_deref() == Some(holder))
+    }
+
+    /// Release the compression lock when owned by `holder`.
+    pub fn release_compression_lock(&self, session_id: &str, holder: &str) -> Result<(), AgentError> {
+        if session_id.is_empty() {
+            return Ok(());
+        }
+        self.ensure_db()?;
+        let conn = rusqlite::Connection::open(&self.db_path)
+            .map_err(|e| AgentError::Io(format!("Failed to open sessions db: {e}")))?;
+        conn.execute(
+            "DELETE FROM compression_locks WHERE session_id = ?1 AND holder = ?2",
+            rusqlite::params![session_id, holder],
+        )
+        .map_err(|e| AgentError::Io(format!("Failed to release compression lock: {e}")))?;
+        Ok(())
+    }
+
+    /// Return the current non-expired lock holder, if any.
+    pub fn get_compression_lock_holder(&self, session_id: &str) -> Result<Option<String>, AgentError> {
+        if session_id.is_empty() {
+            return Ok(None);
+        }
+        self.ensure_db()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let conn = rusqlite::Connection::open(&self.db_path)
+            .map_err(|e| AgentError::Io(format!("Failed to open sessions db: {e}")))?;
+        match conn.query_row(
+            "SELECT holder FROM compression_locks WHERE session_id = ?1 AND expires_at >= ?2",
+            rusqlite::params![session_id, now],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(holder) => Ok(Some(holder)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(AgentError::Io(format!("Failed to read compression lock: {e}"))),
+        }
     }
 
     /// Load persisted full system prompt for prefix-cache continuity (Python `sessions.system_prompt`).

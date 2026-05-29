@@ -478,7 +478,7 @@ impl MemoryProviderPlugin for HonchoMemoryPlugin {
     fn initialize(&self, session_id: &str, hermes_home: &str) {
         let config = HonchoConfig::from_config_file(hermes_home);
         if !config.enabled {
-            tracing::debug!("Honcho not configured — plugin inactive");
+            tracing::trace!("Honcho plugin disabled by configuration");
             return;
         }
 

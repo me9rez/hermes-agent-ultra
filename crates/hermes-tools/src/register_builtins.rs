@@ -181,6 +181,21 @@ pub fn register_builtin_tools(
         );
     }
 
+    // -- Video generation ----------------------------------------------------
+    {
+        let backend = crate::backends::video_gen::FalVideoGenBackend::from_env_or_managed()
+            .unwrap_or_else(|_| crate::backends::video_gen::FalVideoGenBackend::unconfigured());
+        reg(
+            registry,
+            "video_gen",
+            Arc::new(crate::tools::video::VideoGenerateHandler::new(Arc::new(
+                backend,
+            ))),
+            "🎞️",
+            vec!["FAL_KEY".into()],
+        );
+    }
+
     // -- Skills (3 tools) ----------------------------------------------------
     reg(
         registry,

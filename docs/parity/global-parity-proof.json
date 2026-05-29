@@ -47,7 +47,7 @@
     "mode": "tree-drift",
     "pass": true
   },
-  "generated_at_utc": "2026-05-29T20:37:59.378566+00:00",
+  "generated_at_utc": "2026-05-29T22:52:31.646536+00:00",
   "gpar_completion": {
     "GPAR-01": true,
     "GPAR-02": true,
@@ -77,8 +77,8 @@
   "queue_summary": {
     "by_disposition": {
       "mirrored": 75,
-      "ported": 21,
-      "superseded": 4187
+      "ported": 22,
+      "superseded": 4186
     },
     "by_target_ticket": {
       "20": 1790,

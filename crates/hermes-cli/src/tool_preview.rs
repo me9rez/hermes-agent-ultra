@@ -42,6 +42,7 @@ pub fn tool_emoji(tool_name: &str) -> &'static str {
         "browser_vision" => "👁️",
         "vision_analyze" => "👁️",
         "video_analyze" => "🎬",
+        "video_generate" => "🎞️",
         "mixture_of_agents" => "🧠",
         "todo" => "📋",
         "send_message" => "📨",
@@ -170,6 +171,7 @@ pub fn build_tool_preview_from_value(
         "text_to_speech" => Some("text"),
         "vision_analyze" => Some("question"),
         "video_analyze" => Some("question"),
+        "video_generate" => Some("prompt"),
         "mixture_of_agents" => Some("user_prompt"),
         "skill_view" => Some("name"),
         "skills_list" => Some("category"),
@@ -264,6 +266,7 @@ mod tests {
     fn emoji_map_covers_process_and_todo() {
         assert_eq!(tool_emoji("process"), "⚙️");
         assert_eq!(tool_emoji("todo"), "📋");
+        assert_eq!(tool_emoji("video_generate"), "🎞️");
         assert_eq!(tool_emoji("unknown"), "⚙️");
     }
 }

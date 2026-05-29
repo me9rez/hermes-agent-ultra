@@ -1,10 +1,10 @@
 # Parity Matrix
 
-Generated: `2026-05-29T22:32:06.633302+00:00`
+Generated: `2026-05-29T22:52:27.438886+00:00`
 
 ## Scope
 
-- Local ref: `HEAD` (`bb795e224ed1cc9760f40f23151297d856e0852a`)
+- Local ref: `HEAD` (`9ea0700d04a6842f2612a45bd205dd87e441314f`)
 - Upstream ref: `upstream/main` (`689ef5e233980f5d5a32080e959f44c8991dd03a`)
 - Merge base: `none (history divergence)`
 
@@ -13,17 +13,17 @@ Generated: `2026-05-29T22:32:06.633302+00:00`
 | Metric | Value |
 | --- | ---: |
 | Commits behind local (`upstream` ancestry only) | 4399 |
-| Commits ahead local (`local` ancestry only) | 787 |
+| Commits ahead local (`local` ancestry only) | 790 |
 | Upstream commits missing by patch-id (`git cherry local upstream`, `+`) | 4281 |
 | Upstream commits represented by patch-id (`git cherry local upstream`, `-`) | 2 |
-| Local commits unique by patch-id (`git cherry upstream local`, `+`) | 677 |
+| Local commits unique by patch-id (`git cherry upstream local`, `+`) | 679 |
 | Files only in upstream tree | 1470 |
-| Files only in local tree | 562 |
+| Files only in local tree | 563 |
 | Shared files identical content | 1702 |
 | Shared files different content | 1017 |
-| Total files changed (`local` vs `upstream`) | 3049 |
+| Total files changed (`local` vs `upstream`) | 3050 |
 | Insertions (`local` vs `upstream`) | 739593 |
-| Deletions (`local` vs `upstream`) | 375064 |
+| Deletions (`local` vs `upstream`) | 376104 |
 
 ## Top 40 upstream-only buckets
 
@@ -119,7 +119,7 @@ Generated: `2026-05-29T22:32:06.633302+00:00`
 
 | Bucket | Files |
 | --- | ---: |
-| `crates/hermes-tools` | 75 |
+| `crates/hermes-tools` | 76 |
 | `crates/hermes-agent` | 47 |
 | `crates/hermes-gateway` | 46 |
 | `crates/hermes-cli` | 44 |
@@ -176,7 +176,7 @@ Generated: `2026-05-29T22:32:06.633302+00:00`
 
 - Upstream missing by patch-id: `4281`
 - Upstream represented by patch-id: `2`
-- Local unique by patch-id: `677`
+- Local unique by patch-id: `679`
 - Intentional divergence tracked items: `8` (covered files: `900`)
 - Merge base is absent; patch-id mapping is used as primary commit equivalence signal.
 

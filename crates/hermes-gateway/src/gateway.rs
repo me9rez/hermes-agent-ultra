@@ -12,7 +12,7 @@
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
@@ -38,6 +38,14 @@ fn non_streaming_feedback_delay_ms() -> u64 {
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&ms| ms > 0)
         .unwrap_or(1200)
+}
+
+fn streaming_feedback_delay_ms() -> u64 {
+    std::env::var("HERMES_GATEWAY_STREAMING_FEEDBACK_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .unwrap_or(10_000)
 }
 
 use hermes_core::errors::GatewayError;
@@ -1701,6 +1709,10 @@ impl Gateway {
         let mut native_worker: Option<tokio::task::JoinHandle<()>> = None;
         let native_started = Arc::new(AtomicBool::new(false));
         let native_failed = Arc::new(AtomicBool::new(false));
+        let first_visible_emitted = Arc::new(AtomicBool::new(false));
+        let first_visible_chunk_ms = Arc::new(AtomicU64::new(u64::MAX));
+        let streaming_finished = Arc::new(AtomicBool::new(false));
+        let stream_visible_start = Instant::now();
 
         let on_chunk: Arc<dyn Fn(String) + Send + Sync> = if native_streaming {
             let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -1709,6 +1721,8 @@ impl Gateway {
             let reply_to = incoming.message_id.clone();
             let started = native_started.clone();
             let failed = native_failed.clone();
+            let visible_emitted = first_visible_emitted.clone();
+            let visible_ms = first_visible_chunk_ms.clone();
             native_worker = Some(tokio::spawn(async move {
                 let flush_interval =
                     Duration::from_millis(wecom_native_stream_flush_interval_ms());
@@ -1725,6 +1739,9 @@ impl Gateway {
                 {
                     Ok(Some(sid)) => {
                         started.store(true, Ordering::Release);
+                        if !visible_emitted.swap(true, Ordering::AcqRel) {
+                            visible_ms.store(0, Ordering::Release);
+                        }
                         Some(sid)
                     }
                     Ok(None) => {
@@ -1816,14 +1833,25 @@ impl Gateway {
                         .await;
                 }
             }
+            first_visible_emitted.store(true, Ordering::Release);
+            first_visible_chunk_ms.store(0, Ordering::Release);
 
             let stream_manager = self.stream_manager.clone();
             let platform = incoming.platform.clone();
             let chat_id = incoming.chat_id.clone();
             let gateway_adapters = self.adapters.read().await.clone();
             let sid = stream_id.clone().unwrap_or_default();
+            let visible_emitted = first_visible_emitted.clone();
+            let visible_ms = first_visible_chunk_ms.clone();
+            let visible_start = stream_visible_start;
 
             Arc::new(move |chunk: String| {
+                if !chunk.trim().is_empty() && !visible_emitted.swap(true, Ordering::AcqRel) {
+                    visible_ms.store(
+                        visible_start.elapsed().as_millis() as u64,
+                        Ordering::Release,
+                    );
+                }
                 let sm = stream_manager.clone();
                 let sid = sid.clone();
                 let platform = platform.clone();
@@ -1860,6 +1888,35 @@ impl Gateway {
 
         // Invoke the streaming handler
         let agent_start = Instant::now();
+        if incoming.platform.eq_ignore_ascii_case("wecom") {
+            let adapter = adapter_for_platform.clone();
+            let chat_id = incoming.chat_id.clone();
+            let visible_emitted = first_visible_emitted.clone();
+            let visible_ms = first_visible_chunk_ms.clone();
+            let finished = streaming_finished.clone();
+            let visible_start = stream_visible_start;
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(streaming_feedback_delay_ms())).await;
+                if finished.load(Ordering::Acquire) || visible_emitted.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Some(adapter) = adapter {
+                    if adapter.send_message(&chat_id, "处理中，请稍候...", None).await.is_ok() {
+                        if !visible_emitted.swap(true, Ordering::AcqRel) {
+                            visible_ms.store(
+                                visible_start.elapsed().as_millis() as u64,
+                                Ordering::Release,
+                            );
+                        }
+                        info!(
+                            chat_id = %chat_id,
+                            elapsed_ms = visible_start.elapsed().as_millis() as u64,
+                            "gateway streaming delayed first visible output; sent progress notice"
+                        );
+                    }
+                }
+            });
+        }
         info!(
             route_id = %route_id,
             platform = %incoming.platform,
@@ -1880,6 +1937,7 @@ impl Gateway {
         let response = match response_result {
             Ok(text) => text,
             Err(e) => {
+                streaming_finished.store(true, Ordering::Release);
                 self.emit_hook_event(
                     "agent:end",
                     serde_json::json!({
@@ -1896,12 +1954,18 @@ impl Gateway {
                 return Err(e);
             }
         };
+        streaming_finished.store(true, Ordering::Release);
+        let first_visible_ms = {
+            let raw = first_visible_chunk_ms.load(Ordering::Acquire);
+            if raw == u64::MAX { None } else { Some(raw) }
+        };
         info!(
             route_id = %route_id,
             platform = %incoming.platform,
             chat_id = %incoming.chat_id,
             session_key = %session_key,
             elapsed_ms = agent_start.elapsed().as_millis() as u64,
+            first_user_visible_chunk_ms = ?first_visible_ms,
             response_chars = response.chars().count(),
             "gateway streaming agent finished"
         );

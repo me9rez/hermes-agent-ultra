@@ -32,6 +32,14 @@ fn wecom_native_stream_flush_interval_ms() -> u64 {
         .unwrap_or(150)
 }
 
+fn non_streaming_feedback_delay_ms() -> u64 {
+    std::env::var("HERMES_GATEWAY_PROCESSING_FEEDBACK_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .unwrap_or(1200)
+}
+
 use hermes_core::errors::GatewayError;
 use hermes_core::traits::{ParseMode, PlatformAdapter};
 use hermes_core::types::{Message, MessageRole};
@@ -1537,6 +1545,20 @@ impl Gateway {
         runtime_context.deferred_post_delivery_messages = Some(deferred_messages.clone());
         runtime_context.deferred_post_delivery_released = Some(deferred_release.clone());
         let context_handler = self.message_handler_with_context.read().await.clone();
+        let feedback_done = Arc::new(AtomicBool::new(false));
+        if incoming.platform.eq_ignore_ascii_case("wecom") {
+            let adapter = self.get_adapter("wecom").await;
+            let chat_id = incoming.chat_id.clone();
+            let done = feedback_done.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(non_streaming_feedback_delay_ms())).await;
+                if !done.load(Ordering::Acquire) {
+                    if let Some(adapter) = adapter {
+                        let _ = adapter.send_message(&chat_id, "处理中，请稍候...", None).await;
+                    }
+                }
+            });
+        }
         let agent_start = Instant::now();
         debug!(
             route_id = %route_id,
@@ -1559,6 +1581,7 @@ impl Gateway {
         let response = match response_result {
             Ok(text) => text,
             Err(e) => {
+                feedback_done.store(true, Ordering::Release);
                 self.emit_hook_event(
                     "agent:end",
                     serde_json::json!({
@@ -1575,6 +1598,7 @@ impl Gateway {
                 return Err(e);
             }
         };
+        feedback_done.store(true, Ordering::Release);
         debug!(
             route_id = %route_id,
             platform = %incoming.platform,

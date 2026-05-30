@@ -361,6 +361,7 @@ impl CronScheduler {
     /// Validates the job, generates a UUID if needed, computes the next run
     /// time, persists it, and registers it in memory.
     pub async fn create_job(&self, mut job: CronJob) -> Result<String, CronError> {
+        job.normalize_paths().map_err(CronError::InvalidJob)?;
         // Validate
         job.validate().map_err(CronError::InvalidJob)?;
 
@@ -414,7 +415,8 @@ impl CronScheduler {
     }
 
     /// Update an existing cron job.
-    pub async fn update_job(&self, id: &str, updated: CronJob) -> Result<(), CronError> {
+    pub async fn update_job(&self, id: &str, mut updated: CronJob) -> Result<(), CronError> {
+        updated.normalize_paths().map_err(CronError::InvalidJob)?;
         // Validate the updated job
         updated.validate().map_err(CronError::InvalidJob)?;
 
@@ -624,6 +626,36 @@ mod tests {
         let loaded = sched.get_job(&id).await.expect("get");
         assert_eq!(loaded.prompt, "hello");
         assert_eq!(sched.list_jobs().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_create_job_normalizes_workdir() {
+        let sched = make_test_scheduler();
+        let dir = tempdir().expect("workdir");
+        let mut job = CronJob::new("0 * * * *", "hello");
+        job.workdir = Some(dir.path().to_string_lossy().to_string());
+
+        let id = sched.create_job(job).await.expect("create");
+        let loaded = sched.get_job(&id).await.expect("get");
+        assert_eq!(
+            loaded.workdir,
+            Some(
+                std::fs::canonicalize(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_rejects_invalid_workdir() {
+        let sched = make_test_scheduler();
+        let mut job = CronJob::new("0 * * * *", "hello");
+        job.workdir = Some("relative/path".to_string());
+
+        let err = sched.create_job(job).await.expect_err("invalid workdir");
+        assert!(err.to_string().contains("absolute path"));
     }
 
     #[test]

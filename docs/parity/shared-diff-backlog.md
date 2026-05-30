@@ -1,22 +1,22 @@
 # Shared-Different Backlog
 
-Generated: `2026-05-30T11:28:02.575315+00:00`
+Generated: `2026-05-30T12:01:25.724649+00:00`
 
 ## Summary
 
 - Total shared-different paths: `1028`
 - Pending classification: `0`
-- Pending functional review: `675`
+- Pending functional review: `664`
 - Cleared non-runtime: `170`
-- Cleared intentional divergence: `183`
+- Cleared intentional divergence: `194`
 
 ## Status Counts
 
 | Status | Count |
 | --- | ---: |
-| `cleared_intentional_divergence` | 183 |
+| `cleared_intentional_divergence` | 194 |
 | `cleared_non_runtime` | 170 |
-| `pending_review` | 675 |
+| `pending_review` | 664 |
 
 ## Workstream Counts
 
@@ -47,7 +47,6 @@ Generated: `2026-05-30T11:28:02.575315+00:00`
 | `tests/agent` | 24 |
 | `ui-tui/packages` | 18 |
 | `tests/plugins` | 17 |
-| `tests/cron` | 11 |
 | `tests/skills` | 6 |
 | `tests/honcho_plugin` | 5 |
 | `tests/stress` | 5 |

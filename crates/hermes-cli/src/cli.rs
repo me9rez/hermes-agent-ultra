@@ -434,6 +434,9 @@ pub enum CliCommand {
         /// Per-job shell override for inline scripts.
         #[arg(long)]
         script_shell: Option<String>,
+        /// Absolute working directory for this cron job.
+        #[arg(long)]
+        workdir: Option<String>,
         /// Include inactive jobs (list action).
         #[arg(long)]
         all: bool,

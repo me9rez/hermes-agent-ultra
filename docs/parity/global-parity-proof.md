@@ -1,6 +1,6 @@
 # Global Parity Proof
 
-Generated: `2026-05-29T23:51:53.163566+00:00`
+Generated: `2026-05-30T12:04:39.420971+00:00`
 
 ## Gate Status
 
@@ -13,9 +13,9 @@ Generated: `2026-05-29T23:51:53.163566+00:00`
 
 | Metric | Value |
 | --- | ---: |
-| `max_commits_behind` | 4399.0 |
-| `max_upstream_patch_missing` | 4281.0 |
-| `max_files_only_upstream` | 1470.0 |
+| `max_commits_behind` | 4466.0 |
+| `max_upstream_patch_missing` | 4346.0 |
+| `max_files_only_upstream` | 1484.0 |
 | `max_unowned_divergences` | 0.0 |
 | `max_divergence_review_overdue` | 0.0 |
 | `min_test_intent_mapping_ratio` | 1.0 |

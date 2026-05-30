@@ -740,6 +740,7 @@ async fn main() {
             agent,
             script_timeout_seconds,
             script_shell,
+            workdir,
             all,
         } => {
             run_cron(
@@ -761,6 +762,7 @@ async fn main() {
                 agent,
                 script_timeout_seconds,
                 script_shell,
+                workdir,
                 all,
             )
             .await
@@ -8305,6 +8307,7 @@ async fn run_cron(
     agent: bool,
     script_timeout_seconds: Option<u64>,
     script_shell: Option<String>,
+    workdir: Option<String>,
     all: bool,
 ) -> Result<(), AgentError> {
     let data_dir = hermes_state_root(&cli).join("cron");
@@ -8387,6 +8390,9 @@ async fn run_cron(
             }
             if let Some(shell) = script_shell.filter(|v| !v.trim().is_empty()) {
                 job.script_shell = Some(shell.trim().to_string());
+            }
+            if let Some(workdir) = workdir {
+                job.workdir = Some(workdir);
             }
             let jid = sched.create_job(job).await.map_err(cron_cli_error)?;
             println!(
@@ -8479,6 +8485,13 @@ async fn run_cron(
                     job.script_shell = None;
                 } else {
                     job.script_shell = Some(shell.trim().to_string());
+                }
+            }
+            if let Some(workdir) = workdir {
+                if workdir.trim().is_empty() {
+                    job.workdir = None;
+                } else {
+                    job.workdir = Some(workdir);
                 }
             }
             if job.no_agent && job.script.as_ref().map_or(true, |s| s.trim().is_empty()) {

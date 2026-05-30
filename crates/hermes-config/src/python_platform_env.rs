@@ -167,6 +167,19 @@ fn apply_discord_env(config: &mut GatewayConfig) {
     if let Some(v) = env_nonempty("DISCORD_ALLOW_BOTS") {
         set_extra(discord, "allow_bots", json!(v));
     }
+    if let Some(v) = env_nonempty("DISCORD_ALLOWED_USERS") {
+        discord.allowed_users = comma_list_to_strings(&v);
+    }
+    if let Some(v) = env_nonempty("DISCORD_ALLOWED_ROLES") {
+        set_extra(discord, "allowed_roles", json!(comma_list_to_strings(&v)));
+    }
+    if let Some(v) = env_nonempty("DISCORD_ALLOWED_CHANNELS") {
+        set_extra(
+            discord,
+            "allowed_channels",
+            json!(comma_list_to_strings(&v)),
+        );
+    }
     if let Some(v) = env_nonempty("DISCORD_REACTIONS") {
         set_extra(discord, "reactions", json!(env_bool(&v)));
     }
@@ -261,6 +274,9 @@ mod tests {
             std::env::set_var("DISCORD_BOT_TOKEN", "discord-token");
             std::env::set_var("DISCORD_APPLICATION_ID", "app-123");
             std::env::set_var("DISCORD_ALLOW_BOTS", "mentions");
+            std::env::set_var("DISCORD_ALLOWED_USERS", "100, 200");
+            std::env::set_var("DISCORD_ALLOWED_ROLES", "300,400");
+            std::env::set_var("DISCORD_ALLOWED_CHANNELS", "500,*");
             std::env::set_var("DISCORD_REACTIONS", "false");
             std::env::set_var("DISCORD_REPLY_TO_MODE", "ALL");
             std::env::set_var("DISCORD_REQUIRE_MENTION", "true");
@@ -283,6 +299,23 @@ mod tests {
         assert_eq!(
             discord.extra.get("allow_bots").and_then(|v| v.as_str()),
             Some("mentions")
+        );
+        assert_eq!(discord.allowed_users, vec!["100", "200"]);
+        assert_eq!(
+            discord
+                .extra
+                .get("allowed_roles")
+                .and_then(|v| v.as_array())
+                .map(|items| { items.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>() }),
+            Some(vec!["300", "400"])
+        );
+        assert_eq!(
+            discord
+                .extra
+                .get("allowed_channels")
+                .and_then(|v| v.as_array())
+                .map(|items| { items.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>() }),
+            Some(vec!["500", "*"])
         );
         assert_eq!(
             discord.extra.get("reactions").and_then(|v| v.as_bool()),
@@ -331,6 +364,9 @@ mod tests {
             std::env::remove_var("DISCORD_BOT_TOKEN");
             std::env::remove_var("DISCORD_APPLICATION_ID");
             std::env::remove_var("DISCORD_ALLOW_BOTS");
+            std::env::remove_var("DISCORD_ALLOWED_USERS");
+            std::env::remove_var("DISCORD_ALLOWED_ROLES");
+            std::env::remove_var("DISCORD_ALLOWED_CHANNELS");
             std::env::remove_var("DISCORD_REACTIONS");
             std::env::remove_var("DISCORD_REPLY_TO_MODE");
             std::env::remove_var("DISCORD_REQUIRE_MENTION");

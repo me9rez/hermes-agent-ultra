@@ -293,6 +293,8 @@ impl Default for GroupAccessMode {
 pub struct PlatformAccessPolicy {
     pub allowed_users: HashSet<String>,
     pub admin_users: HashSet<String>,
+    pub allowed_channels: HashSet<String>,
+    pub ignored_channels: HashSet<String>,
     pub group_mode: GroupAccessMode,
     pub slash_requires_allowlist: bool,
     pub bot_sender_bypasses_allowlist: bool,
@@ -326,6 +328,26 @@ impl PlatformAccessPolicy {
     pub fn is_user_allowed(&self, user_id: &str) -> bool {
         Self::user_matches_any(user_id, &self.admin_users)
             || Self::user_matches_any(user_id, &self.allowed_users)
+    }
+
+    fn channel_matches_any(channel_id: &str, set: &HashSet<String>) -> bool {
+        let candidate = channel_id.trim();
+        if candidate.is_empty() {
+            return false;
+        }
+        set.iter().any(|entry| {
+            let allowed = entry.trim();
+            allowed == "*" || allowed.eq_ignore_ascii_case(candidate)
+        })
+    }
+
+    fn is_channel_allowed(&self, channel_id: &str) -> bool {
+        self.allowed_channels.is_empty()
+            || Self::channel_matches_any(channel_id, &self.allowed_channels)
+    }
+
+    fn is_channel_ignored(&self, channel_id: &str) -> bool {
+        Self::channel_matches_any(channel_id, &self.ignored_channels)
     }
 
     fn allows_sender_without_user_allowlist(
@@ -598,6 +620,22 @@ impl Gateway {
             let bypasses_user_allowlist =
                 policy.allows_sender_without_user_allowlist(incoming, sender);
             if !incoming.is_dm {
+                if policy.is_channel_ignored(&incoming.chat_id) {
+                    debug!(
+                        platform = incoming.platform,
+                        chat_id = incoming.chat_id,
+                        "Group message denied: channel is ignored by platform policy"
+                    );
+                    return Ok(());
+                }
+                if !policy.is_channel_allowed(&incoming.chat_id) {
+                    debug!(
+                        platform = incoming.platform,
+                        chat_id = incoming.chat_id,
+                        "Group message denied: channel not in platform allowlist"
+                    );
+                    return Ok(());
+                }
                 match policy.group_mode {
                     GroupAccessMode::Disabled => {
                         debug!(
@@ -2635,6 +2673,77 @@ mod tests {
                 .await,
             0
         );
+    }
+
+    #[tokio::test]
+    async fn gateway_channel_allow_and_ignore_policy_matches_discord_contract() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(TestAdapter {
+            messages: sent.clone(),
+        });
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let dm_manager = DmManager::with_ignore_behavior();
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        gw.register_adapter("discord", adapter).await;
+        gw.set_message_handler(Arc::new(|_messages| {
+            Box::pin(async { Ok("handled".to_string()) })
+        }))
+        .await;
+
+        let mut policies = HashMap::new();
+        let mut policy = PlatformAccessPolicy {
+            group_mode: GroupAccessMode::Open,
+            ..PlatformAccessPolicy::default()
+        };
+        policy.allowed_channels.insert("allowed".to_string());
+        policy.ignored_channels.insert("ignored".to_string());
+        policies.insert("discord".to_string(), policy);
+        gw.set_platform_access_policies(policies).await;
+
+        let ignored = IncomingMessage {
+            platform: "discord".into(),
+            chat_id: "ignored".into(),
+            user_id: "user1".into(),
+            text: "hello".into(),
+            message_id: None,
+            is_dm: false,
+        };
+        assert!(gw.route_message(&ignored).await.is_ok());
+        assert_eq!(
+            gw.session_transcript_len("discord", "ignored", "user1")
+                .await,
+            0
+        );
+
+        let not_allowed = IncomingMessage {
+            platform: "discord".into(),
+            chat_id: "other".into(),
+            user_id: "user1".into(),
+            text: "hello".into(),
+            message_id: None,
+            is_dm: false,
+        };
+        assert!(gw.route_message(&not_allowed).await.is_ok());
+        assert_eq!(
+            gw.session_transcript_len("discord", "other", "user1").await,
+            0
+        );
+
+        let allowed = IncomingMessage {
+            platform: "discord".into(),
+            chat_id: "allowed".into(),
+            user_id: "user1".into(),
+            text: "hello".into(),
+            message_id: None,
+            is_dm: false,
+        };
+        assert!(gw.route_message(&allowed).await.is_ok());
+        assert_eq!(
+            gw.session_transcript_len("discord", "allowed", "user1")
+                .await,
+            2
+        );
+        assert_eq!(sent.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

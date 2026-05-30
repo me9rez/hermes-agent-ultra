@@ -3766,16 +3766,16 @@
       "workstream": "WS6"
     },
     {
-      "action": "Map upstream test intent to Rust/Python contract coverage; add missing regression tests.",
-      "classification": "functional",
-      "classification_path": "tests/gateway",
+      "action": "No vendoring; verify approved divergence remains current.",
+      "classification": "intentional_divergence",
+      "classification_path": "tests/gateway/test_discord_component_auth.py",
       "existing_coverage": "claimed_by_shared_diff_classification",
       "local_blob": "5758e82561e041f436c39543717fb826a2da2230",
-      "necessity": "necessary_review",
+      "necessity": "approved_divergence",
       "owner": "sheawinkler",
       "path": "tests/gateway/test_discord_component_auth.py",
-      "rust_requirement": "rust_equivalent_or_contract_test_required",
-      "status": "pending_review",
+      "rust_requirement": "not_required_for_runtime",
+      "status": "cleared_intentional_divergence",
       "ticket": 25,
       "upstream_blob": "95d746b80ee9b05ae888e6ef2e76f86cb7799c5c",
       "workstream": "WS6"
@@ -3811,16 +3811,16 @@
       "workstream": "WS6"
     },
     {
-      "action": "Map upstream test intent to Rust/Python contract coverage; add missing regression tests.",
-      "classification": "functional",
-      "classification_path": "tests/gateway",
+      "action": "No vendoring; verify approved divergence remains current.",
+      "classification": "intentional_divergence",
+      "classification_path": "tests/gateway/test_discord_free_response.py",
       "existing_coverage": "claimed_by_shared_diff_classification",
       "local_blob": "91b23bd860294c94fe7e7d3e0c36092ee97f01b7",
-      "necessity": "necessary_review",
+      "necessity": "approved_divergence",
       "owner": "sheawinkler",
       "path": "tests/gateway/test_discord_free_response.py",
-      "rust_requirement": "rust_equivalent_or_contract_test_required",
-      "status": "pending_review",
+      "rust_requirement": "not_required_for_runtime",
+      "status": "cleared_intentional_divergence",
       "ticket": 25,
       "upstream_blob": "e2133d56c3585995e94f8cffb282cf1f726b797c",
       "workstream": "WS6"
@@ -3931,16 +3931,16 @@
       "workstream": "WS6"
     },
     {
-      "action": "Map upstream test intent to Rust/Python contract coverage; add missing regression tests.",
-      "classification": "functional",
-      "classification_path": "tests/gateway",
+      "action": "No vendoring; verify approved divergence remains current.",
+      "classification": "intentional_divergence",
+      "classification_path": "tests/gateway/test_discord_roles_dm_scope.py",
       "existing_coverage": "claimed_by_shared_diff_classification",
       "local_blob": "0f10ba79ae1fa96feba43c8ddb839c5c81ebee74",
-      "necessity": "necessary_review",
+      "necessity": "approved_divergence",
       "owner": "sheawinkler",
       "path": "tests/gateway/test_discord_roles_dm_scope.py",
-      "rust_requirement": "rust_equivalent_or_contract_test_required",
-      "status": "pending_review",
+      "rust_requirement": "not_required_for_runtime",
+      "status": "cleared_intentional_divergence",
       "ticket": 25,
       "upstream_blob": "19d65a5998c39e5dff1f77381232da6307daf5ae",
       "workstream": "WS6"
@@ -3961,16 +3961,16 @@
       "workstream": "WS6"
     },
     {
-      "action": "Map upstream test intent to Rust/Python contract coverage; add missing regression tests.",
-      "classification": "functional",
-      "classification_path": "tests/gateway",
+      "action": "No vendoring; verify approved divergence remains current.",
+      "classification": "intentional_divergence",
+      "classification_path": "tests/gateway/test_discord_slash_auth.py",
       "existing_coverage": "claimed_by_shared_diff_classification",
       "local_blob": "e51f240e3aa5703e26620bb51d2e25b83e0a51b4",
-      "necessity": "necessary_review",
+      "necessity": "approved_divergence",
       "owner": "sheawinkler",
       "path": "tests/gateway/test_discord_slash_auth.py",
-      "rust_requirement": "rust_equivalent_or_contract_test_required",
-      "status": "pending_review",
+      "rust_requirement": "not_required_for_runtime",
+      "status": "cleared_intentional_divergence",
       "ticket": 25,
       "upstream_blob": "39d06ba74fb8246453853aa392dae9dd551440c6",
       "workstream": "WS6"
@@ -15271,29 +15271,29 @@
       "workstream": "WS5"
     }
   ],
-  "generated_at_utc": "2026-05-30T08:17:53.629547+00:00",
+  "generated_at_utc": "2026-05-30T08:46:47.522814+00:00",
   "refs": {
     "local_ref": "main",
-    "local_sha": "25cfd0b9dd2d95fcb1eb5fb6eb7417a1da6a69d5",
+    "local_sha": "397bfdb4d67885994d1252c6682c606cbf34de94",
     "upstream_ref": "upstream/main",
     "upstream_sha": "bcc83010006c7059ee4d0be63fe74afc74867625"
   },
   "summary": {
     "by_classification": {
       "branding_only": 1,
-      "functional": 727,
-      "intentional_divergence": 122,
+      "functional": 723,
+      "intentional_divergence": 126,
       "policy_only": 168
     },
     "by_rust_requirement": {
-      "not_required_for_runtime": 291,
-      "rust_equivalent_or_contract_test_required": 648,
+      "not_required_for_runtime": 295,
+      "rust_equivalent_or_contract_test_required": 644,
       "rust_primary_ux_or_documented_divergence_required": 79
     },
     "by_status": {
-      "cleared_intentional_divergence": 122,
+      "cleared_intentional_divergence": 126,
       "cleared_non_runtime": 169,
-      "pending_review": 727
+      "pending_review": 723
     },
     "by_workstream": {
       "WS3": 53,
@@ -15302,10 +15302,10 @@
       "WS6": 683,
       "WS8": 13
     },
-    "cleared_intentional_divergence": 122,
+    "cleared_intentional_divergence": 126,
     "cleared_non_runtime": 169,
     "pending_classification": 0,
-    "pending_review": 727,
+    "pending_review": 723,
     "total_shared_different": 1018
   }
 }

@@ -407,6 +407,9 @@ fn channel_matches(
     channel_id: &str,
     parent_channel_id: Option<&str>,
 ) -> bool {
+    if ids.iter().any(|id| id.trim() == "*") {
+        return true;
+    }
     let channel_id = channel_id.trim();
     let parent_channel_id = parent_channel_id.map(str::trim).filter(|s| !s.is_empty());
     (!channel_id.is_empty() && ids.contains(channel_id))
@@ -553,6 +556,309 @@ impl DiscordChannelContext {
             voice_linked_text_channel: false,
         }
     }
+}
+
+fn id_matches_any(candidate: &str, allowed: &BTreeSet<String>) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    let candidate_no_at = candidate.strip_prefix('@').unwrap_or(candidate);
+    allowed.iter().any(|entry| {
+        let allowed = entry.trim();
+        if allowed.is_empty() {
+            return false;
+        }
+        let allowed_no_at = allowed.strip_prefix('@').unwrap_or(allowed);
+        allowed.eq_ignore_ascii_case(candidate)
+            || allowed.eq_ignore_ascii_case(candidate_no_at)
+            || allowed_no_at.eq_ignore_ascii_case(candidate)
+            || allowed_no_at.eq_ignore_ascii_case(candidate_no_at)
+    })
+}
+
+/// Discord user/member data relevant to slash and component authorization.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscordInteractionSubject {
+    pub user_id: Option<String>,
+    pub role_ids: BTreeSet<String>,
+    /// Guild that the resolved role list belongs to.
+    ///
+    /// Component interactions carry the resolved member role list directly and
+    /// do not need this field. Slash/on-message role checks use it to avoid
+    /// trusting roles from a different mutual guild.
+    pub role_guild_id: Option<String>,
+}
+
+impl DiscordInteractionSubject {
+    pub fn user(user_id: impl Into<String>) -> Self {
+        Self {
+            user_id: Some(user_id.into()),
+            role_ids: BTreeSet::new(),
+            role_guild_id: None,
+        }
+    }
+
+    pub fn member(
+        user_id: impl Into<String>,
+        role_ids: impl IntoIterator<Item = impl Into<String>>,
+        role_guild_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            user_id: Some(user_id.into()),
+            role_ids: role_ids.into_iter().map(Into::into).collect(),
+            role_guild_id: Some(role_guild_id.into()),
+        }
+    }
+
+    fn has_role_match(&self, allowed_role_ids: &BTreeSet<String>) -> bool {
+        self.role_ids
+            .iter()
+            .any(|role_id| id_matches_any(role_id, allowed_role_ids))
+    }
+}
+
+/// Slash/component authorization policy matching Discord's Python gate shape.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscordInteractionAuthPolicy {
+    pub allowed_user_ids: BTreeSet<String>,
+    pub allowed_role_ids: BTreeSet<String>,
+    pub allowed_channels: BTreeSet<String>,
+    pub ignored_channels: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscordAuthDecision {
+    Allow,
+    Deny(DiscordAuthDenyReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscordAuthDenyReason {
+    AllowedUsersOrRoles,
+    AllowedChannels,
+    IgnoredChannels,
+}
+
+impl DiscordInteractionAuthPolicy {
+    pub fn has_identity_policy(&self) -> bool {
+        !self.allowed_user_ids.is_empty() || !self.allowed_role_ids.is_empty()
+    }
+
+    pub fn component_allows(&self, subject: &DiscordInteractionSubject) -> bool {
+        if !self.has_identity_policy() {
+            return true;
+        }
+        subject
+            .user_id
+            .as_deref()
+            .map(|user_id| id_matches_any(user_id, &self.allowed_user_ids))
+            .unwrap_or(false)
+            || subject.has_role_match(&self.allowed_role_ids)
+    }
+
+    fn slash_role_allows(
+        &self,
+        subject: &DiscordInteractionSubject,
+        guild_id: Option<&str>,
+        is_dm: bool,
+        dm_role_auth_guild: Option<&str>,
+    ) -> bool {
+        if self.allowed_role_ids.is_empty() || !subject.has_role_match(&self.allowed_role_ids) {
+            return false;
+        }
+
+        let Some(role_guild_id) = subject
+            .role_guild_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return false;
+        };
+
+        if is_dm {
+            return dm_role_auth_guild
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(|trusted| trusted == role_guild_id)
+                .unwrap_or(false);
+        }
+
+        guild_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|origin| origin == role_guild_id)
+            .unwrap_or(false)
+    }
+
+    pub fn authorize_slash(
+        &self,
+        subject: &DiscordInteractionSubject,
+        channel_context: Option<&DiscordChannelContext>,
+        guild_id: Option<&str>,
+        dm_role_auth_guild: Option<&str>,
+    ) -> DiscordAuthDecision {
+        let is_dm = channel_context
+            .map(|ctx| ctx.is_dm)
+            .unwrap_or(guild_id.is_none());
+        if !is_dm {
+            let Some(context) = channel_context else {
+                if !self.allowed_channels.is_empty() {
+                    return DiscordAuthDecision::Deny(DiscordAuthDenyReason::AllowedChannels);
+                }
+                if !self.ignored_channels.is_empty() {
+                    return DiscordAuthDecision::Deny(DiscordAuthDenyReason::IgnoredChannels);
+                }
+                return self.authorize_slash_identity(subject, guild_id, is_dm, dm_role_auth_guild);
+            };
+
+            if channel_matches(
+                &self.ignored_channels,
+                &context.channel_id,
+                context.parent_channel_id.as_deref(),
+            ) {
+                return DiscordAuthDecision::Deny(DiscordAuthDenyReason::IgnoredChannels);
+            }
+
+            if !self.allowed_channels.is_empty()
+                && !channel_matches(
+                    &self.allowed_channels,
+                    &context.channel_id,
+                    context.parent_channel_id.as_deref(),
+                )
+            {
+                return DiscordAuthDecision::Deny(DiscordAuthDenyReason::AllowedChannels);
+            }
+        }
+
+        if !self.has_identity_policy() {
+            return DiscordAuthDecision::Allow;
+        }
+
+        self.authorize_slash_identity(subject, guild_id, is_dm, dm_role_auth_guild)
+    }
+
+    fn authorize_slash_identity(
+        &self,
+        subject: &DiscordInteractionSubject,
+        guild_id: Option<&str>,
+        is_dm: bool,
+        dm_role_auth_guild: Option<&str>,
+    ) -> DiscordAuthDecision {
+        if !self.has_identity_policy() {
+            return DiscordAuthDecision::Allow;
+        }
+
+        let user_allowed = subject
+            .user_id
+            .as_deref()
+            .map(|user_id| id_matches_any(user_id, &self.allowed_user_ids))
+            .unwrap_or(false);
+        if user_allowed || self.slash_role_allows(subject, guild_id, is_dm, dm_role_auth_guild) {
+            DiscordAuthDecision::Allow
+        } else {
+            DiscordAuthDecision::Deny(DiscordAuthDenyReason::AllowedUsersOrRoles)
+        }
+    }
+}
+
+/// Determine whether a Discord message may be routed without an explicit bot mention.
+pub fn discord_allows_message_without_mention(
+    require_mention: bool,
+    controls: &DiscordChannelControls,
+    context: &DiscordChannelContext,
+    bot_participated_in_thread: bool,
+    bot_mentioned: bool,
+) -> bool {
+    if bot_mentioned || !require_mention || context.is_dm || controls.allows_free_response(context)
+    {
+        return true;
+    }
+    context.is_thread && bot_participated_in_thread && !controls.thread_require_mention
+}
+
+/// Discord SendResult-style success handling for unauthorized slash notifications.
+pub fn discord_notify_result_counts_delivered(success: Option<bool>) -> bool {
+    success.unwrap_or(true)
+}
+
+/// Catalog entry used by the flat `/skill` Discord command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordSkillCommandEntry {
+    pub name: String,
+    pub description: String,
+    pub command_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscordSkillCommandDecision {
+    Unauthorized,
+    UnknownSkill { requested_name: String },
+    Dispatch { text: String },
+}
+
+pub fn discord_skill_autocomplete_choices(
+    policy: &DiscordInteractionAuthPolicy,
+    subject: &DiscordInteractionSubject,
+    channel_context: Option<&DiscordChannelContext>,
+    guild_id: Option<&str>,
+    dm_role_auth_guild: Option<&str>,
+    entries: &[DiscordSkillCommandEntry],
+    current: &str,
+) -> Vec<String> {
+    if policy.authorize_slash(subject, channel_context, guild_id, dm_role_auth_guild)
+        != DiscordAuthDecision::Allow
+    {
+        return Vec::new();
+    }
+
+    let needle = current.trim().to_ascii_lowercase();
+    entries
+        .iter()
+        .filter(|entry| {
+            needle.is_empty()
+                || entry.name.to_ascii_lowercase().contains(&needle)
+                || entry.description.to_ascii_lowercase().contains(&needle)
+        })
+        .take(25)
+        .map(|entry| entry.name.clone())
+        .collect()
+}
+
+pub fn discord_skill_command_decision(
+    policy: &DiscordInteractionAuthPolicy,
+    subject: &DiscordInteractionSubject,
+    channel_context: Option<&DiscordChannelContext>,
+    guild_id: Option<&str>,
+    dm_role_auth_guild: Option<&str>,
+    entries: &[DiscordSkillCommandEntry],
+    requested_name: &str,
+    args: &str,
+) -> DiscordSkillCommandDecision {
+    if policy.authorize_slash(subject, channel_context, guild_id, dm_role_auth_guild)
+        != DiscordAuthDecision::Allow
+    {
+        return DiscordSkillCommandDecision::Unauthorized;
+    }
+
+    let requested = requested_name.trim();
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(requested))
+    else {
+        return DiscordSkillCommandDecision::UnknownSkill {
+            requested_name: requested.to_string(),
+        };
+    };
+
+    let args = args.trim();
+    let text = if args.is_empty() {
+        entry.command_key.clone()
+    } else {
+        format!("{} {}", entry.command_key, args)
+    };
+    DiscordSkillCommandDecision::Dispatch { text }
 }
 
 /// Channel-bound skill binding parsed from Python-style Discord config.
@@ -1107,6 +1413,9 @@ pub struct SlashCommand {
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<SlashCommandOption>>,
+    /// Discord permission bitset string. "0" hides the command by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_member_permissions: Option<String>,
     /// Command type (1 = CHAT_INPUT, 2 = USER, 3 = MESSAGE). Default 1.
     #[serde(rename = "type", default = "default_command_type")]
     pub command_type: u8,
@@ -1131,6 +1440,12 @@ pub struct SlashCommandOption {
 pub struct SlashCommandChoice {
     pub name: String,
     pub value: serde_json::Value,
+}
+
+pub fn apply_owner_only_slash_visibility(commands: &mut [SlashCommand]) {
+    for command in commands {
+        command.default_member_permissions = Some("0".to_string());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2911,6 +3226,338 @@ mod tests {
     }
 
     #[test]
+    fn discord_channel_controls_honor_wildcard_lists() {
+        let ignored = DiscordChannelControls {
+            ignored_channels: ["*"].into_iter().map(String::from).collect(),
+            ..DiscordChannelControls::default()
+        };
+        assert!(ignored.is_ignored(&DiscordChannelContext::server("700")));
+        assert!(ignored.is_ignored(&DiscordChannelContext::thread("701", "700")));
+        assert!(!ignored.is_ignored(&DiscordChannelContext::dm("700")));
+
+        let free = DiscordChannelControls {
+            free_response_channels: ["*"].into_iter().map(String::from).collect(),
+            ..DiscordChannelControls::default()
+        };
+        assert!(free.allows_free_response(&DiscordChannelContext::server("900")));
+        assert!(free.allows_free_response(&DiscordChannelContext::thread("901", "900")));
+        assert!(!free.should_auto_thread(&DiscordChannelContext::server("900")));
+    }
+
+    #[test]
+    fn discord_component_auth_user_or_role_matches_and_fails_closed() {
+        let policy = DiscordInteractionAuthPolicy {
+            allowed_user_ids: ["11111"].into_iter().map(String::from).collect(),
+            allowed_role_ids: ["42"].into_iter().map(String::from).collect(),
+            ..DiscordInteractionAuthPolicy::default()
+        };
+
+        assert!(policy.component_allows(&DiscordInteractionSubject::user("11111")));
+        assert!(policy.component_allows(&DiscordInteractionSubject {
+            user_id: Some("99999".into()),
+            role_ids: ["42"].into_iter().map(String::from).collect(),
+            role_guild_id: None,
+        }));
+        assert!(!policy.component_allows(&DiscordInteractionSubject {
+            user_id: Some("99999".into()),
+            role_ids: ["7"].into_iter().map(String::from).collect(),
+            role_guild_id: None,
+        }));
+        assert!(!policy.component_allows(&DiscordInteractionSubject::default()));
+        assert!(DiscordInteractionAuthPolicy::default()
+            .component_allows(&DiscordInteractionSubject::default()));
+    }
+
+    #[test]
+    fn discord_slash_auth_matches_channel_and_identity_policy() {
+        let policy = DiscordInteractionAuthPolicy {
+            allowed_user_ids: ["100200300"].into_iter().map(String::from).collect(),
+            allowed_channels: ["1111", "2222"].into_iter().map(String::from).collect(),
+            ignored_channels: ["9999"].into_iter().map(String::from).collect(),
+            ..DiscordInteractionAuthPolicy::default()
+        };
+        let subject = DiscordInteractionSubject::user("100200300");
+
+        assert_eq!(
+            policy.authorize_slash(
+                &subject,
+                Some(&DiscordChannelContext::server("1111")),
+                Some("guild-1"),
+                None,
+            ),
+            DiscordAuthDecision::Allow
+        );
+        assert_eq!(
+            policy.authorize_slash(
+                &subject,
+                Some(&DiscordChannelContext::server("3333")),
+                Some("guild-1"),
+                None,
+            ),
+            DiscordAuthDecision::Deny(DiscordAuthDenyReason::AllowedChannels)
+        );
+        assert_eq!(
+            policy.authorize_slash(
+                &subject,
+                Some(&DiscordChannelContext::server("9999")),
+                Some("guild-1"),
+                None,
+            ),
+            DiscordAuthDecision::Deny(DiscordAuthDenyReason::IgnoredChannels)
+        );
+        assert_eq!(
+            policy.authorize_slash(&subject, None, Some("guild-1"), None),
+            DiscordAuthDecision::Deny(DiscordAuthDenyReason::AllowedChannels)
+        );
+        let identity_only_policy = DiscordInteractionAuthPolicy {
+            allowed_user_ids: ["100200300"].into_iter().map(String::from).collect(),
+            ..DiscordInteractionAuthPolicy::default()
+        };
+        assert_eq!(
+            identity_only_policy.authorize_slash(
+                &DiscordInteractionSubject::user("other"),
+                None,
+                Some("guild-1"),
+                None,
+            ),
+            DiscordAuthDecision::Deny(DiscordAuthDenyReason::AllowedUsersOrRoles)
+        );
+        assert_eq!(
+            identity_only_policy.authorize_slash(&subject, None, Some("guild-1"), None),
+            DiscordAuthDecision::Allow
+        );
+        assert_eq!(
+            policy.authorize_slash(
+                &DiscordInteractionSubject::user("other"),
+                Some(&DiscordChannelContext::server("1111")),
+                Some("guild-1"),
+                None,
+            ),
+            DiscordAuthDecision::Deny(DiscordAuthDenyReason::AllowedUsersOrRoles)
+        );
+        assert_eq!(
+            policy.authorize_slash(
+                &DiscordInteractionSubject::default(),
+                Some(&DiscordChannelContext::dm("dm-1")),
+                None,
+                None,
+            ),
+            DiscordAuthDecision::Deny(DiscordAuthDenyReason::AllowedUsersOrRoles)
+        );
+    }
+
+    #[test]
+    fn discord_slash_auth_scopes_roles_to_origin_guild_or_dm_opt_in() {
+        let policy = DiscordInteractionAuthPolicy {
+            allowed_role_ids: ["5555"].into_iter().map(String::from).collect(),
+            ..DiscordInteractionAuthPolicy::default()
+        };
+        let foreign_role = DiscordInteractionSubject::member("42", ["5555"], "guild-a");
+        let in_scope_role = DiscordInteractionSubject::member("42", ["5555"], "guild-b");
+
+        assert_eq!(
+            policy.authorize_slash(
+                &foreign_role,
+                Some(&DiscordChannelContext::server("9999")),
+                Some("guild-b"),
+                None,
+            ),
+            DiscordAuthDecision::Deny(DiscordAuthDenyReason::AllowedUsersOrRoles)
+        );
+        assert_eq!(
+            policy.authorize_slash(
+                &in_scope_role,
+                Some(&DiscordChannelContext::server("9999")),
+                Some("guild-b"),
+                None,
+            ),
+            DiscordAuthDecision::Allow
+        );
+        assert_eq!(
+            policy.authorize_slash(
+                &foreign_role,
+                Some(&DiscordChannelContext::dm("dm-1")),
+                None,
+                None,
+            ),
+            DiscordAuthDecision::Deny(DiscordAuthDenyReason::AllowedUsersOrRoles)
+        );
+        assert_eq!(
+            policy.authorize_slash(
+                &foreign_role,
+                Some(&DiscordChannelContext::dm("dm-1")),
+                None,
+                Some("guild-a"),
+            ),
+            DiscordAuthDecision::Allow
+        );
+    }
+
+    #[test]
+    fn discord_mention_policy_covers_free_response_and_participated_threads() {
+        let controls = DiscordChannelControls {
+            free_response_channels: ["222"].into_iter().map(String::from).collect(),
+            ..DiscordChannelControls::default()
+        };
+        assert!(!discord_allows_message_without_mention(
+            true,
+            &controls,
+            &DiscordChannelContext::server("111"),
+            false,
+            false,
+        ));
+        assert!(discord_allows_message_without_mention(
+            true,
+            &controls,
+            &DiscordChannelContext::server("222"),
+            false,
+            false,
+        ));
+        assert!(discord_allows_message_without_mention(
+            true,
+            &controls,
+            &DiscordChannelContext::thread("333", "222"),
+            false,
+            false,
+        ));
+        assert!(discord_allows_message_without_mention(
+            true,
+            &controls,
+            &DiscordChannelContext::thread("444", "111"),
+            true,
+            false,
+        ));
+        let strict_threads = DiscordChannelControls {
+            thread_require_mention: true,
+            ..DiscordChannelControls::default()
+        };
+        assert!(!discord_allows_message_without_mention(
+            true,
+            &strict_threads,
+            &DiscordChannelContext::thread("444", "111"),
+            true,
+            false,
+        ));
+        assert!(discord_allows_message_without_mention(
+            true,
+            &controls,
+            &DiscordChannelContext::server("111"),
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn discord_unauthorized_notify_soft_fail_falls_through() {
+        assert!(!discord_notify_result_counts_delivered(Some(false)));
+        assert!(discord_notify_result_counts_delivered(Some(true)));
+        assert!(discord_notify_result_counts_delivered(None));
+    }
+
+    #[test]
+    fn discord_skill_slash_auth_gates_autocomplete_and_handler_before_lookup() {
+        let policy = DiscordInteractionAuthPolicy {
+            allowed_user_ids: ["100200300"].into_iter().map(String::from).collect(),
+            ..DiscordInteractionAuthPolicy::default()
+        };
+        let entries = vec![
+            DiscordSkillCommandEntry {
+                name: "alpha".into(),
+                description: "First skill".into(),
+                command_key: "/alpha".into(),
+            },
+            DiscordSkillCommandEntry {
+                name: "beta".into(),
+                description: "Search documents".into(),
+                command_key: "/beta".into(),
+            },
+        ];
+        let channel = DiscordChannelContext::server("1111");
+
+        let unauthorized = DiscordInteractionSubject::user("999999999");
+        assert!(discord_skill_autocomplete_choices(
+            &policy,
+            &unauthorized,
+            Some(&channel),
+            Some("guild-1"),
+            None,
+            &entries,
+            ""
+        )
+        .is_empty());
+        assert_eq!(
+            discord_skill_command_decision(
+                &policy,
+                &unauthorized,
+                Some(&channel),
+                Some("guild-1"),
+                None,
+                &entries,
+                "alpha",
+                "extra"
+            ),
+            DiscordSkillCommandDecision::Unauthorized
+        );
+        assert_eq!(
+            discord_skill_command_decision(
+                &policy,
+                &unauthorized,
+                Some(&channel),
+                Some("guild-1"),
+                None,
+                &entries,
+                "definitely-not-a-skill",
+                ""
+            ),
+            DiscordSkillCommandDecision::Unauthorized
+        );
+
+        let authorized = DiscordInteractionSubject::user("100200300");
+        assert_eq!(
+            discord_skill_autocomplete_choices(
+                &policy,
+                &authorized,
+                Some(&channel),
+                Some("guild-1"),
+                None,
+                &entries,
+                "doc"
+            ),
+            vec!["beta".to_string()]
+        );
+        assert_eq!(
+            discord_skill_command_decision(
+                &policy,
+                &authorized,
+                Some(&channel),
+                Some("guild-1"),
+                None,
+                &entries,
+                "alpha",
+                "extra args"
+            ),
+            DiscordSkillCommandDecision::Dispatch {
+                text: "/alpha extra args".into()
+            }
+        );
+        assert_eq!(
+            discord_skill_command_decision(
+                &policy,
+                &authorized,
+                Some(&channel),
+                Some("guild-1"),
+                None,
+                &entries,
+                "missing",
+                ""
+            ),
+            DiscordSkillCommandDecision::UnknownSkill {
+                requested_name: "missing".into()
+            }
+        );
+    }
+
+    #[test]
     fn discord_channel_skill_bindings_resolve_exact_parent_and_deduped_skills() {
         let bindings = DiscordChannelSkillBinding::list_from_json(Some(&serde_json::json!([
             {"id": "100", "skills": ["a", "b", "a", "c", "b"]},
@@ -3574,6 +4221,7 @@ mod tests {
         let cmd = SlashCommand {
             name: "greet".into(),
             description: "Say hello".into(),
+            default_member_permissions: None,
             command_type: 1,
             options: Some(vec![
                 SlashCommandOption {
@@ -3611,6 +4259,23 @@ mod tests {
         let choices = options[1]["choices"].as_array().unwrap();
         assert_eq!(choices.len(), 2);
         assert_eq!(choices[0]["name"], "Formal");
+    }
+
+    #[test]
+    fn slash_owner_only_visibility_sets_zero_permissions() {
+        let mut commands = vec![SlashCommand {
+            name: "restart".into(),
+            description: "Restart Hermes".into(),
+            options: None,
+            default_member_permissions: None,
+            command_type: 1,
+        }];
+
+        apply_owner_only_slash_visibility(&mut commands);
+
+        assert_eq!(commands[0].default_member_permissions.as_deref(), Some("0"));
+        let json = serde_json::to_value(&commands[0]).unwrap();
+        assert_eq!(json["default_member_permissions"], "0");
     }
 
     // -- Emoji encoding tests -----------------------------------------------

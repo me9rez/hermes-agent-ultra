@@ -4083,6 +4083,42 @@ fn extra_string(platform_cfg: &PlatformConfig, key: &str) -> Option<String> {
         .map(String::from)
 }
 
+fn extra_string_set(platform_cfg: &PlatformConfig, key: &str) -> HashSet<String> {
+    let Some(raw) = platform_cfg.extra.get(key) else {
+        return HashSet::new();
+    };
+
+    let mut values = HashSet::new();
+    match raw {
+        serde_json::Value::String(s) => {
+            for item in s.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                values.insert(item.to_string());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                match item {
+                    serde_json::Value::String(s) => {
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            values.insert(trimmed.to_string());
+                        }
+                    }
+                    serde_json::Value::Number(n) => {
+                        values.insert(n.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        serde_json::Value::Number(n) => {
+            values.insert(n.to_string());
+        }
+        _ => {}
+    }
+    values
+}
+
 fn discord_reply_to_mode_string(platform_cfg: &PlatformConfig) -> Option<String> {
     let raw = platform_cfg.extra.get("reply_to_mode")?;
     let candidate = match raw {
@@ -4220,6 +4256,8 @@ fn build_gateway_platform_access_policies(
             PlatformAccessPolicy {
                 allowed_users,
                 admin_users,
+                allowed_channels: extra_string_set(platform_cfg, "allowed_channels"),
+                ignored_channels: extra_string_set(platform_cfg, "ignored_channels"),
                 group_mode,
                 slash_requires_allowlist,
                 bot_sender_bypasses_allowlist: discord_allow_bots_bypasses_gateway_allowlist(
@@ -14170,6 +14208,30 @@ mod tests {
             Some(value) => std::env::set_var("MATRIX_HOME_ROOM", value),
             None => std::env::remove_var("MATRIX_HOME_ROOM"),
         }
+    }
+
+    #[test]
+    fn gateway_platform_access_policy_reads_discord_channel_lists() {
+        let mut config = hermes_config::GatewayConfig::default();
+        let mut discord = PlatformConfig {
+            enabled: true,
+            ..PlatformConfig::default()
+        };
+        discord
+            .extra
+            .insert("allowed_channels".to_string(), serde_json::json!("111, *"));
+        discord.extra.insert(
+            "ignored_channels".to_string(),
+            serde_json::json!(["222", 333]),
+        );
+        config.platforms.insert("discord".to_string(), discord);
+
+        let policies = build_gateway_platform_access_policies(&config);
+        let policy = policies.get("discord").expect("discord policy");
+        assert!(policy.allowed_channels.contains("111"));
+        assert!(policy.allowed_channels.contains("*"));
+        assert!(policy.ignored_channels.contains("222"));
+        assert!(policy.ignored_channels.contains("333"));
     }
 
     #[test]

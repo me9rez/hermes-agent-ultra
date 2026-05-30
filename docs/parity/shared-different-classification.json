@@ -171,6 +171,13 @@
       "ticket": 25
     },
     {
+      "path": "tests/gateway/test_discord_component_auth.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord component user-or-role authorization and fail-closed behavior is covered by Rust DiscordInteractionAuthPolicy component checks for empty allowlists, user matches, role-only matches, missing role data, and missing users.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/gateway/test_discord_channel_controls.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream Discord ignored_channels and no_thread_channels behavior is covered by Rust DiscordChannelControls tests for CSV/YAML parsing, DM bypass, thread-parent matching, auto-thread suppression, config env bridging, and config-to-env hydration precedence.",
@@ -181,6 +188,13 @@
       "path": "tests/gateway/test_discord_channel_skills.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream Discord channel_skill_bindings resolver intent is covered by Rust DiscordChannelSkillBinding parsing and DiscordAdapter::resolve_channel_skills tests for channel matches, parent matches, single-skill shorthand, no-match, and ordered deduplication.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_discord_free_response.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord free-response and mention-gating behavior is covered by Rust DiscordChannelControls and discord_allows_message_without_mention tests for DM bypass, channel and wildcard free-response lists, forum/thread parents, participated threads, reply auto-thread suppression, and voice-linked text channels.",
       "owner": "sheawinkler",
       "ticket": 25
     },
@@ -213,9 +227,23 @@
       "ticket": 25
     },
     {
+      "path": "tests/gateway/test_discord_roles_dm_scope.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord role allowlist scoping is covered by Rust DiscordInteractionAuthPolicy tests that reject cross-guild guild and DM role matches, require dm_role_auth_guild opt-in for DMs, allow same-guild role matches, and preserve user-ID allowlist behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/gateway/test_discord_send.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream Discord send retry and forum-post behavior is covered by Rust hermes-gateway reply-reference retry classifiers, chunk reference-mode payload tests, forum thread payload contracts, and DiscordAdapter forum send outcome handling.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_discord_slash_auth.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord slash authorization is covered by Rust DiscordInteractionAuthPolicy and gateway access-policy tests for user/role/channel allowlists, ignored-channel precedence, wildcard channels, malformed context fail-closed behavior, owner-only visibility semantics, notification soft-failure handling, and /skill autocomplete/handler auth-before-lookup decisions.",
       "owner": "sheawinkler",
       "ticket": 25
     },

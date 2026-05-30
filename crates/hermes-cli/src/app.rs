@@ -4698,6 +4698,8 @@ mod tests {
             "OPENCODE_ZEN_API_KEY",
             "XAI_API_KEY",
             "XIAOMI_API_KEY",
+            "ARCEEAI_API_KEY",
+            "ARCEE_API_KEY",
             "GLM_API_KEY",
             "ZAI_API_KEY",
             "Z_AI_API_KEY",
@@ -4707,6 +4709,7 @@ mod tests {
             "GH_TOKEN",
             "GITHUB_TOKEN",
             "GITHUB_COPILOT_TOKEN",
+            "TOKENHUB_API_KEY",
         ];
         for env_var in env_vars {
             std::env::remove_var(env_var);
@@ -4738,6 +4741,14 @@ mod tests {
             ("ZAI_API_KEY", "z-ai"),
             ("Z_AI_API_KEY", "zhipu"),
             ("GMI_API_KEY", "gmi-cloud"),
+            ("GMI_API_KEY", "gmicloud"),
+            ("ARCEEAI_API_KEY", "arcee-ai"),
+            ("ARCEEAI_API_KEY", "arceeai"),
+            ("XIAOMI_API_KEY", "mimo"),
+            ("XIAOMI_API_KEY", "xiaomi-mimo"),
+            ("TOKENHUB_API_KEY", "tencent-tokenhub"),
+            ("TOKENHUB_API_KEY", "tencent"),
+            ("TOKENHUB_API_KEY", "tokenhub"),
             ("MINIMAX_CN_API_KEY", "minimax_cn"),
             ("COPILOT_GITHUB_TOKEN", "github-copilot"),
             ("GH_TOKEN", "github-models"),
@@ -4804,6 +4815,23 @@ mod tests {
         assert_eq!(normalize_runtime_provider_name("aigateway"), "ai-gateway");
         assert_eq!(normalize_runtime_provider_name("vercel"), "ai-gateway");
         assert_eq!(normalize_runtime_provider_name("gmi-cloud"), "gmi");
+        assert_eq!(normalize_runtime_provider_name("gmicloud"), "gmi");
+        assert_eq!(
+            normalize_runtime_provider_name("google-ai-studio"),
+            "gemini"
+        );
+        assert_eq!(normalize_runtime_provider_name("arcee-ai"), "arcee");
+        assert_eq!(normalize_runtime_provider_name("arceeai"), "arcee");
+        assert_eq!(normalize_runtime_provider_name("mimo"), "xiaomi");
+        assert_eq!(normalize_runtime_provider_name("xiaomi-mimo"), "xiaomi");
+        assert_eq!(
+            normalize_runtime_provider_name("tencent-cloud"),
+            "tencent-tokenhub"
+        );
+        assert_eq!(
+            normalize_runtime_provider_name("tokenhub"),
+            "tencent-tokenhub"
+        );
     }
 
     #[test]
@@ -4817,6 +4845,9 @@ mod tests {
             "GMI_BASE_URL",
             "HF_BASE_URL",
             "AI_GATEWAY_BASE_URL",
+            "TOKENHUB_BASE_URL",
+            "ARCEE_BASE_URL",
+            "XIAOMI_BASE_URL",
         ];
         for env_var in env_vars {
             std::env::remove_var(env_var);
@@ -4847,6 +4878,10 @@ mod tests {
             provider_base_url_from_env("gmi-cloud").as_deref(),
             Some("https://gmi.example/v1")
         );
+        assert_eq!(
+            provider_base_url_from_env("gmicloud").as_deref(),
+            Some("https://gmi.example/v1")
+        );
         std::env::set_var("HF_BASE_URL", "https://hf.example/v1");
         assert_eq!(
             provider_base_url_from_env("huggingface-hub").as_deref(),
@@ -4856,6 +4891,21 @@ mod tests {
         assert_eq!(
             provider_base_url_from_env("vercel").as_deref(),
             Some("https://gateway.example/v1")
+        );
+        std::env::set_var("TOKENHUB_BASE_URL", "https://tokenhub.example/v1");
+        assert_eq!(
+            provider_base_url_from_env("tencent").as_deref(),
+            Some("https://tokenhub.example/v1")
+        );
+        std::env::set_var("ARCEE_BASE_URL", "https://arcee.example/v1");
+        assert_eq!(
+            provider_base_url_from_env("arcee-ai").as_deref(),
+            Some("https://arcee.example/v1")
+        );
+        std::env::set_var("XIAOMI_BASE_URL", "https://mimo.example/v1");
+        assert_eq!(
+            provider_base_url_from_env("mimo").as_deref(),
+            Some("https://mimo.example/v1")
         );
 
         for env_var in env_vars {
@@ -4883,6 +4933,13 @@ mod tests {
             Some(AI_GATEWAY_BASE_URL)
         );
         assert_eq!(provider_default_base_url("gmi-cloud"), Some(GMI_BASE_URL));
+        assert_eq!(provider_default_base_url("gmicloud"), Some(GMI_BASE_URL));
+        assert_eq!(provider_default_base_url("arcee-ai"), Some(ARCEE_BASE_URL));
+        assert_eq!(provider_default_base_url("mimo"), Some(XIAOMI_BASE_URL));
+        assert_eq!(
+            provider_default_base_url("tencent"),
+            Some(TENCENT_TOKENHUB_BASE_URL)
+        );
     }
 
     #[test]
@@ -5642,6 +5699,7 @@ const GMI_BASE_URL: &str = "https://api.gmi-serving.com/v1";
 const XIAOMI_BASE_URL: &str = "https://api.xiaomimimo.com/v1";
 const ZAI_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ARCEE_BASE_URL: &str = "https://api.arcee.ai/api/v1";
+const TENCENT_TOKENHUB_BASE_URL: &str = "https://tokenhub.tencentmaas.com/v1";
 const OLLAMA_CLOUD_BASE_URL: &str = "https://ollama.com/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
 const OLLAMA_LOCAL_BASE_URL: &str = "http://127.0.0.1:11434/v1";
@@ -5659,6 +5717,7 @@ fn normalize_runtime_provider_name(provider: &str) -> String {
         "claude" | "claude-code" => "anthropic".to_string(),
         "qwen-cli" | "qwen-portal" => "qwen-oauth".to_string(),
         "gemini-cli" | "gemini-oauth" => "google-gemini-cli".to_string(),
+        "google" | "google-gemini" | "google-ai-studio" => "gemini".to_string(),
         "step" | "step-plan" => "stepfun".to_string(),
         "moonshot" | "kimi-coding" | "kimi-coding-cn" => "kimi".to_string(),
         "alibaba" | "alibaba-coding-plan" => "qwen".to_string(),
@@ -5669,7 +5728,10 @@ fn normalize_runtime_provider_name(provider: &str) -> String {
         "github-copilot" | "github-models" => "copilot".to_string(),
         "github-copilot-acp" | "copilot-acp-agent" => "copilot-acp".to_string(),
         "hf" | "hugging-face" | "huggingface-hub" => "huggingface".to_string(),
-        "gmi-cloud" => "gmi".to_string(),
+        "gmi-cloud" | "gmicloud" => "gmi".to_string(),
+        "arcee-ai" | "arceeai" => "arcee".to_string(),
+        "mimo" | "xiaomi-mimo" => "xiaomi".to_string(),
+        "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => "tencent-tokenhub".to_string(),
         "kilo" | "kilo-code" | "kilo-gateway" => "kilocode".to_string(),
         "opencode" | "opencode-zen" | "zen" => "opencode-zen".to_string(),
         "go" => "opencode-go".to_string(),
@@ -5687,7 +5749,7 @@ fn provider_default_base_url(provider: &str) -> Option<&'static str> {
     match provider.trim().to_ascii_lowercase().as_str() {
         "openai-codex" | "codex" => Some(OPENAI_CODEX_BASE_URL),
         "google-gemini-cli" | "gemini-cli" | "gemini-oauth" => Some(GOOGLE_GEMINI_CLI_BASE_URL),
-        "gemini" | "google" => Some(GEMINI_BASE_URL),
+        "gemini" | "google" | "google-gemini" | "google-ai-studio" => Some(GEMINI_BASE_URL),
         "qwen" | "alibaba" => Some(QWEN_BASE_URL),
         "alibaba-coding-plan" => Some(ALIBABA_CODING_PLAN_BASE_URL),
         "stepfun" | "step" | "step-plan" => Some(STEPFUN_BASE_URL),
@@ -5703,10 +5765,13 @@ fn provider_default_base_url(provider: &str) -> Option<&'static str> {
         "opencode-zen" | "opencode" => Some(OPENCODE_ZEN_BASE_URL),
         "kilocode" | "kilo" => Some(KILOCODE_BASE_URL),
         "huggingface" | "hf" | "hugging-face" | "huggingface-hub" => Some(HUGGINGFACE_BASE_URL),
-        "gmi" | "gmi-cloud" => Some(GMI_BASE_URL),
-        "xiaomi" => Some(XIAOMI_BASE_URL),
+        "gmi" | "gmi-cloud" | "gmicloud" => Some(GMI_BASE_URL),
+        "xiaomi" | "mimo" | "xiaomi-mimo" => Some(XIAOMI_BASE_URL),
         "zai" | "glm" | "z-ai" | "z_ai" | "zhipu" => Some(ZAI_BASE_URL),
-        "arcee" => Some(ARCEE_BASE_URL),
+        "arcee" | "arcee-ai" | "arceeai" => Some(ARCEE_BASE_URL),
+        "tencent-tokenhub" | "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => {
+            Some(TENCENT_TOKENHUB_BASE_URL)
+        }
         "ollama-cloud" => Some(OLLAMA_CLOUD_BASE_URL),
         "ollama-local" | "ollama" => Some(OLLAMA_LOCAL_BASE_URL),
         "llama-cpp" | "llama.cpp" | "llamacpp" => Some(LLAMA_CPP_BASE_URL),
@@ -5923,6 +5988,7 @@ fn provider_base_url_from_env(provider: &str) -> Option<String> {
             "xiaomi" => "XIAOMI_BASE_URL",
             "zai" => "GLM_BASE_URL",
             "arcee" => "ARCEE_BASE_URL",
+            "tencent-tokenhub" => "TOKENHUB_BASE_URL",
             "deepseek" => "DEEPSEEK_BASE_URL",
             "ollama-local" | "ollama" => "OLLAMA_BASE_URL",
             "llama-cpp" | "llama.cpp" | "llamacpp" => "LLAMA_CPP_BASE_URL",
@@ -6130,6 +6196,9 @@ pub fn provider_api_key_from_env(provider: &str) -> Option<String> {
             .ok()
             .filter(|s| !s.trim().is_empty()),
         "xiaomi" => std::env::var("XIAOMI_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty()),
+        "tencent-tokenhub" => std::env::var("TOKENHUB_API_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty()),
         "zai" => std::env::var("GLM_API_KEY")

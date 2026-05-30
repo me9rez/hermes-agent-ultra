@@ -30,6 +30,8 @@ mod default_models {
     pub const KIMI: &str = "kimi-k2-turbo-preview";
     pub const MINIMAX: &str = "MiniMax-M2.7";
     pub const GEMINI: &str = "gemini-3-flash-preview";
+    pub const GMI: &str = "google/gemini-3.1-flash-lite-preview";
+    pub const TENCENT_TOKENHUB: &str = "hy3-preview";
 }
 
 mod default_base_urls {
@@ -39,11 +41,13 @@ mod default_base_urls {
     pub const GEMINI: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
     pub const XAI: &str = "https://api.x.ai/v1";
     pub const XIAOMI: &str = "https://api.xiaomimimo.com/v1";
+    pub const GMI: &str = "https://api.gmi-serving.com/v1";
     pub const HUGGINGFACE: &str = "https://router.huggingface.co/v1";
     pub const ZAI: &str = "https://api.z.ai/api/paas/v4";
     pub const NOVITA: &str = "https://api.novita.ai/openai/v1";
     pub const NVIDIA: &str = "https://integrate.api.nvidia.com/v1";
     pub const ARCEE: &str = "https://api.arcee.ai/api/v1";
+    pub const TENCENT_TOKENHUB: &str = "https://tokenhub.tencentmaas.com/v1";
     pub const OLLAMA_LOCAL: &str = "http://127.0.0.1:11434/v1";
     pub const LLAMA_CPP: &str = "http://127.0.0.1:8080/v1";
     pub const VLLM: &str = "http://127.0.0.1:8000/v1";
@@ -261,6 +265,24 @@ pub fn build_auxiliary_client_with_main_runtime(
         default_models::GEMINI,
         main_label.as_deref(),
     );
+    register_direct_key(
+        &mut builder,
+        &mut summary,
+        "GMI_API_KEY",
+        "gmi",
+        default_base_urls::GMI,
+        default_models::GMI,
+        main_label.as_deref(),
+    );
+    register_direct_key(
+        &mut builder,
+        &mut summary,
+        "TOKENHUB_API_KEY",
+        "tencent-tokenhub",
+        default_base_urls::TENCENT_TOKENHUB,
+        default_models::TENCENT_TOKENHUB,
+        main_label.as_deref(),
+    );
 
     let client = builder.build();
     (client, summary)
@@ -385,6 +407,11 @@ fn canonical_provider_label(provider: &str) -> String {
         "moonshot" | "kimi-coding" | "kimi-coding-cn" => "kimi".to_string(),
         "alibaba" | "alibaba-coding-plan" => "qwen".to_string(),
         "gemini-cli" | "gemini-oauth" => "google-gemini-cli".to_string(),
+        "google" | "google-gemini" | "google-ai-studio" => "gemini".to_string(),
+        "gmi-cloud" | "gmicloud" => "gmi".to_string(),
+        "arcee-ai" | "arceeai" => "arcee".to_string(),
+        "mimo" | "xiaomi-mimo" => "xiaomi".to_string(),
+        "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => "tencent-tokenhub".to_string(),
         "ollama" => "ollama-local".to_string(),
         "llama.cpp" | "llamacpp" => "llama-cpp".to_string(),
         "ollvm" | "llvm" => "vllm".to_string(),
@@ -447,6 +474,8 @@ fn provider_api_key_from_env(label: &str) -> Option<String> {
         "gemini" | "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "xai" => &["XAI_API_KEY"],
         "xiaomi" => &["XIAOMI_API_KEY"],
+        "gmi" => &["GMI_API_KEY"],
+        "tencent-tokenhub" => &["TOKENHUB_API_KEY"],
         "huggingface" => &["HF_TOKEN", "HUGGINGFACE_API_KEY"],
         "zai" => &["GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"],
         "novita" => &["NOVITA_API_KEY"],
@@ -478,6 +507,8 @@ fn default_base_url(label: &str) -> Option<&'static str> {
         "gemini" | "google" => Some(default_base_urls::GEMINI),
         "xai" => Some(default_base_urls::XAI),
         "xiaomi" => Some(default_base_urls::XIAOMI),
+        "gmi" => Some(default_base_urls::GMI),
+        "tencent-tokenhub" => Some(default_base_urls::TENCENT_TOKENHUB),
         "huggingface" => Some(default_base_urls::HUGGINGFACE),
         "zai" => Some(default_base_urls::ZAI),
         "novita" => Some(default_base_urls::NOVITA),
@@ -562,6 +593,8 @@ mod tests {
         "ANTHROPIC_TOKEN",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "NOUS_API_KEY",
+        "GMI_API_KEY",
+        "TOKENHUB_API_KEY",
         "DEEPSEEK_API_KEY",
         "DASHSCOPE_API_KEY",
         "GITHUB_COPILOT_TOKEN",
@@ -700,11 +733,20 @@ mod tests {
         std::env::set_var("OPENAI_API_KEY", "sk-oa-legacy");
         std::env::set_var("ANTHROPIC_API_KEY", "sk-an");
         std::env::set_var("ZAI_API_KEY", "z");
+        std::env::set_var("GMI_API_KEY", "sk-gmi");
+        std::env::set_var("TOKENHUB_API_KEY", "sk-tokenhub");
         {
             let (client, _) = build_default_auxiliary_client(AuxiliaryConfig::default());
             assert_eq!(
                 client.chain_labels(),
-                vec!["openrouter", "custom", "anthropic", "zai"]
+                vec![
+                    "openrouter",
+                    "custom",
+                    "anthropic",
+                    "zai",
+                    "gmi",
+                    "tencent-tokenhub"
+                ]
             );
         }
     }

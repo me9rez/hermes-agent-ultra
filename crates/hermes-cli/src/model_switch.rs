@@ -32,6 +32,8 @@ const CURATED_PROVIDER_MODELS: &[(&str, &[&str])] = &[
             "moonshotai/kimi-k2.6",
             "anthropic/claude-opus-4.7",
             "openai/gpt-5.4",
+            "tencent/hy3-preview:free",
+            "tencent/hy3-preview",
         ],
     ),
     (
@@ -61,6 +63,7 @@ const CURATED_PROVIDER_MODELS: &[(&str, &[&str])] = &[
             "nousresearch/hermes-4-405b",
             "nousresearch/hermes-4-70b",
             "xiaomi/mimo-v2.5-pro",
+            "tencent/hy3-preview",
             "anthropic/claude-sonnet-4.5",
         ],
     ),
@@ -204,6 +207,34 @@ const CURATED_PROVIDER_MODELS: &[(&str, &[&str])] = &[
             "deepseek-ai/DeepSeek-V3.2",
         ],
     ),
+    (
+        "gmi",
+        &[
+            "zai-org/GLM-5.1-FP8",
+            "deepseek-ai/DeepSeek-V3.2",
+            "moonshotai/Kimi-K2.5",
+            "anthropic/claude-sonnet-4.6",
+        ],
+    ),
+    (
+        "arcee",
+        &[
+            "trinity-large-preview",
+            "trinity-large-thinking",
+            "trinity-mini",
+        ],
+    ),
+    (
+        "xiaomi",
+        &[
+            "mimo-v2.5-pro",
+            "mimo-v2.5",
+            "mimo-v2-pro",
+            "mimo-v2-omni",
+            "mimo-v2-flash",
+        ],
+    ),
+    ("tencent-tokenhub", &["hy3-preview"]),
     ("zai", &["glm-5.1", "glm-5.0", "glm-4.5-flash"]),
     (
         "gemini",
@@ -603,6 +634,44 @@ fn resolve_huggingface_catalog_endpoint_and_token() -> (String, Option<String>) 
     (base_url, token)
 }
 
+fn openai_compatible_catalog_credentials(provider: &str) -> Option<(String, String)> {
+    let (base_env, default_base, key_envs): (&str, &str, &[&str]) = match provider {
+        "gmi" => (
+            "GMI_BASE_URL",
+            "https://api.gmi-serving.com/v1",
+            &["GMI_API_KEY"],
+        ),
+        "arcee" => (
+            "ARCEE_BASE_URL",
+            "https://api.arcee.ai/api/v1",
+            &["ARCEEAI_API_KEY", "ARCEE_API_KEY"],
+        ),
+        "xiaomi" => (
+            "XIAOMI_BASE_URL",
+            "https://api.xiaomimimo.com/v1",
+            &["XIAOMI_API_KEY"],
+        ),
+        "tencent-tokenhub" => (
+            "TOKENHUB_BASE_URL",
+            "https://tokenhub.tencentmaas.com/v1",
+            &["TOKENHUB_API_KEY"],
+        ),
+        _ => return None,
+    };
+    let token = key_envs.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })?;
+    let base_url = std::env::var(base_env)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default_base.to_string());
+    Some((base_url, token))
+}
+
 async fn fetch_openai_compatible_live_models(base_url: &str, api_key: Option<&str>) -> Vec<String> {
     if cfg!(test) {
         return Vec::new();
@@ -836,6 +905,28 @@ pub async fn provider_model_ids_with_client(
             }
         }
         merged
+    } else if matches!(
+        normalized.as_str(),
+        "gmi" | "arcee" | "xiaomi" | "tencent-tokenhub"
+    ) {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut merged: Vec<String> = Vec::new();
+        if let Some((base_url, token)) = openai_compatible_catalog_credentials(&normalized) {
+            let live = fetch_openai_compatible_live_models(base_url.as_str(), Some(&token)).await;
+            for model in live {
+                let key = model.to_ascii_lowercase();
+                if seen.insert(key) {
+                    merged.push(model);
+                }
+            }
+        }
+        for model in curated {
+            let key = model.to_ascii_lowercase();
+            if seen.insert(key) {
+                merged.push((*model).to_string());
+            }
+        }
+        merged
     } else if is_local_openai_compatible_provider(&normalized) {
         let mut seen: HashSet<String> = HashSet::new();
         let mut merged: Vec<String> = Vec::new();
@@ -1059,6 +1150,17 @@ mod tests {
         let models = provider_curated_models("openrouter");
         assert!(models.contains(&"openai/gpt-5.5"));
         assert!(models.contains(&"openai/gpt-5.5-pro"));
+        assert!(models.contains(&"tencent/hy3-preview:free"));
+        assert!(models.contains(&"tencent/hy3-preview"));
+    }
+
+    #[test]
+    fn direct_api_provider_curated_models_cover_upstream_provider_tests() {
+        assert!(provider_curated_models("gmi").contains(&"zai-org/GLM-5.1-FP8"));
+        assert!(provider_curated_models("gmicloud").contains(&"deepseek-ai/DeepSeek-V3.2"));
+        assert!(provider_curated_models("arcee-ai").contains(&"trinity-mini"));
+        assert!(provider_curated_models("mimo").contains(&"mimo-v2.5-pro"));
+        assert!(provider_curated_models("tokenhub").contains(&"hy3-preview"));
     }
 
     #[tokio::test]
@@ -1183,6 +1285,7 @@ mod tests {
                 "nousresearch/hermes-4-405b".to_string(),
                 "nousresearch/hermes-4-70b".to_string(),
                 "xiaomi/mimo-v2.5-pro".to_string(),
+                "tencent/hy3-preview".to_string(),
                 "anthropic/claude-sonnet-4.5".to_string()
             ]),
             "nous list should keep curated models first"

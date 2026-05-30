@@ -2646,6 +2646,29 @@ impl AgentLoop {
                 .filter(|v| !v.trim().is_empty());
         }
         match provider {
+            "gemini" | "google" | "google-gemini" | "google-ai-studio" => {
+                std::env::var("GEMINI_API_KEY")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
+                    .filter(|v| !v.trim().is_empty())
+            }
+            "gmi" | "gmi-cloud" | "gmicloud" => std::env::var("GMI_API_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            "arcee" | "arcee-ai" | "arceeai" => std::env::var("ARCEEAI_API_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| std::env::var("ARCEE_API_KEY").ok())
+                .filter(|v| !v.trim().is_empty()),
+            "xiaomi" | "mimo" | "xiaomi-mimo" => std::env::var("XIAOMI_API_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            "tencent-tokenhub" | "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => {
+                std::env::var("TOKENHUB_API_KEY")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+            }
             "anthropic" | "claude" | "claude-code" => std::env::var("ANTHROPIC_API_KEY")
                 .ok()
                 .filter(|v| !v.trim().is_empty())
@@ -2717,6 +2740,22 @@ impl AgentLoop {
                     Some("https://api.stepfun.ai/step_plan/v1".to_string())
                 } else if provider == "copilot" {
                     Some("https://api.githubcopilot.com".to_string())
+                } else if matches!(
+                    provider,
+                    "gemini" | "google" | "google-gemini" | "google-ai-studio"
+                ) {
+                    Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string())
+                } else if matches!(provider, "gmi" | "gmi-cloud" | "gmicloud") {
+                    Some("https://api.gmi-serving.com/v1".to_string())
+                } else if matches!(provider, "arcee" | "arcee-ai" | "arceeai") {
+                    Some("https://api.arcee.ai/api/v1".to_string())
+                } else if matches!(provider, "xiaomi" | "mimo" | "xiaomi-mimo") {
+                    Some("https://api.xiaomimimo.com/v1".to_string())
+                } else if matches!(
+                    provider,
+                    "tencent-tokenhub" | "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas"
+                ) {
+                    Some("https://tokenhub.tencentmaas.com/v1".to_string())
                 } else {
                     None
                 }
@@ -13155,6 +13194,117 @@ mod tests {
 
         let base = agent.resolve_runtime_base_url("copilot", None);
         assert_eq!(base.as_deref(), Some("https://api.githubcopilot.com"));
+    }
+
+    #[test]
+    fn test_runtime_provider_direct_env_keys_and_base_url_defaults() {
+        use futures::stream::BoxStream;
+        let _guard = env_test_lock();
+
+        struct DummyProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for DummyProvider {
+            async fn chat_completion(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> Result<hermes_core::LlmResponse, AgentError> {
+                Ok(hermes_core::LlmResponse {
+                    message: Message::assistant("dummy"),
+                    usage: None,
+                    model: "dummy".into(),
+                    finish_reason: Some("stop".into()),
+                })
+            }
+
+            fn chat_completion_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> BoxStream<'static, Result<StreamChunk, AgentError>> {
+                futures::stream::empty().boxed()
+            }
+        }
+
+        let _gemini = EnvVarGuard::remove("GEMINI_API_KEY");
+        let _google = EnvVarGuard::remove("GOOGLE_API_KEY");
+        let _gmi = EnvVarGuard::remove("GMI_API_KEY");
+        let _arceeai = EnvVarGuard::remove("ARCEEAI_API_KEY");
+        let _arcee = EnvVarGuard::remove("ARCEE_API_KEY");
+        let _xiaomi = EnvVarGuard::remove("XIAOMI_API_KEY");
+        let _tokenhub = EnvVarGuard::remove("TOKENHUB_API_KEY");
+
+        let agent = AgentLoop::new(
+            AgentConfig::default(),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(DummyProvider),
+        );
+
+        let _google_key = EnvVarGuard::set("GOOGLE_API_KEY", "google-secret");
+        assert_eq!(
+            agent.resolve_runtime_api_key("google-ai-studio", None, None),
+            Some("google-secret".to_string())
+        );
+        drop(_google_key);
+
+        let _gmi_key = EnvVarGuard::set("GMI_API_KEY", "gmi-secret");
+        assert_eq!(
+            agent.resolve_runtime_api_key("gmicloud", None, None),
+            Some("gmi-secret".to_string())
+        );
+
+        let _arcee_key = EnvVarGuard::set("ARCEE_API_KEY", "arcee-secret");
+        assert_eq!(
+            agent.resolve_runtime_api_key("arcee-ai", None, None),
+            Some("arcee-secret".to_string())
+        );
+
+        let _xiaomi_key = EnvVarGuard::set("XIAOMI_API_KEY", "xiaomi-secret");
+        assert_eq!(
+            agent.resolve_runtime_api_key("mimo", None, None),
+            Some("xiaomi-secret".to_string())
+        );
+
+        let _tokenhub_key = EnvVarGuard::set("TOKENHUB_API_KEY", "tokenhub-secret");
+        assert_eq!(
+            agent.resolve_runtime_api_key("tencent", None, None),
+            Some("tokenhub-secret".to_string())
+        );
+
+        assert_eq!(
+            agent
+                .resolve_runtime_base_url("google-gemini", None)
+                .as_deref(),
+            Some("https://generativelanguage.googleapis.com/v1beta/openai")
+        );
+        assert_eq!(
+            agent.resolve_runtime_base_url("gmi-cloud", None).as_deref(),
+            Some("https://api.gmi-serving.com/v1")
+        );
+        assert_eq!(
+            agent.resolve_runtime_base_url("arceeai", None).as_deref(),
+            Some("https://api.arcee.ai/api/v1")
+        );
+        assert_eq!(
+            agent
+                .resolve_runtime_base_url("xiaomi-mimo", None)
+                .as_deref(),
+            Some("https://api.xiaomimimo.com/v1")
+        );
+        assert_eq!(
+            agent
+                .resolve_runtime_base_url("tencentmaas", None)
+                .as_deref(),
+            Some("https://tokenhub.tencentmaas.com/v1")
+        );
     }
 
     #[test]

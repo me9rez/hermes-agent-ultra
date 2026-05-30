@@ -949,6 +949,10 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
         ("MINIMAX_API_KEY", "minimax"),
         ("NOUS_API_KEY", "nous"),
         ("GMI_API_KEY", "gmi"),
+        ("ARCEEAI_API_KEY", "arcee"),
+        ("ARCEE_API_KEY", "arcee"),
+        ("XIAOMI_API_KEY", "xiaomi"),
+        ("TOKENHUB_API_KEY", "tencent-tokenhub"),
         ("COPILOT_GITHUB_TOKEN", "copilot"),
         ("GITHUB_COPILOT_TOKEN", "copilot"),
     ] {
@@ -964,6 +968,23 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
                 .entry(provider_name.to_string())
                 .or_insert_with(LlmProviderConfig::default)
                 .api_key = Some(v);
+        }
+    }
+    for (env_var, provider_name) in [
+        ("GMI_BASE_URL", "gmi"),
+        ("ARCEE_BASE_URL", "arcee"),
+        ("XIAOMI_BASE_URL", "xiaomi"),
+        ("TOKENHUB_BASE_URL", "tencent-tokenhub"),
+    ] {
+        if let Ok(v) = std::env::var(env_var) {
+            if v.trim().is_empty() {
+                continue;
+            }
+            config
+                .llm_providers
+                .entry(provider_name.to_string())
+                .or_insert_with(LlmProviderConfig::default)
+                .base_url = Some(v);
         }
     }
 
@@ -1508,6 +1529,50 @@ auxiliary:
         unsafe {
             std::env::remove_var("COPILOT_GITHUB_TOKEN");
             std::env::remove_var("GITHUB_COPILOT_TOKEN");
+        }
+    }
+
+    #[test]
+    fn apply_env_overrides_supports_direct_provider_env_vars() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        unsafe {
+            std::env::set_var("ARCEEAI_API_KEY", "arcee-token");
+            std::env::set_var("XIAOMI_API_KEY", "xiaomi-token");
+            std::env::set_var("TOKENHUB_API_KEY", "tokenhub-token");
+            std::env::set_var("TOKENHUB_BASE_URL", "https://tokenhub.example/v1");
+        }
+
+        let mut cfg = GatewayConfig::default();
+        apply_env_overrides(&mut cfg);
+
+        assert_eq!(
+            cfg.llm_providers
+                .get("arcee")
+                .and_then(|p| p.api_key.as_deref()),
+            Some("arcee-token")
+        );
+        assert_eq!(
+            cfg.llm_providers
+                .get("xiaomi")
+                .and_then(|p| p.api_key.as_deref()),
+            Some("xiaomi-token")
+        );
+        let tokenhub = cfg
+            .llm_providers
+            .get("tencent-tokenhub")
+            .expect("tokenhub provider");
+        assert_eq!(tokenhub.api_key.as_deref(), Some("tokenhub-token"));
+        assert_eq!(
+            tokenhub.base_url.as_deref(),
+            Some("https://tokenhub.example/v1")
+        );
+
+        unsafe {
+            std::env::remove_var("ARCEEAI_API_KEY");
+            std::env::remove_var("XIAOMI_API_KEY");
+            std::env::remove_var("TOKENHUB_API_KEY");
+            std::env::remove_var("TOKENHUB_BASE_URL");
         }
     }
 

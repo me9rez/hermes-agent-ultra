@@ -5211,6 +5211,7 @@ fn normalize_auth_provider(provider: &str) -> String {
         "openai-oauth" | "openai-cli" => "openai".to_string(),
         "qwen-cli" | "qwen-portal" => "qwen-oauth".to_string(),
         "gemini-cli" | "gemini-oauth" => "google-gemini-cli".to_string(),
+        "google" | "google-gemini" | "google-ai-studio" => "gemini".to_string(),
         "step" | "step-plan" => "stepfun".to_string(),
         "moonshot" | "kimi" => "kimi-coding".to_string(),
         "minimax-cn" | "minimax_cn" | "minimax-china" => "minimax-cn".to_string(),
@@ -5231,7 +5232,10 @@ fn normalize_auth_provider(provider: &str) -> String {
         "glm" | "z-ai" | "z.ai" | "zhipu" => "zai".to_string(),
         "nim" | "nvidia-nim" | "build-nvidia" | "nemotron" => "nvidia".to_string(),
         "hf" | "hugging-face" | "huggingface-hub" => "huggingface".to_string(),
-        "gmi-cloud" => "gmi".to_string(),
+        "gmi-cloud" | "gmicloud" => "gmi".to_string(),
+        "arcee-ai" | "arceeai" => "arcee".to_string(),
+        "mimo" | "xiaomi-mimo" => "xiaomi".to_string(),
+        "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => "tencent-tokenhub".to_string(),
         "api-server" => "api_server".to_string(),
         "home-assistant" => "homeassistant".to_string(),
         "wecom-callback" => "wecom_callback".to_string(),
@@ -5275,6 +5279,7 @@ fn normalize_secret_provider(provider: &str) -> String {
         "codex" => "openai-codex".to_string(),
         "openai-oauth" | "openai-cli" => "openai".to_string(),
         "gemini-cli" | "gemini-oauth" => "google-gemini-cli".to_string(),
+        "google" | "google-gemini" | "google-ai-studio" => "gemini".to_string(),
         "moonshot" | "kimi" => "kimi-coding".to_string(),
         "aigateway" | "vercel" | "vercel-ai-gateway" => "ai-gateway".to_string(),
         "opencode" | "zen" => "opencode-zen".to_string(),
@@ -5289,7 +5294,10 @@ fn normalize_secret_provider(provider: &str) -> String {
         "glm" | "z-ai" | "z.ai" | "zhipu" => "zai".to_string(),
         "nim" | "nvidia-nim" | "build-nvidia" | "nemotron" => "nvidia".to_string(),
         "hf" | "hugging-face" | "huggingface-hub" => "huggingface".to_string(),
-        "gmi-cloud" => "gmi".to_string(),
+        "gmi-cloud" | "gmicloud" => "gmi".to_string(),
+        "arcee-ai" | "arceeai" => "arcee".to_string(),
+        "mimo" | "xiaomi-mimo" => "xiaomi".to_string(),
+        "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => "tencent-tokenhub".to_string(),
         "dashscope" | "aliyun" | "alibaba-cloud" => "alibaba".to_string(),
         "alibaba_coding" | "alibaba-coding" | "alibaba_coding_plan" => {
             "alibaba-coding-plan".to_string()
@@ -5341,7 +5349,28 @@ fn secret_provider_aliases(provider: &str) -> Vec<String> {
             "nim".to_string(),
         ],
         "huggingface" => vec!["huggingface".to_string(), "hf".to_string()],
-        "gmi" => vec!["gmi".to_string(), "gmi-cloud".to_string()],
+        "gmi" => vec![
+            "gmi".to_string(),
+            "gmi-cloud".to_string(),
+            "gmicloud".to_string(),
+        ],
+        "arcee" => vec![
+            "arcee".to_string(),
+            "arcee-ai".to_string(),
+            "arceeai".to_string(),
+        ],
+        "xiaomi" => vec![
+            "xiaomi".to_string(),
+            "mimo".to_string(),
+            "xiaomi-mimo".to_string(),
+        ],
+        "tencent-tokenhub" => vec![
+            "tencent-tokenhub".to_string(),
+            "tencent".to_string(),
+            "tokenhub".to_string(),
+            "tencent-cloud".to_string(),
+            "tencentmaas".to_string(),
+        ],
         "ai-gateway" => vec!["ai-gateway".to_string(), "aigateway".to_string()],
         "opencode-zen" => vec!["opencode-zen".to_string(), "opencode".to_string()],
         "kilocode" => vec!["kilocode".to_string(), "kilo".to_string()],
@@ -5401,6 +5430,7 @@ fn provider_env_var(provider: &str) -> Option<&'static str> {
         "opencode-zen" => Some("OPENCODE_ZEN_API_KEY"),
         "xai" => Some("XAI_API_KEY"),
         "xiaomi" => Some("XIAOMI_API_KEY"),
+        "tencent-tokenhub" => Some("TOKENHUB_API_KEY"),
         "zai" => Some("GLM_API_KEY"),
         _ => None,
     }
@@ -5597,6 +5627,7 @@ async fn hydrate_provider_env_from_vault_for_cli(cli: &Cli) -> Result<(), AgentE
         ("OPENCODE_ZEN_API_KEY", "opencode-zen"),
         ("XAI_API_KEY", "xai"),
         ("XIAOMI_API_KEY", "xiaomi"),
+        ("TOKENHUB_API_KEY", "tencent-tokenhub"),
         ("GLM_API_KEY", "zai"),
         ("ZAI_API_KEY", "zai"),
         ("Z_AI_API_KEY", "zai"),
@@ -9313,6 +9344,7 @@ const SETUP_OPENCODE_GO_ENV_KEYS: &[&str] = &["OPENCODE_GO_API_KEY"];
 const SETUP_OPENCODE_ZEN_ENV_KEYS: &[&str] = &["OPENCODE_ZEN_API_KEY"];
 const SETUP_XAI_ENV_KEYS: &[&str] = &["XAI_API_KEY"];
 const SETUP_XIAOMI_ENV_KEYS: &[&str] = &["XIAOMI_API_KEY"];
+const SETUP_TENCENT_TOKENHUB_ENV_KEYS: &[&str] = &["TOKENHUB_API_KEY"];
 const SETUP_ZAI_ENV_KEYS: &[&str] = &["GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"];
 const SETUP_BEDROCK_ENV_KEYS: &[&str] = &[
     "AWS_ACCESS_KEY_ID",
@@ -9478,6 +9510,11 @@ const SETUP_MODEL_OPTIONS: &[SetupModelOption] = &[
         provider: "xiaomi",
         model: "xiaomi:mimo-v2.5-pro",
         label: "Xiaomi MiMo",
+    },
+    SetupModelOption {
+        provider: "tencent-tokenhub",
+        model: "tencent-tokenhub:hy3-preview",
+        label: "Tencent TokenHub",
     },
     SetupModelOption {
         provider: "ollama-cloud",
@@ -9651,6 +9688,7 @@ fn setup_provider_display(provider: &str) -> &'static str {
         "opencode-zen" => "OpenCode Zen",
         "xai" => "xAI",
         "xiaomi" => "Xiaomi MiMo",
+        "tencent-tokenhub" => "Tencent TokenHub",
         "zai" => "Z.AI / GLM",
         _ => "Provider",
     }
@@ -9695,6 +9733,7 @@ fn setup_provider_env_keys(provider: &str) -> &'static [&'static str] {
         "opencode-zen" => SETUP_OPENCODE_ZEN_ENV_KEYS,
         "xai" => SETUP_XAI_ENV_KEYS,
         "xiaomi" => SETUP_XIAOMI_ENV_KEYS,
+        "tencent-tokenhub" => SETUP_TENCENT_TOKENHUB_ENV_KEYS,
         "zai" => SETUP_ZAI_ENV_KEYS,
         _ => &[],
     }
@@ -9732,6 +9771,7 @@ fn setup_provider_default_base_url(provider: &str) -> Option<&'static str> {
         "opencode-zen" => Some("https://opencode.ai/zen/v1"),
         "xai" => Some("https://api.x.ai/v1"),
         "xiaomi" => Some("https://api.xiaomimimo.com/v1"),
+        "tencent-tokenhub" => Some("https://tokenhub.tencentmaas.com/v1"),
         "zai" => Some("https://api.z.ai/api/paas/v4"),
         _ => None,
     }
@@ -14120,6 +14160,7 @@ mod tests {
         assert_eq!(normalize_auth_provider("openai-oauth"), "openai");
         assert_eq!(normalize_auth_provider("qwen-cli"), "qwen-oauth");
         assert_eq!(normalize_auth_provider("gemini-cli"), "google-gemini-cli");
+        assert_eq!(normalize_auth_provider("google-ai-studio"), "gemini");
         assert_eq!(normalize_auth_provider("step-plan"), "stepfun");
         assert_eq!(normalize_auth_provider("aigateway"), "ai-gateway");
         assert_eq!(normalize_auth_provider("moonshot"), "kimi-coding");
@@ -14128,6 +14169,10 @@ mod tests {
         assert_eq!(normalize_auth_provider("hf"), "huggingface");
         assert_eq!(normalize_auth_provider("github-models"), "copilot");
         assert_eq!(normalize_auth_provider("copilot-acp-agent"), "copilot-acp");
+        assert_eq!(normalize_auth_provider("gmicloud"), "gmi");
+        assert_eq!(normalize_auth_provider("arcee-ai"), "arcee");
+        assert_eq!(normalize_auth_provider("mimo"), "xiaomi");
+        assert_eq!(normalize_auth_provider("tencent-cloud"), "tencent-tokenhub");
         assert_eq!(normalize_auth_provider("ollama"), "ollama-local");
         assert_eq!(normalize_auth_provider("llama.cpp"), "llama-cpp");
         assert_eq!(normalize_auth_provider("ollvm"), "vllm");
@@ -14347,7 +14392,31 @@ mod tests {
             vec!["copilot", "github-copilot", "github-models"]
         );
         assert_eq!(provider_env_var("gmi-cloud"), Some("GMI_API_KEY"));
-        assert_eq!(secret_provider_aliases("gmi"), vec!["gmi", "gmi-cloud"]);
+        assert_eq!(
+            secret_provider_aliases("gmi"),
+            vec!["gmi", "gmi-cloud", "gmicloud"]
+        );
+        assert_eq!(provider_env_var("arcee-ai"), Some("ARCEEAI_API_KEY"));
+        assert_eq!(
+            secret_provider_aliases("arcee"),
+            vec!["arcee", "arcee-ai", "arceeai"]
+        );
+        assert_eq!(provider_env_var("mimo"), Some("XIAOMI_API_KEY"));
+        assert_eq!(
+            secret_provider_aliases("xiaomi"),
+            vec!["xiaomi", "mimo", "xiaomi-mimo"]
+        );
+        assert_eq!(provider_env_var("tokenhub"), Some("TOKENHUB_API_KEY"));
+        assert_eq!(
+            secret_provider_aliases("tencent"),
+            vec![
+                "tencent-tokenhub",
+                "tencent",
+                "tokenhub",
+                "tencent-cloud",
+                "tencentmaas"
+            ]
+        );
         assert_eq!(
             provider_env_var("google-gemini-cli"),
             Some("HERMES_GEMINI_OAUTH_API_KEY")
@@ -14631,6 +14700,18 @@ mod tests {
         assert_eq!(
             setup_provider_default_base_url("gmi"),
             Some("https://api.gmi-serving.com/v1")
+        );
+        assert_eq!(
+            setup_provider_display("tencent-tokenhub"),
+            "Tencent TokenHub"
+        );
+        assert_eq!(
+            setup_provider_env_keys("tencent-tokenhub"),
+            &["TOKENHUB_API_KEY"]
+        );
+        assert_eq!(
+            setup_provider_default_base_url("tencent-tokenhub"),
+            Some("https://tokenhub.tencentmaas.com/v1")
         );
         assert_eq!(
             setup_provider_default_base_url("ai-gateway"),

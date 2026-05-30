@@ -96,6 +96,8 @@ static DEFAULT_CONTEXT_LENGTHS: &[(&str, u64)] = &[
     // Xiaomi MIMO
     ("mimo-v2.5-pro", 1_000_000),
     ("mimo-v2.5", 1_000_000),
+    // Tencent TokenHub
+    ("hy3-preview", 128_000),
 ];
 
 // ---------------------------------------------------------------------------
@@ -548,6 +550,13 @@ pub fn infer_provider_from_url(base_url: &str) -> Option<&'static str> {
         ("api.deepseek.com", "deepseek"),
         ("api.githubcopilot.com", "copilot"),
         ("api.x.ai", "xai"),
+        ("api.gmi-serving.com", "gmi"),
+        ("api.arcee.ai", "arcee"),
+        ("api.xiaomimimo.com", "xiaomi"),
+        ("token-plan-ams.xiaomimimo.com", "xiaomi"),
+        ("token-plan-cn.xiaomimimo.com", "xiaomi"),
+        ("token-plan-sgp.xiaomimimo.com", "xiaomi"),
+        ("tokenhub.tencentmaas.com", "tencent-tokenhub"),
     ];
 
     for (pattern, provider) in mappings {
@@ -630,6 +639,7 @@ mod tests {
         assert_eq!(get_model_context_length("gemini-2.0-flash"), 1_048_576);
         assert_eq!(get_model_context_length("gemma4:31b-cloud"), 256_000);
         assert_eq!(get_model_context_length("xiaomi/mimo-v2.5-pro"), 1_000_000);
+        assert!(get_model_context_length("hy3-preview") >= 4096);
         assert_eq!(
             get_model_context_length("unknown-model"),
             CONTEXT_PROBE_TIERS[0]
@@ -700,6 +710,26 @@ mod tests {
         assert_eq!(
             infer_provider_from_url("https://open.bigmodel.cn/api/paas/v4"),
             Some("zai")
+        );
+        assert_eq!(
+            infer_provider_from_url("https://api.gmi-serving.com/v1"),
+            Some("gmi")
+        );
+        assert_eq!(
+            infer_provider_from_url("https://api.arcee.ai/api/v1"),
+            Some("arcee")
+        );
+        assert_eq!(
+            infer_provider_from_url("https://api.xiaomimimo.com/v1"),
+            Some("xiaomi")
+        );
+        assert_eq!(
+            infer_provider_from_url("https://token-plan-ams.xiaomimimo.com/v1"),
+            Some("xiaomi")
+        );
+        assert_eq!(
+            infer_provider_from_url("https://tokenhub.tencentmaas.com/v1"),
+            Some("tencent-tokenhub")
         );
         assert_eq!(infer_provider_from_url("http://localhost:8080"), None);
     }

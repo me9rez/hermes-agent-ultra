@@ -50,6 +50,11 @@ use serde_json::Value;
 pub const HTTP_PLATFORM: &str = "http";
 const SESSION_KEY_HEADER: &str = "x-hermes-session-key";
 const COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
+const GEMINI_OPENAI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
+const GMI_BASE_URL: &str = "https://api.gmi-serving.com/v1";
+const ARCEE_BASE_URL: &str = "https://api.arcee.ai/api/v1";
+const XIAOMI_BASE_URL: &str = "https://api.xiaomimimo.com/v1";
+const TENCENT_TOKENHUB_BASE_URL: &str = "https://tokenhub.tencentmaas.com/v1";
 
 #[derive(Clone, Default)]
 pub struct ChatOutboundBuffer {
@@ -756,8 +761,12 @@ pub fn bridge_tool_registry(tools: &ToolRegistry) -> AgentToolRegistry {
 }
 
 pub fn build_provider(config: &GatewayConfig, model: &str) -> Arc<dyn LlmProvider> {
-    let (provider_name, model_name) = model.split_once(':').unwrap_or(("openai", model));
-    let provider_config = config.llm_providers.get(provider_name);
+    let (raw_provider_name, model_name) = model.split_once(':').unwrap_or(("openai", model));
+    let provider_name = canonical_gateway_provider_name(raw_provider_name);
+    let provider_config = config
+        .llm_providers
+        .get(raw_provider_name)
+        .or_else(|| config.llm_providers.get(provider_name));
     let api_key = provider_config
         .and_then(|c| c.api_key.clone())
         .unwrap_or_default();
@@ -798,9 +807,33 @@ pub fn build_provider(config: &GatewayConfig, model: &str) -> Arc<dyn LlmProvide
             .with_model(model_name),
         ),
         _ => {
-            let url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let url = base_url
+                .or_else(|| default_gateway_base_url(provider_name).map(str::to_string))
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
             Arc::new(GenericProvider::new(url, &api_key, model_name))
         }
+    }
+}
+
+fn canonical_gateway_provider_name(provider: &str) -> &str {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "google" | "google-gemini" | "google-ai-studio" => "gemini",
+        "gmi-cloud" | "gmicloud" => "gmi",
+        "arcee-ai" | "arceeai" => "arcee",
+        "mimo" | "xiaomi-mimo" => "xiaomi",
+        "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => "tencent-tokenhub",
+        _ => provider,
+    }
+}
+
+fn default_gateway_base_url(provider: &str) -> Option<&'static str> {
+    match provider {
+        "gemini" => Some(GEMINI_OPENAI_BASE_URL),
+        "gmi" => Some(GMI_BASE_URL),
+        "arcee" => Some(ARCEE_BASE_URL),
+        "xiaomi" => Some(XIAOMI_BASE_URL),
+        "tencent-tokenhub" => Some(TENCENT_TOKENHUB_BASE_URL),
+        _ => None,
     }
 }
 
@@ -884,5 +917,26 @@ fn resolve_model(default_model: &str, provider: Option<&str>, model: Option<&str
         }
         (None, Some(m)) => m.to_string(),
         (None, None) => default_model.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_provider_aliases_resolve_to_direct_provider_defaults() {
+        let cases = [
+            ("google-ai-studio", "gemini", GEMINI_OPENAI_BASE_URL),
+            ("gmicloud", "gmi", GMI_BASE_URL),
+            ("arcee-ai", "arcee", ARCEE_BASE_URL),
+            ("mimo", "xiaomi", XIAOMI_BASE_URL),
+            ("tencentmaas", "tencent-tokenhub", TENCENT_TOKENHUB_BASE_URL),
+        ];
+
+        for (alias, canonical, base_url) in cases {
+            assert_eq!(canonical_gateway_provider_name(alias), canonical);
+            assert_eq!(default_gateway_base_url(canonical), Some(base_url));
+        }
     }
 }

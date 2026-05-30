@@ -40,6 +40,7 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "opencode-zen",
     "xai",
     "xiaomi",
+    "tencent-tokenhub",
     "zai",
 ];
 
@@ -93,6 +94,7 @@ pub fn canonical_provider_id(provider: &str) -> String {
         "claude" | "claude-code" => "anthropic".to_string(),
         "qwen-cli" | "qwen-portal" => "qwen-oauth".to_string(),
         "gemini-cli" | "gemini-oauth" => "google-gemini-cli".to_string(),
+        "google" | "google-gemini" | "google-ai-studio" => "gemini".to_string(),
         "step" | "step-plan" => "stepfun".to_string(),
         "moonshot" | "kimi-coding" | "kimi-coding-cn" => "kimi".to_string(),
         "alibaba" | "alibaba-coding-plan" => "qwen".to_string(),
@@ -103,7 +105,10 @@ pub fn canonical_provider_id(provider: &str) -> String {
         "github-copilot" | "github-models" => "copilot".to_string(),
         "github-copilot-acp" | "copilot-acp-agent" => "copilot-acp".to_string(),
         "hf" | "hugging-face" | "huggingface-hub" => "huggingface".to_string(),
-        "gmi-cloud" => "gmi".to_string(),
+        "gmi-cloud" | "gmicloud" => "gmi".to_string(),
+        "arcee-ai" | "arceeai" => "arcee".to_string(),
+        "mimo" | "xiaomi-mimo" => "xiaomi".to_string(),
+        "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => "tencent-tokenhub".to_string(),
         "kilo" | "kilo-code" | "kilo-gateway" => "kilocode".to_string(),
         "opencode" | "opencode-zen" | "zen" => "opencode-zen".to_string(),
         "go" => "opencode-go".to_string(),
@@ -288,6 +293,14 @@ mod tests {
         assert_eq!(canonical_provider_id("aigateway"), "ai-gateway");
         assert_eq!(canonical_provider_id("vercel"), "ai-gateway");
         assert_eq!(canonical_provider_id("gmi-cloud"), "gmi");
+        assert_eq!(canonical_provider_id("gmicloud"), "gmi");
+        assert_eq!(canonical_provider_id("google-ai-studio"), "gemini");
+        assert_eq!(canonical_provider_id("arcee-ai"), "arcee");
+        assert_eq!(canonical_provider_id("arceeai"), "arcee");
+        assert_eq!(canonical_provider_id("mimo"), "xiaomi");
+        assert_eq!(canonical_provider_id("xiaomi-mimo"), "xiaomi");
+        assert_eq!(canonical_provider_id("tencent-cloud"), "tencent-tokenhub");
+        assert_eq!(canonical_provider_id("tokenhub"), "tencent-tokenhub");
         assert_eq!(canonical_provider_id("minimax_cn"), "minimax-cn");
     }
 }

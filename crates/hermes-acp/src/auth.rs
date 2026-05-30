@@ -70,12 +70,17 @@ fn normalize_provider_name(provider: &str) -> String {
         "claude" | "claude-code" => "anthropic".to_string(),
         "qwen-cli" | "qwen-portal" => "qwen-oauth".to_string(),
         "gemini-cli" | "gemini-oauth" => "google-gemini-cli".to_string(),
+        "google" | "google-gemini" | "google-ai-studio" => "gemini".to_string(),
         "step" | "step-plan" => "stepfun".to_string(),
         "moonshot" | "kimi-coding" | "kimi-coding-cn" => "kimi".to_string(),
         "alibaba" | "alibaba-coding-plan" => "qwen".to_string(),
         "minimax-cn" => "minimax".to_string(),
         "novita-ai" | "novitaai" => "novita".to_string(),
         "kilo" | "kilo-code" | "kilo-gateway" => "kilocode".to_string(),
+        "gmi-cloud" | "gmicloud" => "gmi".to_string(),
+        "arcee-ai" | "arceeai" => "arcee".to_string(),
+        "mimo" | "xiaomi-mimo" => "xiaomi".to_string(),
+        "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => "tencent-tokenhub".to_string(),
         "opencode" | "opencode-zen" | "zen" => "opencode-zen".to_string(),
         "go" => "opencode-go".to_string(),
         "ollama" => "ollama-local".to_string(),
@@ -194,7 +199,9 @@ fn provider_env_key_names(provider: &str) -> &'static [&'static str] {
         "gmi" => &["GMI_API_KEY"],
         "huggingface" => &["HF_TOKEN", "HUGGINGFACE_API_KEY"],
         "zai" => &["ZAI_API_KEY"],
-        "arcee" => &["ARCEE_API_KEY"],
+        "arcee" => &["ARCEEAI_API_KEY", "ARCEE_API_KEY"],
+        "xiaomi" => &["XIAOMI_API_KEY"],
+        "tencent-tokenhub" => &["TOKENHUB_API_KEY"],
         "ollama-cloud" => &["OLLAMA_API_KEY"],
         _ => &[],
     }
@@ -330,6 +337,23 @@ mod tests {
                 "GITHUB_TOKEN",
                 "GITHUB_COPILOT_TOKEN"
             ]
+        );
+    }
+
+    #[test]
+    fn direct_provider_credentials_accept_upstream_aliases() {
+        assert_eq!(normalize_provider_name("google-ai-studio"), "gemini");
+        assert_eq!(normalize_provider_name("gmicloud"), "gmi");
+        assert_eq!(normalize_provider_name("arcee-ai"), "arcee");
+        assert_eq!(normalize_provider_name("mimo"), "xiaomi");
+        assert_eq!(normalize_provider_name("tokenhub"), "tencent-tokenhub");
+        assert_eq!(
+            provider_env_key_names("arcee"),
+            &["ARCEEAI_API_KEY", "ARCEE_API_KEY"]
+        );
+        assert_eq!(
+            provider_env_key_names("tencent-tokenhub"),
+            &["TOKENHUB_API_KEY"]
         );
     }
 }

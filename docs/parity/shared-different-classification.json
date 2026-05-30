@@ -640,6 +640,41 @@
       "ticket": 25
     },
     {
+      "path": "tests/hermes_cli/test_arcee_provider.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Arcee provider alias, ARCEEAI_API_KEY/ARCEE_API_KEY, base URL, model catalog, URL inference, config hydration, ACP auth, and runtime resolution intent is covered by Rust provider, CLI, config, ACP, intelligence, AgentLoop, and HTTP gateway tests.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/hermes_cli/test_gemini_provider.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Gemini provider alias and GOOGLE_API_KEY/GEMINI_API_KEY compatibility intent is covered by Rust provider canonicalization, CLI env/base-url resolution, config hydration, AgentLoop runtime defaults, and HTTP gateway alias tests.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/hermes_cli/test_gmi_provider.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream GMI provider aliases, GMI_API_KEY/GMI_BASE_URL handling, curated/live model catalog, auxiliary default, config hydration, ACP auth, and runtime/base URL resolution are covered by Rust CLI, config, ACP, auxiliary, AgentLoop, intelligence, and HTTP gateway tests.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/hermes_cli/test_tencent_tokenhub_provider.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Tencent TokenHub canonical provider, aliases, TOKENHUB_API_KEY/TOKENHUB_BASE_URL, hy3-preview catalog/default/context metadata, URL inference, config hydration, ACP auth, auxiliary default, and runtime/base URL resolution are covered by Rust provider, CLI, config, ACP, auxiliary, AgentLoop, intelligence, and HTTP gateway tests.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/hermes_cli/test_xiaomi_provider.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Xiaomi/MiMo aliases, XIAOMI_API_KEY/XIAOMI_BASE_URL handling, model catalog, URL inference, config hydration, ACP auth, and runtime/base URL resolution are covered by Rust provider, CLI, config, ACP, intelligence, AgentLoop, and HTTP gateway tests.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "ui-tui",
       "classification": "functional",
       "rationale": "TUI package and documentation deltas can affect distributed interactive UX behavior and must be reviewed against Hermes Ultra's Rust-primary UX surface.",

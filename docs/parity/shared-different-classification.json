@@ -199,9 +199,23 @@
       "ticket": 25
     },
     {
+      "path": "tests/gateway/test_discord_reply_mode.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord reply_to_mode behavior is covered by Rust hermes-gateway reply-reference construction/retry tests, DiscordConfig defaults, CLI config hydration, Python-platform env bridging, and reply-text extraction contracts.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/gateway/test_discord_reactions.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream Discord processing-reaction lifecycle is covered by Rust Gateway Discord reaction lifecycle tests, platform-specific Discord emoji mapping, reactions_enabled policy tests, and Discord REST reaction parser/adapter contracts.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_discord_send.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord send retry and forum-post behavior is covered by Rust hermes-gateway reply-reference retry classifiers, chunk reference-mode payload tests, forum thread payload contracts, and DiscordAdapter forum send outcome handling.",
       "owner": "sheawinkler",
       "ticket": 25
     },

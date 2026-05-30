@@ -55,6 +55,10 @@ pub struct DiscordConfig {
     #[serde(default = "default_intents")]
     pub intents: u64,
 
+    /// How outgoing chunks should reply-reference the original Discord message.
+    #[serde(default = "default_reply_to_mode")]
+    pub reply_to_mode: String,
+
     /// Channel-level inbound and auto-thread policy.
     #[serde(default)]
     pub channel_controls: DiscordChannelControls,
@@ -69,18 +73,43 @@ fn default_intents() -> u64 {
     (1 << 0) | (1 << 9) | (1 << 15)
 }
 
+fn default_reply_to_mode() -> String {
+    "first".to_string()
+}
+
 /// Optional Discord send metadata carried by higher-level gateway helpers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscordSendMetadata {
     /// Discord thread channel ID to target instead of the parent channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    /// Original Discord message ID to reply-reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<String>,
 }
 
 impl DiscordSendMetadata {
     pub fn with_thread_id(thread_id: impl Into<String>) -> Self {
         Self {
             thread_id: Some(thread_id.into()),
+            reply_to_message_id: None,
+        }
+    }
+
+    pub fn with_reply_to_message_id(message_id: impl Into<String>) -> Self {
+        Self {
+            thread_id: None,
+            reply_to_message_id: Some(message_id.into()),
+        }
+    }
+
+    pub fn with_thread_and_reply(
+        thread_id: impl Into<String>,
+        message_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            thread_id: Some(thread_id.into()),
+            reply_to_message_id: Some(message_id.into()),
         }
     }
 
@@ -91,6 +120,13 @@ impl DiscordSendMetadata {
             .filter(|id| !id.is_empty())
             .unwrap_or(fallback_channel_id)
     }
+
+    pub fn reply_to_message_id(&self) -> Option<&str> {
+        self.reply_to_message_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
 }
 
 fn target_channel_id_for_metadata<'a>(
@@ -100,6 +136,36 @@ fn target_channel_id_for_metadata<'a>(
     metadata
         .map(|m| m.target_channel_id(channel_id))
         .unwrap_or(channel_id)
+}
+
+fn reply_to_message_id_for_metadata(metadata: Option<&DiscordSendMetadata>) -> Option<&str> {
+    metadata.and_then(DiscordSendMetadata::reply_to_message_id)
+}
+
+/// Effective behavior for Discord reply references across split chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscordReplyToMode {
+    Off,
+    First,
+    All,
+}
+
+impl DiscordReplyToMode {
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(value) if value.eq_ignore_ascii_case("off") => Self::Off,
+            Some(value) if value.eq_ignore_ascii_case("all") => Self::All,
+            _ => Self::First,
+        }
+    }
+
+    pub fn references_chunk(self, chunk_index: usize) -> bool {
+        match self {
+            Self::Off => false,
+            Self::First => chunk_index == 0,
+            Self::All => true,
+        }
+    }
 }
 
 const DISCORD_ALLOW_MENTION_EVERYONE_ENV: &str = "DISCORD_ALLOW_MENTION_EVERYONE";
@@ -182,6 +248,68 @@ fn with_allowed_mentions(
 
 fn with_default_allowed_mentions(body: serde_json::Value) -> serde_json::Value {
     with_allowed_mentions(body, default_discord_allowed_mentions())
+}
+
+fn with_reply_reference(mut body: serde_json::Value, message_id: &str) -> serde_json::Value {
+    let message_id = message_id.trim();
+    if !message_id.is_empty() {
+        body["message_reference"] = serde_json::json!({
+            "message_id": message_id,
+            "fail_if_not_exists": false,
+        });
+    }
+    body
+}
+
+fn discord_message_body(
+    content: &str,
+    reply_to_message_id: Option<&str>,
+    allowed_mentions: DiscordAllowedMentions,
+) -> serde_json::Value {
+    let body = with_allowed_mentions(serde_json::json!({ "content": content }), allowed_mentions);
+    match reply_to_message_id {
+        Some(message_id) => with_reply_reference(body, message_id),
+        None => body,
+    }
+}
+
+fn discord_reply_reference_error_allows_retry(raw_error: &str) -> bool {
+    let normalized = raw_error.to_ascii_lowercase();
+    normalized.contains("cannot reply to a system message")
+        || normalized.contains("unknown message")
+        || normalized.contains("error code: 10008")
+}
+
+fn forum_thread_name(content: Option<&str>, file_name: Option<&str>) -> String {
+    let candidate = content
+        .and_then(|content| content.lines().map(str::trim).find(|line| !line.is_empty()))
+        .or_else(|| file_name.map(str::trim).filter(|name| !name.is_empty()))
+        .unwrap_or("Hermes");
+
+    candidate.chars().take(100).collect()
+}
+
+fn forum_thread_message_body(content: &str) -> serde_json::Value {
+    with_default_allowed_mentions(serde_json::json!({ "content": content }))
+}
+
+fn forum_thread_payload(
+    content: &str,
+    file_name: Option<&str>,
+    auto_archive_duration: Option<u32>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "name": forum_thread_name(Some(content), file_name),
+        "message": forum_thread_message_body(content),
+    });
+    if let Some(duration) = auto_archive_duration {
+        body["auto_archive_duration"] = serde_json::Value::Number(duration.into());
+    }
+    body
+}
+
+pub fn discord_channel_type_is_forum_parent(channel_type: Option<u8>) -> bool {
+    matches!(channel_type, Some(15))
 }
 
 /// Discord bot-message acceptance policy.
@@ -1147,6 +1275,24 @@ pub struct DiscordThread {
     pub parent_id: Option<String>,
 }
 
+/// Response from creating a Discord forum post thread.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiscordForumThread {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub message: Option<DiscordMessage>,
+}
+
+/// Result of a forum post send where follow-up chunk failures are non-fatal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordForumSendOutcome {
+    pub thread_id: String,
+    pub message_id: String,
+    pub warnings: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // DiscordAdapter
 // ---------------------------------------------------------------------------
@@ -1250,13 +1396,23 @@ impl DiscordAdapter {
         let target_channel_id = target_channel_id_for_metadata(channel_id, metadata);
         let chunks = split_message(content, MAX_MESSAGE_LENGTH);
         let mut message_ids = Vec::new();
+        let reply_to_message_id = reply_to_message_id_for_metadata(metadata);
+        let reply_to_mode = DiscordReplyToMode::parse(Some(&self.config.reply_to_mode));
+        let mut suppress_reply_references = false;
 
-        for chunk in &chunks {
+        for (index, chunk) in chunks.iter().enumerate() {
             let url = format!(
                 "{}/channels/{}/messages",
                 DISCORD_API_BASE, target_channel_id
             );
-            let body = with_default_allowed_mentions(serde_json::json!({ "content": chunk }));
+            let include_reply_reference = !suppress_reply_references
+                && reply_to_message_id.is_some()
+                && reply_to_mode.references_chunk(index);
+            let body = discord_message_body(
+                chunk,
+                include_reply_reference.then_some(reply_to_message_id.unwrap_or_default()),
+                default_discord_allowed_mentions(),
+            );
 
             let resp = self
                 .client
@@ -1270,6 +1426,38 @@ impl DiscordAdapter {
 
             if !resp.status().is_success() {
                 let text = resp.text().await.unwrap_or_default();
+                if include_reply_reference && discord_reply_reference_error_allows_retry(&text) {
+                    suppress_reply_references = true;
+                    let retry_body =
+                        discord_message_body(chunk, None, default_discord_allowed_mentions());
+                    let retry_resp = self
+                        .client
+                        .post(&url)
+                        .header("Authorization", self.auth_header())
+                        .header("Content-Type", "application/json")
+                        .json(&retry_body)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            GatewayError::SendFailed(format!("Discord send failed: {}", e))
+                        })?;
+
+                    if !retry_resp.status().is_success() {
+                        let retry_text = retry_resp.text().await.unwrap_or_default();
+                        return Err(GatewayError::SendFailed(format!(
+                            "Discord API error: {}",
+                            retry_text
+                        )));
+                    }
+
+                    let msg: DiscordMessage = retry_resp.json().await.map_err(|e| {
+                        GatewayError::SendFailed(format!("Failed to parse Discord response: {}", e))
+                    })?;
+
+                    message_ids.push(msg.id);
+                    continue;
+                }
+
                 return Err(GatewayError::SendFailed(format!(
                     "Discord API error: {}",
                     text
@@ -1284,6 +1472,72 @@ impl DiscordAdapter {
         }
 
         Ok(message_ids)
+    }
+
+    /// Create a Discord forum post thread from message content.
+    ///
+    /// Follow-up chunks are sent to the created thread. If the starter post is
+    /// created but a follow-up chunk fails, the successful starter message is
+    /// returned together with warnings, matching the upstream partial-send
+    /// behavior.
+    pub async fn send_forum_post(
+        &self,
+        forum_channel_id: &str,
+        content: &str,
+        auto_archive_duration: Option<u32>,
+    ) -> Result<DiscordForumSendOutcome, GatewayError> {
+        let chunks = split_message(content, MAX_MESSAGE_LENGTH);
+        let Some(first_chunk) = chunks.first() else {
+            return Err(GatewayError::SendFailed(
+                "Discord forum post requires content".into(),
+            ));
+        };
+        let url = format!("{}/channels/{}/threads", DISCORD_API_BASE, forum_channel_id);
+        let body = forum_thread_payload(first_chunk, None, auto_archive_duration);
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| GatewayError::SendFailed(format!("Discord forum post failed: {}", e)))?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(GatewayError::SendFailed(format!(
+                "Discord forum post API error: {}",
+                text
+            )));
+        }
+
+        let thread: DiscordForumThread = resp.json().await.map_err(|e| {
+            GatewayError::SendFailed(format!("Failed to parse forum thread response: {}", e))
+        })?;
+        let message_id = thread
+            .message
+            .as_ref()
+            .map(|message| message.id.clone())
+            .unwrap_or_else(|| thread.id.clone());
+        let mut warnings = Vec::new();
+
+        for chunk in chunks.iter().skip(1) {
+            let metadata = DiscordSendMetadata::with_thread_id(thread.id.clone());
+            if let Err(err) = self
+                .send_text_with_metadata(forum_channel_id, chunk, Some(&metadata))
+                .await
+            {
+                warnings.push(err.to_string());
+            }
+        }
+
+        Ok(DiscordForumSendOutcome {
+            thread_id: thread.id,
+            message_id,
+            warnings,
+        })
     }
 
     /// Edit an existing message in a Discord channel.
@@ -2283,6 +2537,7 @@ mod tests {
             proxy: AdapterProxyConfig::default(),
             require_mention: false,
             intents: default_intents(),
+            reply_to_mode: default_reply_to_mode(),
             channel_controls: DiscordChannelControls::default(),
             channel_skill_bindings: Vec::new(),
         }
@@ -2292,10 +2547,19 @@ mod tests {
     fn send_metadata_targets_thread_id_when_present() {
         let metadata = DiscordSendMetadata::with_thread_id(" 987654321 ");
         assert_eq!(metadata.target_channel_id("123"), "987654321");
+        assert_eq!(metadata.reply_to_message_id(), None);
 
         let blank_metadata = DiscordSendMetadata::with_thread_id("   ");
         assert_eq!(blank_metadata.target_channel_id("123"), "123");
         assert_eq!(target_channel_id_for_metadata("123", None), "123");
+
+        let reply_metadata = DiscordSendMetadata::with_reply_to_message_id(" origin-1 ");
+        assert_eq!(reply_metadata.target_channel_id("123"), "123");
+        assert_eq!(reply_metadata.reply_to_message_id(), Some("origin-1"));
+
+        let combined = DiscordSendMetadata::with_thread_and_reply("thread-1", "origin-2");
+        assert_eq!(combined.target_channel_id("123"), "thread-1");
+        assert_eq!(combined.reply_to_message_id(), Some("origin-2"));
     }
 
     #[test]
@@ -2307,6 +2571,100 @@ mod tests {
         let body = with_allowed_mentions(serde_json::json!({ "content": "hello" }), mentions);
         assert_eq!(
             body["allowed_mentions"],
+            serde_json::json!({ "parse": ["users"], "replied_user": true })
+        );
+    }
+
+    #[test]
+    fn reply_to_mode_defaults_to_first_and_parses_effective_behavior() {
+        assert_eq!(default_reply_to_mode(), "first");
+        assert_eq!(DiscordReplyToMode::parse(None), DiscordReplyToMode::First);
+        assert_eq!(
+            DiscordReplyToMode::parse(Some("")),
+            DiscordReplyToMode::First
+        );
+        assert_eq!(
+            DiscordReplyToMode::parse(Some("off")),
+            DiscordReplyToMode::Off
+        );
+        assert_eq!(
+            DiscordReplyToMode::parse(Some("ALL")),
+            DiscordReplyToMode::All
+        );
+        assert_eq!(
+            DiscordReplyToMode::parse(Some("banana")),
+            DiscordReplyToMode::First
+        );
+
+        assert!(!DiscordReplyToMode::Off.references_chunk(0));
+        assert!(DiscordReplyToMode::First.references_chunk(0));
+        assert!(!DiscordReplyToMode::First.references_chunk(1));
+        assert!(DiscordReplyToMode::All.references_chunk(0));
+        assert!(DiscordReplyToMode::All.references_chunk(7));
+    }
+
+    #[test]
+    fn reply_reference_body_matches_discord_reference_contract() {
+        let body = discord_message_body(
+            "chunk",
+            Some(" origin-1 "),
+            DiscordAllowedMentions::from_flags(false, false, true, true),
+        );
+
+        assert_eq!(body["content"], "chunk");
+        assert_eq!(
+            body["allowed_mentions"],
+            serde_json::json!({ "parse": ["users"], "replied_user": true })
+        );
+        assert_eq!(
+            body["message_reference"],
+            serde_json::json!({
+                "message_id": "origin-1",
+                "fail_if_not_exists": false
+            })
+        );
+
+        let no_reference = discord_message_body(
+            "chunk",
+            None,
+            DiscordAllowedMentions::from_flags(false, false, true, true),
+        );
+        assert!(no_reference.get("message_reference").is_none());
+    }
+
+    #[test]
+    fn reply_reference_retry_classifier_only_matches_reference_failures() {
+        assert!(discord_reply_reference_error_allows_retry(
+            "400 Bad Request (error code: 50035): Invalid Form Body\nIn message_reference: Cannot reply to a system message"
+        ));
+        assert!(discord_reply_reference_error_allows_retry(
+            "400 Bad Request (error code: 10008): Unknown Message"
+        ));
+        assert!(!discord_reply_reference_error_allows_retry(
+            "403 Forbidden (error code: 50013): Missing Permissions"
+        ));
+    }
+
+    #[test]
+    fn forum_parent_and_payload_contract_matches_python_send_path() {
+        assert!(!discord_channel_type_is_forum_parent(None));
+        assert!(!discord_channel_type_is_forum_parent(Some(0)));
+        assert!(!discord_channel_type_is_forum_parent(Some(11)));
+        assert!(discord_channel_type_is_forum_parent(Some(15)));
+
+        assert_eq!(
+            forum_thread_name(Some("  here is a photo\nsecond line"), Some("photo.png")),
+            "here is a photo"
+        );
+        assert_eq!(forum_thread_name(Some(""), Some("voice.ogg")), "voice.ogg");
+        assert_eq!(forum_thread_name(None, None), "Hermes");
+
+        let payload = forum_thread_payload("Hello forum!", None, Some(60));
+        assert_eq!(payload["name"], "Hello forum!");
+        assert_eq!(payload["auto_archive_duration"], 60);
+        assert_eq!(payload["message"]["content"], "Hello forum!");
+        assert_eq!(
+            payload["message"]["allowed_mentions"],
             serde_json::json!({ "parse": ["users"], "replied_user": true })
         );
     }

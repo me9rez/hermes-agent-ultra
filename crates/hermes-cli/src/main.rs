@@ -4083,6 +4083,18 @@ fn extra_string(platform_cfg: &PlatformConfig, key: &str) -> Option<String> {
         .map(String::from)
 }
 
+fn discord_reply_to_mode_string(platform_cfg: &PlatformConfig) -> Option<String> {
+    let raw = platform_cfg.extra.get("reply_to_mode")?;
+    let candidate = match raw {
+        serde_json::Value::String(value) => value.trim().to_ascii_lowercase(),
+        serde_json::Value::Bool(false) => "off".to_string(),
+        serde_json::Value::Bool(true) => "all".to_string(),
+        _ => return None,
+    };
+
+    matches!(candidate.as_str(), "off" | "first" | "all").then_some(candidate)
+}
+
 fn env_string(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -4440,6 +4452,8 @@ async fn register_gateway_adapters(
                         .get("intents")
                         .and_then(|v| v.as_u64())
                         .unwrap_or((1 << 0) | (1 << 9) | (1 << 15)),
+                    reply_to_mode: discord_reply_to_mode_string(platform_cfg)
+                        .unwrap_or_else(|| "first".to_string()),
                     channel_controls: DiscordChannelControls::from_extra(&platform_cfg.extra),
                     channel_skill_bindings: DiscordChannelSkillBinding::list_from_json(
                         platform_cfg.extra.get("channel_skill_bindings"),

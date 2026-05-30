@@ -73,7 +73,7 @@ pub fn hydrate_env_from_config(config: &GatewayConfig) -> usize {
         }
 
         for (extra_key, extra_val) in &platform_cfg.extra {
-            if let Some(value) = scalarish_json_to_string(extra_val) {
+            if let Some(value) = platform_extra_json_to_env_string(extra_key, extra_val) {
                 let key = normalize_env_component(extra_key);
                 applied += set_if_absent_owned(format!("{}_{}", scoped_prefix, key), value.clone());
                 applied += set_if_absent_owned(format!("{}_{}", platform_prefix, key), value);
@@ -166,6 +166,22 @@ fn scalarish_json_to_string(value: &Value) -> Option<String> {
     }
 }
 
+fn platform_extra_json_to_env_string(key: &str, value: &Value) -> Option<String> {
+    if key == "reply_to_mode" {
+        return match value {
+            Value::String(s) => {
+                let normalized = s.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "off" | "first" | "all").then_some(normalized)
+            }
+            Value::Bool(false) => Some("off".to_string()),
+            Value::Bool(true) => Some("all".to_string()),
+            _ => None,
+        };
+    }
+
+    scalarish_json_to_string(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +228,7 @@ mod tests {
             "DISCORD_IGNORED_CHANNELS",
             "DISCORD_NO_THREAD_CHANNELS",
             "DISCORD_AUTO_THREAD",
+            "DISCORD_REPLY_TO_MODE",
         ]);
         std::env::remove_var("HERMES_MODEL");
         std::env::remove_var("HERMES_MAX_TURNS");
@@ -221,6 +238,7 @@ mod tests {
         std::env::remove_var("DISCORD_IGNORED_CHANNELS");
         std::env::remove_var("DISCORD_NO_THREAD_CHANNELS");
         std::env::remove_var("DISCORD_AUTO_THREAD");
+        std::env::remove_var("DISCORD_REPLY_TO_MODE");
 
         let mut cfg = GatewayConfig {
             model: Some("openai:gpt-4o".to_string()),
@@ -250,6 +268,9 @@ mod tests {
         discord
             .extra
             .insert("auto_thread".to_string(), Value::Bool(false));
+        discord
+            .extra
+            .insert("reply_to_mode".to_string(), Value::Bool(false));
         cfg.platforms.insert("discord".to_string(), discord);
 
         let applied = hydrate_env_from_config(&cfg);
@@ -283,6 +304,10 @@ mod tests {
             std::env::var("DISCORD_AUTO_THREAD").unwrap(),
             "false".to_string()
         );
+        assert_eq!(
+            std::env::var("DISCORD_REPLY_TO_MODE").unwrap(),
+            "off".to_string()
+        );
     }
 
     #[test]
@@ -292,10 +317,12 @@ mod tests {
             "HERMES_MODEL",
             "DISCORD_ALLOWED_USERS",
             "DISCORD_IGNORED_CHANNELS",
+            "DISCORD_REPLY_TO_MODE",
         ]);
         std::env::set_var("HERMES_MODEL", "existing:model");
         std::env::set_var("DISCORD_ALLOWED_USERS", "from-env");
         std::env::set_var("DISCORD_IGNORED_CHANNELS", "999");
+        std::env::set_var("DISCORD_REPLY_TO_MODE", "first");
 
         let mut cfg = GatewayConfig {
             model: Some("openai:gpt-4o".to_string()),
@@ -309,6 +336,10 @@ mod tests {
             "ignored_channels".to_string(),
             Value::Array(vec![Value::String("111".to_string())]),
         );
+        discord.extra.insert(
+            "reply_to_mode".to_string(),
+            Value::String("all".to_string()),
+        );
         let mut platforms = HashMap::new();
         platforms.insert("discord".to_string(), discord);
         cfg.platforms = platforms;
@@ -318,5 +349,6 @@ mod tests {
         assert_eq!(std::env::var("HERMES_MODEL").unwrap(), "existing:model");
         assert_eq!(std::env::var("DISCORD_ALLOWED_USERS").unwrap(), "from-env");
         assert_eq!(std::env::var("DISCORD_IGNORED_CHANNELS").unwrap(), "999");
+        assert_eq!(std::env::var("DISCORD_REPLY_TO_MODE").unwrap(), "first");
     }
 }

@@ -26,6 +26,15 @@ fn env_bool(raw: &str) -> bool {
     matches!(raw.to_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
+fn discord_reply_to_mode(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" => Some("off"),
+        "first" => Some("first"),
+        "all" => Some("all"),
+        _ => None,
+    }
+}
+
 fn set_extra(pc: &mut PlatformConfig, key: &str, val: Value) {
     pc.extra.insert(key.to_string(), val);
 }
@@ -162,7 +171,9 @@ fn apply_discord_env(config: &mut GatewayConfig) {
         set_extra(discord, "reactions", json!(env_bool(&v)));
     }
     if let Some(v) = env_nonempty("DISCORD_REPLY_TO_MODE") {
-        set_extra(discord, "reply_to_mode", json!(v));
+        if let Some(mode) = discord_reply_to_mode(&v) {
+            set_extra(discord, "reply_to_mode", json!(mode));
+        }
     }
     if let Some(v) = env_nonempty("DISCORD_REQUIRE_MENTION") {
         discord.require_mention = Some(env_bool(&v));
@@ -251,7 +262,7 @@ mod tests {
             std::env::set_var("DISCORD_APPLICATION_ID", "app-123");
             std::env::set_var("DISCORD_ALLOW_BOTS", "mentions");
             std::env::set_var("DISCORD_REACTIONS", "false");
-            std::env::set_var("DISCORD_REPLY_TO_MODE", "all");
+            std::env::set_var("DISCORD_REPLY_TO_MODE", "ALL");
             std::env::set_var("DISCORD_REQUIRE_MENTION", "true");
             std::env::set_var("DISCORD_IGNORED_CHANNELS", "111, 222");
             std::env::set_var("DISCORD_NO_THREAD_CHANNELS", "333");
@@ -328,6 +339,30 @@ mod tests {
             std::env::remove_var("DISCORD_FREE_RESPONSE_CHANNELS");
             std::env::remove_var("DISCORD_AUTO_THREAD");
             std::env::remove_var("DISCORD_THREAD_REQUIRE_MENTION");
+        }
+    }
+
+    #[test]
+    fn discord_reply_to_mode_env_ignores_invalid_values() {
+        unsafe {
+            std::env::set_var("DISCORD_REPLY_TO_MODE", "banana");
+        }
+        let mut cfg = GatewayConfig::default();
+        cfg.platforms
+            .entry("discord".into())
+            .or_default()
+            .extra
+            .insert("reply_to_mode".into(), json!("off"));
+
+        apply_python_named_platform_env(&mut cfg);
+        let discord = cfg.platforms.get("discord").expect("discord block");
+        assert_eq!(
+            discord.extra.get("reply_to_mode").and_then(|v| v.as_str()),
+            Some("off")
+        );
+
+        unsafe {
+            std::env::remove_var("DISCORD_REPLY_TO_MODE");
         }
     }
 

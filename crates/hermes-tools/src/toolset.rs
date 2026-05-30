@@ -289,6 +289,27 @@ impl ToolsetManager {
             .collect(),
         ));
         self.register(Toolset::with_includes(
+            "hermes-api-server",
+            vec![
+                "web",
+                "terminal",
+                "file",
+                "browser",
+                "vision",
+                "image_gen",
+                "memory",
+                "session_search",
+                "todo",
+                "code_execution",
+                "delegation",
+                "cronjob",
+                "homeassistant",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        ));
+        self.register(Toolset::with_includes(
             "hermes-telegram",
             vec!["hermes-cli"].into_iter().map(String::from).collect(),
         ));
@@ -565,6 +586,54 @@ mod tests {
         assert!(tools.contains(&"send_message".to_string()));
         assert!(tools.contains(&"ha_call_service".to_string()));
         assert!(tools.contains(&"cronjob".to_string()));
+    }
+
+    #[test]
+    fn test_hermes_api_server_toolset() {
+        let manager = ToolsetManager::new(empty_registry());
+        let tools = manager
+            .resolve_toolset_unfiltered("hermes-api-server")
+            .unwrap();
+        for expected in [
+            "web_search",
+            "web_extract",
+            "terminal",
+            "process",
+            "read_file",
+            "write_file",
+            "patch",
+            "search_files",
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_click",
+            "browser_type",
+            "browser_scroll",
+            "browser_back",
+            "browser_press",
+            "ha_list_entities",
+            "ha_get_state",
+            "ha_list_services",
+            "ha_call_service",
+            "vision_analyze",
+            "image_generate",
+            "execute_code",
+            "delegate_task",
+            "todo",
+            "memory",
+            "session_search",
+            "cronjob",
+        ] {
+            assert!(
+                tools.contains(&expected.to_string()),
+                "hermes-api-server should include {expected}"
+            );
+        }
+        for excluded in ["clarify", "send_message", "text_to_speech", "tts_premium"] {
+            assert!(
+                !tools.contains(&excluded.to_string()),
+                "hermes-api-server should exclude {excluded}"
+            );
+        }
     }
 
     #[test]

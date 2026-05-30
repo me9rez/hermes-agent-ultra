@@ -143,6 +143,13 @@
       "ticket": 25
     },
     {
+      "path": "tests/gateway/test_api_server_toolset.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream's API-server toolset contract is covered by Rust toolset and platform-toolset tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "website/docs",
       "classification": "policy_only",
       "rationale": "Documentation-site content differs by project positioning and release policy; runtime behavior is unaffected.",

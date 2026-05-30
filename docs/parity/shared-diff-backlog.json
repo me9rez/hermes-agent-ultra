@@ -3376,16 +3376,16 @@
       "workstream": "WS6"
     },
     {
-      "action": "Map upstream test intent to Rust/Python contract coverage; add missing regression tests.",
-      "classification": "functional",
-      "classification_path": "tests/gateway",
+      "action": "No vendoring; verify approved divergence remains current.",
+      "classification": "intentional_divergence",
+      "classification_path": "tests/gateway/test_api_server_toolset.py",
       "existing_coverage": "claimed_by_shared_diff_classification",
       "local_blob": "943d867e6132df63cd5c96d53af986a460132001",
-      "necessity": "necessary_review",
+      "necessity": "approved_divergence",
       "owner": "sheawinkler",
       "path": "tests/gateway/test_api_server_toolset.py",
-      "rust_requirement": "rust_equivalent_or_contract_test_required",
-      "status": "pending_review",
+      "rust_requirement": "not_required_for_runtime",
+      "status": "cleared_intentional_divergence",
       "ticket": 25,
       "upstream_blob": "add2ce27345a8efc3d477373028d593b0b33d238",
       "workstream": "WS6"
@@ -13887,7 +13887,7 @@
       "rust_requirement": "not_required_for_runtime",
       "status": "cleared_non_runtime",
       "ticket": 25,
-      "upstream_blob": "776d53089e89a829a631895112dd593254da7d23",
+      "upstream_blob": "3c8d7bbc1dbef7a1a0d3ab0f5f79be791d63dbbd",
       "workstream": "WS5"
     },
     {
@@ -15271,29 +15271,29 @@
       "workstream": "WS5"
     }
   ],
-  "generated_at_utc": "2026-05-30T00:39:25.050744+00:00",
+  "generated_at_utc": "2026-05-30T00:58:41.862565+00:00",
   "refs": {
     "local_ref": "main",
-    "local_sha": "71d946dbd37df846677055d1a63fbcc8507c2303",
+    "local_sha": "049546fd77db89fc1eb6a037f613857d288857fd",
     "upstream_ref": "upstream/main",
-    "upstream_sha": "54aa4db1de76a7c4bb02c8a7f7411727384b8fea"
+    "upstream_sha": "bcc83010006c7059ee4d0be63fe74afc74867625"
   },
   "summary": {
     "by_classification": {
       "branding_only": 1,
-      "functional": 760,
-      "intentional_divergence": 89,
+      "functional": 759,
+      "intentional_divergence": 90,
       "policy_only": 168
     },
     "by_rust_requirement": {
-      "not_required_for_runtime": 258,
-      "rust_equivalent_or_contract_test_required": 681,
+      "not_required_for_runtime": 259,
+      "rust_equivalent_or_contract_test_required": 680,
       "rust_primary_ux_or_documented_divergence_required": 79
     },
     "by_status": {
-      "cleared_intentional_divergence": 89,
+      "cleared_intentional_divergence": 90,
       "cleared_non_runtime": 169,
-      "pending_review": 760
+      "pending_review": 759
     },
     "by_workstream": {
       "WS3": 53,
@@ -15302,10 +15302,10 @@
       "WS6": 683,
       "WS8": 13
     },
-    "cleared_intentional_divergence": 89,
+    "cleared_intentional_divergence": 90,
     "cleared_non_runtime": 169,
     "pending_classification": 0,
-    "pending_review": 760,
+    "pending_review": 759,
     "total_shared_different": 1018
   }
 }

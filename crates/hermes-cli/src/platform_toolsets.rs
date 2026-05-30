@@ -25,6 +25,10 @@ pub fn default_platform_toolsets() -> HashMap<String, Vec<String>> {
     map.insert("discord".to_string(), vec!["hermes-discord".to_string()]);
     map.insert("whatsapp".to_string(), vec!["hermes-whatsapp".to_string()]);
     map.insert("slack".to_string(), vec!["hermes-slack".to_string()]);
+    map.insert(
+        "api_server".to_string(),
+        vec!["hermes-api-server".to_string()],
+    );
     map
 }
 
@@ -181,12 +185,24 @@ mod tests {
             );
         };
         register(&reg, "web_search", "web");
+        register(&reg, "web_extract", "web");
         register(&reg, "terminal", "terminal");
         register(&reg, "process", "terminal");
         register(&reg, "read_file", "file");
         register(&reg, "write_file", "file");
         register(&reg, "patch", "file");
         register(&reg, "search_files", "file");
+        register(&reg, "vision_analyze", "vision");
+        register(&reg, "image_generate", "image_gen");
+        register(&reg, "execute_code", "code_execution");
+        register(&reg, "delegate_task", "delegation");
+        register(&reg, "session_search", "session_search");
+        register(&reg, "cronjob", "cronjob");
+        register(&reg, "ha_list_entities", "homeassistant");
+        register(&reg, "ha_get_state", "homeassistant");
+        register(&reg, "ha_list_services", "homeassistant");
+        register(&reg, "ha_call_service", "homeassistant");
+        register(&reg, "text_to_speech", "tts");
         register(&reg, "send_message", "messaging");
         register(&reg, "skills_list", "skills");
         register(&reg, "skill_view", "skills");
@@ -204,9 +220,6 @@ mod tests {
         register(&reg, "browser_get_images", "browser");
         register(&reg, "browser_vision", "browser");
         register(&reg, "browser_console", "browser");
-        register(&reg, "vision_analyze", "vision");
-        register(&reg, "execute_code", "code_execution");
-        register(&reg, "delegate_task", "delegation");
         reg
     }
 
@@ -235,6 +248,53 @@ mod tests {
         let names = resolve_platform_tool_names(&cfg, "discord", &reg);
         assert!(names.contains(&"send_message".to_string()));
         assert!(names.contains(&"terminal".to_string()));
+    }
+
+    #[test]
+    fn api_server_defaults_to_restricted_toolset() {
+        let cfg = GatewayConfig::default();
+        let reg = registry_with_minimal_tools();
+        let names = resolve_platform_tool_names(&cfg, "api_server", &reg);
+        for expected in [
+            "web_search",
+            "web_extract",
+            "terminal",
+            "process",
+            "read_file",
+            "write_file",
+            "patch",
+            "search_files",
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_click",
+            "browser_type",
+            "browser_scroll",
+            "browser_back",
+            "browser_press",
+            "vision_analyze",
+            "image_generate",
+            "execute_code",
+            "delegate_task",
+            "todo",
+            "memory",
+            "session_search",
+            "cronjob",
+            "ha_list_entities",
+            "ha_get_state",
+            "ha_list_services",
+            "ha_call_service",
+        ] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "api_server should include {expected}"
+            );
+        }
+        for excluded in ["clarify", "send_message", "text_to_speech"] {
+            assert!(
+                !names.contains(&excluded.to_string()),
+                "api_server should exclude {excluded}"
+            );
+        }
     }
 
     #[test]

@@ -1,29 +1,29 @@
 # Parity Matrix
 
-Generated: `2026-05-30T00:36:38.051139+00:00`
+Generated: `2026-05-30T00:54:56.848014+00:00`
 
 ## Scope
 
-- Local ref: `main` (`71d946dbd37df846677055d1a63fbcc8507c2303`)
-- Upstream ref: `upstream/main` (`54aa4db1de76a7c4bb02c8a7f7411727384b8fea`)
+- Local ref: `main` (`049546fd77db89fc1eb6a037f613857d288857fd`)
+- Upstream ref: `upstream/main` (`bcc83010006c7059ee4d0be63fe74afc74867625`)
 - Merge base: `none (history divergence)`
 
 ## Summary
 
 | Metric | Value |
 | --- | ---: |
-| Commits behind local (`upstream` ancestry only) | 4402 |
-| Commits ahead local (`local` ancestry only) | 799 |
-| Upstream commits missing by patch-id (`git cherry local upstream`, `+`) | 4284 |
+| Commits behind local (`upstream` ancestry only) | 4403 |
+| Commits ahead local (`local` ancestry only) | 801 |
+| Upstream commits missing by patch-id (`git cherry local upstream`, `+`) | 4285 |
 | Upstream commits represented by patch-id (`git cherry local upstream`, `-`) | 2 |
-| Local commits unique by patch-id (`git cherry upstream local`, `+`) | 683 |
-| Files only in upstream tree | 1471 |
+| Local commits unique by patch-id (`git cherry upstream local`, `+`) | 684 |
+| Files only in upstream tree | 1474 |
 | Files only in local tree | 568 |
 | Shared files identical content | 1701 |
 | Shared files different content | 1018 |
-| Total files changed (`local` vs `upstream`) | 3057 |
-| Insertions (`local` vs `upstream`) | 739856 |
-| Deletions (`local` vs `upstream`) | 381880 |
+| Total files changed (`local` vs `upstream`) | 3060 |
+| Insertions (`local` vs `upstream`) | 740489 |
+| Deletions (`local` vs `upstream`) | 381962 |
 
 ## Top 40 upstream-only buckets
 
@@ -42,8 +42,8 @@ Generated: `2026-05-30T00:36:38.051139+00:00`
 | `tests/plugins` | 21 |
 | `tests/run_agent` | 19 |
 | `ui-tui/src` | 19 |
+| `tests/cli` | 17 |
 | `.github/workflows` | 15 |
-| `tests/cli` | 15 |
 | `tests/docker` | 12 |
 | `agent/lsp` | 11 |
 | `agent/transports` | 11 |
@@ -164,9 +164,9 @@ Generated: `2026-05-30T00:36:38.051139+00:00`
 
 | Workstream | Issue | Name | Upstream-only | Shared-different | Risk | Effort |
 | --- | ---: | --- | ---: | ---: | --- | --- |
-| `WS6` | #10 | Tests and CI parity | 318 | 683 | critical | XL |
+| `WS6` | #10 | Tests and CI parity | 320 | 683 | critical | XL |
 | `WS5` | #9 | UX parity | 493 | 231 | high | XL |
-| `WS8` | #12 | Compatibility and divergence policy | 391 | 12 | high | XL |
+| `WS8` | #12 | Compatibility and divergence policy | 392 | 12 | high | XL |
 | `WS3` | #7 | Tools and adapters parity | 114 | 53 | high | L |
 | `WS4` | #8 | Skills parity | 93 | 39 | medium | L |
 | `WS2` | #6 | Core runtime parity | 62 | 0 | critical | M |
@@ -174,9 +174,9 @@ Generated: `2026-05-30T00:36:38.051139+00:00`
 
 ## Commit Mapping
 
-- Upstream missing by patch-id: `4284`
+- Upstream missing by patch-id: `4285`
 - Upstream represented by patch-id: `2`
-- Local unique by patch-id: `683`
+- Local unique by patch-id: `684`
 - Intentional divergence tracked items: `8` (covered files: `900`)
 - Merge base is absent; patch-id mapping is used as primary commit equivalence signal.
 

@@ -199,6 +199,13 @@
       "ticket": 25
     },
     {
+      "path": "tests/agent/test_anthropic_keychain.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Claude Code macOS Keychain discovery, malformed-entry rejection, JSON fallback, and Keychain-priority intent is covered by Rust hermes-cli auth discovery and parser tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/agent/test_redact.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream redaction test intent is covered by Rust hermes-intelligence redaction contracts for vendor prefixes, env/json/auth tokens, JWTs, Discord IDs, URL query/userinfo, DB connection strings, and form bodies; the Python test file remains reference-only.",

@@ -1368,6 +1368,20 @@
       "ticket": 25
     },
     {
+      "path": "tests/tools/test_local_env_blocklist.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream LocalEnvironment subprocess env-scrubbing intent is covered by Rust hermes-environments contracts for Hermes-managed provider, tool, gateway, GitHub, Modal, Daytona, and Bedrock bearer-token stripping; explicit _HERMES_FORCE_ reinjection; general AWS credential-chain passthrough; and Homebrew PATH fallback preservation.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_url_safety.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream URL safety/SSRF intent is covered by Rust hermes-tools url_safety contracts for http/https-only parsing, DNS fail-closed behavior, private/reserved IPv4 and IPv6 blocking including CGNAT, benchmark, multicast, and IPv4-mapped IPv6 ranges, metadata hostname/IP always-blocking, allow_private_urls toggle semantics, and the exact QQ multimedia benchmark-IP exception.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/tools/test_skill_env_passthrough.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream skill required-environment metadata normalization is covered by Rust skill_utils required-env parsing while Ultra exposes env_passthrough as an explicit Rust tool instead of Python's implicit global registry.",

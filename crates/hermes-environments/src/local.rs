@@ -313,8 +313,75 @@ fn resolve_path(input: &str) -> Result<PathBuf, AgentError> {
 }
 
 const SUBPROCESS_ENV_BLOCKLIST_EXACT: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "BROWSERBASE_PROJECT_ID",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "COHERE_API_KEY",
+    "DAYTONA_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "DISCORD_FREE_RESPONSE_CHANNELS",
+    "DISCORD_HOME_CHANNEL",
+    "DISCORD_HOME_CHANNEL_NAME",
+    "DISCORD_REQUIRE_MENTION",
+    "EMAIL_ADDRESS",
+    "EMAIL_HOME_ADDRESS",
+    "EMAIL_HOME_ADDRESS_NAME",
+    "EMAIL_IMAP_HOST",
+    "EMAIL_PASSWORD",
+    "EMAIL_SMTP_HOST",
+    "ELEVENLABS_API_KEY",
+    "FIRECRAWL_API_KEY",
+    "FIREWORKS_API_KEY",
+    "GATEWAY_ALLOW_ALL_USERS",
+    "GATEWAY_ALLOWED_USERS",
+    "GH_TOKEN",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_INSTALLATION_ID",
+    "GITHUB_APP_PRIVATE_KEY_PATH",
+    "GITHUB_TOKEN",
+    "GLM_API_KEY",
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "HASS_TOKEN",
+    "HASS_URL",
+    "HELICONE_API_KEY",
     "HERMES_ENABLE_NOUS_MANAGED_TOOLS",
     "HERMES_POLICY_ADMIN_TOKEN",
+    "KIMI_API_KEY",
+    "LLM_MODEL",
+    "MINIMAX_API_KEY",
+    "MINIMAX_CN_API_KEY",
+    "MISTRAL_API_KEY",
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+    "NVIDIA_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "SIGNAL_ACCOUNT",
+    "SIGNAL_ALLOWED_USERS",
+    "SIGNAL_GROUP_ALLOWED_USERS",
+    "SIGNAL_HOME_CHANNEL",
+    "SIGNAL_HOME_CHANNEL_NAME",
+    "SIGNAL_HTTP_URL",
+    "SIGNAL_IGNORE_STORIES",
+    "SLACK_ALLOWED_USERS",
+    "SLACK_APP_TOKEN",
+    "SLACK_HOME_CHANNEL",
+    "SLACK_HOME_CHANNEL_NAME",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_HOME_CHANNEL",
+    "TELEGRAM_HOME_CHANNEL_NAME",
+    "TOGETHER_API_KEY",
+    "WHATSAPP_ALLOWED_USERS",
+    "WHATSAPP_ENABLED",
+    "WHATSAPP_MODE",
+    "XAI_API_KEY",
+    "ZAI_API_KEY",
+    "Z_AI_API_KEY",
 ];
 
 const SUBPROCESS_ENV_BLOCKLIST_PREFIXES: &[&str] = &[
@@ -324,6 +391,18 @@ const SUBPROCESS_ENV_BLOCKLIST_PREFIXES: &[&str] = &[
     "HERMES_HTTP_",
 ];
 
+const SUBPROCESS_ENV_FORCE_PREFIX: &str = "_HERMES_FORCE_";
+
+const SANE_PATH_ENTRIES: &[&str] = &[
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+];
+
 fn should_strip_subprocess_env(key: &str) -> bool {
     SUBPROCESS_ENV_BLOCKLIST_EXACT.contains(&key)
         || SUBPROCESS_ENV_BLOCKLIST_PREFIXES
@@ -331,26 +410,98 @@ fn should_strip_subprocess_env(key: &str) -> bool {
             .any(|prefix| key.starts_with(prefix))
 }
 
+fn normalize_subprocess_path(path: Option<&str>) -> String {
+    let Some(path) = path.filter(|value| !value.trim().is_empty()) else {
+        return SANE_PATH_ENTRIES.join(":");
+    };
+    if std::env::split_paths(path).any(|entry| entry == std::path::Path::new("/usr/bin")) {
+        return path.to_string();
+    }
+
+    let mut entries: Vec<String> = std::env::split_paths(path)
+        .map(|entry| entry.to_string_lossy().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    for sane in SANE_PATH_ENTRIES {
+        if !entries.iter().any(|entry| entry == sane) {
+            entries.push((*sane).to_string());
+        }
+    }
+    entries.join(":")
+}
+
+fn shell_env_cleanup_snippet() -> String {
+    let mut snippet = String::new();
+    if !SUBPROCESS_ENV_BLOCKLIST_PREFIXES.is_empty() {
+        snippet
+            .push_str("for __hermes_env in $(env | sed 's/=.*//'); do case \"$__hermes_env\" in ");
+        for (idx, prefix) in SUBPROCESS_ENV_BLOCKLIST_PREFIXES.iter().enumerate() {
+            if idx > 0 {
+                snippet.push('|');
+            }
+            snippet.push_str(prefix);
+            snippet.push('*');
+        }
+        snippet.push_str(") unset \"$__hermes_env\" ;; esac; done; unset __hermes_env; ");
+    }
+    for key in SUBPROCESS_ENV_BLOCKLIST_EXACT {
+        snippet.push_str("case \" ${HERMES_SUBPROCESS_FORCE_TARGETS:-} \" in *\" ");
+        snippet.push_str(key);
+        snippet.push_str(" \"*) ;; *) unset ");
+        snippet.push_str(key);
+        snippet.push_str(" ;; esac; ");
+    }
+    snippet.push_str("unset HERMES_SUBPROCESS_FORCE_TARGETS; ");
+    snippet
+}
+
 fn scrub_subprocess_env(cmd: &mut TokioCommand) {
+    let mut forced = Vec::new();
     for (key, _) in std::env::vars() {
         if should_strip_subprocess_env(&key) {
             cmd.env_remove(key);
+        } else if let Some(target) = key.strip_prefix(SUBPROCESS_ENV_FORCE_PREFIX) {
+            cmd.env_remove(&key);
+            if !target.is_empty() && should_strip_subprocess_env(target) {
+                if let Ok(value) = std::env::var(&key) {
+                    forced.push((target.to_string(), value));
+                }
+            }
         }
     }
+    for (target, value) in forced {
+        cmd.env(target, value);
+    }
+    let forced_targets: Vec<String> = std::env::vars()
+        .filter_map(|(key, _)| {
+            key.strip_prefix(SUBPROCESS_ENV_FORCE_PREFIX)
+                .filter(|target| !target.is_empty() && should_strip_subprocess_env(target))
+                .map(ToString::to_string)
+        })
+        .collect();
+    if forced_targets.is_empty() {
+        cmd.env_remove("HERMES_SUBPROCESS_FORCE_TARGETS");
+    } else {
+        cmd.env("HERMES_SUBPROCESS_FORCE_TARGETS", forced_targets.join(" "));
+    }
+
+    let normalized_path = normalize_subprocess_path(std::env::var("PATH").ok().as_deref());
+    cmd.env("PATH", normalized_path);
 }
 
 fn with_login_profile_sources(command: &str) -> String {
     #[cfg(unix)]
     {
+        let cleanup = shell_env_cleanup_snippet();
         fn shell_single_quote(value: &str) -> String {
             format!("'{}'", value.replace('\'', "'\\''"))
         }
 
         let bash_command = shell_single_quote(&format!(
-            "[ -f \"$HOME/.profile\" ] && . \"$HOME/.profile\"; [ -f \"$HOME/.bash_profile\" ] && . \"$HOME/.bash_profile\"; {command}"
+            "[ -f \"$HOME/.profile\" ] && . \"$HOME/.profile\"; [ -f \"$HOME/.bash_profile\" ] && . \"$HOME/.bash_profile\"; {cleanup}{command}"
         ));
         let zsh_command = shell_single_quote(&format!(
-            "[ -f \"$HOME/.zshenv\" ] && . \"$HOME/.zshenv\"; [ -f \"$HOME/.zprofile\" ] && . \"$HOME/.zprofile\"; [ -f \"$HOME/.zshrc\" ] && . \"$HOME/.zshrc\"; [ -f \"$HOME/.profile\" ] && . \"$HOME/.profile\"; {command}"
+            "[ -f \"$HOME/.zshenv\" ] && . \"$HOME/.zshenv\"; [ -f \"$HOME/.zprofile\" ] && . \"$HOME/.zprofile\"; [ -f \"$HOME/.zshrc\" ] && . \"$HOME/.zshrc\"; [ -f \"$HOME/.profile\" ] && . \"$HOME/.profile\"; {cleanup}{command}"
         ));
         let preferred_shell = std::env::var("SHELL")
             .ok()
@@ -1082,6 +1233,8 @@ mod tests {
     use std::path::Path;
     use tempfile::tempdir;
 
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct EnvGuard {
         key: &'static str,
         original: Option<OsString>,
@@ -1305,6 +1458,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command_strips_gateway_env_vars() {
+        let _lock = ENV_TEST_LOCK.lock().expect("lock env");
         let _token_guard = EnvGuard::set("TOOL_GATEWAY_USER_TOKEN", "should-not-leak");
         let _managed_guard = EnvGuard::set("HERMES_ENABLE_NOUS_MANAGED_TOOLS", "1");
         let _http_guard = EnvGuard::set("HERMES_HTTP_API_KEY", "secret-http-key");
@@ -1324,6 +1478,139 @@ mod tests {
 
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.stdout, "|||ok");
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_strips_provider_tool_and_gateway_env_vars() {
+        let _lock = ENV_TEST_LOCK.lock().expect("lock env");
+        let _openai_key = EnvGuard::set("OPENAI_API_KEY", "sk-should-not-leak");
+        let _openai_base = EnvGuard::set("OPENAI_BASE_URL", "http://localhost:8000/v1");
+        let _bedrock_bearer = EnvGuard::set("AWS_BEARER_TOKEN_BEDROCK", "bedrock-secret");
+        let _github = EnvGuard::set("GITHUB_TOKEN", "ghp-secret");
+        let _modal = EnvGuard::set("MODAL_TOKEN_SECRET", "modal-secret");
+        let _gateway = EnvGuard::set("GATEWAY_ALLOWED_USERS", "alice,bob");
+        let _safe_guard = EnvGuard::set("SAFE_PASSTHRU_TEST", "ok");
+        let backend = LocalBackend::default();
+
+        let output = backend
+            .execute_command(
+                "printf '%s|%s|%s|%s|%s|%s|%s' \"${OPENAI_API_KEY:-}\" \"${OPENAI_BASE_URL:-}\" \"${AWS_BEARER_TOKEN_BEDROCK:-}\" \"${GITHUB_TOKEN:-}\" \"${MODAL_TOKEN_SECRET:-}\" \"${GATEWAY_ALLOWED_USERS:-}\" \"${SAFE_PASSTHRU_TEST:-}\"",
+                None,
+                None,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, "||||||ok");
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_preserves_general_aws_credentials() {
+        let _lock = ENV_TEST_LOCK.lock().expect("lock env");
+        let _access_key = EnvGuard::set("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE");
+        let _secret_key = EnvGuard::set("AWS_SECRET_ACCESS_KEY", "aws-secret");
+        let _session = EnvGuard::set("AWS_SESSION_TOKEN", "aws-session");
+        let backend = LocalBackend::default();
+
+        let output = backend
+            .execute_command(
+                "printf '%s|%s|%s' \"${AWS_ACCESS_KEY_ID:-}\" \"${AWS_SECRET_ACCESS_KEY:-}\" \"${AWS_SESSION_TOKEN:-}\"",
+                None,
+                None,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, "AKIAIOSFODNN7EXAMPLE|aws-secret|aws-session");
+        for var in [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE",
+            "AWS_DEFAULT_REGION",
+            "AWS_REGION",
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "AWS_CONFIG_FILE",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ROLE_ARN",
+        ] {
+            assert!(
+                !should_strip_subprocess_env(var),
+                "{var} must not be in the Hermes subprocess blocklist"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_force_prefix_reinjects_blocked_var() {
+        let _lock = ENV_TEST_LOCK.lock().expect("lock env");
+        let _blocked = EnvGuard::set("OPENAI_API_KEY", "sk-should-not-leak");
+        let _forced = EnvGuard::set("_HERMES_FORCE_OPENAI_API_KEY", "sk-explicit");
+        let backend = LocalBackend::default();
+
+        let output = backend
+            .execute_command(
+                "printf '%s|%s' \"${OPENAI_API_KEY:-}\" \"${_HERMES_FORCE_OPENAI_API_KEY:-}\"",
+                None,
+                None,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, "sk-explicit|");
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_cleans_profile_reintroduced_blocked_vars() {
+        let _lock = ENV_TEST_LOCK.lock().expect("lock env");
+        let td = tempdir().unwrap();
+        std::fs::write(
+            td.path().join(".profile"),
+            "export OPENAI_API_KEY=from-profile\nexport SAFE_PASSTHRU_TEST=ok\n",
+        )
+        .unwrap();
+        let _home = EnvGuard::set("HOME", td.path().to_string_lossy().as_ref());
+        let backend = LocalBackend::default();
+
+        let output = backend
+            .execute_command(
+                "printf '%s|%s' \"${OPENAI_API_KEY:-}\" \"${SAFE_PASSTHRU_TEST:-}\"",
+                None,
+                None,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, "|ok");
+    }
+
+    #[test]
+    fn test_subprocess_path_appends_homebrew_when_path_is_minimal() {
+        let normalized = normalize_subprocess_path(Some("/some/custom/bin"));
+        assert!(normalized.contains("/some/custom/bin"));
+        assert!(normalized.contains("/usr/bin"));
+        assert!(normalized.contains("/opt/homebrew/bin"));
+        assert!(normalized.contains("/opt/homebrew/sbin"));
+    }
+
+    #[test]
+    fn test_subprocess_path_preserves_full_path() {
+        assert_eq!(
+            normalize_subprocess_path(Some("/usr/bin:/bin")),
+            "/usr/bin:/bin"
+        );
     }
 
     #[tokio::test]

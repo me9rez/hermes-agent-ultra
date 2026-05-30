@@ -1,25 +1,25 @@
 {
-  "generated_at_utc": "2026-05-30T13:47:27.064383+00:00",
+  "generated_at_utc": "2026-05-30T14:26:04.682475+00:00",
   "refs": {
     "local_ref": "main",
-    "local_sha": "b644f01012a3ebd0b0593691561c6cc70c4c3329",
+    "local_sha": "72597f7c28b599838240eee4a67b7579867c3309",
     "upstream_ref": "upstream/main",
-    "upstream_sha": "44f3e5186502167e68b6073b4f7bdfae7bfb4fbe",
+    "upstream_sha": "10dec7c6dc3e1e051a2a3c8a6e60eac2532449b3",
     "merge_base": null
   },
   "summary": {
-    "commits_behind": 4469,
-    "commits_ahead": 871,
-    "upstream_patch_missing": 4351,
+    "commits_behind": 4473,
+    "commits_ahead": 873,
+    "upstream_patch_missing": 4353,
     "upstream_patch_represented": 2,
-    "local_patch_unique": 719,
+    "local_patch_unique": 720,
     "files_only_upstream": 1484,
-    "files_only_local": 573,
-    "files_shared_identical": 1691,
-    "files_shared_different": 1028,
-    "tree_files_changed": 3085,
-    "tree_insertions": 746713,
-    "tree_deletions": 398480
+    "files_only_local": 574,
+    "files_shared_identical": 1690,
+    "files_shared_different": 1029,
+    "tree_files_changed": 3087,
+    "tree_insertions": 746950,
+    "tree_deletions": 399132
   },
   "top_upstream_only": [
     {
@@ -189,12 +189,12 @@
       "count": 172
     },
     {
-      "path": "website/docs",
+      "path": "tests/tools",
       "count": 139
     },
     {
-      "path": "tests/tools",
-      "count": 138
+      "path": "website/docs",
+      "count": 139
     },
     {
       "path": "tests/hermes_cli",
@@ -388,7 +388,7 @@
     },
     {
       "path": "crates/hermes-core",
-      "count": 11
+      "count": 12
     },
     {
       "path": "crates/hermes-acp",
@@ -712,7 +712,7 @@
     },
     {
       "path": "crates/hermes-core",
-      "count": 11
+      "count": 12
     },
     {
       "path": "crates/hermes-acp",
@@ -837,7 +837,7 @@
       "issue": 10,
       "name": "Tests and CI parity",
       "upstream_only": 329,
-      "shared_different": 687,
+      "shared_different": 688,
       "local_only": 34,
       "risk": "critical",
       "effort": "XL"
@@ -858,7 +858,7 @@
       "name": "Compatibility and divergence policy",
       "upstream_only": 393,
       "shared_different": 12,
-      "local_only": 198,
+      "local_only": 199,
       "risk": "high",
       "effort": "XL"
     },
@@ -904,9 +904,9 @@
     }
   ],
   "commit_mapping": {
-    "upstream_patch_missing": 4351,
+    "upstream_patch_missing": 4353,
     "upstream_patch_represented": 2,
-    "local_patch_unique": 719,
+    "local_patch_unique": 720,
     "local_patch_equivalent_to_upstream": 1,
     "upstream_patch_missing_sample": [
       "99af222ecf56c0eed0d3eb82903a6bf33b6ff7d5",

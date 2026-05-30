@@ -1,25 +1,25 @@
 {
-  "generated_at_utc": "2026-05-30T14:26:04.682475+00:00",
+  "generated_at_utc": "2026-05-30T15:08:12.661310+00:00",
   "refs": {
     "local_ref": "main",
-    "local_sha": "72597f7c28b599838240eee4a67b7579867c3309",
+    "local_sha": "e1a19d8a2152c3579d6a4c72c1c07aadec0320e1",
     "upstream_ref": "upstream/main",
-    "upstream_sha": "10dec7c6dc3e1e051a2a3c8a6e60eac2532449b3",
+    "upstream_sha": "6a72af044c44c9a05137bc448bc65ecf0ace5a89",
     "merge_base": null
   },
   "summary": {
-    "commits_behind": 4473,
-    "commits_ahead": 873,
-    "upstream_patch_missing": 4353,
+    "commits_behind": 4493,
+    "commits_ahead": 875,
+    "upstream_patch_missing": 4373,
     "upstream_patch_represented": 2,
-    "local_patch_unique": 720,
-    "files_only_upstream": 1484,
+    "local_patch_unique": 721,
+    "files_only_upstream": 1493,
     "files_only_local": 574,
-    "files_shared_identical": 1690,
-    "files_shared_different": 1029,
-    "tree_files_changed": 3087,
-    "tree_insertions": 746950,
-    "tree_deletions": 399132
+    "files_shared_identical": 1688,
+    "files_shared_different": 1031,
+    "tree_files_changed": 3098,
+    "tree_insertions": 750036,
+    "tree_deletions": 399969
   },
   "top_upstream_only": [
     {
@@ -28,7 +28,7 @@
     },
     {
       "path": "tests/hermes_cli",
-      "count": 90
+      "count": 91
     },
     {
       "path": "web/src",
@@ -36,11 +36,11 @@
     },
     {
       "path": "tests/agent",
-      "count": 54
+      "count": 56
     },
     {
       "path": "tests/gateway",
-      "count": 41
+      "count": 44
     },
     {
       "path": "gateway/platforms",
@@ -52,7 +52,7 @@
     },
     {
       "path": "tests/tools",
-      "count": 34
+      "count": 35
     },
     {
       "path": "website/docs",
@@ -64,7 +64,7 @@
     },
     {
       "path": "tests/plugins",
-      "count": 21
+      "count": 22
     },
     {
       "path": "tests/run_agent",
@@ -190,7 +190,7 @@
     },
     {
       "path": "tests/tools",
-      "count": 139
+      "count": 140
     },
     {
       "path": "website/docs",
@@ -317,6 +317,10 @@
       "count": 2
     },
     {
+      "path": "plugins/browser",
+      "count": 2
+    },
+    {
       "path": "plugins/disk-cleanup",
       "count": 2
     },
@@ -338,10 +342,6 @@
     },
     {
       "path": "skills/research",
-      "count": 2
-    },
-    {
-      "path": "tests/e2e",
       "count": 2
     }
   ],
@@ -514,7 +514,7 @@
     },
     {
       "path": "tests/hermes_cli",
-      "count": 90
+      "count": 91
     },
     {
       "path": "web/src",
@@ -522,11 +522,11 @@
     },
     {
       "path": "tests/agent",
-      "count": 54
+      "count": 56
     },
     {
       "path": "tests/gateway",
-      "count": 41
+      "count": 44
     },
     {
       "path": "gateway/platforms",
@@ -538,7 +538,7 @@
     },
     {
       "path": "tests/tools",
-      "count": 34
+      "count": 35
     },
     {
       "path": "website/docs",
@@ -550,7 +550,7 @@
     },
     {
       "path": "tests/plugins",
-      "count": 21
+      "count": 22
     },
     {
       "path": "tests/run_agent",
@@ -836,8 +836,8 @@
       "workstream": "WS6",
       "issue": 10,
       "name": "Tests and CI parity",
-      "upstream_only": 329,
-      "shared_different": 688,
+      "upstream_only": 337,
+      "shared_different": 689,
       "local_only": 34,
       "risk": "critical",
       "effort": "XL"
@@ -856,7 +856,7 @@
       "workstream": "WS8",
       "issue": 12,
       "name": "Compatibility and divergence policy",
-      "upstream_only": 393,
+      "upstream_only": 394,
       "shared_different": 12,
       "local_only": 199,
       "risk": "high",
@@ -867,7 +867,7 @@
       "issue": 7,
       "name": "Tools and adapters parity",
       "upstream_only": 114,
-      "shared_different": 55,
+      "shared_different": 56,
       "local_only": 104,
       "risk": "high",
       "effort": "L"
@@ -904,9 +904,9 @@
     }
   ],
   "commit_mapping": {
-    "upstream_patch_missing": 4353,
+    "upstream_patch_missing": 4373,
     "upstream_patch_represented": 2,
-    "local_patch_unique": 720,
+    "local_patch_unique": 721,
     "local_patch_equivalent_to_upstream": 1,
     "upstream_patch_missing_sample": [
       "99af222ecf56c0eed0d3eb82903a6bf33b6ff7d5",

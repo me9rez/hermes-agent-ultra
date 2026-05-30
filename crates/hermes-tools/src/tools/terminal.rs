@@ -39,7 +39,7 @@ impl ToolHandler for TerminalHandler {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParams("Missing 'command' parameter".into()))?;
 
-        match self.approval.check_approval(command) {
+        match self.approval.check_approval_from_env(command, "local") {
             ApprovalDecision::Denied => {
                 return Err(ToolError::ExecutionFailed(format!(
                     "Command denied by security policy: {}",
@@ -480,6 +480,38 @@ impl ToolHandler for ProcessHandler {
 mod tests {
     use super::*;
     use hermes_core::AgentError;
+    use std::sync::{LazyLock, Mutex};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn remove(key: &'static str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, old }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(old) = &self.old {
+                std::env::set_var(self.key, old);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     struct MockBackend;
     #[async_trait]
@@ -590,6 +622,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_terminal_handler_execute() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _yolo = EnvGuard::remove("HERMES_YOLO_MODE");
+        let _sudo = EnvGuard::remove("SUDO_PASSWORD");
         let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
         let result = handler
             .execute(json!({"command": "echo hello"}))
@@ -600,6 +635,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_terminal_handler_execute_with_stdin_data() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _yolo = EnvGuard::remove("HERMES_YOLO_MODE");
+        let _sudo = EnvGuard::remove("SUDO_PASSWORD");
         let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
         let result = handler
             .execute(json!({"command": "cat", "stdin_data": "abc123"}))
@@ -610,6 +648,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_terminal_handler_denies_confirmation_without_consent() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _yolo = EnvGuard::remove("HERMES_YOLO_MODE");
+        let _sudo = EnvGuard::remove("SUDO_PASSWORD");
         let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
         let err = handler
             .execute(json!({"command": "sudo apt update"}))
@@ -620,6 +661,32 @@ mod tests {
         assert!(msg.contains("rephrase"));
         assert!(msg.contains("same outcome"));
         assert!(msg.contains("Silence is not consent"));
+    }
+
+    #[tokio::test]
+    async fn test_terminal_handler_yolo_bypasses_recoverable_confirmation() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _yolo = EnvGuard::set("HERMES_YOLO_MODE", "1");
+        let _sudo = EnvGuard::remove("SUDO_PASSWORD");
+        let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
+        let result = handler
+            .execute(json!({"command": "rm -rf /tmp/hermes-safe-test"}))
+            .await
+            .unwrap();
+        assert!(result.contains("rm -rf /tmp/hermes-safe-test"));
+    }
+
+    #[tokio::test]
+    async fn test_terminal_handler_yolo_does_not_bypass_hardline() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _yolo = EnvGuard::set("HERMES_YOLO_MODE", "1");
+        let _sudo = EnvGuard::remove("SUDO_PASSWORD");
+        let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
+        let err = handler
+            .execute(json!({"command": "rm -rf /"}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("denied by security policy"));
     }
 
     #[tokio::test]

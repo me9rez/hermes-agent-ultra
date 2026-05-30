@@ -1382,6 +1382,20 @@
       "ticket": 25
     },
     {
+      "path": "tests/tools/test_hardline_blocklist.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream hardline command-blocklist intent is covered by Rust hermes-tools approval contracts for protected-path recursive deletes, block-device mkfs/dd/redirection, fork bombs, system shutdown/reboot/halt, hardline-before-yolo semantics, container backend bypass, recoverable-dangerous yolo bypass, and sudo stdin/askpass denial unless SUDO_PASSWORD is explicitly configured.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_approval_heartbeat.py",
+      "classification": "intentional_divergence",
+      "rationale": "Current upstream heartbeat file contains setup helpers but no executable test methods; Hermes Ultra's Rust terminal approval path fail-closes without entering Python's blocking gateway approval wait, so the inactivity-heartbeat wait loop is not a Rust runtime surface.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/tools/test_skill_env_passthrough.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream skill required-environment metadata normalization is covered by Rust skill_utils required-env parsing while Ultra exposes env_passthrough as an explicit Rust tool instead of Python's implicit global registry.",
@@ -1634,9 +1648,23 @@
       "ticket": 25
     },
     {
+      "path": "plugins/browser",
+      "classification": "functional",
+      "rationale": "Browser provider plugin differences can affect runtime cloud browser provider discovery, auth routing, and session lifecycle behavior; each provider path must be ported or covered by Rust-native browser backend contracts before clearing.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "plugins/browser/browserbase/provider.py",
       "classification": "intentional_divergence",
       "rationale": "Browserbase runtime behavior is now covered by the Rust-native browser backend, including direct env config, seconds timeout, keepAlive/proxies/advanced-stealth feature knobs, 402 fallbacks, and session release; the Python plugin remains reference-only compatibility material.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "plugins/browser/browser_use/provider.py",
+      "classification": "functional",
+      "rationale": "Browser Use cloud-provider plugin affects runtime browser session creation, direct-vs-managed gateway auth resolution, and managed idempotency semantics; port or cover with Rust-native browser provider contracts before clearing.",
       "owner": "sheawinkler",
       "ticket": 25
     },

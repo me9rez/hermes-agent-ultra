@@ -1,20 +1,20 @@
 # Shared-Different Backlog
 
-Generated: `2026-05-30T14:26:05.787861+00:00`
+Generated: `2026-05-30T15:08:20.181640+00:00`
 
 ## Summary
 
-- Total shared-different paths: `1029`
+- Total shared-different paths: `1031`
 - Pending classification: `0`
 - Pending functional review: `650`
 - Cleared non-runtime: `170`
-- Cleared intentional divergence: `209`
+- Cleared intentional divergence: `211`
 
 ## Status Counts
 
 | Status | Count |
 | --- | ---: |
-| `cleared_intentional_divergence` | 209 |
+| `cleared_intentional_divergence` | 211 |
 | `cleared_non_runtime` | 170 |
 | `pending_review` | 650 |
 
@@ -22,10 +22,10 @@ Generated: `2026-05-30T14:26:05.787861+00:00`
 
 | Workstream | Count |
 | --- | ---: |
-| `WS3` | 55 |
+| `WS3` | 56 |
 | `WS4` | 40 |
 | `WS5` | 233 |
-| `WS6` | 688 |
+| `WS6` | 689 |
 | `WS8` | 13 |
 
 ## Pending Classification
@@ -39,7 +39,7 @@ Generated: `2026-05-30T14:26:05.787861+00:00`
 | --- | ---: |
 | `tests/gateway` | 147 |
 | `tests/hermes_cli` | 127 |
-| `tests/tools` | 98 |
+| `tests/tools` | 97 |
 | `ui-tui/src` | 60 |
 | `tests/run_agent` | 56 |
 | `tests` | 40 |
@@ -56,3 +56,4 @@ Generated: `2026-05-30T14:26:05.787861+00:00`
 | `ui-tui` | 3 |
 | `plugins/memory` | 2 |
 | `tests/e2e` | 2 |
+| `plugins/browser/browser_use/provider.py` | 1 |

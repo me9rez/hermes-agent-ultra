@@ -1683,6 +1683,8 @@ mod tests {
 
     #[test]
     fn test_session_scoped_yolo_only_bypasses_current_session() {
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         let _lock = TEST_ENV_LOCK.lock().unwrap();
         let _yolo = EnvGuard::remove("HERMES_YOLO_MODE");
         let _sudo = EnvGuard::remove("SUDO_PASSWORD");
@@ -1715,10 +1717,13 @@ mod tests {
 
         clear_session("session-a");
         clear_session("session-b");
+        reset_approval_state_unlocked();
     }
 
     #[test]
     fn test_session_scoped_yolo_does_not_bypass_hardline_or_sudo_floor() {
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         let _lock = TEST_ENV_LOCK.lock().unwrap();
         let _yolo = EnvGuard::remove("HERMES_YOLO_MODE");
         let _sudo = EnvGuard::remove("SUDO_PASSWORD");
@@ -1742,6 +1747,7 @@ mod tests {
         );
 
         clear_session("session-a");
+        reset_approval_state_unlocked();
     }
 
     #[test]

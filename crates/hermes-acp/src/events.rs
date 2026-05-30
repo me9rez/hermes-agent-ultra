@@ -1,8 +1,8 @@
 //! ACP event types for bridging agent progress to the ACP client.
 //!
-//! Mirrors the Python `acp_adapter/events.py` — provides callback factories
-//! that bridge AIAgent events (tool progress, thinking, step completion,
-//! message streaming) to ACP session update notifications.
+//! Provides callback factories that bridge agent events (tool progress,
+//! thinking, step completion, message streaming) to ACP session update
+//! notifications.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::tools::{tool_completion_status, tool_start_metadata};
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -48,9 +50,15 @@ pub struct AcpEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,8 +83,11 @@ impl AcpEvent {
             text: Some(text.to_string()),
             tool_call_id: None,
             tool_name: None,
+            tool_kind: None,
+            title: None,
             arguments: None,
             result: None,
+            status: None,
             api_call_count: None,
             error: None,
         }
@@ -88,15 +99,19 @@ impl AcpEvent {
         tool_name: &str,
         arguments: Option<Value>,
     ) -> Self {
+        let metadata = tool_start_metadata(tool_name, arguments.as_ref());
         Self {
             kind: AcpEventKind::ToolCallStart,
             session_id: session_id.to_string(),
             timestamp: Self::now(),
             tool_call_id: Some(tool_call_id.to_string()),
             tool_name: Some(tool_name.to_string()),
+            tool_kind: Some(metadata.kind.to_string()),
+            title: Some(metadata.title),
             arguments,
             text: None,
             result: None,
+            status: None,
             api_call_count: None,
             error: None,
         }
@@ -108,15 +123,19 @@ impl AcpEvent {
         tool_name: &str,
         result: Option<String>,
     ) -> Self {
+        let status = tool_completion_status(tool_name, result.as_deref());
         Self {
             kind: AcpEventKind::ToolCallComplete,
             session_id: session_id.to_string(),
             timestamp: Self::now(),
             tool_call_id: Some(tool_call_id.to_string()),
             tool_name: Some(tool_name.to_string()),
+            tool_kind: Some(crate::tools::tool_kind(tool_name).to_string()),
+            title: Some(tool_start_metadata(tool_name, None).title),
             result,
             text: None,
             arguments: None,
+            status: Some(status.to_string()),
             api_call_count: None,
             error: None,
         }
@@ -130,8 +149,11 @@ impl AcpEvent {
             text: Some(text.to_string()),
             tool_call_id: None,
             tool_name: None,
+            tool_kind: None,
+            title: None,
             arguments: None,
             result: None,
+            status: None,
             api_call_count: None,
             error: None,
         }
@@ -145,8 +167,11 @@ impl AcpEvent {
             text: Some(text.to_string()),
             tool_call_id: None,
             tool_name: None,
+            tool_kind: None,
+            title: None,
             arguments: None,
             result: None,
+            status: None,
             api_call_count: None,
             error: None,
         }
@@ -160,8 +185,11 @@ impl AcpEvent {
             api_call_count: Some(api_call_count),
             tool_call_id: None,
             tool_name: None,
+            tool_kind: None,
+            title: None,
             arguments: None,
             result: None,
+            status: None,
             text: None,
             error: None,
         }
@@ -175,8 +203,11 @@ impl AcpEvent {
             error: Some(error.to_string()),
             tool_call_id: None,
             tool_name: None,
+            tool_kind: None,
+            title: None,
             arguments: None,
             result: None,
+            status: None,
             text: None,
             api_call_count: None,
         }
@@ -187,8 +218,7 @@ impl AcpEvent {
 // ToolCallIdTracker
 // ---------------------------------------------------------------------------
 
-/// Tracks tool call IDs per tool name using a FIFO queue, matching the Python
-/// `tool_call_ids: dict[str, Deque[str]]` pattern.
+/// Tracks tool call IDs per tool name using a FIFO queue.
 #[derive(Debug, Default)]
 pub struct ToolCallIdTracker {
     queues: HashMap<String, VecDeque<String>>,
@@ -323,11 +353,25 @@ mod tests {
 
     #[test]
     fn test_acp_event_kinds() {
-        let e = AcpEvent::tool_call_start("s1", "tc1", "read_file", None);
+        let e = AcpEvent::tool_call_start(
+            "s1",
+            "tc1",
+            "read_file",
+            Some(serde_json::json!({"path": "/tmp/a.txt"})),
+        );
         assert_eq!(e.kind, AcpEventKind::ToolCallStart);
         assert_eq!(e.tool_name.as_deref(), Some("read_file"));
+        assert_eq!(e.tool_kind.as_deref(), Some("read"));
+        assert_eq!(e.title.as_deref(), Some("read: /tmp/a.txt"));
 
-        let e2 = AcpEvent::tool_call_complete("s1", "tc1", "read_file", Some("ok".into()));
-        assert_eq!(e2.result.as_deref(), Some("ok"));
+        let e2 = AcpEvent::tool_call_complete(
+            "s1",
+            "tc1",
+            "read_file",
+            Some(r#"{"error":"missing"}"#.into()),
+        );
+        assert_eq!(e2.result.as_deref(), Some(r#"{"error":"missing"}"#));
+        assert_eq!(e2.tool_kind.as_deref(), Some("read"));
+        assert_eq!(e2.status.as_deref(), Some("failed"));
     }
 }

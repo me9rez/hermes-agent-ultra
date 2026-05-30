@@ -1,22 +1,22 @@
 # Shared-Different Backlog
 
-Generated: `2026-05-30T02:17:00.293906+00:00`
+Generated: `2026-05-30T02:31:00.609231+00:00`
 
 ## Summary
 
 - Total shared-different paths: `1018`
 - Pending classification: `0`
-- Pending functional review: `753`
+- Pending functional review: `752`
 - Cleared non-runtime: `169`
-- Cleared intentional divergence: `96`
+- Cleared intentional divergence: `97`
 
 ## Status Counts
 
 | Status | Count |
 | --- | ---: |
-| `cleared_intentional_divergence` | 96 |
+| `cleared_intentional_divergence` | 97 |
 | `cleared_non_runtime` | 169 |
-| `pending_review` | 753 |
+| `pending_review` | 752 |
 
 ## Workstream Counts
 
@@ -55,5 +55,5 @@ Generated: `2026-05-30T02:17:00.293906+00:00`
 | `tests/tui_gateway` | 4 |
 | `tests/integration` | 3 |
 | `ui-tui` | 3 |
-| `tests/acp` | 2 |
 | `tests/e2e` | 2 |
+| `tests/acp` | 1 |

@@ -17,6 +17,7 @@ pub mod permissions;
 pub mod protocol;
 pub mod server;
 pub mod session;
+pub mod tools;
 
 pub use auth::{build_auth_methods, detect_provider, has_provider, TERMINAL_SETUP_AUTH_METHOD_ID};
 pub use events::{AcpEvent, AcpEventKind, EventSink, ToolCallIdTracker};
@@ -34,6 +35,10 @@ pub use protocol::{
 };
 pub use server::AcpServer;
 pub use session::{SessionInfo, SessionManager, SessionPhase, SessionState};
+pub use tools::{
+    make_tool_call_id, tool_completion_status, tool_kind, tool_start_metadata, tool_title,
+    ToolStartMetadata,
+};
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

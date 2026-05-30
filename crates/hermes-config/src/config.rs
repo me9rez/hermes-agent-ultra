@@ -1,6 +1,6 @@
 //! Gateway configuration: the top-level config struct and its sub-types.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +81,13 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub smart_model_routing: SmartModelRoutingConfig,
 
+    /// Per-task auxiliary model/direct-endpoint overrides.
+    ///
+    /// Keys match the user-facing `auxiliary.<task>.*` config.yaml surface
+    /// used by side tasks such as `vision`, `web_extract`, and `approval`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub auxiliary: BTreeMap<String, AuxiliaryTaskConfig>,
+
     /// Optional HTTP/SOCKS proxy settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyConfig>,
@@ -137,6 +144,7 @@ impl Default for GatewayConfig {
             fallback_model: None,
             fallback_models: Vec::new(),
             smart_model_routing: SmartModelRoutingConfig::default(),
+            auxiliary: BTreeMap::new(),
             proxy: None,
             approval: ApprovalConfig::default(),
             security: SecurityConfig::default(),
@@ -146,6 +154,196 @@ impl Default for GatewayConfig {
             profile: ProfileConfig::default(),
             agent: AgentLoopBehaviorConfig::default(),
             home_dir: None,
+        }
+    }
+}
+
+/// User-facing override for one auxiliary side task.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuxiliaryTaskConfig {
+    /// `auto` means resolve through the standard auxiliary chain.
+    #[serde(default = "default_auxiliary_provider")]
+    pub provider: String,
+    /// Empty means use the selected provider's default auxiliary model.
+    #[serde(default)]
+    pub model: String,
+    /// Direct OpenAI-compatible endpoint. When set, it takes precedence over provider.
+    #[serde(default)]
+    pub base_url: String,
+    /// API key for a direct endpoint or explicit task provider.
+    #[serde(default)]
+    pub api_key: String,
+    /// Per-attempt timeout in seconds. Accepts both `timeout` and legacy `timeout_secs`.
+    #[serde(
+        default,
+        alias = "timeout_secs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timeout: Option<u64>,
+    /// Provider-specific OpenAI-compatible request body additions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<serde_json::Value>,
+    /// Vision-only image download timeout in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_timeout: Option<u64>,
+    /// Preserve unknown future task keys without dropping user config.
+    #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl Default for AuxiliaryTaskConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_auxiliary_provider(),
+            model: String::new(),
+            base_url: String::new(),
+            api_key: String::new(),
+            timeout: None,
+            extra_body: None,
+            download_timeout: None,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+impl AuxiliaryTaskConfig {
+    pub fn with_timeout(mut self, timeout: u64) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_download_timeout(mut self, timeout: u64) -> Self {
+        self.download_timeout = Some(timeout);
+        self
+    }
+}
+
+fn default_auxiliary_provider() -> String {
+    "auto".to_string()
+}
+
+/// Upstream-shaped default auxiliary task table used by setup/config UIs.
+///
+/// `GatewayConfig::default()` intentionally keeps `auxiliary` empty so normal
+/// config layering does not treat defaults as user overrides. Runtime
+/// resolution still defaults each missing task to provider=`auto`, model=`""`.
+pub fn default_auxiliary_task_configs() -> BTreeMap<String, AuxiliaryTaskConfig> {
+    let mut tasks = BTreeMap::new();
+    tasks.insert(
+        "vision".to_string(),
+        AuxiliaryTaskConfig::default()
+            .with_timeout(120)
+            .with_download_timeout(30),
+    );
+    tasks.insert(
+        "web_extract".to_string(),
+        AuxiliaryTaskConfig::default().with_timeout(360),
+    );
+    tasks.insert(
+        "compression".to_string(),
+        AuxiliaryTaskConfig::default().with_timeout(120),
+    );
+    tasks.insert(
+        "skills_hub".to_string(),
+        AuxiliaryTaskConfig::default().with_timeout(30),
+    );
+    tasks.insert(
+        "approval".to_string(),
+        AuxiliaryTaskConfig::default().with_timeout(30),
+    );
+    tasks.insert(
+        "mcp".to_string(),
+        AuxiliaryTaskConfig::default().with_timeout(30),
+    );
+    tasks.insert(
+        "title_generation".to_string(),
+        AuxiliaryTaskConfig::default().with_timeout(30),
+    );
+    tasks.insert(
+        "triage_specifier".to_string(),
+        AuxiliaryTaskConfig::default().with_timeout(120),
+    );
+    tasks.insert(
+        "kanban_decomposer".to_string(),
+        AuxiliaryTaskConfig::default().with_timeout(180),
+    );
+    tasks.insert(
+        "profile_describer".to_string(),
+        AuxiliaryTaskConfig::default().with_timeout(60),
+    );
+    tasks.insert(
+        "curator".to_string(),
+        AuxiliaryTaskConfig::default().with_timeout(600),
+    );
+    tasks
+}
+
+const BUILTIN_AUXILIARY_ENV_BRIDGE_TASKS: &[&str] = &["approval", "vision", "web_extract"];
+
+impl GatewayConfig {
+    /// Return config-derived environment overrides for the built-in auxiliary
+    /// bridge set (`vision`, `web_extract`, `approval`).
+    pub fn builtin_auxiliary_env_overrides(&self) -> Vec<(String, String)> {
+        self.auxiliary_env_overrides_for(std::iter::empty::<&str>())
+    }
+
+    /// Return config-derived `AUXILIARY_<TASK>_*` assignments for built-ins
+    /// plus caller-provided plugin task keys.
+    ///
+    /// The helper mirrors Python's gateway/CLI bridge contract without forcing
+    /// Rust runtime code to rely on process-global env mutation.
+    pub fn auxiliary_env_overrides_for<I, S>(&self, extra_task_keys: I) -> Vec<(String, String)>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut bridged: BTreeSet<String> = BUILTIN_AUXILIARY_ENV_BRIDGE_TASKS
+            .iter()
+            .map(|task| (*task).to_string())
+            .collect();
+        for task in extra_task_keys {
+            let normalized = normalize_auxiliary_task_key(task.as_ref());
+            if !normalized.is_empty() {
+                bridged.insert(normalized);
+            }
+        }
+
+        let mut overrides = Vec::new();
+        for task_key in bridged {
+            let Some(task_cfg) = self.auxiliary.get(task_key.as_str()) else {
+                continue;
+            };
+            push_auxiliary_task_env_overrides(&mut overrides, &task_key, task_cfg);
+        }
+        overrides
+    }
+}
+
+fn normalize_auxiliary_task_key(task: &str) -> String {
+    task.trim().to_ascii_lowercase()
+}
+
+fn auxiliary_task_env_suffix(task: &str) -> String {
+    task.trim().to_ascii_uppercase()
+}
+
+fn push_auxiliary_task_env_overrides(
+    overrides: &mut Vec<(String, String)>,
+    task_key: &str,
+    task_cfg: &AuxiliaryTaskConfig,
+) {
+    let upper = auxiliary_task_env_suffix(task_key);
+    let provider = task_cfg.provider.trim();
+    if !provider.is_empty() && !provider.eq_ignore_ascii_case("auto") {
+        overrides.push((format!("AUXILIARY_{upper}_PROVIDER"), provider.to_string()));
+    }
+    for (field, value) in [
+        ("MODEL", task_cfg.model.trim()),
+        ("BASE_URL", task_cfg.base_url.trim()),
+        ("API_KEY", task_cfg.api_key.trim()),
+    ] {
+        if !value.is_empty() {
+            overrides.push((format!("AUXILIARY_{upper}_{field}"), value.to_string()));
         }
     }
 }
@@ -644,6 +842,7 @@ mod tests {
         assert_eq!(cfg.max_turns, 250);
         assert!(!cfg.tools.is_empty());
         assert!(cfg.model.is_none());
+        assert!(cfg.auxiliary.is_empty());
         assert!(cfg.proxy.is_none());
         assert_eq!(
             cfg.platform_toolsets
@@ -663,11 +862,119 @@ mod tests {
 
     #[test]
     fn gateway_config_serde_roundtrip() {
-        let cfg = GatewayConfig::default();
+        let mut cfg = GatewayConfig::default();
+        cfg.auxiliary.insert(
+            "vision".to_string(),
+            AuxiliaryTaskConfig {
+                provider: "openrouter".to_string(),
+                model: "google/gemini-2.5-flash".to_string(),
+                ..Default::default()
+            },
+        );
         let json = serde_json::to_string(&cfg).unwrap();
         let back: GatewayConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.max_turns, cfg.max_turns);
         assert_eq!(back.tools, cfg.tools);
+        assert_eq!(back.auxiliary["vision"].model, "google/gemini-2.5-flash");
+    }
+
+    #[test]
+    fn default_auxiliary_task_configs_match_upstream_shape() {
+        let tasks = default_auxiliary_task_configs();
+        for key in ["vision", "web_extract", "approval"] {
+            let task = tasks.get(key).expect("built-in task default");
+            assert_eq!(task.provider, "auto");
+            assert_eq!(task.model, "");
+            assert_eq!(task.base_url, "");
+            assert_eq!(task.api_key, "");
+        }
+        assert_eq!(tasks["vision"].timeout, Some(120));
+        assert_eq!(tasks["vision"].download_timeout, Some(30));
+        assert_eq!(tasks["web_extract"].timeout, Some(360));
+        assert_eq!(tasks["curator"].timeout, Some(600));
+    }
+
+    #[test]
+    fn builtin_auxiliary_env_overrides_bridge_non_default_values() {
+        let mut cfg = GatewayConfig::default();
+        cfg.auxiliary.insert(
+            "vision".to_string(),
+            AuxiliaryTaskConfig {
+                provider: "  openrouter  ".to_string(),
+                model: "  google/gemini-2.5-flash  ".to_string(),
+                ..Default::default()
+            },
+        );
+        cfg.auxiliary.insert(
+            "web_extract".to_string(),
+            AuxiliaryTaskConfig {
+                provider: "auto".to_string(),
+                model: "custom-llm".to_string(),
+                ..Default::default()
+            },
+        );
+        cfg.auxiliary.insert(
+            "approval".to_string(),
+            AuxiliaryTaskConfig {
+                base_url: "http://localhost:1234/v1".to_string(),
+                api_key: "local-key".to_string(),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            cfg.builtin_auxiliary_env_overrides(),
+            vec![
+                (
+                    "AUXILIARY_APPROVAL_BASE_URL".to_string(),
+                    "http://localhost:1234/v1".to_string()
+                ),
+                (
+                    "AUXILIARY_APPROVAL_API_KEY".to_string(),
+                    "local-key".to_string()
+                ),
+                (
+                    "AUXILIARY_VISION_PROVIDER".to_string(),
+                    "openrouter".to_string()
+                ),
+                (
+                    "AUXILIARY_VISION_MODEL".to_string(),
+                    "google/gemini-2.5-flash".to_string()
+                ),
+                (
+                    "AUXILIARY_WEB_EXTRACT_MODEL".to_string(),
+                    "custom-llm".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn auxiliary_env_overrides_skip_compression_until_registered() {
+        let mut cfg = GatewayConfig::default();
+        cfg.auxiliary.insert(
+            "compression".to_string(),
+            AuxiliaryTaskConfig {
+                provider: "openrouter".to_string(),
+                model: "compressor".to_string(),
+                ..Default::default()
+            },
+        );
+
+        assert!(cfg.builtin_auxiliary_env_overrides().is_empty());
+        assert_eq!(
+            cfg.auxiliary_env_overrides_for(["compression"]),
+            vec![
+                (
+                    "AUXILIARY_COMPRESSION_PROVIDER".to_string(),
+                    "openrouter".to_string()
+                ),
+                (
+                    "AUXILIARY_COMPRESSION_MODEL".to_string(),
+                    "compressor".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]

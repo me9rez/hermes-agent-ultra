@@ -125,6 +125,7 @@ fn arb_gateway_config() -> impl Strategy<Value = GatewayConfig> {
                 fallback_model: None,
                 fallback_models: Vec::new(),
                 smart_model_routing: SmartModelRoutingConfig::default(),
+                auxiliary: Default::default(),
                 proxy: None,
                 approval: ApprovalConfig::default(),
                 security: SecurityConfig::default(),

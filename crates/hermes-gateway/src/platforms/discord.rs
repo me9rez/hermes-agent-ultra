@@ -8,7 +8,9 @@
 //! MESSAGE_CREATE, MESSAGE_UPDATE, INTERACTION_CREATE, VOICE_STATE_UPDATE,
 //! MESSAGE_REACTION_ADD, MESSAGE_REACTION_REMOVE).
 
-use std::sync::Arc;
+use std::collections::{BTreeSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -52,6 +54,14 @@ pub struct DiscordConfig {
     /// Gateway intents bitmask (default: GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT).
     #[serde(default = "default_intents")]
     pub intents: u64,
+
+    /// Channel-level inbound and auto-thread policy.
+    #[serde(default)]
+    pub channel_controls: DiscordChannelControls,
+
+    /// Channel-bound skills injected for Discord sessions.
+    #[serde(default)]
+    pub channel_skill_bindings: Vec<DiscordChannelSkillBinding>,
 }
 
 fn default_intents() -> u64 {
@@ -217,6 +227,374 @@ pub fn discord_reactions_enabled_from_raw(raw: Option<&str>) -> bool {
         None => true,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Discord channel policy
+// ---------------------------------------------------------------------------
+
+fn scalar_json_to_discord_id(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn discord_id_set_from_csv(raw: &str) -> BTreeSet<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn discord_id_set_from_json(value: Option<&serde_json::Value>) -> BTreeSet<String> {
+    let Some(value) = value else {
+        return BTreeSet::new();
+    };
+    match value {
+        serde_json::Value::String(raw) => discord_id_set_from_csv(raw),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .filter_map(scalar_json_to_discord_id)
+            .collect::<BTreeSet<_>>(),
+        other => scalar_json_to_discord_id(other).into_iter().collect(),
+    }
+}
+
+fn bool_from_json(value: Option<&serde_json::Value>, default: bool) -> bool {
+    match value {
+        Some(serde_json::Value::Bool(v)) => *v,
+        Some(serde_json::Value::Number(n)) => n.as_i64().map(|v| v != 0).unwrap_or(default),
+        Some(serde_json::Value::String(raw)) => parse_allowed_mention_bool(raw, default),
+        _ => default,
+    }
+}
+
+fn channel_matches(
+    ids: &BTreeSet<String>,
+    channel_id: &str,
+    parent_channel_id: Option<&str>,
+) -> bool {
+    let channel_id = channel_id.trim();
+    let parent_channel_id = parent_channel_id.map(str::trim).filter(|s| !s.is_empty());
+    (!channel_id.is_empty() && ids.contains(channel_id))
+        || parent_channel_id
+            .map(|parent| ids.contains(parent))
+            .unwrap_or(false)
+}
+
+/// Discord channel-level policy controls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscordChannelControls {
+    /// Server channel IDs whose messages are always dropped.
+    #[serde(default)]
+    pub ignored_channels: BTreeSet<String>,
+    /// Server channel IDs where automatic thread creation is suppressed.
+    #[serde(default)]
+    pub no_thread_channels: BTreeSet<String>,
+    /// Server channel IDs where mention-free responses are allowed.
+    #[serde(default)]
+    pub free_response_channels: BTreeSet<String>,
+    /// Global auto-thread toggle. Defaults to true to match upstream behavior.
+    #[serde(default = "default_true_channel_control")]
+    pub auto_thread: bool,
+    /// Require explicit mentions even in participated/free-response threads.
+    #[serde(default)]
+    pub thread_require_mention: bool,
+}
+
+fn default_true_channel_control() -> bool {
+    true
+}
+
+impl Default for DiscordChannelControls {
+    fn default() -> Self {
+        Self {
+            ignored_channels: BTreeSet::new(),
+            no_thread_channels: BTreeSet::new(),
+            free_response_channels: BTreeSet::new(),
+            auto_thread: true,
+            thread_require_mention: false,
+        }
+    }
+}
+
+impl DiscordChannelControls {
+    pub fn from_extra(extra: &std::collections::HashMap<String, serde_json::Value>) -> Self {
+        Self {
+            ignored_channels: discord_id_set_from_json(extra.get("ignored_channels")),
+            no_thread_channels: discord_id_set_from_json(extra.get("no_thread_channels")),
+            free_response_channels: discord_id_set_from_json(extra.get("free_response_channels")),
+            auto_thread: bool_from_json(extra.get("auto_thread"), true),
+            thread_require_mention: bool_from_json(extra.get("thread_require_mention"), false),
+        }
+    }
+
+    pub fn is_ignored(&self, context: &DiscordChannelContext) -> bool {
+        if context.is_dm {
+            return false;
+        }
+        channel_matches(
+            &self.ignored_channels,
+            &context.channel_id,
+            context.parent_channel_id.as_deref(),
+        )
+    }
+
+    pub fn allows_free_response(&self, context: &DiscordChannelContext) -> bool {
+        if context.is_dm {
+            return true;
+        }
+        context.voice_linked_text_channel
+            || channel_matches(
+                &self.free_response_channels,
+                &context.channel_id,
+                context.parent_channel_id.as_deref(),
+            )
+    }
+
+    pub fn should_auto_thread(&self, context: &DiscordChannelContext) -> bool {
+        if !self.auto_thread
+            || context.is_dm
+            || context.is_thread
+            || context.is_reply
+            || context.voice_linked_text_channel
+            || self.allows_free_response(context)
+        {
+            return false;
+        }
+
+        !channel_matches(
+            &self.no_thread_channels,
+            &context.channel_id,
+            context.parent_channel_id.as_deref(),
+        )
+    }
+}
+
+/// Discord channel context used by pure Rust policy checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscordChannelContext {
+    pub channel_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_channel_id: Option<String>,
+    #[serde(default)]
+    pub is_dm: bool,
+    #[serde(default)]
+    pub is_thread: bool,
+    #[serde(default)]
+    pub is_reply: bool,
+    #[serde(default)]
+    pub voice_linked_text_channel: bool,
+}
+
+impl DiscordChannelContext {
+    pub fn server(channel_id: impl Into<String>) -> Self {
+        Self {
+            channel_id: channel_id.into(),
+            parent_channel_id: None,
+            is_dm: false,
+            is_thread: false,
+            is_reply: false,
+            voice_linked_text_channel: false,
+        }
+    }
+
+    pub fn thread(channel_id: impl Into<String>, parent_channel_id: impl Into<String>) -> Self {
+        Self {
+            channel_id: channel_id.into(),
+            parent_channel_id: Some(parent_channel_id.into()),
+            is_dm: false,
+            is_thread: true,
+            is_reply: false,
+            voice_linked_text_channel: false,
+        }
+    }
+
+    pub fn dm(channel_id: impl Into<String>) -> Self {
+        Self {
+            channel_id: channel_id.into(),
+            parent_channel_id: None,
+            is_dm: true,
+            is_thread: false,
+            is_reply: false,
+            voice_linked_text_channel: false,
+        }
+    }
+}
+
+/// Channel-bound skill binding parsed from Python-style Discord config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscordChannelSkillBinding {
+    pub id: String,
+    pub skills: Vec<String>,
+}
+
+impl DiscordChannelSkillBinding {
+    pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let obj = value.as_object()?;
+        let id = obj.get("id").and_then(scalar_json_to_discord_id)?;
+        let skills_value = obj.get("skills").or_else(|| obj.get("skill"))?;
+        let mut skills = Vec::new();
+        match skills_value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    if let Some(skill) = scalar_json_to_discord_id(value) {
+                        if !skills.contains(&skill) {
+                            skills.push(skill);
+                        }
+                    }
+                }
+            }
+            value => {
+                if let Some(skill) = scalar_json_to_discord_id(value) {
+                    skills.push(skill);
+                }
+            }
+        }
+        (!skills.is_empty()).then_some(Self { id, skills })
+    }
+
+    pub fn list_from_json(value: Option<&serde_json::Value>) -> Vec<Self> {
+        match value {
+            Some(serde_json::Value::Array(values)) => {
+                values.iter().filter_map(Self::from_json).collect()
+            }
+            Some(value) => Self::from_json(value).into_iter().collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
+fn resolve_channel_skills_from_bindings(
+    bindings: &[DiscordChannelSkillBinding],
+    channel_id: &str,
+    parent_id: Option<&str>,
+) -> Option<Vec<String>> {
+    let channel_id = channel_id.trim();
+    let parent_id = parent_id.map(str::trim).filter(|id| !id.is_empty());
+
+    bindings
+        .iter()
+        .find(|binding| binding.id.trim() == channel_id)
+        .or_else(|| {
+            parent_id.and_then(|parent| bindings.iter().find(|binding| binding.id.trim() == parent))
+        })
+        .map(|binding| binding.skills.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Discord thread participation persistence
+// ---------------------------------------------------------------------------
+
+/// Persistent ordered set of Discord threads the bot has participated in.
+#[derive(Debug, Clone)]
+pub struct DiscordThreadParticipationTracker {
+    path: PathBuf,
+    threads: VecDeque<String>,
+    max_tracked: usize,
+}
+
+impl DiscordThreadParticipationTracker {
+    pub const DEFAULT_MAX_TRACKED: usize = 2048;
+
+    pub fn new(platform: &str) -> Self {
+        let filename = format!("{}_threads.json", platform.trim());
+        Self::from_path(
+            hermes_config::hermes_home().join(filename),
+            Self::DEFAULT_MAX_TRACKED,
+        )
+    }
+
+    pub fn from_path(path: impl Into<PathBuf>, max_tracked: usize) -> Self {
+        let path = path.into();
+        let mut tracker = Self {
+            path,
+            threads: VecDeque::new(),
+            max_tracked: max_tracked.max(1),
+        };
+        tracker.load();
+        tracker
+    }
+
+    pub fn set_max_tracked(&mut self, max_tracked: usize) {
+        self.max_tracked = max_tracked.max(1);
+        self.enforce_capacity();
+    }
+
+    pub fn contains(&self, thread_id: &str) -> bool {
+        let thread_id = thread_id.trim();
+        !thread_id.is_empty() && self.threads.iter().any(|existing| existing == thread_id)
+    }
+
+    pub fn mark(&mut self, thread_id: impl Into<String>) -> std::io::Result<bool> {
+        let thread_id = thread_id.into();
+        let thread_id = thread_id.trim();
+        if thread_id.is_empty() || self.contains(thread_id) {
+            return Ok(false);
+        }
+
+        self.threads.push_back(thread_id.to_string());
+        self.enforce_capacity();
+        self.save()?;
+        Ok(true)
+    }
+
+    pub fn len(&self) -> usize {
+        self.threads.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.threads.is_empty()
+    }
+
+    pub fn entries(&self) -> Vec<String> {
+        self.threads.iter().cloned().collect()
+    }
+
+    fn load(&mut self) {
+        let Ok(raw) = std::fs::read_to_string(&self.path) else {
+            return;
+        };
+        let Ok(values) = serde_json::from_str::<Vec<String>>(&raw) else {
+            return;
+        };
+
+        let mut seen = BTreeSet::new();
+        for value in values {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                self.threads.push_back(trimmed.to_string());
+            }
+        }
+        self.enforce_capacity();
+    }
+
+    fn enforce_capacity(&mut self) {
+        while self.threads.len() > self.max_tracked {
+            self.threads.pop_front();
+        }
+    }
+
+    fn save(&self) -> std::io::Result<()> {
+        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        let values: Vec<&str> = self.threads.iter().map(String::as_str).collect();
+        let body = serde_json::to_string(&values).expect("thread id list serializes");
+        std::fs::write(&self.path, body)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub type ThreadParticipationTracker = DiscordThreadParticipationTracker;
 
 // ---------------------------------------------------------------------------
 // Discord Gateway opcodes & payload
@@ -779,6 +1157,7 @@ pub struct DiscordAdapter {
     config: DiscordConfig,
     client: Client,
     stop_signal: Arc<Notify>,
+    thread_participation: Mutex<DiscordThreadParticipationTracker>,
 }
 
 impl DiscordAdapter {
@@ -795,12 +1174,51 @@ impl DiscordAdapter {
             config,
             client,
             stop_signal: Arc::new(Notify::new()),
+            thread_participation: Mutex::new(DiscordThreadParticipationTracker::new("discord")),
         })
     }
 
     /// Get a reference to the configuration.
     pub fn config(&self) -> &DiscordConfig {
         &self.config
+    }
+
+    pub fn channel_controls(&self) -> &DiscordChannelControls {
+        &self.config.channel_controls
+    }
+
+    pub fn should_ignore_channel(&self, context: &DiscordChannelContext) -> bool {
+        self.config.channel_controls.is_ignored(context)
+    }
+
+    pub fn should_auto_thread(&self, context: &DiscordChannelContext) -> bool {
+        self.config.channel_controls.should_auto_thread(context)
+    }
+
+    pub fn resolve_channel_skills(
+        &self,
+        channel_id: &str,
+        parent_id: Option<&str>,
+    ) -> Option<Vec<String>> {
+        resolve_channel_skills_from_bindings(
+            &self.config.channel_skill_bindings,
+            channel_id,
+            parent_id,
+        )
+    }
+
+    pub fn thread_participation_contains(&self, thread_id: &str) -> bool {
+        self.thread_participation
+            .lock()
+            .map(|tracker| tracker.contains(thread_id))
+            .unwrap_or(false)
+    }
+
+    pub fn mark_thread_participation(&self, thread_id: &str) -> std::io::Result<bool> {
+        self.thread_participation
+            .lock()
+            .map_err(|_| std::io::Error::other("discord thread tracker lock poisoned"))?
+            .mark(thread_id)
     }
 
     /// Return the authorization header value.
@@ -1865,6 +2283,8 @@ mod tests {
             proxy: AdapterProxyConfig::default(),
             require_mention: false,
             intents: default_intents(),
+            channel_controls: DiscordChannelControls::default(),
+            channel_skill_bindings: Vec::new(),
         }
     }
 
@@ -2059,6 +2479,158 @@ mod tests {
         assert!(!discord_reactions_enabled_from_raw(Some("false")));
         assert!(!discord_reactions_enabled_from_raw(Some("0")));
         assert!(!discord_reactions_enabled_from_raw(Some("off")));
+    }
+
+    #[test]
+    fn discord_channel_controls_parse_csv_and_yaml_shapes() {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert(
+            "ignored_channels".into(),
+            serde_json::json!("500, 600 ,700"),
+        );
+        extra.insert("no_thread_channels".into(), serde_json::json!(["800", 900]));
+        extra.insert("free_response_channels".into(), serde_json::json!(1000));
+        extra.insert("auto_thread".into(), serde_json::json!("false"));
+        extra.insert("thread_require_mention".into(), serde_json::json!("yes"));
+
+        let controls = DiscordChannelControls::from_extra(&extra);
+        assert_eq!(
+            controls.ignored_channels,
+            ["500", "600", "700"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+        assert_eq!(
+            controls.no_thread_channels,
+            ["800", "900"].into_iter().map(String::from).collect()
+        );
+        assert_eq!(
+            controls.free_response_channels,
+            ["1000"].into_iter().map(String::from).collect()
+        );
+        assert!(!controls.auto_thread);
+        assert!(controls.thread_require_mention);
+    }
+
+    #[test]
+    fn discord_channel_controls_ignore_server_channels_and_thread_parents() {
+        let controls = DiscordChannelControls {
+            ignored_channels: ["500"].into_iter().map(String::from).collect(),
+            ..DiscordChannelControls::default()
+        };
+
+        assert!(controls.is_ignored(&DiscordChannelContext::server("500")));
+        assert!(controls.is_ignored(&DiscordChannelContext::thread("501", "500")));
+        assert!(!controls.is_ignored(&DiscordChannelContext::server("700")));
+        assert!(!controls.is_ignored(&DiscordChannelContext::dm("500")));
+    }
+
+    #[test]
+    fn discord_channel_controls_auto_thread_policy_matches_upstream_cases() {
+        let controls = DiscordChannelControls {
+            no_thread_channels: ["800"].into_iter().map(String::from).collect(),
+            free_response_channels: ["900"].into_iter().map(String::from).collect(),
+            ..DiscordChannelControls::default()
+        };
+
+        assert!(!controls.should_auto_thread(&DiscordChannelContext::server("800")));
+        assert!(!controls.should_auto_thread(&DiscordChannelContext::thread("801", "800")));
+        assert!(!controls.should_auto_thread(&DiscordChannelContext::server("900")));
+        assert!(!controls.should_auto_thread(&DiscordChannelContext::dm("700")));
+        let mut reply = DiscordChannelContext::server("700");
+        reply.is_reply = true;
+        assert!(!controls.should_auto_thread(&reply));
+        assert!(controls.should_auto_thread(&DiscordChannelContext::server("700")));
+
+        let disabled = DiscordChannelControls {
+            auto_thread: false,
+            no_thread_channels: ["800"].into_iter().map(String::from).collect(),
+            ..DiscordChannelControls::default()
+        };
+        assert!(!disabled.should_auto_thread(&DiscordChannelContext::server("700")));
+        assert!(!disabled.should_auto_thread(&DiscordChannelContext::server("800")));
+    }
+
+    #[test]
+    fn discord_channel_skill_bindings_resolve_exact_parent_and_deduped_skills() {
+        let bindings = DiscordChannelSkillBinding::list_from_json(Some(&serde_json::json!([
+            {"id": "100", "skills": ["a", "b", "a", "c", "b"]},
+            {"id": "200", "skill": "forum-skill"},
+            {"id": 300, "skills": "solo"},
+        ])));
+
+        assert_eq!(
+            resolve_channel_skills_from_bindings(&bindings, "100", None),
+            Some(vec!["a".into(), "b".into(), "c".into()])
+        );
+        assert_eq!(
+            resolve_channel_skills_from_bindings(&bindings, "999", Some("200")),
+            Some(vec!["forum-skill".into()])
+        );
+        assert_eq!(
+            resolve_channel_skills_from_bindings(&bindings, "300", None),
+            Some(vec!["solo".into()])
+        );
+        assert_eq!(
+            resolve_channel_skills_from_bindings(&bindings, "999", None),
+            None
+        );
+    }
+
+    #[test]
+    fn discord_adapter_resolves_configured_channel_skills() {
+        let mut cfg = test_config();
+        cfg.channel_skill_bindings = DiscordChannelSkillBinding::list_from_json(Some(
+            &serde_json::json!([{"id": "100", "skills": ["skill-a", "skill-b"]}]),
+        ));
+        let adapter = DiscordAdapter::new(cfg).unwrap();
+        assert_eq!(
+            adapter.resolve_channel_skills("100", None),
+            Some(vec!["skill-a".into(), "skill-b".into()])
+        );
+        assert_eq!(adapter.resolve_channel_skills("101", None), None);
+    }
+
+    #[test]
+    fn discord_thread_participation_tracker_persists_and_keeps_newest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("discord_threads.json");
+        let mut tracker = DiscordThreadParticipationTracker::from_path(&path, 5);
+
+        assert!(tracker.is_empty());
+        assert!(tracker.mark("0").unwrap());
+        assert!(!tracker.mark("0").unwrap());
+        for id in ["1", "2", "3", "4", "newest"] {
+            assert!(tracker.mark(id).unwrap());
+        }
+
+        assert_eq!(tracker.entries(), vec!["1", "2", "3", "4", "newest"]);
+        let saved: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved, vec!["1", "2", "3", "4", "newest"]);
+
+        let reloaded = DiscordThreadParticipationTracker::from_path(&path, 5);
+        assert!(reloaded.contains("newest"));
+        assert!(!reloaded.contains("0"));
+    }
+
+    #[test]
+    fn discord_thread_participation_tracker_tolerates_corrupt_and_missing_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let corrupt_path = tmp.path().join("discord_threads.json");
+        std::fs::write(&corrupt_path, "not valid json{{{").unwrap();
+        let tracker = DiscordThreadParticipationTracker::from_path(&corrupt_path, 5);
+        assert!(tracker.is_empty());
+
+        let missing_parent = tmp
+            .path()
+            .join("missing")
+            .join("deep")
+            .join("discord_threads.json");
+        let mut tracker = DiscordThreadParticipationTracker::from_path(&missing_parent, 5);
+        assert!(tracker.mark("111").unwrap());
+        assert!(missing_parent.exists());
     }
 
     #[test]

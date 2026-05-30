@@ -22,6 +22,10 @@ fn comma_list_to_strings(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn env_bool(raw: &str) -> bool {
+    matches!(raw.to_lowercase().as_str(), "1" | "true" | "yes" | "on")
+}
+
 fn set_extra(pc: &mut PlatformConfig, key: &str, val: Value) {
     pc.extra.insert(key.to_string(), val);
 }
@@ -155,17 +159,40 @@ fn apply_discord_env(config: &mut GatewayConfig) {
         set_extra(discord, "allow_bots", json!(v));
     }
     if let Some(v) = env_nonempty("DISCORD_REACTIONS") {
-        set_extra(
-            discord,
-            "reactions",
-            json!(matches!(
-                v.to_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )),
-        );
+        set_extra(discord, "reactions", json!(env_bool(&v)));
     }
     if let Some(v) = env_nonempty("DISCORD_REPLY_TO_MODE") {
         set_extra(discord, "reply_to_mode", json!(v));
+    }
+    if let Some(v) = env_nonempty("DISCORD_REQUIRE_MENTION") {
+        discord.require_mention = Some(env_bool(&v));
+    }
+    if let Some(v) = env_nonempty("DISCORD_IGNORED_CHANNELS") {
+        set_extra(
+            discord,
+            "ignored_channels",
+            json!(comma_list_to_strings(&v)),
+        );
+    }
+    if let Some(v) = env_nonempty("DISCORD_NO_THREAD_CHANNELS") {
+        set_extra(
+            discord,
+            "no_thread_channels",
+            json!(comma_list_to_strings(&v)),
+        );
+    }
+    if let Some(v) = env_nonempty("DISCORD_FREE_RESPONSE_CHANNELS") {
+        set_extra(
+            discord,
+            "free_response_channels",
+            json!(comma_list_to_strings(&v)),
+        );
+    }
+    if let Some(v) = env_nonempty("DISCORD_AUTO_THREAD") {
+        set_extra(discord, "auto_thread", json!(env_bool(&v)));
+    }
+    if let Some(v) = env_nonempty("DISCORD_THREAD_REQUIRE_MENTION") {
+        set_extra(discord, "thread_require_mention", json!(env_bool(&v)));
     }
 }
 
@@ -225,12 +252,19 @@ mod tests {
             std::env::set_var("DISCORD_ALLOW_BOTS", "mentions");
             std::env::set_var("DISCORD_REACTIONS", "false");
             std::env::set_var("DISCORD_REPLY_TO_MODE", "all");
+            std::env::set_var("DISCORD_REQUIRE_MENTION", "true");
+            std::env::set_var("DISCORD_IGNORED_CHANNELS", "111, 222");
+            std::env::set_var("DISCORD_NO_THREAD_CHANNELS", "333");
+            std::env::set_var("DISCORD_FREE_RESPONSE_CHANNELS", "444,555");
+            std::env::set_var("DISCORD_AUTO_THREAD", "false");
+            std::env::set_var("DISCORD_THREAD_REQUIRE_MENTION", "yes");
         }
         let mut cfg = GatewayConfig::default();
         apply_python_named_platform_env(&mut cfg);
         let discord = cfg.platforms.get("discord").expect("discord block");
         assert!(discord.enabled);
         assert_eq!(discord.token.as_deref(), Some("discord-token"));
+        assert_eq!(discord.require_mention, Some(true));
         assert_eq!(
             discord.extra.get("application_id").and_then(|v| v.as_str()),
             Some("app-123")
@@ -247,12 +281,53 @@ mod tests {
             discord.extra.get("reply_to_mode").and_then(|v| v.as_str()),
             Some("all")
         );
+        assert_eq!(
+            discord
+                .extra
+                .get("ignored_channels")
+                .and_then(|v| v.as_array())
+                .map(|items| { items.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>() }),
+            Some(vec!["111", "222"])
+        );
+        assert_eq!(
+            discord
+                .extra
+                .get("no_thread_channels")
+                .and_then(|v| v.as_array())
+                .map(|items| { items.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>() }),
+            Some(vec!["333"])
+        );
+        assert_eq!(
+            discord
+                .extra
+                .get("free_response_channels")
+                .and_then(|v| v.as_array())
+                .map(|items| { items.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>() }),
+            Some(vec!["444", "555"])
+        );
+        assert_eq!(
+            discord.extra.get("auto_thread").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            discord
+                .extra
+                .get("thread_require_mention")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
         unsafe {
             std::env::remove_var("DISCORD_BOT_TOKEN");
             std::env::remove_var("DISCORD_APPLICATION_ID");
             std::env::remove_var("DISCORD_ALLOW_BOTS");
             std::env::remove_var("DISCORD_REACTIONS");
             std::env::remove_var("DISCORD_REPLY_TO_MODE");
+            std::env::remove_var("DISCORD_REQUIRE_MENTION");
+            std::env::remove_var("DISCORD_IGNORED_CHANNELS");
+            std::env::remove_var("DISCORD_NO_THREAD_CHANNELS");
+            std::env::remove_var("DISCORD_FREE_RESPONSE_CHANNELS");
+            std::env::remove_var("DISCORD_AUTO_THREAD");
+            std::env::remove_var("DISCORD_THREAD_REQUIRE_MENTION");
         }
     }
 

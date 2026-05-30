@@ -30,7 +30,7 @@ use crate::adapter::{AdapterProxyConfig, BasePlatformAdapter};
 use crate::gateway::IncomingMessage;
 
 const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
-const FEISHU_WS_ENDPOINT_PATH: &str = "/callback/ws/endpoints";
+const FEISHU_WS_ENDPOINT_PATH: &str = "/callback/ws/endpoint";
 
 /// Feishu tokens expire in 2 hours; refresh 5 minutes early.
 const TOKEN_EXPIRY_SECS: u64 = 2 * 60 * 60;
@@ -283,25 +283,27 @@ struct FeishuWsConnectConfig {
 
 #[derive(Debug, Deserialize)]
 struct FeishuWsConfigResponse {
-    code: i64,
+    #[serde(default, alias = "Code", alias = "statusCode")]
+    code: Option<i64>,
     #[serde(default)]
+    #[serde(alias = "Msg", alias = "Message")]
     msg: Option<String>,
-    #[serde(default, rename = "data")]
+    #[serde(default, alias = "Data")]
     data: Option<FeishuWsConfigData>,
 }
 
 #[derive(Debug, Deserialize)]
 struct FeishuWsConfigData {
-    #[serde(rename = "URL")]
-    url: String,
-    #[serde(rename = "ClientConfig")]
-    client_config: FeishuWsClientConfig,
+    #[serde(default, alias = "URL", alias = "Url")]
+    url: Option<String>,
+    #[serde(default, alias = "ClientConfig", alias = "clientConfig")]
+    client_config: Option<FeishuWsClientConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 struct FeishuWsClientConfig {
-    #[serde(rename = "PingInterval")]
-    ping_interval: u64,
+    #[serde(default, alias = "PingInterval", alias = "pingInterval")]
+    ping_interval: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -588,20 +590,37 @@ impl FeishuAdapter {
             .map_err(|e| {
                 GatewayError::ConnectionFailed(format!("Feishu ws config request failed: {e}"))
             })?;
-        let ws_cfg: FeishuWsConfigResponse = resp.json().await.map_err(|e| {
-            GatewayError::ConnectionFailed(format!("Feishu ws config parse failed: {e}"))
+        let status = resp.status();
+        let body = resp.text().await.map_err(|e| {
+            GatewayError::ConnectionFailed(format!("Feishu ws config read body failed: {e}"))
         })?;
-        if ws_cfg.code != 0 {
+        if !status.is_success() {
+            let preview = body.chars().take(400).collect::<String>();
+            return Err(GatewayError::ConnectionFailed(format!(
+                "Feishu ws config HTTP {status}: {preview}"
+            )));
+        }
+        let ws_cfg: FeishuWsConfigResponse = serde_json::from_str(&body).map_err(|e| {
+            let preview = body.chars().take(400).collect::<String>();
+            GatewayError::ConnectionFailed(format!(
+                "Feishu ws config parse failed: {e}; body={preview}"
+            ))
+        })?;
+        let code = ws_cfg.code.unwrap_or(-1);
+        if code != 0 {
             let msg = ws_cfg.msg.unwrap_or_else(|| "unknown error".to_string());
             return Err(GatewayError::ConnectionFailed(format!(
                 "Feishu ws config failed code={} msg={msg}",
-                ws_cfg.code
+                code
             )));
         }
         let data = ws_cfg.data.ok_or_else(|| {
             GatewayError::ConnectionFailed("Feishu ws config missing data".into())
         })?;
-        let url = Url::parse(&data.url)
+        let connect_url = data
+            .url
+            .ok_or_else(|| GatewayError::ConnectionFailed("Feishu ws config missing URL".into()))?;
+        let url = Url::parse(&connect_url)
             .map_err(|e| GatewayError::ConnectionFailed(format!("Feishu ws URL invalid: {e}")))?;
         let service_id = url
             .query_pairs()
@@ -609,9 +628,13 @@ impl FeishuAdapter {
             .and_then(|(_, v)| v.parse::<i32>().ok())
             .unwrap_or(0);
         Ok(FeishuWsConnectConfig {
-            connect_url: data.url,
+            connect_url,
             service_id,
-            ping_interval_ms: data.client_config.ping_interval.saturating_mul(1000),
+            ping_interval_ms: data
+                .client_config
+                .and_then(|c| c.ping_interval)
+                .unwrap_or(DEFAULT_WS_PING_INTERVAL_MS / 1000)
+                .saturating_mul(1000),
         })
     }
 
@@ -1711,6 +1734,31 @@ impl PlatformAdapter for FeishuAdapter {
         Ok(())
     }
 
+    async fn send_message_with_id(
+        &self,
+        chat_id: &str,
+        text: &str,
+        _parse_mode: Option<ParseMode>,
+    ) -> Result<Option<String>, GatewayError> {
+        let id = self.send_text(chat_id, text).await?;
+        Ok(Some(id))
+    }
+
+    async fn send_message_replying(
+        &self,
+        chat_id: &str,
+        text: &str,
+        _parse_mode: Option<ParseMode>,
+        reply_to_message_id: Option<&str>,
+    ) -> Result<Option<String>, GatewayError> {
+        let id = if let Some(mid) = reply_to_message_id.filter(|v| !v.trim().is_empty()) {
+            self.reply_message(mid, text).await?
+        } else {
+            self.send_text(chat_id, text).await?
+        };
+        Ok(Some(id))
+    }
+
     async fn edit_message(
         &self,
         _chat_id: &str,
@@ -2125,5 +2173,51 @@ mod tests {
     fn format_message_trims_whitespace() {
         assert_eq!(format_message("\n\nhello world\n"), "hello world");
         assert_eq!(format_message("  hello world  "), "hello world");
+    }
+
+    #[test]
+    fn ws_config_parse_uppercase_fields() {
+        let body = serde_json::json!({
+            "Code": 0,
+            "Message": "success",
+            "Data": {
+                "URL": "wss://open.feishu.cn/ws?service_id=1",
+                "ClientConfig": {
+                    "PingInterval": 120
+                }
+            }
+        })
+        .to_string();
+        let parsed: FeishuWsConfigResponse =
+            serde_json::from_str(&body).expect("parse ws config uppercase");
+        assert_eq!(parsed.code, Some(0));
+        assert_eq!(
+            parsed.data.and_then(|d| d.url).as_deref(),
+            Some("wss://open.feishu.cn/ws?service_id=1")
+        );
+    }
+
+    #[test]
+    fn ws_config_parse_lowercase_fields() {
+        let body = serde_json::json!({
+            "code": 0,
+            "msg": "ok",
+            "data": {
+                "url": "wss://open.feishu.cn/ws?service_id=2",
+                "clientConfig": {
+                    "pingInterval": 100
+                }
+            }
+        })
+        .to_string();
+        let parsed: FeishuWsConfigResponse =
+            serde_json::from_str(&body).expect("parse ws config lowercase");
+        assert_eq!(parsed.code, Some(0));
+        let data = parsed.data.expect("data");
+        assert_eq!(
+            data.url.as_deref(),
+            Some("wss://open.feishu.cn/ws?service_id=2")
+        );
+        assert_eq!(data.client_config.and_then(|c| c.ping_interval), Some(100));
     }
 }

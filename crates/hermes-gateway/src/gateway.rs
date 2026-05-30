@@ -1881,7 +1881,9 @@ impl Gateway {
                 .then(|| incoming.message_id.as_deref())
                 .flatten()
                 .filter(|id| !id.is_empty());
-            let anchor_id = if let Some(adapter) = self.get_adapter(&incoming.platform).await {
+            let anchor_id = if incoming.platform == "feishu" {
+                None
+            } else if let Some(adapter) = self.get_adapter(&incoming.platform).await {
                 adapter
                     .send_message_replying(&incoming.chat_id, "...", None, reply_to)
                     .await?
@@ -1948,6 +1950,9 @@ impl Gateway {
                         return;
                     };
                     if !should_flush {
+                        return;
+                    }
+                    if platform == "feishu" {
                         return;
                     }
                     let _guard = edit_lock.lock().await;

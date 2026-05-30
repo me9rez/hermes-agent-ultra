@@ -584,9 +584,37 @@
       "ticket": 25
     },
     {
+      "path": "tests/agent/test_compressor_image_tokens.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream image-aware compression-budget intent is covered by Rust hermes-intelligence context_engine contracts that charge fixed image-block budgets for OpenAI, Responses, and Anthropic image shapes without counting base64 payload bytes; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent/test_context_compressor.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream context compressor thresholding, summary fallback, cooldown, tool-pair sanitization, handoff-prefix, and collision-avoidance intent is covered by Rust hermes-agent ContextCompressor state-machine tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/agent/test_context_compressor_summary_continuity.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream iterative context-summary continuity intent is covered by Rust hermes-agent ContextCompressor tests for same-process previous-summary reuse, resume handoff rehydration, protected-head handoffs, and exclusion of existing handoff messages from the new-turn summary block; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent/test_context_engine.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream context-engine ABC/default behavior is represented in Rust by hermes-intelligence ContextEngine trait implementations plus Default and Importance engine compression contracts; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent/test_credential_pool.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream credential-pool selection, rate-limit clearing, round-robin, single-key, and pool-fallback intent is covered by Rust hermes-agent CredentialPool and agent-loop fallback tests; persistent Python OAuth pool migration tests remain reference-only for Rust auth-store contracts.",
       "owner": "sheawinkler",
       "ticket": 25
     },
@@ -598,9 +626,72 @@
       "ticket": 25
     },
     {
+      "path": "tests/agent/test_prompt_builder.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream prompt-builder context-file, injection scan, skill prompt, subscription prompt, and truncation intent is covered by Rust hermes-agent context/context_files/skill_orchestrator tests and CLI prompt assembly contracts; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent/test_prompt_caching.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Anthropic cache-control breakpoint intent is covered by Rust hermes-agent provider message conversion and cache_control request-shape tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent/test_rate_limit_tracker.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream rate-limit header parsing, waiting, compact display, and provider-integration intent is covered by Rust hermes-agent RateLimitTracker and provider/API-bridge rate-limit tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/agent/test_redact.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream redaction test intent is covered by Rust hermes-intelligence redaction contracts for vendor prefixes, env/json/auth tokens, JWTs, Discord IDs, URL query/userinfo, DB connection strings, and form bodies; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent/test_skill_commands.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream skill-command discovery, platform filtering, command-key resolution, invocation rendering, setup guidance, file hints, and template substitution intent is covered by Rust hermes-agent SkillOrchestrator and hermes-tools skill command tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent/test_skill_utils.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream skill metadata and platform-matching intent is covered by Rust hermes-tools skill_utils contracts for frontmatter parsing, disabled skill names, platform scopes, config extraction, and Termux-compatible matching; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent/test_streaming_context_scrubber.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream memory-context streaming leak prevention is covered by Rust hermes-agent StreamingContextScrubber contracts and run_stream UI-delta scrubbing; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent/test_subagent_progress.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream sub-agent progress relay intent is covered by Rust hermes-agent sub-agent lineage/orchestration tests and hermes-cli TUI progress/phase-stream contracts; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent/test_subdirectory_hints.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream subdirectory hint discovery, workspace-boundary rejection, command path extraction, duplicate suppression, and truncation intent is covered by Rust hermes-agent subdirectory_hints tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/agent/test_tool_guardrails.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream repeated tool failure/no-progress guardrail intent is covered by Rust hermes-agent tool-loop guard tests for exact repeated failures, varied args, idempotent outputs, success reset, and hard-stop toggles; the Python test file remains reference-only.",
       "owner": "sheawinkler",
       "ticket": 25
     },

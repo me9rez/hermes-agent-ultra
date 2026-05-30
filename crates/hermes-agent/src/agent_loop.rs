@@ -40,7 +40,7 @@ use crate::context_references::preprocess_context_references_async;
 use crate::credential_pool::CredentialPool;
 use crate::interrupt::InterruptController;
 use crate::lsp_context::{build_lsp_context_note, LspContextConfig};
-use crate::memory_manager::MemoryManager;
+use crate::memory_manager::{MemoryManager, StreamingContextScrubber};
 use crate::plugins::{HookResult, HookType, PluginManager};
 use crate::provider::{AnthropicProvider, GenericProvider, OpenAiProvider, OpenRouterProvider};
 use crate::providers_extra::{
@@ -4264,6 +4264,7 @@ impl AgentLoop {
             let mut last_usage: Option<UsageStats> = None;
             let mut finish_reason: Option<String> = None;
             let mut deltas_were_sent = false;
+            let mut stream_scrubber = StreamingContextScrubber::new();
 
             while let Some(chunk_result) = stream.next().await {
                 if self.interrupt.take_interrupt_graceful().is_some() {
@@ -4339,12 +4340,23 @@ impl AgentLoop {
                     }
                 };
 
+                let mut emit_chunk = chunk.clone();
                 if let Some(ref delta) = chunk.delta {
                     if let Some(ref text) = delta.content {
-                        deltas_were_sent = true;
-                        content.push_str(text);
-                        if let Some(ref cb) = self.callbacks.on_stream_delta {
-                            cb(text);
+                        let scrubbed = stream_scrubber.feed(text);
+                        if let Some(ref mut emit_delta) = emit_chunk.delta {
+                            emit_delta.content = if scrubbed.is_empty() {
+                                None
+                            } else {
+                                Some(scrubbed.clone())
+                            };
+                        }
+                        if !scrubbed.is_empty() {
+                            deltas_were_sent = true;
+                            content.push_str(&scrubbed);
+                            if let Some(ref cb) = self.callbacks.on_stream_delta {
+                                cb(&scrubbed);
+                            }
                         }
                     }
                     if let Some(ref extra) = delta.extra {
@@ -4390,7 +4402,49 @@ impl AgentLoop {
                     finish_reason = Some(fr.clone());
                 }
 
-                on_chunk(chunk);
+                if chunk.finish_reason.is_some() {
+                    let scrubbed_tail = stream_scrubber.flush();
+                    if !scrubbed_tail.is_empty() {
+                        content.push_str(&scrubbed_tail);
+                        if let Some(ref cb) = self.callbacks.on_stream_delta {
+                            cb(&scrubbed_tail);
+                        }
+                        on_chunk(StreamChunk {
+                            delta: Some(hermes_core::StreamDelta {
+                                content: Some(scrubbed_tail),
+                                tool_calls: None,
+                                extra: None,
+                            }),
+                            finish_reason: None,
+                            usage: None,
+                        });
+                    }
+                }
+
+                let empty_delta = emit_chunk.delta.as_ref().is_some_and(|delta| {
+                    delta.content.is_none() && delta.tool_calls.is_none() && delta.extra.is_none()
+                });
+                if !empty_delta || emit_chunk.finish_reason.is_some() || emit_chunk.usage.is_some()
+                {
+                    on_chunk(emit_chunk);
+                }
+            }
+
+            let scrubbed_tail = stream_scrubber.flush();
+            if !scrubbed_tail.is_empty() {
+                content.push_str(&scrubbed_tail);
+                if let Some(ref cb) = self.callbacks.on_stream_delta {
+                    cb(&scrubbed_tail);
+                }
+                on_chunk(StreamChunk {
+                    delta: Some(hermes_core::StreamDelta {
+                        content: Some(scrubbed_tail),
+                        tool_calls: None,
+                        extra: None,
+                    }),
+                    finish_reason: None,
+                    usage: None,
+                });
             }
 
             let has_truncated_tool_args = tool_calls.iter().any(|tc| {
@@ -5504,6 +5558,8 @@ impl AgentLoop {
         let raw_emit = on_chunk;
         let mute_for_emit = stream_mute.clone();
         let break_for_emit = stream_needs_break.clone();
+        let stream_scrubber = Arc::new(Mutex::new(StreamingContextScrubber::new()));
+        let scrubber_for_emit = stream_scrubber.clone();
         let on_chunk: Box<dyn Fn(StreamChunk) + Send + Sync> =
             Box::new(move |chunk: StreamChunk| {
                 let StreamChunk {
@@ -5519,6 +5575,13 @@ impl AgentLoop {
                         let mut out = content;
                         if break_for_emit.swap(false, Ordering::AcqRel) {
                             out = format!("\n\n{}", out);
+                        }
+                        out = scrubber_for_emit
+                            .lock()
+                            .expect("stream scrubber mutex poisoned")
+                            .feed(&out);
+                        if out.is_empty() {
+                            return;
                         }
                         raw_emit(StreamChunk {
                             delta: Some(hermes_core::StreamDelta {
@@ -5537,6 +5600,21 @@ impl AgentLoop {
                         usage,
                     });
                     return;
+                }
+                let scrubbed_tail = scrubber_for_emit
+                    .lock()
+                    .expect("stream scrubber mutex poisoned")
+                    .flush();
+                if !scrubbed_tail.is_empty() {
+                    raw_emit(StreamChunk {
+                        delta: Some(hermes_core::StreamDelta {
+                            content: Some(scrubbed_tail),
+                            tool_calls: None,
+                            extra: None,
+                        }),
+                        finish_reason: None,
+                        usage: None,
+                    });
                 }
                 raw_emit(StreamChunk {
                     delta: None,
@@ -10446,6 +10524,7 @@ mod tests {
         RecoverOnSecondAttempt,
         AlwaysFailMidToolCall,
         TextOnlyDrop,
+        MemoryContextLeak,
     }
 
     struct StreamRetryProvider {
@@ -10525,6 +10604,13 @@ mod tests {
                     Err(AgentError::LlmApi(
                         "Stream read error: connection lost".to_string(),
                     )),
+                ],
+                StreamRetryScenario::MemoryContextLeak => vec![
+                    Ok(stream_chunk_content("Hello\n")),
+                    Ok(stream_chunk_content("<memory-context>\nsecret ")),
+                    Ok(stream_chunk_content("payload\n")),
+                    Ok(stream_chunk_content("</memory-context> world")),
+                    Ok(stream_chunk_finish("stop")),
                 ],
             };
 
@@ -10647,6 +10733,43 @@ mod tests {
             text.to_lowercase()
                 .contains("connection dropped mid tool-call; reconnecting")
         }));
+    }
+
+    #[tokio::test]
+    async fn stream_memory_context_blocks_are_scrubbed_from_callbacks_and_final_message() {
+        let provider = Arc::new(StreamRetryProvider::new(
+            StreamRetryScenario::MemoryContextLeak,
+        ));
+        let agent = AgentLoop::new(
+            AgentConfig::default(),
+            Arc::new(ToolRegistry::new()),
+            provider.clone(),
+        );
+        let mut ctx = ContextManager::default_budget();
+        ctx.add_message(Message::system("system"));
+        ctx.add_message(Message::user("run"));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_ref = seen.clone();
+
+        let out = agent
+            .collect_stream_llm_response(&ctx, &[], None, "dummy-model", None, &move |chunk| {
+                if let Some(delta) = chunk.delta {
+                    if let Some(text) = delta.content {
+                        seen_ref.lock().expect("seen lock").push(text);
+                    }
+                }
+            })
+            .await
+            .expect("stream should complete");
+
+        let StreamCollectOutcome::Complete(resp) = out else {
+            panic!("expected complete response");
+        };
+        assert_eq!(resp.message.content.as_deref(), Some("Hello\n world"));
+        let joined = seen.lock().expect("seen lock").join("");
+        assert_eq!(joined, "Hello\n world");
+        assert!(!joined.contains("secret"));
+        assert!(!joined.contains("memory-context"));
     }
 
     #[test]

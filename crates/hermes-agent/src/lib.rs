@@ -75,6 +75,7 @@ pub use interrupt::InterruptController;
 // Re-export memory manager
 pub use memory_manager::{
     build_memory_context_block, sanitize_context, MemoryManager, MemoryProviderPlugin,
+    StreamingContextScrubber,
 };
 
 // Re-export plugin system

@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // JobStatus
@@ -158,6 +159,9 @@ pub struct CronJob {
     /// Optional shell override for script execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_shell: Option<String>,
+    /// Optional absolute working directory for this scheduled run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
     /// Optional source cron job IDs whose most recent output should be injected
     /// into this job prompt before execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,6 +203,7 @@ impl CronJob {
             no_agent: false,
             script_timeout_seconds: None,
             script_shell: None,
+            workdir: None,
             context_from: None,
             last_output: None,
         }
@@ -231,6 +236,7 @@ impl CronJob {
         if self.no_agent && self.script.as_ref().map_or(true, |s| s.trim().is_empty()) {
             return Err("no_agent mode requires non-empty script".to_string());
         }
+        normalize_workdir(self.workdir.as_deref())?;
 
         // Validate repeat
         if let Some(repeat) = self.repeat {
@@ -239,6 +245,12 @@ impl CronJob {
             }
         }
 
+        Ok(())
+    }
+
+    /// Normalize path-like fields to their persisted canonical form.
+    pub fn normalize_paths(&mut self) -> Result<(), String> {
+        self.workdir = normalize_workdir(self.workdir.as_deref())?;
         Ok(())
     }
 
@@ -313,6 +325,59 @@ impl CronJob {
     pub fn mark_failed(&mut self) {
         self.status = JobStatus::Failed;
     }
+}
+
+/// Normalize an optional per-job working directory.
+///
+/// A configured workdir must resolve to an existing absolute directory. Empty
+/// strings clear the setting, and `~` expands through the same Hermes home-dir
+/// resolution used elsewhere in this crate.
+pub fn normalize_workdir(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let expanded = expand_tilde(trimmed)?;
+    if !expanded.is_absolute() {
+        return Err("workdir must be an absolute path".to_string());
+    }
+
+    let meta = std::fs::metadata(&expanded)
+        .map_err(|_| format!("workdir does not exist: {}", expanded.display()))?;
+    if !meta.is_dir() {
+        return Err(format!(
+            "workdir is not a directory: {}",
+            expanded.display()
+        ));
+    }
+
+    let canonical = std::fs::canonicalize(&expanded)
+        .map_err(|e| format!("failed to resolve workdir {}: {e}", expanded.display()))?;
+    Ok(Some(canonical.to_string_lossy().to_string()))
+}
+
+fn expand_tilde(raw: &str) -> Result<PathBuf, String> {
+    if raw == "~" {
+        return Ok(user_home_dir());
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return Ok(user_home_dir().join(rest));
+    }
+    if raw.starts_with('~') {
+        return Err("workdir must use an absolute path; ~user expansion is not supported".into());
+    }
+    Ok(Path::new(raw).to_path_buf())
+}
+
+fn user_home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(test)]
@@ -431,5 +496,41 @@ mod tests {
         let json = serde_json::to_string(&job).unwrap();
         let parsed: CronJob = serde_json::from_str(&json).unwrap();
         assert_eq!(job, parsed);
+    }
+
+    #[test]
+    fn test_normalize_workdir_empty_returns_none() {
+        assert_eq!(normalize_workdir(None).unwrap(), None);
+        assert_eq!(normalize_workdir(Some("  ")).unwrap(), None);
+    }
+
+    #[test]
+    fn test_normalize_workdir_rejects_relative_path() {
+        let err = normalize_workdir(Some("relative/path")).unwrap_err();
+        assert!(err.contains("absolute path"));
+    }
+
+    #[test]
+    fn test_normalize_workdir_accepts_existing_absolute_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let normalized = normalize_workdir(Some(&dir.path().to_string_lossy())).unwrap();
+        assert_eq!(
+            normalized,
+            Some(
+                std::fs::canonicalize(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_normalize_workdir_rejects_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, "hi").unwrap();
+        let err = normalize_workdir(Some(&file.to_string_lossy())).unwrap_err();
+        assert!(err.contains("not a directory"));
     }
 }

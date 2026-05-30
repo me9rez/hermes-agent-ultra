@@ -1284,6 +1284,83 @@
       "ticket": 25
     },
     {
+      "path": "tests/cron/test_codex_execution_paths.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream cron/Codex execution-path intent is covered by Rust cron runner isolation plus Rust provider/auth refresh contracts; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cron/test_cron_context_from.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream context_from create/update/prompt-injection intent is covered by Rust CronJob context_from persistence, scheduler prefix assembly, invalid-ref filtering, and truncation tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cron/test_cron_inactivity_timeout.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream cron inactivity-timeout intent is covered by Rust cron script timeout controls and scheduler execution/error delivery contracts; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cron/test_cron_no_agent.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream no_agent script-only intent is covered by Rust CronJob validation, cronjob tool plumbing, runner short-circuit execution, wakeAgent silence gating, bash/Python path execution, and traversal blocking tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cron/test_cron_prompt_injection_skill.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream assembled cron skill prompt scanning intent is covered by Rust cron skill loading, SkillGuard checks, invisible-Unicode blocking, and prompt-injection regression tests before agent execution; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cron/test_cron_script.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream cron script field, script output injection, relative Hermes scripts path resolution, absolute/tilde/traversal/symlink containment, and env cleanup intent is covered by Rust CronJob storage, runner script execution, and script-path guard tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cron/test_cron_workdir.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream per-job workdir normalization, create/update roundtrip, TERMINAL_CWD scoping, and workspace-context opt-in intent is covered by Rust CronJob workdir normalization, scheduler persistence tests, CLI/tool plumbing, and runner environment/current_dir handling; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cron/test_file_permissions.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream cron file-permission hardening intent is covered by Rust FileJobPersistence 0700 directory and 0600 job-file tests on Unix; broader config permission contracts live in Rust auth/config code.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cron/test_jobs.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream cron job CRUD, validation, persistence, status, repeat, no_agent, script, context_from, and workdir intent is covered by Rust CronJob, FileJobPersistence, SqliteJobPersistence, ScheduledCronjobBackend, and CronScheduler tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cron/test_scheduler.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream scheduler tick/run/delivery/history intent is covered by Rust CronScheduler create/update/run/manual-trigger, context prefix, completion broadcast, delivery suppression, and runner contract tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/cron/test_scheduler_mcp_init.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream no_agent scheduler MCP-skip intent is covered by Rust CronRunner no_agent short-circuiting before AgentLoop construction and tool filtering tests that exclude recursive cron scheduling; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/providers",
       "classification": "functional",
       "rationale": "Provider tests cover model transport compatibility and error handling.",

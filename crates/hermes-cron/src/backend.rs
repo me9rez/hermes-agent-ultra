@@ -5,6 +5,7 @@
 //! agent's tool call immediately creates / lists / pauses / resumes / removes
 //! / runs real cron jobs instead of returning a "pending" envelope.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -95,6 +96,67 @@ fn parse_context_from_update(
     }
 }
 
+fn normalize_workdir_value(raw: &Value) -> Result<Option<String>, ToolError> {
+    match raw {
+        Value::Null => Ok(None),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        _ => Err(ToolError::InvalidParams(
+            "workdir must be an absolute path string or null".to_string(),
+        )),
+    }
+}
+
+fn windows_absolute_path(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+fn validate_tool_script_reference(script: &str) -> Result<(), ToolError> {
+    let trimmed = script.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return Ok(());
+    }
+    if trimmed.starts_with('~')
+        || windows_absolute_path(trimmed)
+        || Path::new(trimmed).is_absolute()
+    {
+        return Err(ToolError::InvalidParams(
+            "cron script must be an inline script or a relative path under Hermes scripts/"
+                .to_string(),
+        ));
+    }
+    if trimmed.contains("../") || trimmed.contains("..\\") {
+        return Err(ToolError::InvalidParams(
+            "cron script path traversal escapes Hermes scripts/".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_workdir_create(raw: Option<&Value>) -> Result<Option<String>, ToolError> {
+    match raw {
+        Some(v) => normalize_workdir_value(v),
+        None => Ok(None),
+    }
+}
+
+fn parse_workdir_update(raw: Option<&Value>) -> Result<Option<Option<String>>, ToolError> {
+    match raw {
+        Some(v) => Ok(Some(normalize_workdir_value(v)?)),
+        None => Ok(None),
+    }
+}
+
 fn cron_err_to_tool(e: CronError) -> ToolError {
     match e {
         CronError::JobNotFound(id) => {
@@ -121,6 +183,7 @@ impl CronjobBackend for ScheduledCronjobBackend {
         context_from: Option<&Value>,
         script: Option<&str>,
         no_agent: Option<bool>,
+        workdir: Option<&Value>,
     ) -> Result<String, ToolError> {
         let mut job = CronJob::new(schedule, task);
         if !name.trim().is_empty() {
@@ -133,12 +196,14 @@ impl CronjobBackend for ScheduledCronjobBackend {
         if let Some(script) = script {
             let trimmed = script.trim();
             if !trimmed.is_empty() {
+                validate_tool_script_reference(trimmed)?;
                 job.script = Some(trimmed.to_string());
             }
         }
         if let Some(no_agent) = no_agent {
             job.no_agent = no_agent;
         }
+        job.workdir = parse_workdir_create(workdir)?;
         let context_from = parse_context_from_create(context_from)?;
         if let Some(ref refs) = context_from {
             self.validate_context_refs_exist(refs).await?;
@@ -160,6 +225,7 @@ impl CronjobBackend for ScheduledCronjobBackend {
             "toolset": toolset,
             "script": script,
             "no_agent": no_agent.unwrap_or(false),
+            "workdir": self.scheduler.get_job(&id).await.and_then(|j| j.workdir),
             "context_from": context_from,
         })
         .to_string())
@@ -179,6 +245,7 @@ impl CronjobBackend for ScheduledCronjobBackend {
                     "next_run": j.next_run,
                     "last_run": j.last_run,
                     "run_count": j.run_count,
+                    "workdir": j.workdir,
                     "context_from": j.context_from,
                 })
             })
@@ -200,6 +267,7 @@ impl CronjobBackend for ScheduledCronjobBackend {
         context_from: Option<&Value>,
         script: Option<&str>,
         no_agent: Option<bool>,
+        workdir: Option<&Value>,
     ) -> Result<String, ToolError> {
         let mut job = self
             .scheduler
@@ -216,6 +284,9 @@ impl CronjobBackend for ScheduledCronjobBackend {
         }
         if let Some(script) = script {
             let trimmed = script.trim();
+            if !trimmed.is_empty() {
+                validate_tool_script_reference(trimmed)?;
+            }
             job.script = if trimmed.is_empty() {
                 None
             } else {
@@ -224,6 +295,9 @@ impl CronjobBackend for ScheduledCronjobBackend {
         }
         if let Some(no_agent) = no_agent {
             job.no_agent = no_agent;
+        }
+        if let Some(workdir_update) = parse_workdir_update(workdir)? {
+            job.workdir = workdir_update;
         }
         if let Some(context_update) = parse_context_from_update(context_from)? {
             if let Some(ref refs) = context_update {
@@ -250,6 +324,7 @@ impl CronjobBackend for ScheduledCronjobBackend {
         Ok(json!({
             "action": "updated",
             "id": id,
+            "workdir": self.scheduler.get_job(id).await.and_then(|j| j.workdir),
             "context_from": self.scheduler.get_job(id).await.and_then(|j| j.context_from),
         })
         .to_string())
@@ -361,6 +436,7 @@ mod tests {
                 Some(&json!(source_id.clone())),
                 None,
                 None,
+                None,
             )
             .await
             .expect("create");
@@ -379,6 +455,7 @@ mod tests {
                 Some(&json!([source_id.clone()])),
                 None,
                 None,
+                None,
             )
             .await
             .expect("update set");
@@ -389,7 +466,16 @@ mod tests {
         assert_eq!(loaded.context_from, Some(vec![source_id.clone()]));
 
         backend
-            .update(consumer_id, None, None, None, Some(&json!([])), None, None)
+            .update(
+                consumer_id,
+                None,
+                None,
+                None,
+                Some(&json!([])),
+                None,
+                None,
+                None,
+            )
             .await
             .expect("update clear");
         let loaded = scheduler
@@ -397,5 +483,65 @@ mod tests {
             .await
             .expect("consumer after clear");
         assert_eq!(loaded.context_from, None);
+    }
+
+    #[tokio::test]
+    async fn create_and_update_workdir_roundtrip() {
+        let backend = make_backend();
+        let scheduler = backend.scheduler().clone();
+        let workdir = tempdir().expect("workdir");
+
+        let created = backend
+            .create(
+                "consumer",
+                "0 * * * *",
+                "consume context",
+                None,
+                None,
+                None,
+                None,
+                Some(&json!(workdir.path().to_string_lossy().to_string())),
+            )
+            .await
+            .expect("create");
+        let created_v: serde_json::Value = serde_json::from_str(&created).expect("json");
+        let job_id = created_v.get("id").and_then(|v| v.as_str()).expect("id");
+
+        let loaded = scheduler.get_job(job_id).await.expect("job");
+        assert_eq!(
+            loaded.workdir,
+            Some(
+                std::fs::canonicalize(workdir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            )
+        );
+
+        backend
+            .update(job_id, None, None, None, None, None, None, Some(&json!("")))
+            .await
+            .expect("clear");
+        let loaded = scheduler.get_job(job_id).await.expect("job");
+        assert_eq!(loaded.workdir, None);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_absolute_tool_script() {
+        let backend = make_backend();
+        let err = backend
+            .create(
+                "bad",
+                "0 * * * *",
+                "task",
+                None,
+                None,
+                Some("/tmp/evil.py"),
+                None,
+                None,
+            )
+            .await
+            .expect_err("reject absolute");
+        assert!(err.to_string().contains("relative path"));
     }
 }

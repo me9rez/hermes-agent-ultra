@@ -25,6 +25,7 @@ pub trait CronjobBackend: Send + Sync {
         context_from: Option<&Value>,
         script: Option<&str>,
         no_agent: Option<bool>,
+        workdir: Option<&Value>,
     ) -> Result<String, ToolError>;
     /// List all cron jobs.
     async fn list(&self) -> Result<String, ToolError>;
@@ -38,6 +39,7 @@ pub trait CronjobBackend: Send + Sync {
         context_from: Option<&Value>,
         script: Option<&str>,
         no_agent: Option<bool>,
+        workdir: Option<&Value>,
     ) -> Result<String, ToolError>;
     /// Pause a cron job.
     async fn pause(&self, id: &str) -> Result<String, ToolError>;
@@ -93,6 +95,7 @@ impl ToolHandler for CronjobHandler {
                 let context_from = params.get("context_from");
                 let script = params.get("script").and_then(|v| v.as_str());
                 let no_agent = params.get("no_agent").and_then(|v| v.as_bool());
+                let workdir = params.get("workdir");
                 self.backend
                     .create(
                         name,
@@ -102,6 +105,7 @@ impl ToolHandler for CronjobHandler {
                         context_from,
                         script,
                         no_agent,
+                        workdir,
                     )
                     .await
             }
@@ -117,8 +121,18 @@ impl ToolHandler for CronjobHandler {
                 let context_from = params.get("context_from");
                 let script = params.get("script").and_then(|v| v.as_str());
                 let no_agent = params.get("no_agent").and_then(|v| v.as_bool());
+                let workdir = params.get("workdir");
                 self.backend
-                    .update(id, schedule, task, enabled, context_from, script, no_agent)
+                    .update(
+                        id,
+                        schedule,
+                        task,
+                        enabled,
+                        context_from,
+                        script,
+                        no_agent,
+                        workdir,
+                    )
                     .await
             }
             "pause" => {
@@ -216,6 +230,13 @@ impl ToolHandler for CronjobHandler {
             }),
         );
         props.insert(
+            "workdir".into(),
+            json!({
+                "type": ["string", "null"],
+                "description": "Absolute working directory for this cron job. Empty string or null clears it on update."
+            }),
+        );
+        props.insert(
             "enabled".into(),
             json!({
                 "type": "boolean",
@@ -267,6 +288,7 @@ mod tests {
             _context_from: Option<&Value>,
             _script: Option<&str>,
             _no_agent: Option<bool>,
+            _workdir: Option<&Value>,
         ) -> Result<String, ToolError> {
             Ok(format!("Created cronjob: {}", name))
         }
@@ -282,6 +304,7 @@ mod tests {
             _context_from: Option<&Value>,
             _script: Option<&str>,
             _no_agent: Option<bool>,
+            _workdir: Option<&Value>,
         ) -> Result<String, ToolError> {
             Ok(format!("Updated cronjob: {}", id))
         }

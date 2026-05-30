@@ -231,7 +231,11 @@ impl AuxiliaryClient {
             let tools = request.tools.clone();
             let model_call = model.clone();
             let mut attempt_temperature = temperature;
-            let mut attempt_max_tokens = max_tokens;
+            let mut attempt_max_tokens = if candidate.source.omits_auxiliary_max_tokens() {
+                None
+            } else {
+                max_tokens
+            };
             let mut attempt_extra_body = extra_body.clone();
 
             loop {
@@ -785,9 +789,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_max_tokens_retries_with_max_completion_tokens() {
+    async fn openai_compatible_auxiliary_calls_omit_max_tokens_across_temperature_retry() {
         let p1 = ScriptedProvider::new(
             "openrouter",
+            vec![
+                Outcome::Err("HTTP 400: Unsupported parameter: temperature".into()),
+                Outcome::Ok("rescued".into()),
+            ],
+        );
+
+        let client = AuxiliaryClient::builder()
+            .add_candidate(ProviderCandidate::new(
+                AuxiliarySource::OpenRouter,
+                "gpt-5.5",
+                p1.clone(),
+            ))
+            .build();
+
+        let resp = client
+            .call(
+                AuxiliaryRequest::new(AuxiliaryTask::SessionSearch, vec![user_msg("query")])
+                    .with_temperature(0.3)
+                    .with_max_tokens(500),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.provider_label, "openrouter");
+        assert_eq!(resp.model, "gpt-5.5");
+        assert_eq!(resp.text(), Some("rescued"));
+
+        let calls = p1.recorded_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].temperature, Some(0.3));
+        assert_eq!(calls[1].temperature, None);
+        assert_eq!(calls[0].max_tokens, None);
+        assert_eq!(calls[1].max_tokens, None);
+        assert!(calls[0].extra_body.is_none());
+        assert!(calls[1].extra_body.is_none());
+    }
+
+    #[tokio::test]
+    async fn unsupported_max_tokens_retries_with_max_completion_tokens() {
+        let p1 = ScriptedProvider::new(
+            "anthropic",
             vec![
                 Outcome::Err("Unknown parameter: max_tokens".into()),
                 Outcome::Ok("rescued".into()),
@@ -796,8 +841,8 @@ mod tests {
 
         let client = AuxiliaryClient::builder()
             .add_candidate(ProviderCandidate::new(
-                AuxiliarySource::OpenRouter,
-                "or-model",
+                AuxiliarySource::Anthropic,
+                "claude-haiku",
                 p1.clone(),
             ))
             .build();
@@ -810,7 +855,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.provider_label, "openrouter");
+        assert_eq!(resp.provider_label, "anthropic");
         assert_eq!(resp.text(), Some("rescued"));
 
         let calls = p1.recorded_calls();

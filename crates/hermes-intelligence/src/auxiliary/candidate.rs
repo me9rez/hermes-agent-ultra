@@ -44,6 +44,19 @@ impl AuxiliarySource {
             AuxiliarySource::DirectKey(name) => name.clone(),
         }
     }
+
+    /// OpenAI-compatible auxiliary endpoints choose their own output budget for
+    /// side tasks. Sending `max_tokens` trips reasoning-model gateways that
+    /// accept the same endpoint shape but reject that parameter.
+    pub fn omits_auxiliary_max_tokens(&self) -> bool {
+        matches!(
+            self,
+            AuxiliarySource::OpenRouter
+                | AuxiliarySource::Nous
+                | AuxiliarySource::Custom
+                | AuxiliarySource::DirectKey(_)
+        )
+    }
 }
 
 /// A fully-resolved provider entry the chain can call into.

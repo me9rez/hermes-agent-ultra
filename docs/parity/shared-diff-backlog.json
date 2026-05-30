@@ -1752,7 +1752,7 @@
       "rust_requirement": "rust_equivalent_or_contract_test_required",
       "status": "pending_review",
       "ticket": 25,
-      "upstream_blob": "66e52b6c10b9559036f5ca01f8545d7757b98ebf",
+      "upstream_blob": "97c3a7f6b66afc348c172adf5a1942f9cdabc6a9",
       "workstream": "WS6"
     },
     {
@@ -2473,6 +2473,21 @@
       "status": "pending_review",
       "ticket": 25,
       "upstream_blob": "6e6268dbb76f8379ed35b9f2276cb5bf0b579920",
+      "workstream": "WS6"
+    },
+    {
+      "action": "No vendoring; verify approved divergence remains current.",
+      "classification": "intentional_divergence",
+      "classification_path": "tests/agent/test_unsupported_temperature_retry.py",
+      "existing_coverage": "claimed_by_shared_diff_classification",
+      "local_blob": "82d8d3208d2995da3153db85e43dbed5bdf15d46",
+      "necessity": "approved_divergence",
+      "owner": "sheawinkler",
+      "path": "tests/agent/test_unsupported_temperature_retry.py",
+      "rust_requirement": "not_required_for_runtime",
+      "status": "cleared_intentional_divergence",
+      "ticket": 25,
+      "upstream_blob": "4d2ebb980e3091f4d8a48481e8b0174db9f4212c",
       "workstream": "WS6"
     },
     {
@@ -9462,7 +9477,7 @@
       "rust_requirement": "rust_equivalent_or_contract_test_required",
       "status": "pending_review",
       "ticket": 25,
-      "upstream_blob": "89d10f03b1d03c7a23e4c7b54a15153742a96375",
+      "upstream_blob": "d72c0224a692e31cf3a789a5695fe87d20965f17",
       "workstream": "WS6"
     },
     {
@@ -15256,27 +15271,27 @@
       "workstream": "WS5"
     }
   ],
-  "generated_at_utc": "2026-05-29T23:51:50.711472+00:00",
+  "generated_at_utc": "2026-05-30T00:39:25.050744+00:00",
   "refs": {
-    "local_ref": "HEAD",
-    "local_sha": "5d65c13120fb246128eb356e2e83b496c4f36232",
+    "local_ref": "main",
+    "local_sha": "71d946dbd37df846677055d1a63fbcc8507c2303",
     "upstream_ref": "upstream/main",
-    "upstream_sha": "689ef5e233980f5d5a32080e959f44c8991dd03a"
+    "upstream_sha": "54aa4db1de76a7c4bb02c8a7f7411727384b8fea"
   },
   "summary": {
     "by_classification": {
       "branding_only": 1,
       "functional": 760,
-      "intentional_divergence": 88,
+      "intentional_divergence": 89,
       "policy_only": 168
     },
     "by_rust_requirement": {
-      "not_required_for_runtime": 257,
+      "not_required_for_runtime": 258,
       "rust_equivalent_or_contract_test_required": 681,
       "rust_primary_ux_or_documented_divergence_required": 79
     },
     "by_status": {
-      "cleared_intentional_divergence": 88,
+      "cleared_intentional_divergence": 89,
       "cleared_non_runtime": 169,
       "pending_review": 760
     },
@@ -15284,13 +15299,13 @@
       "WS3": 53,
       "WS4": 39,
       "WS5": 230,
-      "WS6": 682,
+      "WS6": 683,
       "WS8": 13
     },
-    "cleared_intentional_divergence": 88,
+    "cleared_intentional_divergence": 89,
     "cleared_non_runtime": 169,
     "pending_classification": 0,
     "pending_review": 760,
-    "total_shared_different": 1017
+    "total_shared_different": 1018
   }
 }

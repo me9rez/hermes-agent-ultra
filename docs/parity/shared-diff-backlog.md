@@ -1,20 +1,20 @@
 # Shared-Different Backlog
 
-Generated: `2026-05-29T23:51:50.711472+00:00`
+Generated: `2026-05-30T00:39:25.050744+00:00`
 
 ## Summary
 
-- Total shared-different paths: `1017`
+- Total shared-different paths: `1018`
 - Pending classification: `0`
 - Pending functional review: `760`
 - Cleared non-runtime: `169`
-- Cleared intentional divergence: `88`
+- Cleared intentional divergence: `89`
 
 ## Status Counts
 
 | Status | Count |
 | --- | ---: |
-| `cleared_intentional_divergence` | 88 |
+| `cleared_intentional_divergence` | 89 |
 | `cleared_non_runtime` | 169 |
 | `pending_review` | 760 |
 
@@ -25,7 +25,7 @@ Generated: `2026-05-29T23:51:50.711472+00:00`
 | `WS3` | 53 |
 | `WS4` | 39 |
 | `WS5` | 230 |
-| `WS6` | 682 |
+| `WS6` | 683 |
 | `WS8` | 13 |
 
 ## Pending Classification

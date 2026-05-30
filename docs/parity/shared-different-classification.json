@@ -192,6 +192,76 @@
       "ticket": 25
     },
     {
+      "path": "tests/gateway/test_telegram_approval_buttons.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Telegram approval-button behavior is covered by Rust Telegram inline approval request and callback handling, including approval:once/session/deny callback parsing, per-adapter approval ID state, answerCallbackQuery acknowledgement, and FIFO gateway approval resolution.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_telegram_conflict.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Telegram polling-conflict and webhook cleanup intent is covered by Rust polling startup deleteWebhook, polling conflict detection/logging, and deterministic poll-with-backoff retry behavior.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_telegram_documents.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Telegram document and media routing intent is covered by Rust parse_update document metadata extraction, document-size/extension acceptance checks, sendDocument fallback for wav/flac, and caption truncation/thread fallback multipart send contracts.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_telegram_format.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Telegram formatting intent is covered by Rust MarkdownV2 escaping, code-block preservation tests, and send/edit message paths that escape outgoing MarkdownV2 text before Telegram API submission.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_telegram_group_gating.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Telegram group gating intent is covered by Rust should_process_message/update tests for required mentions, mention entities, custom wake regexes, allowed/guest chats, ignored threads, allowed topics, reply-to-bot handling, and env/config access-policy hydration.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_telegram_network.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Telegram network fallback intent is covered by Rust Telegram fallback IP parsing/deduplication and reqwest DNS override wiring for api.telegram.org while preserving proxy configuration.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_telegram_photo_interrupts.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Telegram photo interrupt intent is covered by Rust parse_update photo extraction, group-gating support for observe_unmentioned_group_messages, media placeholder routing, and image URL send path with reply/thread fallback.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_telegram_text_batching.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Telegram text batching intent is covered by Rust TelegramTextBatcher aggregation keyed by chat/user/thread and the CLI polling loop wiring that drains batched text before gateway routing.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_telegram_thread_fallback.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Telegram thread fallback intent is covered by Rust sendMessage/edit/multipart retry contracts that drop message_thread_id and reply_to_message_id only after Telegram thread/reply-not-found errors while preserving keyboard and parse-mode payloads.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_telegram_topic_mode.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Telegram topic-mode intent is covered by Rust TelegramTopicBindingStore enable/bind/list/remove/recover contracts, allowed-topic gating, and CLI/config hydration for allowed_topics and ignored_threads.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/gateway/test_discord_allowed_mentions.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream Discord allowed_mentions safe-default intent is covered by Rust hermes-gateway DiscordAllowedMentions payload construction and env-style parsing tests; the Python test file remains reference-only.",

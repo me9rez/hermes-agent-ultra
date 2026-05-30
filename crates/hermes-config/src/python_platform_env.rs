@@ -22,6 +22,15 @@ fn comma_list_to_strings(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn json_array_or_csv(raw: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(raw)
+        .unwrap_or_else(|_| comma_list_to_strings(raw))
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn env_bool(raw: &str) -> bool {
     matches!(raw.to_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
@@ -45,12 +54,38 @@ fn apply_telegram_env(config: &mut GatewayConfig) {
     let webhook_secret = env_nonempty("TELEGRAM_WEBHOOK_SECRET");
     let reply_mode = env_nonempty("TELEGRAM_REPLY_TO_MODE").and_then(|v| reply_to_mode(&v));
     let reactions = env_nonempty("TELEGRAM_REACTIONS");
+    let fallback_ips = env_nonempty("TELEGRAM_FALLBACK_IPS");
+    let require_mention = env_nonempty("TELEGRAM_REQUIRE_MENTION");
+    let guest_mode = env_nonempty("TELEGRAM_GUEST_MODE");
+    let exclusive_bot_mentions = env_nonempty("TELEGRAM_EXCLUSIVE_BOT_MENTIONS");
+    let observe_unmentioned = env_nonempty("TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES");
+    let mention_patterns = env_nonempty("TELEGRAM_MENTION_PATTERNS");
+    let free_response_chats = env_nonempty("TELEGRAM_FREE_RESPONSE_CHATS");
+    let allowed_chats = env_nonempty("TELEGRAM_ALLOWED_CHATS");
+    let group_allowed_chats = env_nonempty("TELEGRAM_GROUP_ALLOWED_CHATS");
+    let allowed_topics = env_nonempty("TELEGRAM_ALLOWED_TOPICS");
+    let ignored_threads = env_nonempty("TELEGRAM_IGNORED_THREADS");
+    let allowed_users = env_nonempty("TELEGRAM_ALLOWED_USERS");
+    let group_allowed_users = env_nonempty("TELEGRAM_GROUP_ALLOWED_USERS");
 
     if token.is_none()
         && webhook_url.is_none()
         && webhook_secret.is_none()
         && reply_mode.is_none()
         && reactions.is_none()
+        && fallback_ips.is_none()
+        && require_mention.is_none()
+        && guest_mode.is_none()
+        && exclusive_bot_mentions.is_none()
+        && observe_unmentioned.is_none()
+        && mention_patterns.is_none()
+        && free_response_chats.is_none()
+        && allowed_chats.is_none()
+        && group_allowed_chats.is_none()
+        && allowed_topics.is_none()
+        && ignored_threads.is_none()
+        && allowed_users.is_none()
+        && group_allowed_users.is_none()
     {
         return;
     }
@@ -82,6 +117,69 @@ fn apply_telegram_env(config: &mut GatewayConfig) {
     }
     if let Some(v) = reactions {
         set_extra(telegram, "reactions", json!(env_bool(&v)));
+    }
+    if let Some(v) = fallback_ips {
+        let ips = comma_list_to_strings(&v);
+        if !ips.is_empty() {
+            set_extra(telegram, "fallback_ips", json!(ips));
+        }
+    }
+    if let Some(v) = require_mention {
+        telegram.require_mention = Some(env_bool(&v));
+        set_extra(telegram, "require_mention", json!(env_bool(&v)));
+    }
+    if let Some(v) = guest_mode {
+        set_extra(telegram, "guest_mode", json!(env_bool(&v)));
+    }
+    if let Some(v) = exclusive_bot_mentions {
+        set_extra(telegram, "exclusive_bot_mentions", json!(env_bool(&v)));
+    }
+    if let Some(v) = observe_unmentioned {
+        set_extra(
+            telegram,
+            "observe_unmentioned_group_messages",
+            json!(env_bool(&v)),
+        );
+    }
+    if let Some(v) = mention_patterns {
+        set_extra(telegram, "mention_patterns", json!(json_array_or_csv(&v)));
+    }
+    if let Some(v) = free_response_chats {
+        set_extra(
+            telegram,
+            "free_response_chats",
+            json!(comma_list_to_strings(&v)),
+        );
+    }
+    if let Some(v) = allowed_chats {
+        set_extra(telegram, "allowed_chats", json!(comma_list_to_strings(&v)));
+    }
+    if let Some(v) = group_allowed_chats {
+        set_extra(
+            telegram,
+            "group_allowed_chats",
+            json!(comma_list_to_strings(&v)),
+        );
+    }
+    if let Some(v) = allowed_topics {
+        set_extra(telegram, "allowed_topics", json!(comma_list_to_strings(&v)));
+    }
+    if let Some(v) = ignored_threads {
+        set_extra(
+            telegram,
+            "ignored_threads",
+            json!(comma_list_to_strings(&v)),
+        );
+    }
+    if let Some(v) = allowed_users {
+        telegram.allowed_users = comma_list_to_strings(&v);
+    }
+    if let Some(v) = group_allowed_users {
+        set_extra(
+            telegram,
+            "group_allow_from",
+            json!(comma_list_to_strings(&v)),
+        );
     }
 }
 
@@ -332,6 +430,22 @@ mod tests {
             std::env::set_var("TELEGRAM_WEBHOOK_SECRET", "telegram-secret");
             std::env::set_var("TELEGRAM_REPLY_TO_MODE", "ALL");
             std::env::set_var("TELEGRAM_REACTIONS", "1");
+            std::env::set_var("TELEGRAM_FALLBACK_IPS", "149.154.167.220,149.154.167.221");
+            std::env::set_var("TELEGRAM_REQUIRE_MENTION", "true");
+            std::env::set_var("TELEGRAM_GUEST_MODE", "yes");
+            std::env::set_var("TELEGRAM_EXCLUSIVE_BOT_MENTIONS", "on");
+            std::env::set_var("TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES", "1");
+            std::env::set_var(
+                "TELEGRAM_MENTION_PATTERNS",
+                r#"["^\\s*chompy\\b","@hermes"]"#,
+            );
+            std::env::set_var("TELEGRAM_FREE_RESPONSE_CHATS", "-100,-101");
+            std::env::set_var("TELEGRAM_ALLOWED_CHATS", "-200");
+            std::env::set_var("TELEGRAM_GROUP_ALLOWED_CHATS", "-300,-301");
+            std::env::set_var("TELEGRAM_ALLOWED_TOPICS", "8,0");
+            std::env::set_var("TELEGRAM_IGNORED_THREADS", "31, 32");
+            std::env::set_var("TELEGRAM_ALLOWED_USERS", "u1,u2");
+            std::env::set_var("TELEGRAM_GROUP_ALLOWED_USERS", "g1,g2");
         }
         let mut cfg = GatewayConfig::default();
         apply_python_named_platform_env(&mut cfg);
@@ -357,12 +471,140 @@ mod tests {
             telegram.extra.get("reactions").and_then(|v| v.as_bool()),
             Some(true)
         );
+        assert_eq!(telegram.require_mention, Some(true));
+        assert_eq!(telegram.allowed_users, vec!["u1", "u2"]);
+        assert_eq!(
+            telegram
+                .extra
+                .get("fallback_ips")
+                .and_then(|v| v.as_array())
+                .map(|items| items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["149.154.167.220", "149.154.167.221"])
+        );
+        assert_eq!(
+            telegram
+                .extra
+                .get("require_mention")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            telegram.extra.get("guest_mode").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            telegram
+                .extra
+                .get("exclusive_bot_mentions")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            telegram
+                .extra
+                .get("observe_unmentioned_group_messages")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            telegram
+                .extra
+                .get("mention_patterns")
+                .and_then(|v| v.as_array())
+                .map(|items| items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec![r"^\s*chompy\b", "@hermes"])
+        );
+        assert_eq!(
+            telegram
+                .extra
+                .get("free_response_chats")
+                .and_then(|v| v.as_array())
+                .map(|items| items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["-100", "-101"])
+        );
+        assert_eq!(
+            telegram
+                .extra
+                .get("allowed_chats")
+                .and_then(|v| v.as_array())
+                .map(|items| items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["-200"])
+        );
+        assert_eq!(
+            telegram
+                .extra
+                .get("group_allowed_chats")
+                .and_then(|v| v.as_array())
+                .map(|items| items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["-300", "-301"])
+        );
+        assert_eq!(
+            telegram
+                .extra
+                .get("allowed_topics")
+                .and_then(|v| v.as_array())
+                .map(|items| items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["8", "0"])
+        );
+        assert_eq!(
+            telegram
+                .extra
+                .get("ignored_threads")
+                .and_then(|v| v.as_array())
+                .map(|items| items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["31", "32"])
+        );
+        assert_eq!(
+            telegram
+                .extra
+                .get("group_allow_from")
+                .and_then(|v| v.as_array())
+                .map(|items| items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["g1", "g2"])
+        );
         unsafe {
             std::env::remove_var("TELEGRAM_BOT_TOKEN");
             std::env::remove_var("TELEGRAM_WEBHOOK_URL");
             std::env::remove_var("TELEGRAM_WEBHOOK_SECRET");
             std::env::remove_var("TELEGRAM_REPLY_TO_MODE");
             std::env::remove_var("TELEGRAM_REACTIONS");
+            std::env::remove_var("TELEGRAM_FALLBACK_IPS");
+            std::env::remove_var("TELEGRAM_REQUIRE_MENTION");
+            std::env::remove_var("TELEGRAM_GUEST_MODE");
+            std::env::remove_var("TELEGRAM_EXCLUSIVE_BOT_MENTIONS");
+            std::env::remove_var("TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES");
+            std::env::remove_var("TELEGRAM_MENTION_PATTERNS");
+            std::env::remove_var("TELEGRAM_FREE_RESPONSE_CHATS");
+            std::env::remove_var("TELEGRAM_ALLOWED_CHATS");
+            std::env::remove_var("TELEGRAM_GROUP_ALLOWED_CHATS");
+            std::env::remove_var("TELEGRAM_ALLOWED_TOPICS");
+            std::env::remove_var("TELEGRAM_IGNORED_THREADS");
+            std::env::remove_var("TELEGRAM_ALLOWED_USERS");
+            std::env::remove_var("TELEGRAM_GROUP_ALLOWED_USERS");
         }
     }
 

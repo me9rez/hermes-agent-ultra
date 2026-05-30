@@ -6,9 +6,11 @@
 //! caching, inline keyboards, callback queries, rate limiting, exponential
 //! backoff reconnection, and group chat support.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -18,8 +20,10 @@ use tracing::{info, warn};
 
 use hermes_core::errors::GatewayError;
 use hermes_core::traits::{ParseMode, PlatformAdapter};
+use hermes_tools::approval::{self, ApprovalChoice, GatewayApprovalRequest};
 
 use crate::adapter::{describe_secret, AdapterProxyConfig, BasePlatformAdapter};
+use crate::format::to_telegram_markdown_v2;
 
 /// Maximum message length for Telegram (4096 characters).
 const MAX_MESSAGE_LENGTH: usize = 4096;
@@ -43,6 +47,15 @@ const TELEGRAM_MAX_DOCUMENT_SIZE_BYTES: u64 = 20 * 1024 * 1024;
 const SUPPORTED_DOCUMENT_EXTENSIONS: &[&str] = &[
     "pdf", "md", "txt", "docx", "xlsx", "pptx", "zip", "png", "jpg", "jpeg",
 ];
+
+/// Telegram API host used for DNS fallback overrides.
+const TELEGRAM_API_HOST: &str = "api.telegram.org";
+
+/// Maximum Telegram caption length.
+const MAX_CAPTION_LENGTH: usize = 1024;
+
+/// Default aggregation delay for rapid Telegram text chunks.
+const DEFAULT_TEXT_BATCH_DELAY_MS: u64 = 750;
 
 // ---------------------------------------------------------------------------
 // TelegramConfig
@@ -90,6 +103,58 @@ pub struct TelegramConfig {
     #[serde(default)]
     pub reactions: bool,
 
+    /// Optional Telegram API fallback IPs. Valid IPv4/IPv6 literals are used
+    /// as reqwest DNS overrides for `api.telegram.org`.
+    #[serde(default)]
+    pub fallback_ips: Vec<String>,
+
+    /// Whether group messages must directly address the bot.
+    #[serde(default)]
+    pub require_mention: bool,
+
+    /// Allow direct mentions outside `allowed_chats` without opening the
+    /// broader custom wake-word/reply gates.
+    #[serde(default)]
+    pub guest_mode: bool,
+
+    /// Chats where group messages can bypass mention requirements.
+    #[serde(default)]
+    pub free_response_chats: Vec<String>,
+
+    /// Group chats allowed to interact with the bot.
+    #[serde(default)]
+    pub allowed_chats: Vec<String>,
+
+    /// Alias for Python `group_allowed_chats`.
+    #[serde(default)]
+    pub group_allowed_chats: Vec<String>,
+
+    /// Forum topic/thread IDs to ignore.
+    #[serde(default)]
+    pub ignored_threads: Vec<String>,
+
+    /// Forum topic/thread IDs allowed for processing. Threadless messages are
+    /// treated as Telegram's general topic (`0`).
+    #[serde(default)]
+    pub allowed_topics: Vec<String>,
+
+    /// Extra wake-word regexes accepted when `require_mention` is enabled.
+    #[serde(default)]
+    pub mention_patterns: Vec<String>,
+
+    /// Require bot-command entities to address this bot explicitly.
+    #[serde(default)]
+    pub exclusive_bot_mentions: bool,
+
+    /// Preserve unmentioned group media as observations instead of treating
+    /// them as priority interrupts.
+    #[serde(default)]
+    pub observe_unmentioned_group_messages: bool,
+
+    /// Delay for rapid text-chunk aggregation.
+    #[serde(default = "default_text_batch_delay_ms")]
+    pub text_batch_delay_ms: u64,
+
     /// Bot username (without @), used for mention filtering in groups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot_username: Option<String>,
@@ -105,6 +170,10 @@ fn default_poll_timeout() -> u64 {
 
 fn default_reply_to_mode() -> String {
     "first".to_string()
+}
+
+fn default_text_batch_delay_ms() -> u64 {
+    DEFAULT_TEXT_BATCH_DELAY_MS
 }
 
 /// Effective behavior for Telegram reply anchors across split chunks.
@@ -195,6 +264,10 @@ pub struct TelegramMessage {
     #[serde(default)]
     pub caption: Option<String>,
     #[serde(default)]
+    pub entities: Vec<MessageEntity>,
+    #[serde(default)]
+    pub caption_entities: Vec<MessageEntity>,
+    #[serde(default)]
     pub sticker: Option<Sticker>,
     #[serde(default)]
     pub document: Option<Document>,
@@ -202,6 +275,17 @@ pub struct TelegramMessage {
     pub reply_to_message: Option<Box<TelegramMessage>>,
     #[serde(default)]
     pub message_thread_id: Option<i64>,
+    #[serde(default)]
+    pub is_topic_message: Option<bool>,
+}
+
+/// Telegram message entity metadata for mention/bot-command gates.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageEntity {
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub offset: usize,
+    pub length: usize,
 }
 
 /// Telegram Chat object.
@@ -379,6 +463,224 @@ impl ChatKind {
 }
 
 // ---------------------------------------------------------------------------
+// Telegram text batching and topic-mode helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct PendingTextBatch {
+    message: IncomingMessage,
+    parts: Vec<String>,
+    ready_at: Instant,
+}
+
+/// Deterministic aggregator for Telegram clients that split long text into
+/// rapid successive updates.
+#[derive(Debug)]
+pub struct TelegramTextBatcher {
+    delay: Duration,
+    pending: HashMap<String, PendingTextBatch>,
+}
+
+impl TelegramTextBatcher {
+    pub fn new(delay: Duration) -> Self {
+        Self {
+            delay,
+            pending: HashMap::new(),
+        }
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn enqueue(&mut self, message: IncomingMessage) {
+        self.enqueue_at(message, Instant::now());
+    }
+
+    pub fn enqueue_at(&mut self, message: IncomingMessage, now: Instant) {
+        let key = Self::batch_key(&message);
+        let ready_at = now + self.delay;
+        let text = message.text.clone().unwrap_or_default();
+        self.pending
+            .entry(key)
+            .and_modify(|batch| {
+                if !text.is_empty() {
+                    batch.parts.push(text.clone());
+                }
+                batch.ready_at = ready_at;
+                batch.message = message.clone();
+            })
+            .or_insert_with(|| PendingTextBatch {
+                message,
+                parts: if text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![text]
+                },
+                ready_at,
+            });
+    }
+
+    pub fn drain_ready(&mut self) -> Vec<IncomingMessage> {
+        self.drain_ready_at(Instant::now())
+    }
+
+    pub fn drain_ready_at(&mut self, now: Instant) -> Vec<IncomingMessage> {
+        let ready_keys = self
+            .pending
+            .iter()
+            .filter_map(|(key, batch)| (batch.ready_at <= now).then(|| key.clone()))
+            .collect::<Vec<_>>();
+
+        ready_keys
+            .into_iter()
+            .filter_map(|key| self.pending.remove(&key))
+            .map(|mut batch| {
+                let joined = batch
+                    .parts
+                    .iter()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !joined.is_empty() {
+                    batch.message.text = Some(joined);
+                }
+                batch.message
+            })
+            .collect()
+    }
+
+    fn batch_key(message: &IncomingMessage) -> String {
+        format!(
+            "{}:{}:{}",
+            message.chat_id,
+            message.user_id.map(|id| id.to_string()).unwrap_or_default(),
+            message
+                .message_thread_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "root".to_string())
+        )
+    }
+}
+
+/// In-memory Telegram DM topic binding. The Rust gateway currently uses an
+/// in-process session manager, so this mirrors the upstream topic invariants
+/// without introducing a parallel SQLite layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramTopicBinding {
+    pub chat_id: String,
+    pub thread_id: String,
+    pub session_id: String,
+    pub user_id: String,
+    pub title: Option<String>,
+    pub operator_declared: bool,
+    touched_seq: u64,
+}
+
+/// Topic-mode state for Telegram DM topic lanes.
+#[derive(Debug, Default)]
+pub struct TelegramTopicBindingStore {
+    enabled: HashSet<(String, String)>,
+    bindings: HashMap<(String, String), TelegramTopicBinding>,
+    seq: u64,
+}
+
+impl TelegramTopicBindingStore {
+    pub fn enable(&mut self, chat_id: impl Into<String>, user_id: impl Into<String>) {
+        self.enabled.insert((chat_id.into(), user_id.into()));
+    }
+
+    pub fn disable(&mut self, chat_id: &str, user_id: &str) {
+        self.enabled
+            .remove(&(chat_id.to_string(), user_id.to_string()));
+        self.bindings.retain(|(chat, _), binding| {
+            !(chat == chat_id && binding.user_id.eq_ignore_ascii_case(user_id))
+        });
+    }
+
+    pub fn is_enabled(&self, chat_id: &str, user_id: &str) -> bool {
+        self.enabled
+            .contains(&(chat_id.to_string(), user_id.to_string()))
+    }
+
+    pub fn bind(
+        &mut self,
+        chat_id: impl Into<String>,
+        thread_id: impl Into<String>,
+        session_id: impl Into<String>,
+        user_id: impl Into<String>,
+        title: Option<String>,
+        operator_declared: bool,
+    ) {
+        self.seq = self.seq.saturating_add(1);
+        let binding = TelegramTopicBinding {
+            chat_id: chat_id.into(),
+            thread_id: thread_id.into(),
+            session_id: session_id.into(),
+            user_id: user_id.into(),
+            title,
+            operator_declared,
+            touched_seq: self.seq,
+        };
+        self.bindings.insert(
+            (binding.chat_id.clone(), binding.thread_id.clone()),
+            binding,
+        );
+    }
+
+    pub fn get(&self, chat_id: &str, thread_id: &str) -> Option<&TelegramTopicBinding> {
+        self.bindings
+            .get(&(chat_id.to_string(), thread_id.to_string()))
+    }
+
+    pub fn get_by_session(&self, session_id: &str) -> Option<&TelegramTopicBinding> {
+        self.bindings
+            .values()
+            .find(|binding| binding.session_id == session_id)
+    }
+
+    pub fn remove_session(&mut self, session_id: &str) {
+        self.bindings
+            .retain(|_, binding| binding.session_id != session_id);
+    }
+
+    pub fn list_for_chat(&self, chat_id: &str) -> Vec<TelegramTopicBinding> {
+        let mut rows = self
+            .bindings
+            .values()
+            .filter(|binding| binding.chat_id == chat_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| b.touched_seq.cmp(&a.touched_seq));
+        rows
+    }
+
+    /// Recover stripped Telegram DM-topic replies. Known topics and brand-new
+    /// non-root topic IDs must be preserved; only root/lobby messages can be
+    /// rewritten to the most recently active topic.
+    pub fn recover_thread_id(
+        &self,
+        chat_id: &str,
+        user_id: &str,
+        incoming_thread_id: Option<&str>,
+    ) -> Option<String> {
+        if !self.is_enabled(chat_id, user_id) {
+            return None;
+        }
+        if let Some(thread_id) = incoming_thread_id.map(str::trim).filter(|s| !s.is_empty()) {
+            if thread_id != "0" {
+                return None;
+            }
+        }
+        self.list_for_chat(chat_id)
+            .into_iter()
+            .find(|binding| binding.user_id == user_id)
+            .map(|binding| binding.thread_id)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PollResult – returned from poll_with_backoff
 // ---------------------------------------------------------------------------
 
@@ -411,6 +713,9 @@ pub struct TelegramAdapter {
     /// Status message IDs keyed by `(chat_id, status_key)` so repeated status
     /// events edit one Telegram bubble instead of appending noisy updates.
     status_message_ids: Mutex<HashMap<(String, String), String>>,
+    /// Inline approval callback IDs mapped to gateway session keys.
+    approval_state: Mutex<HashMap<u64, String>>,
+    approval_counter: AtomicU64,
 }
 
 impl TelegramAdapter {
@@ -422,7 +727,7 @@ impl TelegramAdapter {
 
         base.validate_token()?;
 
-        let client = base.build_client()?;
+        let client = Self::build_client(&base, &config.fallback_ips)?;
         let api_base = format!("https://api.telegram.org/bot{}", config.token);
 
         Ok(Self {
@@ -435,12 +740,63 @@ impl TelegramAdapter {
             backoff_ms: AtomicU64::new(0),
             consecutive_errors: AtomicU64::new(0),
             status_message_ids: Mutex::new(HashMap::new()),
+            approval_state: Mutex::new(HashMap::new()),
+            approval_counter: AtomicU64::new(1),
         })
     }
 
     /// Get a reference to the configuration.
     pub fn config(&self) -> &TelegramConfig {
         &self.config
+    }
+
+    fn build_client(
+        base: &BasePlatformAdapter,
+        fallback_ips: &[String],
+    ) -> Result<Client, GatewayError> {
+        let valid_fallbacks = Self::fallback_socket_addrs(fallback_ips);
+        if valid_fallbacks.is_empty() {
+            return base.build_client();
+        }
+
+        let mut builder = Client::builder().resolve_to_addrs(TELEGRAM_API_HOST, &valid_fallbacks);
+
+        if let Some(ref http_proxy) = base.proxy.http_proxy {
+            let proxy = reqwest::Proxy::all(http_proxy).map_err(|e| {
+                GatewayError::ConnectionFailed(format!("Invalid HTTP proxy: {}", e))
+            })?;
+            builder = builder.proxy(proxy);
+        }
+
+        if let Some(ref socks_proxy) = base.proxy.socks_proxy {
+            let proxy = reqwest::Proxy::all(socks_proxy).map_err(|e| {
+                GatewayError::ConnectionFailed(format!("Invalid SOCKS proxy: {}", e))
+            })?;
+            builder = builder.proxy(proxy);
+        }
+
+        builder.build().map_err(|e| {
+            GatewayError::ConnectionFailed(format!("Failed to build HTTP client: {}", e))
+        })
+    }
+
+    pub fn fallback_socket_addrs(raw_ips: &[String]) -> Vec<SocketAddr> {
+        let mut seen = HashSet::new();
+        raw_ips
+            .iter()
+            .flat_map(|entry| entry.split(','))
+            .filter_map(|entry| {
+                let trimmed = entry.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                let ip = trimmed.parse::<IpAddr>().ok()?;
+                if !seen.insert(ip) {
+                    return None;
+                }
+                Some(SocketAddr::new(ip, 0))
+            })
+            .collect()
     }
 
     fn validate_webhook_secret(config: &TelegramConfig) -> Result<(), GatewayError> {
@@ -504,6 +860,191 @@ impl TelegramAdapter {
         }
     }
 
+    pub fn should_process_message(&self, msg: &TelegramMessage, is_command: bool) -> bool {
+        let chat_kind = ChatKind::from_str(&msg.chat.chat_type);
+        if !chat_kind.is_group_like() {
+            return true;
+        }
+
+        let chat_id = msg.chat.id.to_string();
+        let thread_id = msg
+            .message_thread_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "0".to_string());
+
+        if Self::contains_id(&self.config.ignored_threads, &thread_id) {
+            return false;
+        }
+
+        if !self.config.allowed_topics.is_empty()
+            && !Self::contains_id(&self.config.allowed_topics, &thread_id)
+        {
+            return false;
+        }
+
+        let allowed_chat = self.config.allowed_chats.is_empty()
+            && self.config.group_allowed_chats.is_empty()
+            || Self::contains_id(&self.config.allowed_chats, &chat_id)
+            || Self::contains_id(&self.config.group_allowed_chats, &chat_id);
+
+        let direct_mention = self.has_direct_bot_mention(msg, is_command);
+        if !allowed_chat {
+            return self.config.guest_mode && direct_mention;
+        }
+
+        if Self::contains_id(&self.config.free_response_chats, &chat_id) {
+            return true;
+        }
+
+        if !self.config.require_mention {
+            return true;
+        }
+
+        direct_mention || self.is_reply_to_bot(msg) || self.matches_mention_pattern(msg)
+    }
+
+    pub fn should_process_update(&self, update: &Update) -> bool {
+        match (&update.message, &update.callback_query) {
+            (Some(msg), _) => self.should_process_message(
+                msg,
+                msg.text
+                    .as_deref()
+                    .map(str::trim_start)
+                    .is_some_and(|text| text.starts_with('/')),
+            ),
+            (None, Some(cq)) => cq
+                .message
+                .as_ref()
+                .map(|msg| self.should_process_message(msg, false))
+                .unwrap_or(true),
+            (None, None) => true,
+        }
+    }
+
+    fn contains_id(values: &[String], candidate: &str) -> bool {
+        let candidate = candidate.trim();
+        values.iter().any(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .any(|part| !part.is_empty() && part == candidate)
+        })
+    }
+
+    fn has_direct_bot_mention(&self, msg: &TelegramMessage, is_command: bool) -> bool {
+        let Some(bot_username) = self.config.bot_username.as_deref() else {
+            return !self.config.exclusive_bot_mentions && !self.config.require_mention;
+        };
+        let bot_username = bot_username.trim().trim_start_matches('@');
+        if bot_username.is_empty() {
+            return false;
+        }
+        let mention = format!("@{bot_username}");
+        let text = msg.text.as_deref().or(msg.caption.as_deref()).unwrap_or("");
+        let entities = if msg.text.is_some() {
+            &msg.entities
+        } else {
+            &msg.caption_entities
+        };
+
+        for entity in entities {
+            let Some(token) = Self::entity_text(text, entity) else {
+                continue;
+            };
+            match entity.entity_type.as_str() {
+                "mention" | "text_mention" => {
+                    if token.eq_ignore_ascii_case(&mention) {
+                        return true;
+                    }
+                }
+                "bot_command" if is_command => {
+                    if let Some((_, addressed_to)) = token.split_once('@') {
+                        return addressed_to.eq_ignore_ascii_case(bot_username);
+                    }
+                    if !self.config.exclusive_bot_mentions && !self.config.require_mention {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Self::contains_bot_mention_boundary(text, bot_username)
+    }
+
+    fn entity_text<'a>(text: &'a str, entity: &MessageEntity) -> Option<&'a str> {
+        let start = entity.offset;
+        let end = entity.offset.saturating_add(entity.length);
+        if start >= end
+            || end > text.len()
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(end)
+        {
+            return None;
+        }
+        Some(&text[start..end])
+    }
+
+    fn contains_bot_mention_boundary(text: &str, bot_username: &str) -> bool {
+        let target = format!("@{}", bot_username.to_ascii_lowercase());
+        let lower = text.to_ascii_lowercase();
+        let bytes = lower.as_bytes();
+        let target_bytes = target.as_bytes();
+        if target_bytes.is_empty() || bytes.len() < target_bytes.len() {
+            return false;
+        }
+        for idx in 0..=bytes.len() - target_bytes.len() {
+            if &bytes[idx..idx + target_bytes.len()] != target_bytes {
+                continue;
+            }
+            let before_ok = idx == 0
+                || !bytes[idx - 1].is_ascii_alphanumeric()
+                    && bytes[idx - 1] != b'_'
+                    && bytes[idx - 1] != b'@';
+            let after_idx = idx + target_bytes.len();
+            let after_ok = after_idx == bytes.len()
+                || !bytes[after_idx].is_ascii_alphanumeric() && bytes[after_idx] != b'_';
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_reply_to_bot(&self, msg: &TelegramMessage) -> bool {
+        let Some(reply) = msg.reply_to_message.as_ref() else {
+            return false;
+        };
+        let Some(user) = reply.from.as_ref() else {
+            return false;
+        };
+        if user.is_bot == Some(true) {
+            return true;
+        }
+        match (&self.config.bot_username, &user.username) {
+            (Some(bot), Some(username)) => bot
+                .trim_start_matches('@')
+                .eq_ignore_ascii_case(username.trim_start_matches('@')),
+            _ => false,
+        }
+    }
+
+    fn matches_mention_pattern(&self, msg: &TelegramMessage) -> bool {
+        let text = msg.text.as_deref().or(msg.caption.as_deref()).unwrap_or("");
+        self.config.mention_patterns.iter().any(|pattern| {
+            regex::Regex::new(pattern)
+                .map(|re| re.is_match(text))
+                .unwrap_or(false)
+        })
+    }
+
+    fn outgoing_text_for_parse_mode(&self, text: &str, parse_mode: Option<&str>) -> String {
+        match parse_mode {
+            Some(mode) if mode.eq_ignore_ascii_case("MarkdownV2") => to_telegram_markdown_v2(text),
+            _ => text.to_string(),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Sending messages
     // -----------------------------------------------------------------------
@@ -555,9 +1096,10 @@ impl TelegramAdapter {
         let mut message_ids = Vec::new();
 
         for (i, chunk) in chunks.iter().enumerate() {
+            let rendered_chunk = self.outgoing_text_for_parse_mode(chunk, parse_mode);
             let mut body = serde_json::json!({
                 "chat_id": chat_id,
-                "text": chunk,
+                "text": rendered_chunk,
             });
 
             if let Some(pm) = parse_mode {
@@ -582,11 +1124,17 @@ impl TelegramAdapter {
                 }
             }
 
-            let url = format!("{}/sendMessage", self.api_base);
-            let resp: TelegramResponse<SentMessage> = self.post_json(&url, &body).await?;
+            let resp: TelegramResponse<SentMessage> = self
+                .send_json_with_thread_fallback("sendMessage", body)
+                .await?;
 
             if let Some(msg) = resp.result {
                 message_ids.push(msg.message_id);
+            } else {
+                return Err(GatewayError::SendFailed(
+                    resp.description
+                        .unwrap_or_else(|| "sendMessage returned no message".to_string()),
+                ));
             }
         }
 
@@ -604,15 +1152,19 @@ impl TelegramAdapter {
         let mut body = serde_json::json!({
             "chat_id": chat_id,
             "message_id": message_id.parse::<i64>().unwrap_or(0),
-            "text": &text[..text.len().min(MAX_MESSAGE_LENGTH)],
+            "text": self.outgoing_text_for_parse_mode(
+                &text[..text.len().min(MAX_MESSAGE_LENGTH)],
+                parse_mode,
+            ),
         });
 
         if let Some(pm) = parse_mode {
             body["parse_mode"] = serde_json::Value::String(pm.to_string());
         }
 
-        let url = format!("{}/editMessageText", self.api_base);
-        let _resp: TelegramResponse<serde_json::Value> = self.post_json(&url, &body).await?;
+        let _resp: TelegramResponse<serde_json::Value> = self
+            .send_json_with_thread_fallback("editMessageText", body)
+            .await?;
         Ok(())
     }
 
@@ -637,6 +1189,70 @@ impl TelegramAdapter {
         Ok(())
     }
 
+    async fn send_json_with_thread_fallback<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        mut body: serde_json::Value,
+    ) -> Result<TelegramResponse<T>, GatewayError> {
+        let url = format!("{}/{}", self.api_base, method);
+        match self.post_json(&url, &body).await {
+            Ok(resp) if resp.ok => Ok(resp),
+            Ok(resp) => {
+                let description = resp
+                    .description
+                    .unwrap_or_else(|| format!("{method} failed"));
+                if Self::thread_or_reply_missing(&description)
+                    && Self::strip_thread_fields_for_fallback(&mut body)
+                {
+                    let retry = self.post_json(&url, &body).await?;
+                    if retry.ok {
+                        return Ok(retry);
+                    }
+                    return Err(GatewayError::SendFailed(
+                        retry
+                            .description
+                            .unwrap_or_else(|| format!("{method} fallback failed")),
+                    ));
+                }
+                Err(GatewayError::SendFailed(description))
+            }
+            Err(err) if Self::gateway_error_thread_or_reply_missing(&err) => {
+                if Self::strip_thread_fields_for_fallback(&mut body) {
+                    self.post_json(&url, &body).await
+                } else {
+                    Err(err)
+                }
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn strip_thread_fields_for_fallback(body: &mut serde_json::Value) -> bool {
+        let Some(obj) = body.as_object_mut() else {
+            return false;
+        };
+        let removed_thread = obj.remove("message_thread_id").is_some();
+        let removed_reply = obj.remove("reply_to_message_id").is_some();
+        removed_thread || removed_reply
+    }
+
+    fn gateway_error_thread_or_reply_missing(err: &GatewayError) -> bool {
+        match err {
+            GatewayError::SendFailed(message)
+            | GatewayError::Platform(message)
+            | GatewayError::ConnectionFailed(message) => Self::thread_or_reply_missing(message),
+            _ => false,
+        }
+    }
+
+    fn thread_or_reply_missing(message: &str) -> bool {
+        let lower = message.to_ascii_lowercase();
+        lower.contains("message thread not found")
+            || lower.contains("thread not found")
+            || lower.contains("message to be replied not found")
+            || lower.contains("reply message not found")
+    }
+
     // -----------------------------------------------------------------------
     // File operations
     // -----------------------------------------------------------------------
@@ -648,8 +1264,36 @@ impl TelegramAdapter {
         file_path: &str,
         caption: Option<&str>,
     ) -> Result<i64, GatewayError> {
-        self.send_multipart(chat_id, file_path, caption, "sendDocument", "document")
-            .await
+        self.send_multipart_with_options(
+            chat_id,
+            file_path,
+            caption,
+            "sendDocument",
+            "document",
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn send_document_with_options(
+        &self,
+        chat_id: &str,
+        file_path: &str,
+        caption: Option<&str>,
+        reply_to_message_id: Option<i64>,
+        message_thread_id: Option<i64>,
+    ) -> Result<i64, GatewayError> {
+        self.send_multipart_with_options(
+            chat_id,
+            file_path,
+            caption,
+            "sendDocument",
+            "document",
+            reply_to_message_id,
+            message_thread_id,
+        )
+        .await
     }
 
     /// Send a photo file.
@@ -659,8 +1303,36 @@ impl TelegramAdapter {
         file_path: &str,
         caption: Option<&str>,
     ) -> Result<i64, GatewayError> {
-        self.send_multipart(chat_id, file_path, caption, "sendPhoto", "photo")
-            .await
+        self.send_multipart_with_options(
+            chat_id,
+            file_path,
+            caption,
+            "sendPhoto",
+            "photo",
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn send_photo_with_options(
+        &self,
+        chat_id: &str,
+        file_path: &str,
+        caption: Option<&str>,
+        reply_to_message_id: Option<i64>,
+        message_thread_id: Option<i64>,
+    ) -> Result<i64, GatewayError> {
+        self.send_multipart_with_options(
+            chat_id,
+            file_path,
+            caption,
+            "sendPhoto",
+            "photo",
+            reply_to_message_id,
+            message_thread_id,
+        )
+        .await
     }
 
     /// Send an audio file.
@@ -744,6 +1416,58 @@ impl TelegramAdapter {
         method: &str,
         field_name: &str,
     ) -> Result<i64, GatewayError> {
+        self.send_multipart_with_options(
+            chat_id, file_path, caption, method, field_name, None, None,
+        )
+        .await
+    }
+
+    async fn send_multipart_with_options(
+        &self,
+        chat_id: &str,
+        file_path: &str,
+        caption: Option<&str>,
+        method: &str,
+        field_name: &str,
+        reply_to_message_id: Option<i64>,
+        message_thread_id: Option<i64>,
+    ) -> Result<i64, GatewayError> {
+        match self
+            .send_multipart_once(
+                chat_id,
+                file_path,
+                caption,
+                method,
+                field_name,
+                reply_to_message_id,
+                message_thread_id,
+            )
+            .await
+        {
+            Ok(id) => Ok(id),
+            Err(err)
+                if Self::gateway_error_thread_or_reply_missing(&err)
+                    && (reply_to_message_id.is_some() || message_thread_id.is_some()) =>
+            {
+                self.send_multipart_once(
+                    chat_id, file_path, caption, method, field_name, None, None,
+                )
+                .await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn send_multipart_once(
+        &self,
+        chat_id: &str,
+        file_path: &str,
+        caption: Option<&str>,
+        method: &str,
+        field_name: &str,
+        reply_to_message_id: Option<i64>,
+        message_thread_id: Option<i64>,
+    ) -> Result<i64, GatewayError> {
         let url = format!("{}/{}", self.api_base, method);
 
         let file_bytes = tokio::fs::read(file_path).await.map_err(|e| {
@@ -762,8 +1486,17 @@ impl TelegramAdapter {
             .text("chat_id", chat_id.to_string())
             .part(field_name.to_string(), part);
 
-        if let Some(cap) = caption {
-            form = form.text("caption", cap.to_string());
+        if let Some(cap) = caption.map(str::trim).filter(|s| !s.is_empty()) {
+            let truncated: String = cap.chars().take(MAX_CAPTION_LENGTH).collect();
+            form = form.text("caption", truncated);
+        }
+
+        if let Some(reply_id) = reply_to_message_id {
+            form = form.text("reply_to_message_id", reply_id.to_string());
+        }
+
+        if let Some(thread_id) = message_thread_id {
+            form = form.text("message_thread_id", thread_id.to_string());
         }
 
         let resp = self
@@ -787,13 +1520,21 @@ impl TelegramAdapter {
             GatewayError::SendFailed(format!("Failed to parse {} response: {}", method, e))
         })?;
 
-        result.result.map(|m| m.message_id).ok_or_else(|| {
-            GatewayError::SendFailed(
+        if result.ok {
+            result.result.map(|m| m.message_id).ok_or_else(|| {
+                GatewayError::SendFailed(
+                    result
+                        .description
+                        .unwrap_or_else(|| format!("{} returned no message", method)),
+                )
+            })
+        } else {
+            Err(GatewayError::SendFailed(
                 result
                     .description
                     .unwrap_or_else(|| format!("{} failed", method)),
-            )
-        })
+            ))
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -823,6 +1564,20 @@ impl TelegramAdapter {
         }
     }
 
+    pub async fn delete_webhook(&self, drop_pending_updates: bool) -> Result<(), GatewayError> {
+        let url = format!("{}/deleteWebhook", self.api_base);
+        let body = serde_json::json!({ "drop_pending_updates": drop_pending_updates });
+        let resp: TelegramResponse<bool> = self.post_json(&url, &body).await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(GatewayError::SendFailed(
+                resp.description
+                    .unwrap_or_else(|| "deleteWebhook failed".to_string()),
+            ))
+        }
+    }
+
     /// Fetch updates with exponential backoff on failures.
     ///
     /// On success the backoff resets to zero. On failure the delay doubles
@@ -845,9 +1600,11 @@ impl TelegramAdapter {
                 self.backoff_ms.store(next, Ordering::SeqCst);
 
                 let err_count = self.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
+                let conflict = Self::is_polling_conflict_error(&e);
                 warn!(
                     consecutive_errors = err_count,
                     backoff_ms = next,
+                    polling_conflict = conflict,
                     "Telegram poll failed: {}",
                     e
                 );
@@ -872,6 +1629,13 @@ impl TelegramAdapter {
     /// Return the current consecutive error count.
     pub fn consecutive_error_count(&self) -> u64 {
         self.consecutive_errors.load(Ordering::SeqCst)
+    }
+
+    pub fn is_polling_conflict_error(err: &GatewayError) -> bool {
+        let message = err.to_string().to_ascii_lowercase();
+        message.contains("409")
+            || message.contains("conflict")
+            || message.contains("terminated by other getupdates request")
     }
 
     // -----------------------------------------------------------------------
@@ -1125,6 +1889,34 @@ impl TelegramAdapter {
         }
     }
 
+    pub async fn send_image_url_with_options(
+        &self,
+        chat_id: &str,
+        image_url: &str,
+        caption: Option<&str>,
+        reply_to_message_id: Option<i64>,
+        message_thread_id: Option<i64>,
+    ) -> Result<(), GatewayError> {
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "photo": image_url,
+        });
+        if let Some(cap) = caption.map(str::trim).filter(|s| !s.is_empty()) {
+            let truncated: String = cap.chars().take(MAX_CAPTION_LENGTH).collect();
+            body["caption"] = serde_json::Value::String(truncated);
+        }
+        if let Some(reply_id) = reply_to_message_id {
+            body["reply_to_message_id"] = serde_json::Value::Number(reply_id.into());
+        }
+        if let Some(thread_id) = message_thread_id {
+            body["message_thread_id"] = serde_json::Value::Number(thread_id.into());
+        }
+        let _resp: TelegramResponse<SentMessage> = self
+            .send_json_with_thread_fallback("sendPhoto", body)
+            .await?;
+        Ok(())
+    }
+
     async fn set_message_reaction(
         &self,
         chat_id: &str,
@@ -1152,6 +1944,91 @@ impl TelegramAdapter {
         let url = format!("{}/setMessageReaction", self.api_base);
         let _resp: TelegramResponse<bool> = self.post_json(&url, &body).await?;
         Ok(())
+    }
+
+    pub async fn send_approval_request(
+        &self,
+        chat_id: &str,
+        request: &GatewayApprovalRequest,
+        reply_to_message_id: Option<i64>,
+        message_thread_id: Option<i64>,
+    ) -> Result<Vec<i64>, GatewayError> {
+        let approval_id = self.approval_counter.fetch_add(1, Ordering::SeqCst);
+        self.approval_state
+            .lock()
+            .map_err(|_| GatewayError::Platform("telegram approval state poisoned".to_string()))?
+            .insert(approval_id, request.session_key.clone());
+
+        let command = truncate_chars(&request.command, 1800);
+        let description = truncate_chars(&request.description, 1200);
+        let text = format!(
+            "*Command approval required*\n\nCommand:\n`{command}`\n\nReason: {description}"
+        );
+        let keyboard = InlineKeyboardMarkup {
+            inline_keyboard: vec![
+                vec![
+                    InlineKeyboardButton {
+                        text: "Approve once".to_string(),
+                        callback_data: Some(format!("approval:once:{approval_id}")),
+                        url: None,
+                    },
+                    InlineKeyboardButton {
+                        text: "Approve session".to_string(),
+                        callback_data: Some(format!("approval:session:{approval_id}")),
+                        url: None,
+                    },
+                ],
+                vec![InlineKeyboardButton {
+                    text: "Deny".to_string(),
+                    callback_data: Some(format!("approval:deny:{approval_id}")),
+                    url: None,
+                }],
+            ],
+        };
+        self.send_text_with_keyboard(
+            chat_id,
+            &text,
+            keyboard,
+            Some("MarkdownV2"),
+            reply_to_message_id,
+            message_thread_id,
+        )
+        .await
+    }
+
+    pub async fn handle_approval_callback(
+        &self,
+        callback_query_id: &str,
+        callback_data: &str,
+    ) -> Result<bool, GatewayError> {
+        let Some((choice, approval_id)) = parse_approval_callback(callback_data) else {
+            return Ok(false);
+        };
+        let session_key = self
+            .approval_state
+            .lock()
+            .map_err(|_| GatewayError::Platform("telegram approval state poisoned".to_string()))?
+            .remove(&approval_id);
+        let Some(session_key) = session_key else {
+            self.answer_callback_query(callback_query_id, Some("Approval already resolved"), true)
+                .await?;
+            return Ok(true);
+        };
+        let resolved = approval::resolve_gateway_approval(
+            &session_key,
+            choice,
+            matches!(choice, ApprovalChoice::Session),
+        );
+        let answer = if resolved == 0 {
+            "No pending approval for this session"
+        } else if choice == ApprovalChoice::Deny {
+            "Denied"
+        } else {
+            "Approved"
+        };
+        self.answer_callback_query(callback_query_id, Some(answer), false)
+            .await?;
+        Ok(true)
     }
 
     // -----------------------------------------------------------------------
@@ -1242,7 +2119,7 @@ impl TelegramAdapter {
             "jpg" | "jpeg" | "png" | "webp" => ("sendPhoto", "photo"),
             "gif" => ("sendAnimation", "animation"),
             "mp4" | "mov" | "avi" | "mkv" | "webm" => ("sendVideo", "video"),
-            "mp3" | "flac" | "aac" | "m4a" | "wav" => ("sendAudio", "audio"),
+            "mp3" | "aac" | "m4a" => ("sendAudio", "audio"),
             "ogg" | "oga" => ("sendVoice", "voice"),
             "webm_sticker" | "tgs" => ("sendSticker", "sticker"),
             _ => ("sendDocument", "document"),
@@ -1352,17 +2229,8 @@ impl PlatformAdapter for TelegramAdapter {
         image_url: &str,
         caption: Option<&str>,
     ) -> Result<(), GatewayError> {
-        let mut body = serde_json::json!({
-            "chat_id": chat_id,
-            "photo": image_url,
-        });
-        if let Some(cap) = caption.map(str::trim).filter(|s| !s.is_empty()) {
-            let truncated: String = cap.chars().take(1024).collect();
-            body["caption"] = serde_json::Value::String(truncated);
-        }
-        let url = format!("{}/sendPhoto", self.api_base);
-        let _resp: TelegramResponse<SentMessage> = self.post_json(&url, &body).await?;
-        Ok(())
+        self.send_image_url_with_options(chat_id, image_url, caption, None, None)
+            .await
     }
 
     async fn add_reaction(
@@ -1428,12 +2296,55 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut truncated = text
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn parse_approval_callback(data: &str) -> Option<(ApprovalChoice, u64)> {
+    let mut parts = data.split(':');
+    if parts.next()? != "approval" {
+        return None;
+    }
+    let choice = match parts.next()? {
+        "once" => ApprovalChoice::Once,
+        "session" => ApprovalChoice::Session,
+        "deny" => ApprovalChoice::Deny,
+        _ => return None,
+    };
+    let approval_id = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((choice, approval_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
+
+    struct JsonFieldAbsent(&'static str);
+
+    impl Match for JsonFieldAbsent {
+        fn matches(&self, request: &Request) -> bool {
+            request
+                .body_json::<Value>()
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+                .map(|obj| !obj.contains_key(self.0))
+                .unwrap_or(false)
+        }
+    }
 
     fn test_config() -> TelegramConfig {
         TelegramConfig {
@@ -1447,6 +2358,18 @@ mod tests {
             poll_timeout: 30,
             reply_to_mode: "first".into(),
             reactions: false,
+            fallback_ips: Vec::new(),
+            require_mention: false,
+            guest_mode: false,
+            free_response_chats: Vec::new(),
+            allowed_chats: Vec::new(),
+            group_allowed_chats: Vec::new(),
+            ignored_threads: Vec::new(),
+            allowed_topics: Vec::new(),
+            mention_patterns: Vec::new(),
+            exclusive_bot_mentions: false,
+            observe_unmentioned_group_messages: false,
+            text_batch_delay_ms: DEFAULT_TEXT_BATCH_DELAY_MS,
             bot_username: None,
         }
     }
@@ -1633,6 +2556,265 @@ mod tests {
         assert!(requests.is_empty());
     }
 
+    #[test]
+    fn telegram_network_fallback_ips_filter_and_deduplicate() {
+        let raw = vec![
+            "149.154.167.220".to_string(),
+            "not-valid".to_string(),
+            "149.154.167.220,149.154.167.221".to_string(),
+            "::1".to_string(),
+        ];
+        let addrs = TelegramAdapter::fallback_socket_addrs(&raw);
+        let rendered = addrs
+            .iter()
+            .map(|addr| addr.ip().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(rendered, vec!["149.154.167.220", "149.154.167.221", "::1"]);
+
+        let mut cfg = test_config();
+        cfg.fallback_ips = raw;
+        assert!(TelegramAdapter::new(cfg).is_ok());
+    }
+
+    #[test]
+    fn telegram_group_gating_covers_mentions_guests_threads_and_topics() {
+        let mut cfg = test_config();
+        cfg.bot_username = Some("hermes_bot".into());
+        cfg.require_mention = true;
+        cfg.allowed_chats = vec!["-100".into()];
+        cfg.guest_mode = true;
+        cfg.mention_patterns = vec![r"^\s*chompy\b".into(), "(".into()];
+        cfg.ignored_threads = vec!["31".into()];
+        cfg.allowed_topics = vec!["8".into(), "0".into()];
+        let adapter = test_adapter(cfg);
+
+        let mut msg = make_text_message(
+            1,
+            make_chat(-100, "supergroup"),
+            make_user(11, Some("u")),
+            "hello",
+        );
+        msg.message_thread_id = Some(8);
+        assert!(!adapter.should_process_message(&msg, false));
+
+        msg.text = Some("hi @hermes_bot".into());
+        msg.entities = vec![MessageEntity {
+            entity_type: "mention".into(),
+            offset: 3,
+            length: 11,
+        }];
+        assert!(adapter.should_process_message(&msg, false));
+
+        msg.text = Some("chompy status".into());
+        msg.entities.clear();
+        assert!(adapter.should_process_message(&msg, false));
+
+        msg.message_thread_id = Some(31);
+        assert!(!adapter.should_process_message(&msg, false));
+
+        msg.message_thread_id = Some(9);
+        msg.text = Some("hi @hermes_bot".into());
+        msg.entities = vec![MessageEntity {
+            entity_type: "mention".into(),
+            offset: 3,
+            length: 11,
+        }];
+        assert!(!adapter.should_process_message(&msg, false));
+
+        msg.chat.id = -200;
+        msg.message_thread_id = Some(8);
+        assert!(adapter.should_process_message(&msg, false));
+
+        msg.text = Some("chompy status".into());
+        msg.entities.clear();
+        assert!(!adapter.should_process_message(&msg, false));
+    }
+
+    #[test]
+    fn telegram_text_batcher_aggregates_by_chat_user_and_thread() {
+        let now = Instant::now();
+        let mut batcher = TelegramTextBatcher::new(Duration::from_millis(50));
+        let mut first = IncomingMessage {
+            chat_id: 1,
+            user_id: Some(2),
+            username: None,
+            text: Some("part one".into()),
+            message_id: 10,
+            is_voice: false,
+            is_photo: false,
+            is_sticker: false,
+            is_document: false,
+            voice_file_id: None,
+            photo_file_id: None,
+            sticker_file_id: None,
+            document_file_id: None,
+            document_file_name: None,
+            document_mime_type: None,
+            document_file_size: None,
+            reply_to_message_id: None,
+            message_thread_id: Some(8),
+            chat_type: ChatKind::Private,
+            is_group: false,
+            callback_query_id: None,
+            callback_data: None,
+        };
+        batcher.enqueue_at(first.clone(), now);
+        first.text = Some("part two".into());
+        first.message_id = 11;
+        batcher.enqueue_at(first, now + Duration::from_millis(10));
+        assert!(batcher
+            .drain_ready_at(now + Duration::from_millis(40))
+            .is_empty());
+        let ready = batcher.drain_ready_at(now + Duration::from_millis(70));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].text.as_deref(), Some("part one\npart two"));
+        assert_eq!(batcher.pending_len(), 0);
+    }
+
+    #[test]
+    fn telegram_topic_binding_store_recovers_only_lobby_replies() {
+        let mut store = TelegramTopicBindingStore::default();
+        store.enable("208214988", "user1");
+        store.bind("208214988", "111", "session-a", "user1", None, false);
+        store.bind("208214988", "222", "session-b", "user1", None, false);
+
+        assert_eq!(
+            store.recover_thread_id("208214988", "user1", None),
+            Some("222".into())
+        );
+        assert_eq!(
+            store.recover_thread_id("208214988", "user1", Some("0")),
+            Some("222".into())
+        );
+        assert_eq!(
+            store.recover_thread_id("208214988", "user1", Some("9999")),
+            None
+        );
+        assert_eq!(store.get_by_session("session-b").unwrap().thread_id, "222");
+        assert_eq!(
+            store
+                .list_for_chat("208214988")
+                .into_iter()
+                .map(|binding| binding.thread_id)
+                .collect::<Vec<_>>(),
+            vec!["222", "111"]
+        );
+        store.remove_session("session-b");
+        assert!(store.get("208214988", "222").is_none());
+        store.disable("208214988", "user1");
+        assert!(!store.is_enabled("208214988", "user1"));
+    }
+
+    #[tokio::test]
+    async fn telegram_thread_fallback_retries_without_thread_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/botfake_token_12345/sendMessage"))
+            .and(body_partial_json(serde_json::json!({
+                "message_thread_id": 999
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "description": "Bad Request: message thread not found"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/botfake_token_12345/sendMessage"))
+            .and(JsonFieldAbsent("message_thread_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 77 }
+            })))
+            .mount(&server)
+            .await;
+
+        let mut adapter = test_adapter(test_config());
+        adapter.api_base = format!("{}/botfake_token_12345", server.uri());
+
+        let ids = adapter
+            .send_text_with_keyboard(
+                "123",
+                "hello [world]_1",
+                InlineKeyboardMarkup {
+                    inline_keyboard: vec![vec![InlineKeyboardButton {
+                        text: "Go".into(),
+                        callback_data: Some("go".into()),
+                        url: None,
+                    }]],
+                },
+                Some("MarkdownV2"),
+                Some(55),
+                Some(999),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ids, vec![77]);
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 2);
+        let first: Value = requests[0].body_json().expect("json");
+        assert_eq!(
+            first.pointer("/message_thread_id").and_then(|v| v.as_i64()),
+            Some(999)
+        );
+        let second: Value = requests[1].body_json().expect("json");
+        assert!(second.get("message_thread_id").is_none());
+        assert!(second.get("reply_to_message_id").is_none());
+        assert_eq!(
+            second
+                .pointer("/reply_markup/inline_keyboard/0/0/callback_data")
+                .and_then(|v| v.as_str()),
+            Some("go")
+        );
+        assert_eq!(
+            second.pointer("/parse_mode").and_then(|v| v.as_str()),
+            Some("MarkdownV2")
+        );
+        assert!(second
+            .pointer("/text")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .contains("\\[world\\]\\_1"));
+    }
+
+    #[test]
+    fn telegram_media_method_matches_document_contracts() {
+        assert_eq!(
+            TelegramAdapter::media_method_for_extension("mp3"),
+            ("sendAudio", "audio")
+        );
+        assert_eq!(
+            TelegramAdapter::media_method_for_extension("wav"),
+            ("sendDocument", "document")
+        );
+        assert_eq!(
+            TelegramAdapter::media_method_for_extension("flac"),
+            ("sendDocument", "document")
+        );
+        assert_eq!(
+            TelegramAdapter::media_method_for_extension("mp4"),
+            ("sendVideo", "video")
+        );
+    }
+
+    #[test]
+    fn telegram_approval_callback_parses_and_tracks_state() {
+        assert_eq!(
+            parse_approval_callback("approval:once:42"),
+            Some((ApprovalChoice::Once, 42))
+        );
+        assert_eq!(
+            parse_approval_callback("approval:session:42"),
+            Some((ApprovalChoice::Session, 42))
+        );
+        assert_eq!(
+            parse_approval_callback("approval:deny:42"),
+            Some((ApprovalChoice::Deny, 42))
+        );
+        assert_eq!(parse_approval_callback("model:pick:gpt"), None);
+        assert_eq!(truncate_chars("abcdef", 5), "ab...");
+    }
+
     // -----------------------------------------------------------------------
     // parse_update tests (original, updated for new fields)
     // -----------------------------------------------------------------------
@@ -1664,10 +2846,13 @@ mod tests {
             voice: None,
             photo: None,
             caption: None,
+            entities: Vec::new(),
+            caption_entities: Vec::new(),
             sticker: None,
             document: None,
             reply_to_message: None,
             message_thread_id: None,
+            is_topic_message: None,
         }
     }
 
@@ -1713,10 +2898,13 @@ mod tests {
                 }),
                 photo: None,
                 caption: None,
+                entities: Vec::new(),
+                caption_entities: Vec::new(),
                 sticker: None,
                 document: None,
                 reply_to_message: None,
                 message_thread_id: None,
+                is_topic_message: None,
             }),
             callback_query: None,
         };
@@ -1751,10 +2939,13 @@ mod tests {
                     },
                 ]),
                 caption: Some("my photo".into()),
+                entities: Vec::new(),
+                caption_entities: Vec::new(),
                 sticker: None,
                 document: None,
                 reply_to_message: None,
                 message_thread_id: None,
+                is_topic_message: None,
             }),
             callback_query: None,
         };
@@ -1793,6 +2984,8 @@ mod tests {
                 voice: None,
                 photo: None,
                 caption: None,
+                entities: Vec::new(),
+                caption_entities: Vec::new(),
                 sticker: Some(Sticker {
                     file_id: "sticker_abc".into(),
                     file_unique_id: "su_abc".into(),
@@ -1806,6 +2999,7 @@ mod tests {
                 document: None,
                 reply_to_message: None,
                 message_thread_id: None,
+                is_topic_message: None,
             }),
             callback_query: None,
         };
@@ -1830,6 +3024,8 @@ mod tests {
                 voice: None,
                 photo: None,
                 caption: Some("document caption".into()),
+                entities: Vec::new(),
+                caption_entities: Vec::new(),
                 sticker: None,
                 document: Some(Document {
                     file_id: "doc_abc".into(),
@@ -1840,6 +3036,7 @@ mod tests {
                 }),
                 reply_to_message: None,
                 message_thread_id: None,
+                is_topic_message: None,
             }),
             callback_query: None,
         };
@@ -1873,10 +3070,13 @@ mod tests {
                     voice: None,
                     photo: None,
                     caption: None,
+                    entities: Vec::new(),
+                    caption_entities: Vec::new(),
                     sticker: None,
                     document: None,
                     reply_to_message: None,
                     message_thread_id: None,
+                    is_topic_message: None,
                 }),
                 data: Some("btn_action_1".into()),
                 chat_instance: Some("inst".into()),
@@ -1926,10 +3126,13 @@ mod tests {
             voice: None,
             photo: None,
             caption: None,
+            entities: Vec::new(),
+            caption_entities: Vec::new(),
             sticker: None,
             document: None,
             reply_to_message: None,
             message_thread_id: None,
+            is_topic_message: None,
         };
 
         let update = Update {
@@ -1942,10 +3145,13 @@ mod tests {
                 voice: None,
                 photo: None,
                 caption: None,
+                entities: Vec::new(),
+                caption_entities: Vec::new(),
                 sticker: None,
                 document: None,
                 reply_to_message: Some(Box::new(reply_msg)),
                 message_thread_id: Some(999),
+                is_topic_message: None,
             }),
             callback_query: None,
         };

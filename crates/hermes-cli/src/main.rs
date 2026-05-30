@@ -80,7 +80,10 @@ use hermes_gateway::platforms::qqbot::{QqBotAdapter, QqBotConfig};
 use hermes_gateway::platforms::signal::{SignalAdapter, SignalConfig};
 use hermes_gateway::platforms::slack::{SlackAdapter, SlackConfig};
 use hermes_gateway::platforms::sms::{SmsAdapter, SmsConfig};
-use hermes_gateway::platforms::telegram::{TelegramAdapter, TelegramConfig};
+use hermes_gateway::platforms::telegram::{
+    IncomingMessage as TelegramIncomingMessage, TelegramAdapter, TelegramConfig,
+    TelegramTextBatcher,
+};
 use hermes_gateway::platforms::webhook::{WebhookAdapter, WebhookConfig, WebhookPayload};
 use hermes_gateway::platforms::wecom::{WeComAdapter, WeComConfig};
 use hermes_gateway::platforms::wecom_callback::{
@@ -4059,6 +4062,29 @@ fn build_telegram_config(
         poll_timeout,
         reply_to_mode: reply_to_mode_string(platform_cfg).unwrap_or_else(|| "first".to_string()),
         reactions: extra_bool(platform_cfg, "reactions", false),
+        fallback_ips: extra_string_vec(platform_cfg, "fallback_ips"),
+        require_mention: platform_cfg
+            .require_mention
+            .or_else(|| extra_bool_loose(platform_cfg, "require_mention"))
+            .unwrap_or(false),
+        guest_mode: extra_bool(platform_cfg, "guest_mode", false),
+        free_response_chats: extra_string_vec(platform_cfg, "free_response_chats"),
+        allowed_chats: extra_string_vec(platform_cfg, "allowed_chats"),
+        group_allowed_chats: extra_string_vec(platform_cfg, "group_allowed_chats"),
+        ignored_threads: extra_string_vec(platform_cfg, "ignored_threads"),
+        allowed_topics: extra_string_vec(platform_cfg, "allowed_topics"),
+        mention_patterns: extra_string_vec(platform_cfg, "mention_patterns"),
+        exclusive_bot_mentions: extra_bool(platform_cfg, "exclusive_bot_mentions", false),
+        observe_unmentioned_group_messages: extra_bool(
+            platform_cfg,
+            "observe_unmentioned_group_messages",
+            false,
+        ),
+        text_batch_delay_ms: platform_cfg
+            .extra
+            .get("text_batch_delay_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(750),
         bot_username: None,
     }
 }
@@ -4125,6 +4151,38 @@ fn extra_string_set(platform_cfg: &PlatformConfig, key: &str) -> HashSet<String>
         _ => {}
     }
     values
+}
+
+fn extra_string_vec(platform_cfg: &PlatformConfig, key: &str) -> Vec<String> {
+    let Some(raw) = platform_cfg.extra.get(key) else {
+        return Vec::new();
+    };
+    match raw {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .filter_map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.as_i64().map(|n| n.to_string()))
+                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+            })
+            .flat_map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+        serde_json::Value::String(s) => s
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect(),
+        serde_json::Value::Number(n) => vec![n.to_string()],
+        _ => Vec::new(),
+    }
 }
 
 fn discord_reply_to_mode_string(platform_cfg: &PlatformConfig) -> Option<String> {
@@ -4263,13 +4321,23 @@ fn build_gateway_platform_access_policies(
             .or_else(|| extra_bool_loose(platform_cfg, "require_allowlist_for_slash"))
             .unwrap_or_else(|| platform.eq_ignore_ascii_case("discord") && has_allowlist);
 
+        let mut allowed_channels = extra_string_set(platform_cfg, "allowed_channels");
+        if platform.eq_ignore_ascii_case("telegram") {
+            allowed_channels.extend(extra_string_set(platform_cfg, "allowed_chats"));
+            allowed_channels.extend(extra_string_set(platform_cfg, "group_allowed_chats"));
+        }
+        let mut ignored_channels = extra_string_set(platform_cfg, "ignored_channels");
+        if platform.eq_ignore_ascii_case("telegram") {
+            ignored_channels.extend(extra_string_set(platform_cfg, "ignored_threads"));
+        }
+
         policies.insert(
             platform.to_ascii_lowercase(),
             PlatformAccessPolicy {
                 allowed_users,
                 admin_users,
-                allowed_channels: extra_string_set(platform_cfg, "allowed_channels"),
-                ignored_channels: extra_string_set(platform_cfg, "ignored_channels"),
+                allowed_channels,
+                ignored_channels,
                 group_mode,
                 slash_requires_allowlist,
                 bot_sender_bypasses_allowlist: discord_allow_bots_bypasses_gateway_allowlist(
@@ -4985,44 +5053,108 @@ async fn register_gateway_adapters(
     Ok(())
 }
 
+fn telegram_should_batch_text(msg: &TelegramIncomingMessage) -> bool {
+    msg.text
+        .as_deref()
+        .map(|text| !text.trim().is_empty())
+        .unwrap_or(false)
+        && !msg.is_voice
+        && !msg.is_photo
+        && !msg.is_sticker
+        && !msg.is_document
+        && msg.callback_query_id.is_none()
+        && msg.callback_data.is_none()
+}
+
+fn telegram_gateway_message(msg: TelegramIncomingMessage) -> GatewayIncomingMessage {
+    let text = msg.text.unwrap_or_else(|| {
+        if msg.is_voice {
+            "[voice message]".to_string()
+        } else if msg.is_photo {
+            "[photo message]".to_string()
+        } else {
+            "[unsupported message]".to_string()
+        }
+    });
+    let user_id = msg
+        .user_id
+        .map(|id| id.to_string())
+        .or(msg.username)
+        .unwrap_or_else(|| "unknown".to_string());
+
+    GatewayIncomingMessage {
+        platform: "telegram".to_string(),
+        chat_id: msg.chat_id.to_string(),
+        user_id,
+        text,
+        message_id: Some(msg.message_id.to_string()),
+        is_dm: msg.chat_id > 0,
+    }
+}
+
+async fn route_telegram_message(gateway: &Gateway, msg: TelegramIncomingMessage) {
+    let incoming = telegram_gateway_message(msg);
+    if let Err(err) = gateway.route_message(&incoming).await {
+        tracing::warn!("Failed to route telegram message: {}", err);
+    }
+}
+
 async fn run_telegram_poll_loop(gateway: Arc<Gateway>, adapter: Arc<TelegramAdapter>) {
+    if adapter.config().polling {
+        if let Err(err) = adapter.delete_webhook(false).await {
+            tracing::warn!("Telegram deleteWebhook before polling failed: {}", err);
+        }
+    }
+
+    let batch_delay = std::time::Duration::from_millis(adapter.config().text_batch_delay_ms);
+    let mut text_batcher = TelegramTextBatcher::new(batch_delay);
+
     loop {
         if !adapter.is_running() {
             break;
         }
 
+        for msg in text_batcher.drain_ready() {
+            route_telegram_message(&gateway, msg).await;
+        }
+
         match adapter.get_updates().await {
             Ok(updates) => {
                 for update in updates {
+                    if !adapter.should_process_update(&update) {
+                        continue;
+                    }
                     let Some(msg) = TelegramAdapter::parse_update(&update) else {
                         continue;
                     };
 
-                    let text = msg.text.unwrap_or_else(|| {
-                        if msg.is_voice {
-                            "[voice message]".to_string()
-                        } else if msg.is_photo {
-                            "[photo message]".to_string()
-                        } else {
-                            "[unsupported message]".to_string()
+                    if let (Some(callback_id), Some(callback_data)) =
+                        (&msg.callback_query_id, &msg.callback_data)
+                    {
+                        if callback_data.starts_with("approval:") {
+                            if let Err(err) = adapter
+                                .handle_approval_callback(callback_id, callback_data)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to handle telegram approval callback: {}",
+                                    err
+                                );
+                            }
+                            continue;
                         }
-                    });
-                    let user_id = msg
-                        .user_id
-                        .map(|id| id.to_string())
-                        .or(msg.username)
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let incoming = GatewayIncomingMessage {
-                        platform: "telegram".to_string(),
-                        chat_id: msg.chat_id.to_string(),
-                        user_id,
-                        text,
-                        message_id: Some(msg.message_id.to_string()),
-                        is_dm: msg.chat_id > 0,
-                    };
+                    }
 
-                    if let Err(err) = gateway.route_message(&incoming).await {
-                        tracing::warn!("Failed to route telegram message: {}", err);
+                    if batch_delay.is_zero() || !telegram_should_batch_text(&msg) {
+                        route_telegram_message(&gateway, msg).await;
+                    } else {
+                        text_batcher.enqueue(msg);
+                    }
+                }
+                if text_batcher.pending_len() > 0 && !batch_delay.is_zero() {
+                    tokio::time::sleep(batch_delay).await;
+                    for msg in text_batcher.drain_ready() {
+                        route_telegram_message(&gateway, msg).await;
                     }
                 }
             }
@@ -14249,6 +14381,46 @@ mod tests {
         platform
             .extra
             .insert("reactions".to_string(), serde_json::json!(true));
+        platform.extra.insert(
+            "fallback_ips".to_string(),
+            serde_json::json!("149.154.167.220,::1"),
+        );
+        platform.require_mention = Some(true);
+        platform
+            .extra
+            .insert("guest_mode".to_string(), serde_json::json!(true));
+        platform.extra.insert(
+            "free_response_chats".to_string(),
+            serde_json::json!(["-100", "-101"]),
+        );
+        platform
+            .extra
+            .insert("allowed_chats".to_string(), serde_json::json!("-200, -201"));
+        platform.extra.insert(
+            "group_allowed_chats".to_string(),
+            serde_json::json!(["-300", "-301"]),
+        );
+        platform
+            .extra
+            .insert("ignored_threads".to_string(), serde_json::json!([31, "32"]));
+        platform
+            .extra
+            .insert("allowed_topics".to_string(), serde_json::json!([8, "0"]));
+        platform.extra.insert(
+            "mention_patterns".to_string(),
+            serde_json::json!(["^\\s*chompy\\b", "@hermes"]),
+        );
+        platform.extra.insert(
+            "exclusive_bot_mentions".to_string(),
+            serde_json::json!(true),
+        );
+        platform.extra.insert(
+            "observe_unmentioned_group_messages".to_string(),
+            serde_json::json!(true),
+        );
+        platform
+            .extra
+            .insert("text_batch_delay_ms".to_string(), serde_json::json!(125));
 
         let cfg = build_telegram_config(&platform, "token".to_string());
         assert_eq!(
@@ -14258,6 +14430,18 @@ mod tests {
         assert_eq!(cfg.webhook_secret.as_deref(), Some("env-secret"));
         assert_eq!(cfg.reply_to_mode, "all");
         assert!(cfg.reactions);
+        assert_eq!(cfg.fallback_ips, vec!["149.154.167.220", "::1"]);
+        assert!(cfg.require_mention);
+        assert!(cfg.guest_mode);
+        assert_eq!(cfg.free_response_chats, vec!["-100", "-101"]);
+        assert_eq!(cfg.allowed_chats, vec!["-200", "-201"]);
+        assert_eq!(cfg.group_allowed_chats, vec!["-300", "-301"]);
+        assert_eq!(cfg.ignored_threads, vec!["31", "32"]);
+        assert_eq!(cfg.allowed_topics, vec!["8", "0"]);
+        assert_eq!(cfg.mention_patterns, vec![r"^\s*chompy\b", "@hermes"]);
+        assert!(cfg.exclusive_bot_mentions);
+        assert!(cfg.observe_unmentioned_group_messages);
+        assert_eq!(cfg.text_batch_delay_ms, 125);
 
         match previous_secret {
             Some(value) => std::env::set_var("TELEGRAM_WEBHOOK_SECRET", value),
@@ -14298,6 +14482,35 @@ mod tests {
         assert!(policy.allowed_channels.contains("*"));
         assert!(policy.ignored_channels.contains("222"));
         assert!(policy.ignored_channels.contains("333"));
+    }
+
+    #[test]
+    fn gateway_platform_access_policy_reads_telegram_chat_lists() {
+        let mut config = hermes_config::GatewayConfig::default();
+        let mut telegram = PlatformConfig {
+            enabled: true,
+            ..PlatformConfig::default()
+        };
+        telegram
+            .extra
+            .insert("allowed_chats".to_string(), serde_json::json!("-100, *"));
+        telegram.extra.insert(
+            "group_allowed_chats".to_string(),
+            serde_json::json!(["-200", -300]),
+        );
+        telegram
+            .extra
+            .insert("ignored_threads".to_string(), serde_json::json!(["31", 32]));
+        config.platforms.insert("telegram".to_string(), telegram);
+
+        let policies = build_gateway_platform_access_policies(&config);
+        let policy = policies.get("telegram").expect("telegram policy");
+        assert!(policy.allowed_channels.contains("-100"));
+        assert!(policy.allowed_channels.contains("*"));
+        assert!(policy.allowed_channels.contains("-200"));
+        assert!(policy.allowed_channels.contains("-300"));
+        assert!(policy.ignored_channels.contains("31"));
+        assert!(policy.ignored_channels.contains("32"));
     }
 
     #[test]

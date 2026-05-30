@@ -566,7 +566,11 @@ async fn send_message(
         is_dm: false,
         interaction_id: None,
         interaction_token: None,
-    role_ids: vec![],
+        role_ids: vec![],
+        parent_channel_id: None,
+        channel_prompt: None,
+        channel_skills: vec![],
+        channel_topic: None,
     };
 
     state
@@ -637,7 +641,11 @@ async fn exec_command(
         is_dm: false,
         interaction_id: None,
         interaction_token: None,
-    role_ids: vec![],
+        role_ids: vec![],
+        parent_channel_id: None,
+        channel_prompt: None,
+        channel_skills: vec![],
+        channel_topic: None,
     };
 
     state

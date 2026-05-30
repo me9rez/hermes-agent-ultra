@@ -263,7 +263,16 @@ fn lookup_home_for_username(username: &str) -> Option<PathBuf> {
 
 fn resolve_path(input: &str) -> Result<PathBuf, AgentError> {
     if !input.starts_with('~') {
-        return Ok(PathBuf::from(input));
+        let path = PathBuf::from(input);
+        if path.is_absolute() {
+            return Ok(path);
+        }
+        if let Some(cwd) = std::env::var_os("TERMINAL_CWD") {
+            if !cwd.is_empty() {
+                return Ok(PathBuf::from(cwd).join(path));
+            }
+        }
+        return Ok(path);
     }
 
     let rest = &input[1..];
@@ -1216,6 +1225,33 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_relative_file_paths_use_terminal_cwd() {
+        let td = tempdir().unwrap();
+        let terminal_cwd = td.path().join("worktree");
+        std::fs::create_dir_all(&terminal_cwd).unwrap();
+        let _cwd_guard = EnvGuard::set("TERMINAL_CWD", terminal_cwd.to_string_lossy().as_ref());
+        let backend = LocalBackend::default();
+
+        backend
+            .write_file("nested/file.txt", "from terminal cwd")
+            .await
+            .unwrap();
+
+        let expected = terminal_cwd.join("nested/file.txt");
+        assert_eq!(
+            std::fs::read_to_string(&expected).unwrap(),
+            "from terminal cwd"
+        );
+        assert_eq!(
+            backend
+                .read_file("nested/file.txt", None, None)
+                .await
+                .unwrap(),
+            "from terminal cwd"
+        );
     }
 
     #[tokio::test]

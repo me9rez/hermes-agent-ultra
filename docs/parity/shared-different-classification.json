@@ -318,6 +318,76 @@
       "ticket": 25
     },
     {
+      "path": "tests/tools/test_credential_files.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream credential-file mount behavior is covered by Rust credential file contracts for path/name/string entries, missing reporting, path precedence, traversal rejection, absolute-path rejection, symlink escape rejection, filtered hidden skill components, and component-boundary symlink checks.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_file_operations.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream file operation safety behavior is covered by Rust file-tool contracts for pagination normalization, sensitive write-deny paths, hidden descendant search exclusion, hidden-root visible file search, and JSON search output modes.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_file_ops_cwd_tracking.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream live-cwd behavior is covered by Rust LocalBackend and file-tool path contracts that resolve relative file operations against TERMINAL_CWD or the live terminal cwd before process cwd.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_file_read_guards.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream read safety guards are covered by Rust contracts for device-path rejection before backend I/O, unbounded read size limits with offset/limit guidance, and internal read_file status text write rejection.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_file_tools.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream file tool facade behavior is covered by Rust handler contracts for read/write schemas, missing parameter errors, normalized read/search pagination, patch backend behavior, search output modes, and status-dominated write rejection.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_hidden_dir_filter.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream hidden directory filtering is covered by Rust component-based hidden path contracts that catch .git, .github, and .hub on Unix and Windows-style paths without rejecting unrelated dotted skill names.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_resolve_path.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream path resolution behavior is covered by Rust resolve_tool_path and LocalBackend contracts for absolute paths, tilde expansion, relative TERMINAL_CWD joins, live cwd precedence, and lexical parent cleanup.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_search_hidden_dirs.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream hidden search exclusion is covered by Rust LocalSearchBackend contracts that skip .hub/.git-style hidden descendants while preserving visible files under a hidden root and visible skill content.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_symlink_prefix_confusion.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream symlink prefix-confusion regression is covered by Rust root-boundary contracts using Path strip_prefix semantics so sibling directories sharing a prefix escape while real subpaths and the root itself pass.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_write_deny.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream write-deny behavior is covered by Rust CredentialGuard contracts for /etc sensitive files, sudoers/systemd prefixes, SSH/AWS/GnuPG/Kube home prefixes, shell/package credential files, profile-aware HERMES_HOME/.env, and allowed project/config paths.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "website/docs",
       "classification": "policy_only",
       "rationale": "Documentation-site content differs by project positioning and release policy; runtime behavior is unaffected.",

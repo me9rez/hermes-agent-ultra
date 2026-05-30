@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use hermes_core::{tool_schema, JsonSchema, TerminalBackend, ToolError, ToolHandler, ToolSchema};
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use crate::credential_guard::CredentialGuard;
@@ -16,6 +16,9 @@ const DEFAULT_READ_LIMIT: i64 = 500;
 const MAX_READ_LIMIT: i64 = 2000;
 const DEFAULT_SEARCH_OFFSET: i64 = 0;
 const DEFAULT_SEARCH_LIMIT: i64 = 50;
+pub const DEFAULT_MAX_READ_CHARS: usize = 200_000;
+pub const READ_DEDUP_STATUS_MESSAGE: &str =
+    "File unchanged since last read; content omitted. Use offset/limit or edit only from known content.";
 
 fn parse_int_param(raw: Option<&Value>, default: i64) -> i64 {
     let Some(v) = raw else {
@@ -57,6 +60,101 @@ fn normalize_search_pagination(
     (offset, limit)
 }
 
+pub fn is_blocked_device_path(path: &Path) -> bool {
+    let raw = path.to_string_lossy();
+    matches!(
+        raw.as_ref(),
+        "/dev/zero"
+            | "/dev/random"
+            | "/dev/urandom"
+            | "/dev/stdin"
+            | "/dev/stdout"
+            | "/dev/stderr"
+            | "/dev/tty"
+            | "/dev/console"
+            | "/dev/fd/0"
+            | "/dev/fd/1"
+            | "/dev/fd/2"
+    ) || matches!(
+        raw.as_ref(),
+        "/proc/self/fd/0" | "/proc/self/fd/1" | "/proc/self/fd/2"
+    ) || RegexLikeProcFd::matches(&raw)
+}
+
+struct RegexLikeProcFd;
+
+impl RegexLikeProcFd {
+    fn matches(raw: &str) -> bool {
+        let Some(rest) = raw.strip_prefix("/proc/") else {
+            return false;
+        };
+        let Some((pid, fd)) = rest.split_once("/fd/") else {
+            return false;
+        };
+        !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()) && matches!(fd, "0" | "1" | "2")
+    }
+}
+
+fn expand_user_path(path: &str) -> Option<PathBuf> {
+    if path == "~" {
+        return std::env::var_os("HOME").map(PathBuf::from);
+    }
+    path.strip_prefix("~/").and_then(|rest| {
+        std::env::var_os("HOME").map(|home| {
+            let mut expanded = PathBuf::from(home);
+            expanded.push(rest);
+            expanded
+        })
+    })
+}
+
+fn clean_path(path: PathBuf) -> PathBuf {
+    let mut cleaned = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                cleaned.pop();
+            }
+            Component::Normal(part) => cleaned.push(part),
+            Component::RootDir | Component::Prefix(_) => cleaned.push(component.as_os_str()),
+        }
+    }
+    if cleaned.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        cleaned
+    }
+}
+
+/// Resolve file-tool paths the same way the Python tool facade did:
+/// user expansion first, absolute paths unchanged, then live terminal cwd,
+/// then `TERMINAL_CWD`, then process cwd for relative paths.
+pub fn resolve_tool_path(
+    input: &str,
+    terminal_cwd: Option<&Path>,
+    live_cwd: Option<&Path>,
+) -> PathBuf {
+    let expanded = expand_user_path(input).unwrap_or_else(|| PathBuf::from(input));
+    if expanded.is_absolute() {
+        return clean_path(expanded);
+    }
+
+    let base = live_cwd
+        .or(terminal_cwd)
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    clean_path(base.join(expanded))
+}
+
+pub fn content_looks_like_internal_read_status(content: &str) -> bool {
+    if !content.contains(READ_DEDUP_STATUS_MESSAGE) {
+        return false;
+    }
+    content.chars().count() <= READ_DEDUP_STATUS_MESSAGE.chars().count() + 128
+}
+
 // ---------------------------------------------------------------------------
 // ReadFileHandler
 // ---------------------------------------------------------------------------
@@ -80,14 +178,31 @@ impl ToolHandler for ReadFileHandler {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParams("Missing 'path' parameter".into()))?;
 
+        if is_blocked_device_path(Path::new(path)) {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Refusing to read device file '{}'",
+                path
+            )));
+        }
+
         CredentialGuard::new().check_read_access(Path::new(path))?;
 
         let (offset, limit) = normalize_read_pagination(params.get("offset"), params.get("limit"));
 
-        self.backend
+        let content = self
+            .backend
             .read_file(path, offset, limit)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        if limit.is_none() && content.chars().count() > DEFAULT_MAX_READ_CHARS {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Read safety limit exceeded for '{}'; use offset and limit to read smaller chunks",
+                path
+            )));
+        }
+
+        Ok(content)
     }
 
     fn schema(&self) -> ToolSchema {
@@ -149,6 +264,12 @@ impl ToolHandler for WriteFileHandler {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParams("Missing 'content' parameter".into()))?;
+
+        if content_looks_like_internal_read_status(content) {
+            return Err(ToolError::ExecutionFailed(
+                "Write denied: content appears to be internal read_file status text".into(),
+            ));
+        }
 
         CredentialGuard::new().check_write_access(Path::new(path), content)?;
 
@@ -545,5 +666,143 @@ mod tests {
         let (offset, limit) = normalize_search_pagination(Some(&json!(3)), Some(&json!(0)));
         assert_eq!(offset, Some(3));
         assert_eq!(limit, Some(1));
+    }
+
+    #[test]
+    fn blocked_device_detection_matches_python_guard() {
+        for path in [
+            "/dev/zero",
+            "/dev/random",
+            "/dev/urandom",
+            "/dev/stdin",
+            "/dev/tty",
+            "/dev/console",
+            "/dev/stdout",
+            "/dev/stderr",
+            "/dev/fd/0",
+            "/dev/fd/1",
+            "/dev/fd/2",
+            "/proc/self/fd/0",
+            "/proc/12345/fd/2",
+        ] {
+            assert!(is_blocked_device_path(Path::new(path)), "{path}");
+        }
+
+        for path in [
+            "/dev/null",
+            "/dev/sda1",
+            "/proc/self/fd/3",
+            "/proc/self/maps",
+            "/tmp/test.py",
+            "/home/user/.bashrc",
+        ] {
+            assert!(!is_blocked_device_path(Path::new(path)), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_file_handler_rejects_device_paths_before_backend_io() {
+        let handler = ReadFileHandler::new(Arc::new(MockBackend));
+        let err = handler
+            .execute(json!({"path": "/dev/zero"}))
+            .await
+            .expect_err("device path should be rejected");
+        assert!(err.to_string().contains("device file"));
+    }
+
+    #[tokio::test]
+    async fn read_file_handler_rejects_oversized_unbounded_reads() {
+        struct BigBackend;
+        #[async_trait]
+        impl TerminalBackend for BigBackend {
+            async fn execute_command(
+                &self,
+                _cmd: &str,
+                _timeout: Option<u64>,
+                _workdir: Option<&str>,
+                _bg: bool,
+                _pty: bool,
+            ) -> Result<CommandOutput, AgentError> {
+                unreachable!()
+            }
+            async fn read_file(
+                &self,
+                _path: &str,
+                _offset: Option<u64>,
+                _limit: Option<u64>,
+            ) -> Result<String, AgentError> {
+                Ok("x".repeat(DEFAULT_MAX_READ_CHARS + 1))
+            }
+            async fn write_file(&self, _path: &str, _content: &str) -> Result<(), AgentError> {
+                unreachable!()
+            }
+            async fn file_exists(&self, _path: &str) -> Result<bool, AgentError> {
+                Ok(true)
+            }
+        }
+
+        let handler = ReadFileHandler::new(Arc::new(BigBackend));
+        let err = handler
+            .execute(json!({"path": "/tmp/huge.txt"}))
+            .await
+            .expect_err("oversized read should be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("safety limit"));
+        assert!(msg.contains("offset and limit"));
+
+        let bounded = handler
+            .execute(json!({"path": "/tmp/huge.txt", "limit": 1}))
+            .await
+            .expect("explicit limit delegates to backend");
+        assert_eq!(bounded.len(), DEFAULT_MAX_READ_CHARS + 1);
+    }
+
+    #[test]
+    fn internal_read_status_write_guard_is_status_dominated_only() {
+        assert!(content_looks_like_internal_read_status(
+            READ_DEDUP_STATUS_MESSAGE
+        ));
+        assert!(content_looks_like_internal_read_status(&format!(
+            "Note: {READ_DEDUP_STATUS_MESSAGE}\n\n(continuing.)"
+        )));
+        let documented = format!(
+            "# Skill reference\n\n    {READ_DEDUP_STATUS_MESSAGE}\n\n{}",
+            "This is documentation content. ".repeat(200)
+        );
+        assert!(!content_looks_like_internal_read_status(&documented));
+    }
+
+    #[tokio::test]
+    async fn write_file_handler_rejects_internal_read_status_text() {
+        let handler = WriteFileHandler::new(Arc::new(MockBackend));
+        let err = handler
+            .execute(json!({"path": "/tmp/out.txt", "content": READ_DEDUP_STATUS_MESSAGE}))
+            .await
+            .expect_err("status text should be rejected");
+        assert!(err.to_string().contains("internal read_file status text"));
+    }
+
+    #[test]
+    fn resolve_tool_path_prefers_live_cwd_then_terminal_cwd() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let start = tmp.path().join("start");
+        let live = tmp.path().join("worktree");
+        std::fs::create_dir_all(&start).expect("start");
+        std::fs::create_dir_all(&live).expect("live");
+
+        assert_eq!(
+            resolve_tool_path("nested/file.txt", Some(&start), Some(&live)),
+            live.join("nested/file.txt")
+        );
+        assert_eq!(
+            resolve_tool_path("a/../b/file.txt", Some(&start), None),
+            start.join("b/file.txt")
+        );
+
+        let absolute = tmp.path().join("already-absolute.txt");
+        assert_eq!(
+            resolve_tool_path(absolute.to_str().unwrap(), Some(&start), Some(&live)),
+            absolute
+        );
     }
 }

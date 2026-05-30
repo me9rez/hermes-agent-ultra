@@ -1382,9 +1382,23 @@
       "ticket": 25
     },
     {
+      "path": "tests/tools/test_skill_provenance.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream skill write-origin ContextVar intent is covered by Rust write-origin provenance guards with foreground fallback, nested restoration, background-review detection, and thread-isolated scope tests.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/tools/test_skill_size_limits.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream managed skill content-size guard intent is covered by Rust SkillManager MAX_SKILL_CONTENT_CHARS tests while hand-placed skill files remain loadable through the store path.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_skill_usage.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream skill usage sidecar, curator provenance filtering, protected bundled/hub exclusions, archiving, restore, pin/state, and agent-created reporting intent is covered by Rust SkillUsageRecord and usage module contract tests.",
       "owner": "sheawinkler",
       "ticket": 25
     },
@@ -1406,6 +1420,20 @@
       "path": "tests/tools/test_skills_hub.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream skills hub trust, content hashing, and remote skill integrity intent is covered by Rust SkillsHubClient search/download/upload/update contracts, Ed25519 signature verification, trusted source resolution, and scan-before-use policy; Python source-adapter breadth remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_skills_hub_clawhub.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream ClawHub listing/detail/search repair/version/file mapping intent is covered by Rust ClawHub registry metadata parsing, exact-slug repair, hyphenated query normalization, latest-version extraction, and inline/raw file reference contracts.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/tools/test_skills_sync.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream bundled skill manifest sync/reset/optional provenance intent is covered by Rust sync contracts for v1/v2 manifests, stable hashes, category-preserving copy, collision non-poisoning, user-modified protection, reset/restore, and official optional lock backfill.",
       "owner": "sheawinkler",
       "ticket": 25
     },

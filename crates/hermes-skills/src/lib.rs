@@ -6,8 +6,11 @@
 
 mod guard;
 mod hub;
+mod provenance;
 mod skill;
 mod store;
+mod sync;
+mod usage;
 mod version;
 
 pub use guard::{
@@ -16,7 +19,27 @@ pub use guard::{
     SkillScanFinding, SkillScanReport, SkillScanVerdict, SkillTrustLevel,
     MAX_SINGLE_SKILL_FILE_BYTES, MAX_SKILL_FILE_COUNT,
 };
-pub use hub::{SkillUpdate, SkillsHubClient};
+pub use hub::{
+    clawhub_file_refs, clawhub_finalize_search_results, clawhub_latest_version,
+    clawhub_meta_from_payload, clawhub_metas_from_listing, ClawHubBundle, ClawHubFileRef,
+    RegistrySkillMeta, SkillUpdate, SkillsHubClient,
+};
+pub use provenance::{
+    get_current_write_origin, is_background_review, normalize_write_origin,
+    set_current_write_origin, WriteOriginGuard, ASSISTANT_TOOL, BACKGROUND_REVIEW, FOREGROUND,
+};
 pub use skill::{SkillError, SkillManager, MAX_SKILL_CONTENT_CHARS};
 pub use store::{FileSkillStore, SkillStore, MAX_SKILL_NAME_LENGTH};
+pub use sync::{
+    compute_relative_dest, dir_hash, discover_bundled_skills, read_manifest, read_skill_name,
+    reset_bundled_skill, restore_official_optional_skill, sync_skills, write_manifest,
+    BundledSkill, OfficialOptionalRestoreResult, SkillResetResult, SkillSyncConfig,
+    SkillSyncResult,
+};
+pub use usage::{
+    agent_created_report, archive_skill, bump_patch, bump_use, bump_view, forget, get_record,
+    is_agent_created, is_protected_skill, list_agent_created_skill_names, load_usage,
+    mark_agent_created, restore_skill, save_usage, set_pinned, set_state, usage_file,
+    SkillUsageRecord, SkillUsageReportRow, STATE_ACTIVE, STATE_ARCHIVED, STATE_STALE,
+};
 pub use version::{compare_versions, compute_version, track_change, SkillChange, SkillVersion};

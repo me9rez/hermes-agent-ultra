@@ -1978,6 +1978,7 @@ dependencies = [
  "ed25519-dalek",
  "hermes-core",
  "jsonwebtoken",
+ "md5",
  "minijinja",
  "regex",
  "reqwest",

@@ -15,47 +15,48 @@ use std::{
 
 use bytes::Bytes;
 use hermes_agent::{
-    plugins::PluginManifest, split_messages_for_run_conversation, RunConversationParams,
+    RunConversationParams, plugins::PluginManifest, split_messages_for_run_conversation,
 };
 use hermes_core::AgentError;
 use hermes_intelligence::model_metadata::{get_model_context_length, get_model_info};
 use hermes_intelligence::models_dev::default_client;
-use hermes_intelligence::{build_swarm_execution_plan, swarm_runtime_status, SwarmExecutionMode};
-use hermes_tools::tools::messaging::MessagingSessionContext;
+use hermes_intelligence::{SwarmExecutionMode, build_swarm_execution_plan, swarm_runtime_status};
 use hermes_tools::ToolPolicyEngine;
+use hermes_tools::tools::messaging::MessagingSessionContext;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::alpha_runtime::{
-    append_counterfactual, append_objective_learning_entry, build_objective_dag_from_contract,
-    canonical_objective_behavior_mode, canonical_objective_lifecycle_status,
-    clear_objective_contract, clear_objective_dag, clear_objective_learning_ledger,
-    enqueue_loop_event, ensure_alpha_runtime_bootstrap, ensure_trading_runtime_bootstrap,
-    load_alpha_loops, load_claim_verifier_policy, load_contextlattice_policy,
-    load_last_trading_alpha_report, load_objective_contract, load_objective_dag,
-    load_objective_ensemble_policy, load_objective_eval_trend, load_objective_learning_ledger,
-    load_objective_profile, load_objective_simulation_policy, load_quorum_policy,
-    objective_lifecycle_is_active, objective_profile_specialized_for, recover_orphan_loop_events,
-    refresh_trading_alpha_report, render_mission_board, render_trading_alpha_board,
-    replay_loop_queue, reset_objective_profile_generalized, set_claim_verifier_enabled,
-    set_contextlattice_policy_mode, set_objective_contract_behavior_mode,
-    set_objective_contract_lifecycle_status, set_objective_ensemble_mode, set_objective_profile,
-    set_objective_simulation_mode, set_quorum_policy, summarize_objective_contract,
-    upsert_objective_contract, utility_terms_from_contract, ObjectiveLearningLedgerEntry,
+    ObjectiveLearningLedgerEntry, append_counterfactual, append_objective_learning_entry,
+    build_objective_dag_from_contract, canonical_objective_behavior_mode,
+    canonical_objective_lifecycle_status, clear_objective_contract, clear_objective_dag,
+    clear_objective_learning_ledger, enqueue_loop_event, ensure_alpha_runtime_bootstrap,
+    ensure_trading_runtime_bootstrap, load_alpha_loops, load_claim_verifier_policy,
+    load_contextlattice_policy, load_last_trading_alpha_report, load_objective_contract,
+    load_objective_dag, load_objective_ensemble_policy, load_objective_eval_trend,
+    load_objective_learning_ledger, load_objective_profile, load_objective_simulation_policy,
+    load_quorum_policy, objective_lifecycle_is_active, objective_profile_specialized_for,
+    recover_orphan_loop_events, refresh_trading_alpha_report, render_mission_board,
+    render_trading_alpha_board, replay_loop_queue, reset_objective_profile_generalized,
+    set_claim_verifier_enabled, set_contextlattice_policy_mode,
+    set_objective_contract_behavior_mode, set_objective_contract_lifecycle_status,
+    set_objective_ensemble_mode, set_objective_profile, set_objective_simulation_mode,
+    set_quorum_policy, summarize_objective_contract, upsert_objective_contract,
+    utility_terms_from_contract,
 };
 use crate::app::{App, PetDock, PetSettings};
 use crate::kanban::{
-    add_task, archive_done, claim_task, create_or_select_board, ensure_board, find_task_mut,
-    lane_counts, load_store, maybe_checkpoint_to_contextlattice, move_task, save_store,
-    set_blocked, KanbanActionInput, KanbanBoard, KanbanLane, NewKanbanTaskInput,
+    KanbanActionInput, KanbanBoard, KanbanLane, NewKanbanTaskInput, add_task, archive_done,
+    claim_task, create_or_select_board, ensure_board, find_task_mut, lane_counts, load_store,
+    maybe_checkpoint_to_contextlattice, move_task, save_store, set_blocked,
 };
 use crate::model_switch::{
     cached_provider_catalog_status, curated_provider_slugs, normalize_provider_model,
     provider_model_ids,
 };
 use crate::pairing_store::{PairingStatus, PairingStore};
-use crate::skin_engine::{canonical_skin_name, BUILTIN_SKINS};
+use crate::skin_engine::{BUILTIN_SKINS, canonical_skin_name};
 use hermes_config::{GatewayConfig, LlmProviderConfig};
 
 // ---------------------------------------------------------------------------
@@ -253,7 +254,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/qos",
         "Provider QoS router controls (`status|health|autotune [plan|apply]`)",
     ),
-    ("/image", "Attach/clear an image hint consumed by next prompt"),
+    (
+        "/image",
+        "Attach/clear an image hint consumed by next prompt",
+    ),
     ("/config", "Show or modify configuration"),
     (
         "/autocompact",
@@ -1287,10 +1291,8 @@ fn skill_guard_enforce_bundle(
     files: &[(String, Bytes)],
     force: bool,
 ) -> Result<(), AgentError> {
-    let file_vec: Vec<(String, Vec<u8>)> = files
-        .iter()
-        .map(|(p, b)| (p.clone(), b.to_vec()))
-        .collect();
+    let file_vec: Vec<(String, Vec<u8>)> =
+        files.iter().map(|(p, b)| (p.clone(), b.to_vec())).collect();
     hermes_skills::SkillGuard::enforce_install_bundle(install_name, source, &file_vec, force)
         .map_err(|e| AgentError::Config(e.to_string()))
 }
@@ -4341,40 +4343,35 @@ const BACKEND_BEST_PRACTICE_PROFILES: &[BackendBestPracticeProfile] = &[
         provider: "vllm",
         profile: "balanced",
         summary: "Default SOTA profile for stable throughput and latency.",
-        launch_hint:
-            "vllm serve MODEL --enable-prefix-caching --enable-chunked-prefill --gpu-memory-utilization 0.88",
+        launch_hint: "vllm serve MODEL --enable-prefix-caching --enable-chunked-prefill --gpu-memory-utilization 0.88",
         env_overrides: VLLM_PROFILE_BALANCED_ENV,
     },
     BackendBestPracticeProfile {
         provider: "vllm",
         profile: "throughput",
         summary: "Higher concurrency profile for heavy parallel workloads.",
-        launch_hint:
-            "vllm serve MODEL --enable-prefix-caching --max-num-seqs 256 --gpu-memory-utilization 0.92",
+        launch_hint: "vllm serve MODEL --enable-prefix-caching --max-num-seqs 256 --gpu-memory-utilization 0.92",
         env_overrides: VLLM_PROFILE_THROUGHPUT_ENV,
     },
     BackendBestPracticeProfile {
         provider: "vllm",
         profile: "reliability",
         summary: "Lower-pressure profile tuned for long sessions and fewer OOM events.",
-        launch_hint:
-            "vllm serve MODEL --max-num-seqs 64 --gpu-memory-utilization 0.80 --disable-chunked-prefill",
+        launch_hint: "vllm serve MODEL --max-num-seqs 64 --gpu-memory-utilization 0.80 --disable-chunked-prefill",
         env_overrides: VLLM_PROFILE_RELIABILITY_ENV,
     },
     BackendBestPracticeProfile {
         provider: "llama-cpp",
         profile: "balanced",
         summary: "General local GGUF serving profile with predictable latency.",
-        launch_hint:
-            "llama-server -m MODEL.gguf -c 8192 -t 8 -b 512 --host 127.0.0.1 --port 8080",
+        launch_hint: "llama-server -m MODEL.gguf -c 8192 -t 8 -b 512 --host 127.0.0.1 --port 8080",
         env_overrides: LLAMA_CPP_PROFILE_BALANCED_ENV,
     },
     BackendBestPracticeProfile {
         provider: "mlx",
         profile: "balanced",
         summary: "Apple Silicon profile prioritizing cache reuse and compact memory.",
-        launch_hint:
-            "python -m mlx_lm.server --model mlx-community/Qwen3-8B-4bit --host 127.0.0.1 --port 8080",
+        launch_hint: "python -m mlx_lm.server --model mlx-community/Qwen3-8B-4bit --host 127.0.0.1 --port 8080",
         env_overrides: MLX_PROFILE_BALANCED_ENV,
     },
     BackendBestPracticeProfile {
@@ -4388,16 +4385,14 @@ const BACKEND_BEST_PRACTICE_PROFILES: &[BackendBestPracticeProfile] = &[
         provider: "sglang",
         profile: "balanced",
         summary: "SGLang cache-first profile for sustained request loads.",
-        launch_hint:
-            "python -m sglang.launch_server --model-path MODEL --host 127.0.0.1 --port 30000",
+        launch_hint: "python -m sglang.launch_server --model-path MODEL --host 127.0.0.1 --port 30000",
         env_overrides: SGLANG_PROFILE_BALANCED_ENV,
     },
     BackendBestPracticeProfile {
         provider: "tgi",
         profile: "balanced",
         summary: "Text-Generation-Inference profile balancing batch depth and tail latency.",
-        launch_hint:
-            "text-generation-launcher --model-id MODEL --port 8082 --max-batch-total-tokens 32768",
+        launch_hint: "text-generation-launcher --model-id MODEL --port 8082 --max-batch-total-tokens 32768",
         env_overrides: TGI_PROFILE_BALANCED_ENV,
     },
     BackendBestPracticeProfile {
@@ -4657,7 +4652,8 @@ fn handle_model_backend_command(app: &mut App, args: &[&str]) -> Result<CommandR
             }
             crate::env_vars::set_var("HERMES_LOCAL_BACKEND_PROFILE", row.profile);
             crate::env_vars::set_var("HERMES_LOCAL_BACKEND_PROVIDER", row.provider);
-            let persisted = persist_backend_profile_env(row.provider, row.profile, row.env_overrides)?;
+            let persisted =
+                persist_backend_profile_env(row.provider, row.profile, row.env_overrides)?;
             let (current_provider, _) = model_current_provider_and_id(&app.current_model);
             if current_provider == row.provider {
                 let current = app.current_model.clone();
@@ -4918,7 +4914,7 @@ fn parse_skills_slash_invocation(args: &[&str]) -> Result<SkillsSlashInvocation,
             return Err(format!(
                 "Unknown /skills subcommand '{}'. Use `/skills list`, `/skills quality`, or `/skills search <query>`.",
                 action
-            ))
+            ));
         }
     };
 
@@ -5568,11 +5564,7 @@ fn handle_compress_rules_command(
                 .get(1)
                 .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "apply" | "--apply"))
             {
-                let target = args
-                    .get(2)
-                    .copied()
-                    .unwrap_or("user")
-                    .to_ascii_lowercase();
+                let target = args.get(2).copied().unwrap_or("user").to_ascii_lowercase();
                 let path = match resolve_compression_plane_path(&target) {
                     Ok(path) => path,
                     Err(err) => {
@@ -5648,7 +5640,10 @@ fn handle_compress_rules_command(
                 return Ok(CommandResult::Handled);
             };
             let value = value_raw.parse::<usize>().map_err(|_| {
-                AgentError::Config(format!("Invalid value '{}' (expected positive integer).", value_raw))
+                AgentError::Config(format!(
+                    "Invalid value '{}' (expected positive integer).",
+                    value_raw
+                ))
             })?;
             let target = plane_name.trim().to_ascii_lowercase();
             let path = match resolve_compression_plane_path(&target) {
@@ -5686,9 +5681,13 @@ fn handle_compress_rules_command(
                 }
             };
             if path.exists() {
-                std::fs::remove_file(&path)
-                    .map_err(|e| AgentError::Io(format!("Failed to remove {}: {}", path.display(), e)))?;
-                emit_command_output(app, format!("Cleared {} plane rules at {}.", target, path.display()));
+                std::fs::remove_file(&path).map_err(|e| {
+                    AgentError::Io(format!("Failed to remove {}: {}", path.display(), e))
+                })?;
+                emit_command_output(
+                    app,
+                    format!("Cleared {} plane rules at {}.", target, path.display()),
+                );
             } else {
                 emit_command_output(app, format!("{} plane rules already clear.", target));
             }
@@ -5874,7 +5873,12 @@ fn handle_usage_command(app: &mut App) -> Result<CommandResult, AgentError> {
         app,
         format!(
             "Session Usage Statistics\n  Session:     {}\n  Model:       {}\n  Messages:    {} total\n    User:      {}\n    Assistant: {}\n  Est. tokens: ~{}",
-            app.session_id, app.current_model, msg_count, user_msgs, assistant_msgs, estimated_tokens
+            app.session_id,
+            app.current_model,
+            msg_count,
+            user_msgs,
+            assistant_msgs,
+            estimated_tokens
         ),
     );
     Ok(CommandResult::Handled)
@@ -6029,11 +6033,7 @@ fn parse_sync_report_metadata(path: &Path) -> (std::collections::HashMap<String,
 }
 
 fn yes_no(flag: bool) -> &'static str {
-    if flag {
-        "yes"
-    } else {
-        "no"
-    }
+    if flag { "yes" } else { "no" }
 }
 
 fn handle_about_command(app: &mut App) -> Result<CommandResult, AgentError> {
@@ -6811,7 +6811,11 @@ fn handle_simulate_command(app: &mut App, args: &[&str]) -> Result<CommandResult
                  usage: /simulate <tool_name> [json-params]\n\
                  examples:\n  /simulate terminal {{\"cmd\":\"ls\"}}\n  /simulate skill_manage {{\"action\":\"view\",\"skill\":\"contextlattice-agent-contract\"}}\n\
                  counters: allow={} deny={} audit_only={} simulate={} would_block={}",
-                counters.allow, counters.deny, counters.audit_only, counters.simulate, counters.would_block
+                counters.allow,
+                counters.deny,
+                counters.audit_only,
+                counters.simulate,
+                counters.would_block
             ),
         );
         return Ok(CommandResult::Handled);
@@ -7553,7 +7557,9 @@ async fn handle_ops_autopilot_command(
                 app,
                 format!(
                     "{out}\n\nApplied safe runtime knobs: {applied_keys}\nmode={mode} profile={profile}\nlog: {}",
-                    report_dir.join("performance-autopilot-runtime.jsonl").display()
+                    report_dir
+                        .join("performance-autopilot-runtime.jsonl")
+                        .display()
                 ),
             );
             Ok(CommandResult::Handled)
@@ -7561,10 +7567,9 @@ async fn handle_ops_autopilot_command(
         "profile" => {
             let next = args.get(1).map(|v| v.to_ascii_lowercase());
             match next.as_deref() {
-                None | Some("status") => emit_command_output(
-                    app,
-                    format!("autopilot profile={profile} (mode={mode})"),
-                ),
+                None | Some("status") => {
+                    emit_command_output(app, format!("autopilot profile={profile} (mode={mode})"))
+                }
                 Some("list") => emit_command_output(
                     app,
                     "Autopilot profiles:\n- balanced: default stability/perf mix\n- throughput: lower latency and tighter loop cadence\n- quality: stronger verification and replay focus\n- reliability: prioritize retries/recovery and degraded-source tolerance\n- safety: strictest gate posture with conservative policy knobs",
@@ -9670,11 +9675,7 @@ fn handle_subconscious_command(app: &mut App, args: &[&str]) -> Result<CommandRe
                 app,
                 format!(
                     "{} subconscious run profile={}\nreviewed={} dispatched={} blocked={}\n{}\nUse `/background status` and `/subconscious status` for tracking.",
-                    if dry_run {
-                        "Dry-run"
-                    } else {
-                        "Executed"
-                    },
+                    if dry_run { "Dry-run" } else { "Executed" },
                     profile.as_str(),
                     reviewed,
                     dispatched,
@@ -9688,7 +9689,11 @@ fn handle_subconscious_command(app: &mut App, args: &[&str]) -> Result<CommandRe
             );
         }
         "profile" => {
-            let token = args.get(1).copied().unwrap_or("status").to_ascii_lowercase();
+            let token = args
+                .get(1)
+                .copied()
+                .unwrap_or("status")
+                .to_ascii_lowercase();
             match token.as_str() {
                 "status" | "show" => emit_command_output(
                     app,
@@ -9717,7 +9722,10 @@ fn handle_subconscious_command(app: &mut App, args: &[&str]) -> Result<CommandRe
                         return Ok(CommandResult::Handled);
                     };
                     crate::env_vars::set_var("HERMES_SUBCONSCIOUS_PROFILE", next.as_str());
-                    emit_command_output(app, format!("Subconscious profile set to {}.", next.as_str()));
+                    emit_command_output(
+                        app,
+                        format!("Subconscious profile set to {}.", next.as_str()),
+                    );
                 }
             }
         }
@@ -9772,25 +9780,16 @@ fn handle_trigger_triage_command(
         }
         "feedback" => {
             let Some(source) = args.get(1).copied() else {
-                emit_command_output(
-                    app,
-                    "Usage: /triage feedback <source> <outcome> <payload>",
-                );
+                emit_command_output(app, "Usage: /triage feedback <source> <outcome> <payload>");
                 return Ok(CommandResult::Handled);
             };
             let Some(outcome) = args.get(2).copied() else {
-                emit_command_output(
-                    app,
-                    "Usage: /triage feedback <source> <outcome> <payload>",
-                );
+                emit_command_output(app, "Usage: /triage feedback <source> <outcome> <payload>");
                 return Ok(CommandResult::Handled);
             };
             let payload = args.get(3..).unwrap_or(&[]).join(" ").trim().to_string();
             if payload.is_empty() {
-                emit_command_output(
-                    app,
-                    "Usage: /triage feedback <source> <outcome> <payload>",
-                );
+                emit_command_output(app, "Usage: /triage feedback <source> <outcome> <payload>");
                 return Ok(CommandResult::Handled);
             }
             let assessment = evaluate_trigger_triage(source, &payload);
@@ -9800,7 +9799,12 @@ fn handle_trigger_triage_command(
                 app,
                 format!(
                     "Recorded triage feedback.\nsource={} outcome={} delta={:+} decision={} severity={}\nsource_bias_now={:+}",
-                    entry.source, entry.outcome, entry.bias_delta, entry.decision, entry.severity, bias_now
+                    entry.source,
+                    entry.outcome,
+                    entry.bias_delta,
+                    entry.decision,
+                    entry.severity,
+                    bias_now
                 ),
             );
         }
@@ -9990,13 +9994,29 @@ fn handle_background_command(app: &mut App, args: &[&str]) -> Result<CommandResu
                 job.id,
                 job.status,
                 job.attempts,
-                if job.created_at.is_empty() { "(n/a)" } else { job.created_at.as_str() },
-                if job.started_at.is_empty() { "(n/a)" } else { job.started_at.as_str() },
-                if job.finished_at.is_empty() { "(n/a)" } else { job.finished_at.as_str() },
+                if job.created_at.is_empty() {
+                    "(n/a)"
+                } else {
+                    job.created_at.as_str()
+                },
+                if job.started_at.is_empty() {
+                    "(n/a)"
+                } else {
+                    job.started_at.as_str()
+                },
+                if job.finished_at.is_empty() {
+                    "(n/a)"
+                } else {
+                    job.finished_at.as_str()
+                },
                 job.status_path.display(),
                 job.log_path.display(),
                 limit,
-                if tail.trim().is_empty() { "(empty)" } else { tail.trim_end() }
+                if tail.trim().is_empty() {
+                    "(empty)"
+                } else {
+                    tail.trim_end()
+                }
             ),
         );
         return Ok(CommandResult::Handled);
@@ -10276,10 +10296,7 @@ fn schedule_background_job_execution(status_path: PathBuf, log_path: PathBuf, ta
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let log = format!(
                     "task: {}\nstarted_at: {}\nfinished_at: {}\nexit_code: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n",
-                    queued
-                        .get("task")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(""),
+                    queued.get("task").and_then(|v| v.as_str()).unwrap_or(""),
                     started,
                     chrono::Utc::now().to_rfc3339(),
                     exit,
@@ -11026,8 +11043,16 @@ fn handle_raw_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Age
                     app,
                     format!(
                         "Replay trace: {}{}\nSession: {}\nPath: {}\nUsage: /raw trace [on|off|toggle|status|tail [N]|focus <trace-id> [N]|graph [N]|verify|export [N] [PATH]|path]",
-                        if replay_enabled_runtime() { "ON" } else { "OFF" },
-                        if replay_path.exists() { "" } else { " (no log yet)" },
+                        if replay_enabled_runtime() {
+                            "ON"
+                        } else {
+                            "OFF"
+                        },
+                        if replay_path.exists() {
+                            ""
+                        } else {
+                            " (no log yet)"
+                        },
                         app.session_id,
                         replay_path.display()
                     ),
@@ -11198,7 +11223,11 @@ fn handle_raw_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Age
                     ""
                 },
                 log_dir.display(),
-                if replay_enabled_runtime() { "ON" } else { "OFF" }
+                if replay_enabled_runtime() {
+                    "ON"
+                } else {
+                    "OFF"
+                }
             ),
         );
         return Ok(CommandResult::Handled);
@@ -11318,8 +11347,7 @@ fn handle_policy_command(app: &mut App, args: &[&str]) -> Result<CommandResult, 
                 std::env::var("HERMES_TOOL_POLICY_MODE").unwrap_or_else(|_| "enforce".into()),
                 std::env::var("HERMES_EXECUTION_SANDBOX_PROFILE")
                     .unwrap_or_else(|_| "balanced".into()),
-                std::env::var("HERMES_SKILLS_EXECUTION_TIER")
-                    .unwrap_or_else(|_| "balanced".into()),
+                std::env::var("HERMES_SKILLS_EXECUTION_TIER").unwrap_or_else(|_| "balanced".into()),
                 counters.allow,
                 counters.deny,
                 counters.audit_only,
@@ -11956,7 +11984,11 @@ fn handle_pet_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Age
                         app,
                         format!(
                             "Pet {}.\n{}",
-                            if settings.enabled { "enabled" } else { "hidden" },
+                            if settings.enabled {
+                                "enabled"
+                            } else {
+                                "hidden"
+                            },
                             render_pet_status(&settings)
                         ),
                     );
@@ -13151,7 +13183,10 @@ fn handle_plan_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Ag
                 apply_task_depth_profile(TaskDepthProfile::Balanced);
                 emit_command_output(
                     app,
-                    format!("Task depth reset to defaults.\n{}", task_depth_runtime_summary()),
+                    format!(
+                        "Task depth reset to defaults.\n{}",
+                        task_depth_runtime_summary()
+                    ),
                 );
             }
             _ => {
@@ -14617,7 +14652,10 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
                 let _ = writeln!(
                     out,
                     "\nObjective profile\n-----------------\nprofile_id: {}\noperator_hint: {}\nmemory_backend: {}\ndefault_shell: {}",
-                    profile.profile_id, profile.operator_hint, profile.memory_backend, profile.default_shell
+                    profile.profile_id,
+                    profile.operator_hint,
+                    profile.memory_backend,
+                    profile.default_shell
                 );
             }
             if let Ok(ctx_policy) = load_contextlattice_policy() {
@@ -14636,7 +14674,10 @@ fn handle_objective_command(app: &mut App, args: &[&str]) -> Result<CommandResul
                 let _ = writeln!(
                     out,
                     "\nSimulation policy\n-----------------\nmode: {} (shadow_pass={} replay_validation={} cap={:.4})",
-                    sim.mode, sim.require_shadow_pass, sim.require_replay_validation, sim.max_live_capital_fraction
+                    sim.mode,
+                    sim.require_shadow_pass,
+                    sim.require_replay_validation,
+                    sim.max_live_capital_fraction
                 );
             }
             if let Ok(ensemble) = load_objective_ensemble_policy() {
@@ -15245,7 +15286,10 @@ async fn handle_swarm_command(app: &mut App, args: &[&str]) -> Result<CommandRes
         "cancel" => {
             app.quorum_armed_once = false;
             clear_quorum_system_hints(app);
-            emit_command_output(app, "Swarm run canceled. Pending one-shot fan-out was disarmed.");
+            emit_command_output(
+                app,
+                "Swarm run canceled. Pending one-shot fan-out was disarmed.",
+            );
         }
         "artifact" => {
             let Some(path) = latest_quorum_artifact_path(app) else {
@@ -15274,7 +15318,11 @@ async fn handle_swarm_command(app: &mut App, args: &[&str]) -> Result<CommandRes
                 .unwrap_or_else(|| "(unable to parse artifact summary)".to_string());
             emit_command_output(
                 app,
-                format!("Latest swarm artifact\npath={}\n{}", path.display(), summary),
+                format!(
+                    "Latest swarm artifact\npath={}\n{}",
+                    path.display(),
+                    summary
+                ),
             );
         }
         "on" | "off" | "enable" | "disable" | "true" | "false" | "1" | "0" | "voters"
@@ -17878,11 +17926,7 @@ fn oauth_runtime_gate_manifest_path() -> Option<PathBuf> {
         .filter(|path| path.exists())
         .or_else(|| {
             let path = hermes_config::hermes_home().join("oauth-gate-manifest.json");
-            if path.exists() {
-                Some(path)
-            } else {
-                None
-            }
+            if path.exists() { Some(path) } else { None }
         })
 }
 
@@ -17973,11 +18017,7 @@ fn boot_profile_overall(profile: BootProfile, fail: usize, warn: usize) -> &'sta
         }
         BootProfile::Standard => {
             if fail == 0 {
-                if warn == 0 {
-                    "PASS"
-                } else {
-                    "WARN"
-                }
+                if warn == 0 { "PASS" } else { "WARN" }
             } else {
                 "FAIL"
             }
@@ -18861,7 +18901,11 @@ pub async fn handle_cli_chat(
             .await
             .map_err(|e| hermes_core::AgentError::Config(format!("cron load: {e}")))?;
         cron_scheduler.start().await;
-        wire_cron_scheduler_backend(&tool_registry, cron_scheduler, MessagingSessionContext::new());
+        wire_cron_scheduler_backend(
+            &tool_registry,
+            cron_scheduler,
+            MessagingSessionContext::new(),
+        );
         crate::platform_toolsets::resolve_platform_tool_schemas(&config, "cli", &tool_registry)
     } else {
         Vec::new()
@@ -19355,7 +19399,7 @@ pub async fn handle_cli_skills(
                         return Err(AgentError::Config(format!(
                             "Unsupported skill registry source '{}'",
                             source
-                        )))
+                        )));
                     }
                 }
             } else if let Some((repo, maybe_branch, skill_dir)) = explicit {
@@ -19744,7 +19788,9 @@ pub async fn handle_cli_skills(
                     "No hub-installed skills tracked in {}.",
                     skills_hub_lock_path(&skills_dir).display()
                 );
-                println!("Install skills with `hermes skills install <identifier>` to enable source-aware updates.");
+                println!(
+                    "Install skills with `hermes skills install <identifier>` to enable source-aware updates."
+                );
                 return Ok(());
             }
 
@@ -20309,7 +20355,10 @@ pub async fn handle_cli_skills(
                 .map(PathBuf::from)
                 .filter(|p| p.is_dir())
                 .unwrap_or_else(|| skills_dir.clone());
-            println!("Security audit of installed skills ({})", scan_dir.display());
+            println!(
+                "Security audit of installed skills ({})",
+                scan_dir.display()
+            );
             println!("==================================\n");
             if !scan_dir.exists() {
                 println!("No skills directory at {}.", scan_dir.display());
@@ -20542,7 +20591,9 @@ pub async fn handle_cli_skills(
         }
         other => {
             println!("Skills action '{}' is not recognized.", other);
-            println!("Available actions: list, browse, search, install, inspect, uninstall, check, update, publish, snapshot, tap, config, quality, audit");
+            println!(
+                "Available actions: list, browse, search, install, inspect, uninstall, check, update, publish, snapshot, tap, config, quality, audit"
+            );
         }
     }
     Ok(())
@@ -21604,7 +21655,9 @@ pub async fn handle_cli_plugins(
 
                             if let Some(url) = git_url {
                                 if !plugin_git_host_allowed(url, allow_untrusted_git_host) {
-                                    println!("  ✗ Registry git_url host is not allow-listed. Use --allow-untrusted-git-host or HERMES_PLUGIN_GIT_EXTRA_HOSTS.");
+                                    println!(
+                                        "  ✗ Registry git_url host is not allow-listed. Use --allow-untrusted-git-host or HERMES_PLUGIN_GIT_EXTRA_HOSTS."
+                                    );
                                     return Ok(());
                                 }
                                 std::fs::create_dir_all(&plugins_dir)
@@ -22115,7 +22168,8 @@ pub async fn handle_cli_interest(action: Option<String>) -> Result<(), hermes_co
         }
         "clear" => {
             if db_path.exists() {
-                std::fs::remove_file(&db_path).map_err(|e| hermes_core::AgentError::Io(e.to_string()))?;
+                std::fs::remove_file(&db_path)
+                    .map_err(|e| hermes_core::AgentError::Io(e.to_string()))?;
             }
             println!("Cleared interest store at {}", db_path.display());
         }
@@ -23521,16 +23575,24 @@ fn render_qr_to_terminal(data: &str) {
     }
 }
 
-/// Handle `hermes pairing [action] [--device-id ...]`.
+/// Handle `hermes pairing`.
+///
+/// Supports both:
+/// - Legacy device pairing (`--device-id`)
+/// - Python-compatible DM pairing (`approve <platform> <code>`)
 pub async fn handle_cli_pairing(
     action: Option<String>,
     device_id: Option<String>,
+    args: Vec<String>,
 ) -> Result<(), hermes_core::AgentError> {
     use crate::pairing_store::{PairingStatus, PairingStore};
+    use hermes_gateway::DmPairingStore;
 
     let store = PairingStore::open_default();
+    let dm_store = DmPairingStore::open_default();
+    let action = action.unwrap_or_else(|| "list".to_string());
 
-    match action.as_deref().unwrap_or("list") {
+    match action.as_str() {
         "list" => {
             let devices = store.list().map_err(|e| hermes_core::AgentError::Io(e))?;
             if devices.is_empty() {
@@ -23557,58 +23619,141 @@ pub async fn handle_cli_pairing(
                     );
                 }
             }
-        }
-        "approve" => {
-            let did = device_id.ok_or_else(|| {
-                hermes_core::AgentError::Config(
-                    "Missing --device-id. Usage: hermes pairing approve --device-id <id>".into(),
-                )
-            })?;
-            match store.approve(&did) {
-                Ok(dev) => {
-                    println!("Device '{}' approved.", dev.device_id);
-                    if let Some(secret) = &dev.shared_secret {
-                        if secret_stdout_allowed() {
-                            println!("  Shared secret: {}", secret);
-                            println!(
-                                "  (plaintext output enabled via HERMES_ALLOW_SECRET_STDOUT=1)"
-                            );
-                        } else {
-                            println!("  Shared secret: {}", mask_secret_value(secret));
-                            println!(
-                                "  (set HERMES_ALLOW_SECRET_STDOUT=1 to reveal plaintext once)"
-                            );
-                        }
-                        println!("  (Store this securely — it will not be shown again)");
+            let pending = dm_store.list_pending(None);
+            let approved = dm_store.list_approved(None);
+            if pending.is_empty() && approved.is_empty() {
+                println!("No DM pairing data found.");
+            } else {
+                if !pending.is_empty() {
+                    println!("\nPending DM pairing requests ({}):", pending.len());
+                    println!(
+                        "  {:10} {:12} {:20} {:20} {}",
+                        "Platform", "Code*", "User ID", "Name", "Age"
+                    );
+                    println!("  {}", "-".repeat(80));
+                    for p in pending {
+                        println!(
+                            "  {:10} {:12} {:20} {:20} {}m",
+                            p.platform, p.code, p.user_id, p.user_name, p.age_minutes
+                        );
+                    }
+                    println!("  * code is hash prefix for display only");
+                }
+                if !approved.is_empty() {
+                    println!("\nApproved DM users ({}):", approved.len());
+                    println!("  {:10} {:24} {}", "Platform", "User ID", "Name");
+                    println!("  {}", "-".repeat(60));
+                    for a in approved {
+                        println!("  {:10} {:24} {}", a.platform, a.user_id, a.user_name);
                     }
                 }
-                Err(e) => println!("Failed to approve device: {}", e),
+            }
+        }
+        "approve" => {
+            if let Some(did) = device_id {
+                match store.approve(&did) {
+                    Ok(dev) => {
+                        println!("Device '{}' approved.", dev.device_id);
+                        if let Some(secret) = &dev.shared_secret {
+                            if secret_stdout_allowed() {
+                                println!("  Shared secret: {}", secret);
+                                println!(
+                                    "  (plaintext output enabled via HERMES_ALLOW_SECRET_STDOUT=1)"
+                                );
+                            } else {
+                                println!("  Shared secret: {}", mask_secret_value(secret));
+                                println!(
+                                    "  (set HERMES_ALLOW_SECRET_STDOUT=1 to reveal plaintext once)"
+                                );
+                            }
+                            println!("  (Store this securely — it will not be shown again)");
+                        }
+                    }
+                    Err(e) => println!("Failed to approve device: {}", e),
+                }
+            } else if args.len() >= 2 {
+                let platform = &args[0];
+                let code = &args[1];
+                match dm_store
+                    .approve_code(platform, code)
+                    .map_err(hermes_core::AgentError::Io)?
+                {
+                    Some(user) => {
+                        let display = if user.user_name.trim().is_empty() {
+                            user.user_id.clone()
+                        } else {
+                            format!("{} ({})", user.user_name, user.user_id)
+                        };
+                        println!(
+                            "Approved! User {} on {} can now use DM access.",
+                            display, platform
+                        );
+                    }
+                    None => {
+                        println!(
+                            "Code '{}' not found, expired, or locked out on '{}'.",
+                            code, platform
+                        );
+                    }
+                }
+            } else {
+                return Err(hermes_core::AgentError::Config(
+                    "Missing args. Usage: hermes pairing approve --device-id <id> OR hermes pairing approve <platform> <code>".into(),
+                ));
             }
         }
         "revoke" => {
-            let did = device_id.ok_or_else(|| {
-                hermes_core::AgentError::Config(
-                    "Missing --device-id. Usage: hermes pairing revoke --device-id <id>".into(),
-                )
-            })?;
-            match store.revoke(&did) {
-                Ok(dev) => {
-                    println!("Device '{}' revoked.", dev.device_id);
-                    println!("  The device will no longer be able to connect.");
+            if let Some(did) = device_id {
+                match store.revoke(&did) {
+                    Ok(dev) => {
+                        println!("Device '{}' revoked.", dev.device_id);
+                        println!("  The device will no longer be able to connect.");
+                    }
+                    Err(e) => println!("Failed to revoke device: {}", e),
                 }
-                Err(e) => println!("Failed to revoke device: {}", e),
+            } else if args.len() >= 2 {
+                let platform = &args[0];
+                let user_id = &args[1];
+                let revoked = dm_store
+                    .revoke(platform, user_id)
+                    .map_err(hermes_core::AgentError::Io)?;
+                if revoked {
+                    println!("Revoked DM access for {} on {}.", user_id, platform);
+                } else {
+                    println!("User {} was not approved on {}.", user_id, platform);
+                }
+            } else {
+                return Err(hermes_core::AgentError::Config(
+                    "Missing args. Usage: hermes pairing revoke --device-id <id> OR hermes pairing revoke <platform> <user_id>".into(),
+                ));
             }
         }
-        "clear-pending" => match store.clear_pending() {
-            Ok(count) => {
-                if count == 0 {
-                    println!("No pending pairing requests to clear.");
-                } else {
-                    println!("Cleared {} pending pairing request(s).", count);
+        "clear-pending" => {
+            match store.clear_pending() {
+                Ok(count) => {
+                    if count == 0 {
+                        println!("No pending pairing requests to clear.");
+                    } else {
+                        println!("Cleared {} pending pairing request(s).", count);
+                    }
                 }
+                Err(e) => println!("Failed to clear pending requests: {}", e),
             }
-            Err(e) => println!("Failed to clear pending requests: {}", e),
-        },
+            let platform = args.first().map(|s| s.as_str());
+            match dm_store.clear_pending(platform) {
+                Ok(count) => {
+                    if platform.is_some() {
+                        println!("Cleared {} pending DM requests.", count);
+                    } else {
+                        println!(
+                            "Cleared {} pending DM requests across all platforms.",
+                            count
+                        );
+                    }
+                }
+                Err(e) => println!("Failed to clear DM pending requests: {}", e),
+            }
+        }
         other => {
             println!("Pairing action '{}' is not recognized.", other);
             println!("Available actions: list, approve, revoke, clear-pending");
@@ -23727,7 +23872,7 @@ fn claw_status_cmd() {
 
 /// Run the full migration using `claw_migrate::run_migration`.
 fn claw_migrate_cmd() -> Result<(), hermes_core::AgentError> {
-    use crate::claw_migrate::{find_openclaw_dir, run_migration, MigrateOptions};
+    use crate::claw_migrate::{MigrateOptions, find_openclaw_dir, run_migration};
 
     println!("OpenClaw → Hermes Migration");
     println!("===========================\n");
@@ -24078,10 +24223,8 @@ impl hermes_acp::AcpPromptExecutor for CliAcpPromptExecutor {
             provider,
         ));
         let messages = acp_history_to_messages(history, user_text);
-        let (conversation_history, user_message) =
-            split_messages_for_run_conversation(messages).ok_or_else(|| {
-                "ACP prompt has no user message for run_conversation".to_string()
-            })?;
+        let (conversation_history, user_message) = split_messages_for_run_conversation(messages)
+            .ok_or_else(|| "ACP prompt has no user message for run_conversation".to_string())?;
         let task_id = Some(session.session_id.clone());
         let conv = agent
             .run_conversation(RunConversationParams {
@@ -24153,7 +24296,11 @@ pub async fn handle_cli_acp(action: Option<String>) -> Result<(), hermes_core::A
                 .await
                 .map_err(|e| hermes_core::AgentError::Config(format!("cron load: {e}")))?;
             cron_scheduler.start().await;
-            crate::runtime_tool_wiring::wire_cron_scheduler_backend(&tool_registry, cron_scheduler, MessagingSessionContext::new());
+            crate::runtime_tool_wiring::wire_cron_scheduler_backend(
+                &tool_registry,
+                cron_scheduler,
+                MessagingSessionContext::new(),
+            );
             let tool_schemas = crate::platform_toolsets::resolve_platform_tool_schemas(
                 &config,
                 "cli",
@@ -24300,9 +24447,7 @@ pub async fn handle_cli_meeting(
     match action {
         "notes" => {
             let audio_path = audio.ok_or_else(|| {
-                hermes_core::AgentError::Config(
-                    "meeting notes requires --audio <path>".into(),
-                )
+                hermes_core::AgentError::Config("meeting notes requires --audio <path>".into())
             })?;
             let title = title.unwrap_or_else(|| "会议".to_string());
 
@@ -24314,8 +24459,7 @@ pub async fn handle_cli_meeting(
                 });
             }
             if diarize {
-                meeting_cfg.diarization_provider =
-                    Some(DiarizationProvider::Pyannote);
+                meeting_cfg.diarization_provider = Some(DiarizationProvider::Pyannote);
             }
 
             let llm_base = std::env::var("MEETING_LLM_BASE_URL")
@@ -24324,8 +24468,8 @@ pub async fn handle_cli_meeting(
             let llm_key = std::env::var("MEETING_LLM_API_KEY")
                 .or_else(|_| std::env::var("OPENAI_API_KEY"))
                 .unwrap_or_default();
-            let llm_model = std::env::var("MEETING_LLM_MODEL")
-                .unwrap_or_else(|_| "gpt-4o-mini".into());
+            let llm_model =
+                std::env::var("MEETING_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
 
             println!("▶ Generating meeting notes for: {}", audio_path);
             let notes = run_offline_pipeline(
@@ -24381,12 +24525,8 @@ pub async fn handle_cli_meeting(
             println!("\n✓ 已写入记忆系统 (holographic facts + MEMORY.md)");
         }
         "record" => {
-            println!(
-                "⚠ `hermes meeting record` requires a microphone source (Phase 2 runtime)."
-            );
-            println!(
-                "  Run `hermes meeting notes --audio <recorded.wav>` after recording."
-            );
+            println!("⚠ `hermes meeting record` requires a microphone source (Phase 2 runtime).");
+            println!("  Run `hermes meeting notes --audio <recorded.wav>` after recording.");
         }
         _ => {
             println!("Unknown meeting action '{action}'. Available: notes, record");
@@ -25054,9 +25194,11 @@ mod tests {
 
     #[test]
     fn test_timetravel_command_and_alias_are_registered() {
-        assert!(SLASH_COMMANDS
-            .iter()
-            .any(|(name, _)| *name == "/timetravel"));
+        assert!(
+            SLASH_COMMANDS
+                .iter()
+                .any(|(name, _)| *name == "/timetravel")
+        );
         assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/tt"));
         assert_eq!(canonical_command("/tt"), "/timetravel");
         let results = autocomplete("/time");
@@ -25477,10 +25619,11 @@ mod tests {
             .await
             .expect("codex soft-accept");
         assert_eq!(guarded, "openai-codex:gpt-9-codex-preview");
-        assert!(note
-            .as_deref()
-            .unwrap_or_default()
-            .contains("soft-accepted"));
+        assert!(
+            note.as_deref()
+                .unwrap_or_default()
+                .contains("soft-accepted")
+        );
         crate::env_vars::remove_var("HERMES_MODEL_CATALOG_GUARD");
     }
 
@@ -25753,28 +25896,36 @@ mod tests {
     #[test]
     fn test_default_skill_tap_present_in_merged_list() {
         let merged = merged_skill_taps(&[]);
-        assert!(merged
-            .iter()
-            .any(|tap| tap == "https://github.com/MiniMax-AI/cli::skill"));
+        assert!(
+            merged
+                .iter()
+                .any(|tap| tap == "https://github.com/MiniMax-AI/cli::skill")
+        );
     }
 
     #[test]
     fn test_autoresearch_default_skill_tap_present_in_merged_list() {
         let merged = merged_skill_taps(&[]);
-        assert!(merged
-            .iter()
-            .any(|tap| tap == "https://github.com/github/awesome-copilot::skills"));
+        assert!(
+            merged
+                .iter()
+                .any(|tap| tap == "https://github.com/github/awesome-copilot::skills")
+        );
     }
 
     #[test]
     fn test_nous_official_default_skill_taps_present_in_merged_list() {
         let merged = merged_skill_taps(&[]);
-        assert!(merged
-            .iter()
-            .any(|tap| tap == "https://github.com/NousResearch/hermes-agent::skills"));
-        assert!(merged
-            .iter()
-            .any(|tap| tap == "https://github.com/NousResearch/hermes-agent::optional-skills"));
+        assert!(
+            merged
+                .iter()
+                .any(|tap| tap == "https://github.com/NousResearch/hermes-agent::skills")
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|tap| tap == "https://github.com/NousResearch/hermes-agent::optional-skills")
+        );
     }
 
     #[test]
@@ -25798,15 +25949,18 @@ mod tests {
     #[test]
     fn test_mattpocock_default_skill_tap_present_in_merged_list() {
         let merged = merged_skill_taps(&[]);
-        assert!(merged
-            .iter()
-            .any(|tap| tap == "https://github.com/mattpocock/skills::skills"));
+        assert!(
+            merged
+                .iter()
+                .any(|tap| tap == "https://github.com/mattpocock/skills::skills")
+        );
     }
 
     #[test]
     fn test_merged_skill_taps_deduplicates_default() {
-        let merged =
-            merged_skill_taps(&vec!["https://github.com/MiniMax-AI/cli::skill".to_string()]);
+        let merged = merged_skill_taps(&vec![
+            "https://github.com/MiniMax-AI/cli::skill".to_string(),
+        ]);
         assert_eq!(
             merged
                 .iter()
@@ -26090,15 +26244,18 @@ install_command: "uv pip install -r requirements.txt"
             .expect("parse")
             .expect("plan");
         assert_eq!(plan.commands.len(), 3);
-        assert!(plan
-            .commands
-            .contains(&"python3 scripts/setup.py --fast".to_string()));
-        assert!(plan
-            .commands
-            .contains(&"bash scripts/bootstrap.sh".to_string()));
-        assert!(plan
-            .commands
-            .contains(&"uv pip install -r requirements.txt".to_string()));
+        assert!(
+            plan.commands
+                .contains(&"python3 scripts/setup.py --fast".to_string())
+        );
+        assert!(
+            plan.commands
+                .contains(&"bash scripts/bootstrap.sh".to_string())
+        );
+        assert!(
+            plan.commands
+                .contains(&"uv pip install -r requirements.txt".to_string())
+        );
     }
 
     #[test]
@@ -26242,9 +26399,11 @@ install_command: "uv pip install -r requirements.txt"
         let missing = unmet_model_requirements(caps, requirements);
         assert!(missing.iter().any(|m| m == "vision"));
         assert!(missing.iter().any(|m| m == "reasoning"));
-        assert!(missing
-            .iter()
-            .any(|m| m.contains("context>=256000 (actual=128000)")));
+        assert!(
+            missing
+                .iter()
+                .any(|m| m.contains("context>=256000 (actual=128000)"))
+        );
     }
 
     #[test]

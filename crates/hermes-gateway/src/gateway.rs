@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex as TokioMutex, RwLock};
+use tokio::sync::{Mutex as TokioMutex, RwLock, mpsc};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, trace, warn};
 
@@ -52,20 +52,21 @@ use hermes_core::errors::GatewayError;
 use hermes_core::traits::{ParseMode, PlatformAdapter};
 use hermes_core::types::{Message, MessageRole};
 use hermes_core::{
-    transport_fallback_message, InboundEvent, InboundMessagePreparer, InboundPrepareContext,
+    InboundEvent, InboundMessagePreparer, InboundPrepareContext, transport_fallback_message,
 };
 
 use crate::background::{BackgroundTaskManager, TaskStatus};
-use crate::commands::{handle_command, GatewayCommandResult};
+use crate::commands::{GatewayCommandResult, handle_command};
 use crate::dm::{DmDecision, DmManager};
 use crate::hooks::{HookEvent, HookRegistry};
+use crate::pairing_store::DmPairingStore;
 use crate::platforms::helpers::extract_inline_images;
-use hermes_config::resolve_outbound_media_path;
-use hermes_tools::extract_media;
-use hermes_tools::tools::messaging::MessagingSessionContext;
 use crate::session::SessionManager;
 use crate::stream::{StreamConfig, StreamManager};
 use crate::voice::VoiceManager;
+use hermes_config::resolve_outbound_media_path;
+use hermes_tools::extract_media;
+use hermes_tools::tools::messaging::MessagingSessionContext;
 
 // ---------------------------------------------------------------------------
 // GatewayConfig
@@ -324,6 +325,7 @@ pub struct Gateway {
     adapters: RwLock<HashMap<String, Arc<dyn PlatformAdapter>>>,
     session_manager: Arc<SessionManager>,
     dm_manager: Arc<RwLock<DmManager>>,
+    pairing_store: Arc<StdMutex<DmPairingStore>>,
     stream_manager: Arc<StreamManager>,
     config: GatewayConfig,
     /// Optional message handler for processing messages through the agent loop.
@@ -436,7 +438,11 @@ impl PlatformAccessPolicy {
 fn inbound_text_log_fields(text: &str) -> (usize, String, String) {
     let trimmed = text.trim();
     let chars = trimmed.chars().count();
-    let preview: String = trimmed.chars().take(48).collect::<String>().replace('\n', " ");
+    let preview: String = trimmed
+        .chars()
+        .take(48)
+        .collect::<String>()
+        .replace('\n', " ");
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     trimmed.hash(&mut hasher);
     let text_fp = format!("{:016x}", hasher.finish());
@@ -473,6 +479,7 @@ impl Gateway {
             adapters: RwLock::new(HashMap::new()),
             session_manager,
             dm_manager: Arc::new(RwLock::new(dm_manager)),
+            pairing_store: Arc::new(StdMutex::new(DmPairingStore::open_default())),
             stream_manager,
             config,
             message_handler: RwLock::new(None),
@@ -497,16 +504,16 @@ impl Gateway {
 
     /// Register Discord adapter and retain a handle for channel backfill (P2-8).
     #[cfg(feature = "discord")]
-    pub async fn register_discord_adapter(&self, adapter: Arc<crate::platforms::discord::DiscordAdapter>) {
+    pub async fn register_discord_adapter(
+        &self,
+        adapter: Arc<crate::platforms::discord::DiscordAdapter>,
+    ) {
         *self.discord_adapter.write().await = Some(adapter.clone());
         self.register_adapter("discord", adapter).await;
     }
 
     /// Hold the per-session lock for the full `route_message` pipeline (agent + session writes).
-    async fn acquire_session_serial(
-        &self,
-        session_key: &str,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
+    async fn acquire_session_serial(&self, session_key: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let mutex = {
             let mut map = self.session_serial.write().await;
             map.entry(session_key.to_string())
@@ -602,10 +609,7 @@ impl Gateway {
         }
     }
 
-    async fn should_apply_reaction_lifecycle(
-        &self,
-        incoming: &IncomingMessage,
-    ) -> bool {
+    async fn should_apply_reaction_lifecycle(&self, incoming: &IncomingMessage) -> bool {
         if incoming.text.trim_start().starts_with('/') {
             return false;
         }
@@ -630,9 +634,7 @@ impl Gateway {
             if !adapter.reactions_enabled() {
                 return false;
             }
-            return incoming.is_dm
-                || incoming.text.contains("<@")
-                || incoming.text.contains("<@!");
+            return incoming.is_dm || incoming.text.contains("<@") || incoming.text.contains("<@!");
         }
         false
     }
@@ -791,12 +793,16 @@ impl Gateway {
 
         // 1. Check DM authorization if this is a direct message
         if incoming.is_dm {
-            let dm_mode = access_policy.as_ref().map(|p| p.dm_mode).unwrap_or_else(|| {
-                match incoming.platform.trim().to_ascii_lowercase().as_str() {
-                    "wecom" | "weixin" | "qqbot" => DmAccessMode::Open,
-                    _ => DmAccessMode::Pairing,
-                }
-            });
+            let dm_mode =
+                access_policy
+                    .as_ref()
+                    .map(|p| p.dm_mode)
+                    .unwrap_or_else(|| {
+                        match incoming.platform.trim().to_ascii_lowercase().as_str() {
+                            "wecom" | "weixin" | "qqbot" => DmAccessMode::Open,
+                            _ => DmAccessMode::Pairing,
+                        }
+                    });
 
             if dm_mode == DmAccessMode::Disabled {
                 debug!(
@@ -820,33 +826,65 @@ impl Gateway {
                     return Ok(());
                 }
             } else if dm_mode != DmAccessMode::Open {
-                let dm_manager = self.dm_manager.read().await;
-                let decision = dm_manager
-                    .handle_dm(&incoming.user_id, &incoming.platform)
-                    .await;
+                let pair_approved =
+                    self.pairing_store.lock().ok().is_some_and(|store| {
+                        store.is_approved(&incoming.platform, &incoming.user_id)
+                    });
+                if pair_approved {
+                    debug!(
+                        user_id = incoming.user_id,
+                        platform = incoming.platform,
+                        "DM authorized by pairing store"
+                    );
+                } else {
+                    let dm_manager = self.dm_manager.read().await;
+                    let decision = dm_manager
+                        .handle_dm(&incoming.user_id, &incoming.platform)
+                        .await;
 
-                match decision {
-                    DmDecision::Allow => {}
-                    DmDecision::Pair { message } => {
-                        if let Some(msg) = message {
-                            warn!(
-                                user_id = %incoming.user_id,
-                                platform = %incoming.platform,
-                                dm_mode = ?dm_mode,
-                                "Sending DM pairing approval message"
-                            );
-                            self.send_incoming_reply(incoming, &msg, None)
-                                .await?;
+                    match decision {
+                        DmDecision::Allow => {}
+                        DmDecision::Pair { message } => {
+                            let pair_msg = self
+                            .pairing_store
+                            .lock()
+                            .ok()
+                            .and_then(|store| {
+                                store
+                                    .generate_code(
+                                        &incoming.platform,
+                                        &incoming.user_id,
+                                        &incoming.user_id,
+                                    )
+                                    .ok()
+                                    .flatten()
+                            })
+                            .map(|code| {
+                                format!(
+                                    "Hi~ I don't recognize you yet!\n\nHere's your pairing code: `{code}`\n\nAsk the bot owner to run:\n`hermes pairing approve {} {code}`",
+                                    incoming.platform
+                                )
+                            })
+                            .or(message);
+                            if let Some(msg) = pair_msg {
+                                warn!(
+                                    user_id = %incoming.user_id,
+                                    platform = %incoming.platform,
+                                    dm_mode = ?dm_mode,
+                                    "Sending DM pairing approval message"
+                                );
+                                self.send_incoming_reply(incoming, &msg, None).await?;
+                            }
+                            return Ok(());
                         }
-                        return Ok(());
-                    }
-                    DmDecision::Deny => {
-                        debug!(
-                            user_id = incoming.user_id,
-                            platform = incoming.platform,
-                            "DM denied for unauthorized user"
-                        );
-                        return Ok(());
+                        DmDecision::Deny => {
+                            debug!(
+                                user_id = incoming.user_id,
+                                platform = incoming.platform,
+                                "DM denied for unauthorized user"
+                            );
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -962,8 +1000,7 @@ impl Gateway {
         self.session_manager
             .add_message(&session_key, user_message)
             .await;
-        self.bump_input_usage(&session_key, input_chars)
-            .await;
+        self.bump_input_usage(&session_key, input_chars).await;
 
         // 4. Get all session messages for the agent loop
         let messages = self.session_manager.get_messages(&session_key).await;
@@ -1100,8 +1137,7 @@ impl Gateway {
             GatewayCommandResult::Reply(text)
             | GatewayCommandResult::ShowHelp(text)
             | GatewayCommandResult::Unknown(text) => {
-                self.send_incoming_reply(incoming, &text, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &text, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::ResetSession(reply) => {
@@ -1128,16 +1164,14 @@ impl Gateway {
                     }),
                 )
                 .await;
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::SwitchModel { model, reply } => {
                 let mut states = self.runtime_state.write().await;
                 states.entry(session_key.to_string()).or_default().model = Some(model);
                 drop(states);
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::SwitchPersonality { name, reply } => {
@@ -1147,8 +1181,7 @@ impl Gateway {
                     .or_default()
                     .personality = Some(name);
                 drop(states);
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::ApproveUser { user_id } => {
@@ -1205,14 +1238,12 @@ impl Gateway {
                         let _ = self.background_tasks.cancel(&task_id);
                     }
                 }
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::ShowUsage(_) => {
                 let text = self.build_usage_text(session_key).await;
-                self.send_incoming_reply(incoming, &text, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &text, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::CompressContext(_) => {
@@ -1225,13 +1256,11 @@ impl Gateway {
                     reply.push_str("\n\n");
                     reply.push_str(&warning);
                 }
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::ShowInsights(text) => {
-                self.send_incoming_reply(incoming, &text, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &text, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::ToggleVerbose(_) => {
@@ -1243,8 +1272,7 @@ impl Gateway {
                     if state.verbose { "ON" } else { "OFF" }
                 );
                 drop(states);
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::ToggleYolo(_) => {
@@ -1253,8 +1281,7 @@ impl Gateway {
                 state.yolo = !state.yolo;
                 let reply = format!("🤠 YOLO mode: {}", if state.yolo { "ON" } else { "OFF" });
                 drop(states);
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::SetHome { path, reply } => {
@@ -1266,14 +1293,12 @@ impl Gateway {
                 } else {
                     format!("❌ Path not found or not a directory: {}", path)
                 };
-                self.send_incoming_reply(incoming, &response, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &response, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::ShowStatus(_) => {
                 let text = self.build_status_text(session_key).await;
-                self.send_incoming_reply(incoming, &text, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &text, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::ReloadMcp => {
@@ -1294,16 +1319,14 @@ impl Gateway {
                 let mut states = self.runtime_state.write().await;
                 states.entry(session_key.to_string()).or_default().provider = Some(provider);
                 drop(states);
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::SwitchProfile { profile, reply } => {
                 let mut states = self.runtime_state.write().await;
                 states.entry(session_key.to_string()).or_default().profile = Some(profile);
                 drop(states);
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::SwitchBranch { branch } => {
@@ -1325,8 +1348,7 @@ impl Gateway {
                         format!("🌿 Current branch context: {}", branch)
                     }
                 };
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::Rollback { steps } => {
@@ -1380,8 +1402,7 @@ impl Gateway {
                     if state.reasoning { "ON" } else { "OFF" }
                 );
                 drop(states);
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::SwitchFast(_) => {
@@ -1442,8 +1463,7 @@ impl Gateway {
                 } else {
                     format!("↩️ Removed {} message(s) from current session.", removed)
                 };
-                self.send_incoming_reply(incoming, &reply, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::ListTools { filter } => {
@@ -1455,8 +1475,7 @@ impl Gateway {
                     "🔧 Tools{}.\nRegistered MCP tools are resolved at runtime after reload.",
                     suffix
                 );
-                self.send_incoming_reply(incoming, &text, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &text, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::EnableTool { name } => {
@@ -1511,8 +1530,7 @@ impl Gateway {
                     out.push_str("\nUse `/sessions <key or id>` to switch.");
                     out
                 };
-                self.send_incoming_reply(incoming, &text, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &text, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::SwitchSession { session_id } => {
@@ -1553,8 +1571,7 @@ impl Gateway {
                         session_id
                     )
                 };
-                self.send_incoming_reply(incoming, &msg, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &msg, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::ShowBudget { new_budget } => {
@@ -1573,8 +1590,7 @@ impl Gateway {
                     },
                 };
                 drop(states);
-                self.send_incoming_reply(incoming, &msg, None)
-                    .await?;
+                self.send_incoming_reply(incoming, &msg, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::Noop => Ok(true),
@@ -1615,7 +1631,9 @@ impl Gateway {
                 tokio::time::sleep(Duration::from_millis(non_streaming_feedback_delay_ms())).await;
                 if !done.load(Ordering::Acquire) {
                     if let Some(adapter) = adapter {
-                        let _ = adapter.send_message(&chat_id, "处理中，请稍候...", None).await;
+                        let _ = adapter
+                            .send_message(&chat_id, "处理中，请稍候...", None)
+                            .await;
                     }
                 }
             });
@@ -1681,8 +1699,7 @@ impl Gateway {
         // Send response back to the platform (text + MEDIA: local attachments)
         self.deliver_response_attachments(&incoming.platform, &incoming.chat_id, &response)
             .await;
-        self.send_incoming_reply(incoming, &response, None)
-            .await?;
+        self.send_incoming_reply(incoming, &response, None).await?;
         self.flush_post_delivery_messages(
             &incoming.platform,
             &incoming.chat_id,
@@ -1755,7 +1772,9 @@ impl Gateway {
 
         let on_chunk: Arc<dyn Fn(String) + Send + Sync> = if native_streaming {
             let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-            let adapter = adapter_for_platform.clone().expect("adapter exists when native_streaming");
+            let adapter = adapter_for_platform
+                .clone()
+                .expect("adapter exists when native_streaming");
             let chat_id = incoming.chat_id.clone();
             let reply_to = incoming.message_id.clone();
             let started = native_started.clone();
@@ -1763,8 +1782,7 @@ impl Gateway {
             let visible_emitted = first_visible_emitted.clone();
             let visible_ms = first_visible_chunk_ms.clone();
             native_worker = Some(tokio::spawn(async move {
-                let flush_interval =
-                    Duration::from_millis(wecom_native_stream_flush_interval_ms());
+                let flush_interval = Duration::from_millis(wecom_native_stream_flush_interval_ms());
                 let mut ticker = tokio::time::interval(flush_interval);
                 ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -1860,9 +1878,7 @@ impl Gateway {
                 .then(|| incoming.message_id.as_deref())
                 .flatten()
                 .filter(|id| !id.is_empty());
-            let anchor_id = if let Some(adapter) =
-                self.get_adapter(&incoming.platform).await
-            {
+            let anchor_id = if let Some(adapter) = self.get_adapter(&incoming.platform).await {
                 adapter
                     .send_message_replying(&incoming.chat_id, "...", None, reply_to)
                     .await?
@@ -1873,9 +1889,7 @@ impl Gateway {
             };
             if let Some(stream_id) = stream_id.as_ref() {
                 if let Some(mid) = anchor_id.as_deref().or(Some("stream-anchor")) {
-                    self.stream_manager
-                        .set_message_id(stream_id, mid)
-                        .await;
+                    self.stream_manager.set_message_id(stream_id, mid).await;
                 }
             }
             first_visible_emitted.store(true, Ordering::Release);
@@ -1960,9 +1974,8 @@ impl Gateway {
                         return;
                     };
                     if let Some(message_id) = sm.get_message_id(&sid).await {
-                        let edit_result = adapter
-                            .edit_message(&chat_id, &message_id, &content)
-                            .await;
+                        let edit_result =
+                            adapter.edit_message(&chat_id, &message_id, &content).await;
                         if edit_result.is_ok() {
                             #[cfg(feature = "discord")]
                             if platform == "discord" {
@@ -1978,8 +1991,7 @@ impl Gateway {
                                 "streaming progressive edit failed"
                             );
                         }
-                    } else if let Err(err) = adapter.send_message(&chat_id, &content, None).await
-                    {
+                    } else if let Err(err) = adapter.send_message(&chat_id, &content, None).await {
                         warn!(
                             platform = %platform,
                             chat_id = %chat_id,
@@ -2006,7 +2018,11 @@ impl Gateway {
                     return;
                 }
                 if let Some(adapter) = adapter {
-                    if adapter.send_message(&chat_id, "处理中，请稍候...", None).await.is_ok() {
+                    if adapter
+                        .send_message(&chat_id, "处理中，请稍候...", None)
+                        .await
+                        .is_ok()
+                    {
                         if !visible_emitted.swap(true, Ordering::AcqRel) {
                             visible_ms.store(
                                 visible_start.elapsed().as_millis() as u64,
@@ -2152,33 +2168,22 @@ impl Gateway {
                                         error = %err,
                                         "streaming final edit failed; sending full reply"
                                     );
-                                    adapter
-                                        .send_message(&incoming.chat_id, first, None)
-                                        .await?;
+                                    adapter.send_message(&incoming.chat_id, first, None).await?;
                                 }
                             }
                             for chunk in chunks.iter().skip(1) {
-                                adapter
-                                    .send_message(&incoming.chat_id, chunk, None)
-                                    .await?;
+                                adapter.send_message(&incoming.chat_id, chunk, None).await?;
                             }
                         } else {
                             for chunk in &chunks {
-                                adapter
-                                    .send_message(&incoming.chat_id, chunk, None)
-                                    .await?;
+                                adapter.send_message(&incoming.chat_id, chunk, None).await?;
                             }
                         }
                     }
                 } else {
                     for chunk in &chunks {
-                        self.send_message(
-                            &incoming.platform,
-                            &incoming.chat_id,
-                            chunk,
-                            None,
-                        )
-                        .await?;
+                        self.send_message(&incoming.platform, &incoming.chat_id, chunk, None)
+                            .await?;
                     }
                 }
             }
@@ -2526,8 +2531,7 @@ impl Gateway {
                 }
                 out
             };
-            self.send_incoming_reply(incoming, &summary, None)
-                .await?;
+            self.send_incoming_reply(incoming, &summary, None).await?;
             return Ok(true);
         }
         if let Some(task_id) = trimmed.strip_prefix("cancel ").map(str::trim) {
@@ -2537,8 +2541,7 @@ impl Gateway {
             } else {
                 format!("Task {} was not running or not found", task_id)
             };
-            self.send_incoming_reply(incoming, &msg, None)
-                .await?;
+            self.send_incoming_reply(incoming, &msg, None).await?;
             return Ok(true);
         }
         if let Some(task_id) = trimmed.strip_prefix("status ").map(str::trim) {
@@ -2555,8 +2558,7 @@ impl Gateway {
                 Some(TaskStatus::Cancelled) => format!("Task {} was cancelled", task_id),
                 None => format!("Task {} not found", task_id),
             };
-            self.send_incoming_reply(incoming, &msg, None)
-                .await?;
+            self.send_incoming_reply(incoming, &msg, None).await?;
             return Ok(true);
         }
 
@@ -2578,8 +2580,7 @@ impl Gateway {
                 preview, task_id
             )
         };
-        self.send_incoming_reply(incoming, &ack, None)
-            .await?;
+        self.send_incoming_reply(incoming, &ack, None).await?;
 
         let legacy_handler = self.message_handler.read().await.as_ref().cloned();
         let context_handler = self
@@ -2670,12 +2671,7 @@ impl Gateway {
     // -----------------------------------------------------------------------
 
     /// Deliver `MEDIA:<path>` attachments and bare local paths from an agent response.
-    pub async fn deliver_response_attachments(
-        &self,
-        platform: &str,
-        chat_id: &str,
-        text: &str,
-    ) {
+    pub async fn deliver_response_attachments(&self, platform: &str, chat_id: &str, text: &str) {
         let (media_files, _cleaned) = extract_media(text);
         for (media_path, _is_voice) in media_files {
             match resolve_outbound_media_path(&media_path) {
@@ -2955,9 +2951,8 @@ impl Gateway {
                         error = %err,
                         "Inbound audio transcription failed"
                     );
-                    transcripts.push(
-                        "[The user sent a voice message but transcription failed.]".into(),
-                    );
+                    transcripts
+                        .push("[The user sent a voice message but transcription failed.]".into());
                 }
             }
         }
@@ -3039,7 +3034,6 @@ impl Gateway {
         }
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -3116,10 +3110,7 @@ mod tests {
             text: &str,
         ) -> Result<(), GatewayError> {
             let mut msgs = self.messages.lock().unwrap();
-            if let Some(pos) = msgs
-                .iter()
-                .rposition(|(c, t)| c == chat_id && t == "...")
-            {
+            if let Some(pos) = msgs.iter().rposition(|(c, t)| c == chat_id && t == "...") {
                 msgs[pos].1 = text.to_string();
             }
             Ok(())
@@ -3296,10 +3287,10 @@ mod tests {
             _reply_to: Option<&str>,
             initial_content: Option<&str>,
         ) -> Result<Option<String>, GatewayError> {
-            self.chunks.lock().unwrap().push((
-                initial_content.unwrap_or_default().to_string(),
-                false,
-            ));
+            self.chunks
+                .lock()
+                .unwrap()
+                .push((initial_content.unwrap_or_default().to_string(), false));
             Ok(Some("sid-1".to_string()))
         }
 
@@ -3390,7 +3381,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
 
@@ -3435,7 +3426,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
 
@@ -3465,7 +3456,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
 
@@ -3491,7 +3482,7 @@ mod tests {
             is_dm: false, // Group message, no DM check
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
 
@@ -3525,7 +3516,7 @@ mod tests {
             is_dm: false,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
 
@@ -3570,7 +3561,7 @@ mod tests {
             is_dm: false,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&denied).await.is_ok());
@@ -3591,7 +3582,7 @@ mod tests {
             is_dm: false,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&allowed).await.is_ok());
@@ -3625,7 +3616,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
 
@@ -3687,7 +3678,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
 
@@ -3743,7 +3734,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
 
@@ -3801,7 +3792,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&start).await.is_ok());
@@ -3833,7 +3824,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&status).await.is_ok());
@@ -3866,7 +3857,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&approve).await.is_ok());
@@ -3883,7 +3874,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&authorized_dm).await.is_err());
@@ -3899,7 +3890,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&deny).await.is_ok());
@@ -3916,7 +3907,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&denied_dm).await.is_ok());
@@ -3946,7 +3937,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&provider).await.is_ok());
@@ -3962,7 +3953,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&profile).await.is_ok());
@@ -3978,7 +3969,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&reload).await.is_ok());
@@ -3994,7 +3985,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&status).await.is_ok());
@@ -4057,7 +4048,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&set_provider).await.is_ok());
@@ -4073,7 +4064,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&set_model).await.is_ok());
@@ -4089,7 +4080,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&set_profile).await.is_ok());
@@ -4105,7 +4096,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&set_branch).await.is_ok());
@@ -4121,7 +4112,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&normal).await.is_ok());
@@ -4176,7 +4167,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&yolo_chat1).await.is_ok());
@@ -4192,7 +4183,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&yolo_chat2).await.is_ok());
@@ -4214,7 +4205,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&reset_chat1).await.is_ok());
@@ -4263,7 +4254,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&yolo_chat1).await.is_ok());
@@ -4283,7 +4274,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&switch).await.is_ok());
@@ -4324,7 +4315,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&incoming).await.is_ok());
@@ -4372,7 +4363,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&incoming).await.is_err());
@@ -4419,7 +4410,7 @@ mod tests {
             is_dm: false,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&incoming).await.is_ok());
@@ -4671,8 +4662,8 @@ mod tests {
                 is_dm: true,
                 interaction_id: None,
                 interaction_token: None,
-            role_ids: vec![],
-            ..Default::default()
+                role_ids: vec![],
+                ..Default::default()
             };
             assert!(gw.route_message(&incoming).await.is_ok());
         }
@@ -4688,7 +4679,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&normal).await.is_ok());
@@ -4758,7 +4749,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&incoming).await.is_ok());
@@ -4821,7 +4812,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&incoming).await.is_ok());
@@ -4885,7 +4876,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&incoming).await.is_ok());
@@ -4940,7 +4931,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&incoming).await.is_ok());
@@ -4999,7 +4990,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&incoming).await.is_ok());
@@ -5087,7 +5078,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&incoming).await.is_ok());
@@ -5144,7 +5135,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&incoming).await.is_ok());
@@ -5192,7 +5183,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&normal).await.is_ok());
@@ -5208,7 +5199,7 @@ mod tests {
             is_dm: true,
             interaction_id: None,
             interaction_token: None,
-        role_ids: vec![],
+            role_ids: vec![],
             ..Default::default()
         };
         assert!(gw.route_message(&reset).await.is_ok());

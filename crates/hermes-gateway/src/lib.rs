@@ -12,7 +12,6 @@
 //! - Platform-specific adapters behind feature flags
 
 pub mod adapter;
-pub mod ws_proxy;
 pub mod background;
 pub mod channel_directory;
 pub mod commands;
@@ -27,17 +26,19 @@ pub mod markdown_split;
 pub mod media;
 pub mod mirror;
 pub mod pairing;
+pub mod pairing_store;
 pub mod platform_requirements;
 pub mod platforms;
 pub mod session;
 pub mod ssrf;
-#[cfg(test)]
-mod test_env;
 pub mod sticker_cache;
 pub mod stream;
+#[cfg(test)]
+mod test_env;
 pub mod tool_backends;
 pub mod voice;
 pub mod voice_config;
+pub mod ws_proxy;
 
 // Re-export core types from hermes-core
 pub use hermes_core::errors::GatewayError;
@@ -62,15 +63,16 @@ pub use ssrf::{is_safe_url, validate_url};
 // Gateway credential preflight (single source of truth)
 pub use gateway_requirements::gateway_requirement_issues;
 pub use platform_requirements::{
-    evaluate_gateway_requirements, RequirementIssue, RequirementScope, RequirementSeverity,
+    RequirementIssue, RequirementScope, RequirementSeverity, evaluate_gateway_requirements,
 };
 
 // Re-export DM management
 pub use channel_directory::{ChannelDirectory, ChannelEntry};
-pub use delivery::{parse_target, DeliveryItem, DeliveryQueue, DeliveryRouter, DeliveryTarget};
+pub use delivery::{DeliveryItem, DeliveryQueue, DeliveryRouter, DeliveryTarget, parse_target};
 pub use dm::{DmDecision, DmManager};
 pub use mirror::MirrorManager;
 pub use pairing::{PairingManager, PairingState};
+pub use pairing_store::{ApprovedPairing, ApprovedUser, DmPairingStore, PendingPairing};
 pub use sticker_cache::{StickerCache, StickerMeta};
 
 // Re-export adapter base

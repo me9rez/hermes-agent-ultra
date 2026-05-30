@@ -46,13 +46,11 @@ struct ToolsArgs {
 }
 
 pub fn parse_tools(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<ToolsArgs, _>(args, |a| {
-        CliCommand::Tools {
-            action: a.action,
-            name: a.name,
-            platform: a.platform,
-            summary: a.summary,
-        }
+    parse_subcommand::<ToolsArgs, _>(args, |a| CliCommand::Tools {
+        action: a.action,
+        name: a.name,
+        platform: a.platform,
+        summary: a.summary,
     })
 }
 
@@ -65,12 +63,10 @@ struct ConfigArgs {
 }
 
 pub fn parse_config(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<ConfigArgs, _>(args, |a| {
-        CliCommand::Config {
-            action: a.action,
-            key: a.key,
-            value: a.value,
-        }
+    parse_subcommand::<ConfigArgs, _>(args, |a| CliCommand::Config {
+        action: a.action,
+        key: a.key,
+        value: a.value,
     })
 }
 
@@ -98,17 +94,16 @@ struct GatewayArgs {
 
 pub fn parse_gateway(args: &[OsString]) -> Result<CliCommand, clap::Error> {
     parse_subcommand::<GatewayArgs, _>(args, |a| CliCommand::Gateway {
-            action: a.action,
-            system: a.system,
-            all: a.all,
-            force: a.force,
-            run_as_user: a.run_as_user,
-            replace: a.replace,
-            dry_run: a.dry_run,
-            yes: a.yes,
-            deep: a.deep,
-        },
-    )
+        action: a.action,
+        system: a.system,
+        all: a.all,
+        force: a.force,
+        run_as_user: a.run_as_user,
+        replace: a.replace,
+        dry_run: a.dry_run,
+        yes: a.yes,
+        deep: a.deep,
+    })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -128,13 +123,12 @@ struct DoctorArgs {
 
 pub fn parse_doctor(args: &[OsString]) -> Result<CliCommand, clap::Error> {
     parse_subcommand::<DoctorArgs, _>(args, |a| CliCommand::Doctor {
-            deep: a.deep,
-            self_heal: a.self_heal,
-            snapshot: a.snapshot,
-            snapshot_path: a.snapshot_path,
-            bundle: a.bundle,
-        },
-    )
+        deep: a.deep,
+        self_heal: a.self_heal,
+        snapshot: a.snapshot,
+        snapshot_path: a.snapshot_path,
+        bundle: a.bundle,
+    })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -145,9 +139,7 @@ struct UpdateArgs {
 }
 
 pub fn parse_update(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<UpdateArgs, _>(args, |a| {
-        CliCommand::Update { check: a.check }
-    })
+    parse_subcommand::<UpdateArgs, _>(args, |a| CliCommand::Update { check: a.check })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -161,10 +153,9 @@ struct EliteCheckArgs {
 
 pub fn parse_elite_check(args: &[OsString]) -> Result<CliCommand, clap::Error> {
     parse_subcommand::<EliteCheckArgs, _>(args, |a| CliCommand::EliteCheck {
-            json: a.json,
-            strict: a.strict,
-        },
-    )
+        json: a.json,
+        strict: a.strict,
+    })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -181,24 +172,27 @@ struct VerifyProvenanceArgs {
 
 pub fn parse_verify_provenance(args: &[OsString]) -> Result<CliCommand, clap::Error> {
     parse_subcommand::<VerifyProvenanceArgs, _>(args, |a| CliCommand::VerifyProvenance {
-            path: a.path,
-            signature: a.signature,
-            strict: a.strict,
-            json: a.json,
-        },
-    )
+        path: a.path,
+        signature: a.signature,
+        strict: a.strict,
+        json: a.json,
+    })
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "rotate-provenance-key", about = "rotate provenance key command")]
+#[command(
+    name = "rotate-provenance-key",
+    about = "rotate provenance key command"
+)]
 struct RotateProvenanceKeyArgs {
     #[arg(long)]
     json: bool,
 }
 
 pub fn parse_rotate_provenance_key(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<RotateProvenanceKeyArgs, _>(args, |a| CliCommand::RotateProvenanceKey { json: a.json },
-    )
+    parse_subcommand::<RotateProvenanceKeyArgs, _>(args, |a| CliCommand::RotateProvenanceKey {
+        json: a.json,
+    })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -211,10 +205,9 @@ struct RouteLearningArgs {
 
 pub fn parse_route_learning(args: &[OsString]) -> Result<CliCommand, clap::Error> {
     parse_subcommand::<RouteLearningArgs, _>(args, |a| CliCommand::RouteLearning {
-            action: a.action,
-            json: a.json,
-        },
-    )
+        action: a.action,
+        json: a.json,
+    })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -227,10 +220,9 @@ struct RouteHealthArgs {
 
 pub fn parse_route_health(args: &[OsString]) -> Result<CliCommand, clap::Error> {
     parse_subcommand::<RouteHealthArgs, _>(args, |a| CliCommand::RouteHealth {
-            action: a.action,
-            json: a.json,
-        },
-    )
+        action: a.action,
+        json: a.json,
+    })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -247,12 +239,11 @@ struct RouteAutotuneArgs {
 
 pub fn parse_route_autotune(args: &[OsString]) -> Result<CliCommand, clap::Error> {
     parse_subcommand::<RouteAutotuneArgs, _>(args, |a| CliCommand::RouteAutotune {
-            action: a.action,
-            apply: a.apply,
-            strict: a.strict,
-            json: a.json,
-        },
-    )
+        action: a.action,
+        apply: a.apply,
+        strict: a.strict,
+        json: a.json,
+    })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -268,11 +259,10 @@ struct IncidentPackArgs {
 
 pub fn parse_incident_pack(args: &[OsString]) -> Result<CliCommand, clap::Error> {
     parse_subcommand::<IncidentPackArgs, _>(args, |a| CliCommand::IncidentPack {
-            snapshot: a.snapshot,
-            output: a.output,
-            json: a.json,
-        },
-    )
+        snapshot: a.snapshot,
+        output: a.output,
+        json: a.json,
+    })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -290,12 +280,11 @@ struct DashboardArgs {
 
 pub fn parse_dashboard(args: &[OsString]) -> Result<CliCommand, clap::Error> {
     parse_subcommand::<DashboardArgs, _>(args, |a| CliCommand::Dashboard {
-            host: a.host,
-            port: a.port,
-            no_open: a.no_open,
-            insecure: a.insecure,
-        },
-    )
+        host: a.host,
+        port: a.port,
+        no_open: a.no_open,
+        insecure: a.insecure,
+    })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -312,14 +301,12 @@ struct DebugArgs {
 }
 
 pub fn parse_debug(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<DebugArgs, _>(args, |a| {
-        CliCommand::Debug {
-            action: a.action,
-            url: a.url,
-            lines: a.lines,
-            expire: a.expire,
-            local: a.local,
-        }
+    parse_subcommand::<DebugArgs, _>(args, |a| CliCommand::Debug {
+        action: a.action,
+        url: a.url,
+        lines: a.lines,
+        expire: a.expire,
+        local: a.local,
     })
 }
 
@@ -368,22 +355,20 @@ struct ProfileArgs {
 }
 
 pub fn parse_profile(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<ProfileArgs, _>(args, |a| {
-        CliCommand::Profile {
-            action: a.action,
-            name: a.name,
-            secondary: a.secondary,
-            output: a.output,
-            import_name: a.import_name,
-            alias_name: a.alias_name,
-            remove: a.remove,
-            yes: a.yes,
-            clone: a.clone,
-            clone_all: a.clone_all,
-            clone_from: a.clone_from,
-            no_alias: a.no_alias,
-            no_skills: a.no_skills,
-        }
+    parse_subcommand::<ProfileArgs, _>(args, |a| CliCommand::Profile {
+        action: a.action,
+        name: a.name,
+        secondary: a.secondary,
+        output: a.output,
+        import_name: a.import_name,
+        alias_name: a.alias_name,
+        remove: a.remove,
+        yes: a.yes,
+        clone: a.clone,
+        clone_all: a.clone_all,
+        clone_from: a.clone_from,
+        no_alias: a.no_alias,
+        no_skills: a.no_skills,
     })
 }
 
@@ -404,16 +389,14 @@ struct AuthArgs {
 }
 
 pub fn parse_auth(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<AuthArgs, _>(args, |a| {
-        CliCommand::Auth {
-            action: a.action,
-            provider: a.provider,
-            target: a.target,
-            auth_type: a.auth_type,
-            label: a.label,
-            api_key: a.api_key,
-            qr: a.qr,
-        }
+    parse_subcommand::<AuthArgs, _>(args, |a| CliCommand::Auth {
+        action: a.action,
+        provider: a.provider,
+        target: a.target,
+        auth_type: a.auth_type,
+        label: a.label,
+        api_key: a.api_key,
+        qr: a.qr,
     })
 }
 
@@ -429,13 +412,11 @@ struct SecretsArgs {
 }
 
 pub fn parse_secrets(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<SecretsArgs, _>(args, |a| {
-        CliCommand::Secrets {
-            action: a.action,
-            provider: a.provider,
-            value: a.value,
-            show: a.show,
-        }
+    parse_subcommand::<SecretsArgs, _>(args, |a| CliCommand::Secrets {
+        action: a.action,
+        provider: a.provider,
+        value: a.value,
+        show: a.show,
     })
 }
 
@@ -479,27 +460,25 @@ struct CronArgs {
 }
 
 pub fn parse_cron(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<CronArgs, _>(args, |a| {
-        CliCommand::Cron {
-            action: a.action,
-            job_id: a.job_id,
-            id: a.id,
-            schedule: a.schedule,
-            prompt: a.prompt,
-            name: a.name,
-            deliver: a.deliver,
-            repeat: a.repeat,
-            skills: a.skills,
-            add_skills: a.add_skills,
-            remove_skills: a.remove_skills,
-            clear_skills: a.clear_skills,
-            script: a.script,
-            no_agent: a.no_agent,
-            agent: a.agent,
-            script_timeout_seconds: a.script_timeout_seconds,
-            script_shell: a.script_shell,
-            all: a.all,
-        }
+    parse_subcommand::<CronArgs, _>(args, |a| CliCommand::Cron {
+        action: a.action,
+        job_id: a.job_id,
+        id: a.id,
+        schedule: a.schedule,
+        prompt: a.prompt,
+        name: a.name,
+        deliver: a.deliver,
+        repeat: a.repeat,
+        skills: a.skills,
+        add_skills: a.add_skills,
+        remove_skills: a.remove_skills,
+        clear_skills: a.clear_skills,
+        script: a.script,
+        no_agent: a.no_agent,
+        agent: a.agent,
+        script_timeout_seconds: a.script_timeout_seconds,
+        script_shell: a.script_shell,
+        all: a.all,
     })
 }
 
@@ -533,22 +512,20 @@ struct WebhookArgs {
 }
 
 pub fn parse_webhook(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<WebhookArgs, _>(args, |a| {
-        CliCommand::Webhook {
-            action: a.action,
-            name: a.name,
-            url: a.url,
-            id: a.id,
-            prompt: a.prompt,
-            events: a.events,
-            description: a.description,
-            skills: a.skills,
-            deliver: a.deliver,
-            deliver_chat_id: a.deliver_chat_id,
-            secret: a.secret,
-            deliver_only: a.deliver_only,
-            payload: a.payload,
-        }
+    parse_subcommand::<WebhookArgs, _>(args, |a| CliCommand::Webhook {
+        action: a.action,
+        name: a.name,
+        url: a.url,
+        id: a.id,
+        prompt: a.prompt,
+        events: a.events,
+        description: a.description,
+        skills: a.skills,
+        deliver: a.deliver,
+        deliver_chat_id: a.deliver_chat_id,
+        secret: a.secret,
+        deliver_only: a.deliver_only,
+        payload: a.payload,
     })
 }
 
@@ -564,12 +541,10 @@ struct ChatArgs {
 }
 
 pub fn parse_chat(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<ChatArgs, _>(args, |a| {
-        CliCommand::Chat {
-            query: a.query,
-            preload_skill: a.preload_skill,
-            yolo: a.yolo,
-        }
+    parse_subcommand::<ChatArgs, _>(args, |a| CliCommand::Chat {
+        query: a.query,
+        preload_skill: a.preload_skill,
+        yolo: a.yolo,
     })
 }
 
@@ -583,12 +558,10 @@ struct SkillsArgs {
 }
 
 pub fn parse_skills(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<SkillsArgs, _>(args, |a| {
-        CliCommand::Skills {
-            action: a.action,
-            name: a.name,
-            extra: a.extra,
-        }
+    parse_subcommand::<SkillsArgs, _>(args, |a| CliCommand::Skills {
+        action: a.action,
+        name: a.name,
+        extra: a.extra,
     })
 }
 
@@ -604,13 +577,11 @@ struct PluginsArgs {
 }
 
 pub fn parse_plugins(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<PluginsArgs, _>(args, |a| {
-        CliCommand::Plugins {
-            action: a.action,
-            name: a.name,
-            git_ref: a.git_ref,
-            allow_untrusted_git_host: a.allow_untrusted_git_host,
-        }
+    parse_subcommand::<PluginsArgs, _>(args, |a| CliCommand::Plugins {
+        action: a.action,
+        name: a.name,
+        git_ref: a.git_ref,
+        allow_untrusted_git_host: a.allow_untrusted_git_host,
     })
 }
 
@@ -624,12 +595,10 @@ struct MemoryArgs {
 }
 
 pub fn parse_memory(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<MemoryArgs, _>(args, |a| {
-        CliCommand::Memory {
-            action: a.action,
-            target: a.target,
-            yes: a.yes,
-        }
+    parse_subcommand::<MemoryArgs, _>(args, |a| CliCommand::Memory {
+        action: a.action,
+        target: a.target,
+        yes: a.yes,
     })
 }
 
@@ -680,12 +649,10 @@ struct SessionsArgs {
 }
 
 pub fn parse_sessions(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<SessionsArgs, _>(args, |a| {
-        CliCommand::Sessions {
-            action: a.action,
-            id: a.id,
-            name: a.name,
-        }
+    parse_subcommand::<SessionsArgs, _>(args, |a| CliCommand::Sessions {
+        action: a.action,
+        id: a.id,
+        name: a.name,
     })
 }
 
@@ -697,9 +664,8 @@ struct ResumeArgs {
 
 pub fn parse_resume(args: &[OsString]) -> Result<CliCommand, clap::Error> {
     parse_subcommand::<ResumeArgs, _>(args, |a| CliCommand::Resume {
-            session_id: a.session_id,
-        },
-    )
+        session_id: a.session_id,
+    })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -741,11 +707,9 @@ struct InsightsArgs {
 }
 
 pub fn parse_insights(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<InsightsArgs, _>(args, |a| {
-        CliCommand::Insights {
-            days: a.days,
-            source: a.source,
-        }
+    parse_subcommand::<InsightsArgs, _>(args, |a| CliCommand::Insights {
+        days: a.days,
+        source: a.source,
     })
 }
 
@@ -756,10 +720,8 @@ struct LoginArgs {
 }
 
 pub fn parse_login(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<LoginArgs, _>(args, |a| {
-        CliCommand::Login {
-            provider: a.provider,
-        }
+    parse_subcommand::<LoginArgs, _>(args, |a| CliCommand::Login {
+        provider: a.provider,
     })
 }
 
@@ -770,10 +732,8 @@ struct LogoutArgs {
 }
 
 pub fn parse_logout(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<LogoutArgs, _>(args, |a| {
-        CliCommand::Logout {
-            provider: a.provider,
-        }
+    parse_subcommand::<LogoutArgs, _>(args, |a| CliCommand::Logout {
+        provider: a.provider,
     })
 }
 
@@ -784,24 +744,24 @@ struct WhatsappArgs {
 }
 
 pub fn parse_whatsapp(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<WhatsappArgs, _>(args, |a| CliCommand::Whatsapp { action: a.action },
-    )
+    parse_subcommand::<WhatsappArgs, _>(args, |a| CliCommand::Whatsapp { action: a.action })
 }
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "pairing", about = "pairing command")]
 struct PairingArgs {
     action: Option<String>,
+    #[arg()]
+    args: Vec<String>,
     #[arg(long)]
     device_id: Option<String>,
 }
 
 pub fn parse_pairing(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<PairingArgs, _>(args, |a| {
-        CliCommand::Pairing {
-            action: a.action,
-            device_id: a.device_id,
-        }
+    parse_subcommand::<PairingArgs, _>(args, |a| CliCommand::Pairing {
+        action: a.action,
+        device_id: a.device_id,
+        args: a.args,
     })
 }
 
@@ -812,9 +772,7 @@ struct ClawArgs {
 }
 
 pub fn parse_claw(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<ClawArgs, _>(args, |a| {
-        CliCommand::Claw { action: a.action }
-    })
+    parse_subcommand::<ClawArgs, _>(args, |a| CliCommand::Claw { action: a.action })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -824,8 +782,7 @@ struct AcpArgs {
 }
 
 pub fn parse_acp(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<AcpArgs, _>(args, |a| CliCommand::Acp { action: a.action },
-    )
+    parse_subcommand::<AcpArgs, _>(args, |a| CliCommand::Acp { action: a.action })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -835,9 +792,7 @@ struct BackupArgs {
 }
 
 pub fn parse_backup(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<BackupArgs, _>(args, |a| {
-        CliCommand::Backup { output: a.output }
-    })
+    parse_subcommand::<BackupArgs, _>(args, |a| CliCommand::Backup { output: a.output })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -847,9 +802,7 @@ struct ImportArgs {
 }
 
 pub fn parse_import(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<ImportArgs, _>(args, |a| {
-        CliCommand::Import { path: a.path }
-    })
+    parse_subcommand::<ImportArgs, _>(args, |a| CliCommand::Import { path: a.path })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -860,11 +813,9 @@ struct DumpArgs {
 }
 
 pub fn parse_dump(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<DumpArgs, _>(args, |a| {
-        CliCommand::Dump {
-            session: a.session,
-            output: a.output,
-        }
+    parse_subcommand::<DumpArgs, _>(args, |a| CliCommand::Dump {
+        session: a.session,
+        output: a.output,
     })
 }
 
@@ -875,8 +826,7 @@ struct CompletionArgs {
 }
 
 pub fn parse_completion(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<CompletionArgs, _>(args, |a| CliCommand::Completion { shell: a.shell },
-    )
+    parse_subcommand::<CompletionArgs, _>(args, |a| CliCommand::Completion { shell: a.shell })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -887,8 +837,7 @@ struct UninstallArgs {
 }
 
 pub fn parse_uninstall(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<UninstallArgs, _>(args, |a| CliCommand::Uninstall { yes: a.yes },
-    )
+    parse_subcommand::<UninstallArgs, _>(args, |a| CliCommand::Uninstall { yes: a.yes })
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -900,11 +849,9 @@ struct LumioArgs {
 }
 
 pub fn parse_lumio(args: &[OsString]) -> Result<CliCommand, clap::Error> {
-    parse_subcommand::<LumioArgs, _>(args, |a| {
-        CliCommand::Lumio {
-            action: a.action,
-            model: a.model,
-        }
+    parse_subcommand::<LumioArgs, _>(args, |a| CliCommand::Lumio {
+        action: a.action,
+        model: a.model,
     })
 }
 

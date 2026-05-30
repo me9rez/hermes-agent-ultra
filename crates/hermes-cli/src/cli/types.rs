@@ -211,6 +211,7 @@ pub enum CliCommand {
     Pairing {
         action: Option<String>,
         device_id: Option<String>,
+        args: Vec<String>,
     },
     Claw {
         action: Option<String>,

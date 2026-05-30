@@ -3,6 +3,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD;
@@ -33,6 +34,8 @@ pub const ANTHROPIC_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5
 pub const ANTHROPIC_OAUTH_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 pub const ANTHROPIC_OAUTH_SCOPE: &str = "org:create_api_key user:profile user:inference";
 pub const ANTHROPIC_OAUTH_ACCESS_TOKEN_REFRESH_SKEW_SECONDS: i64 = 60;
+const ANTHROPIC_CLAUDE_CODE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+const ANTHROPIC_CLAUDE_CODE_KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_QWEN_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 pub const QWEN_OAUTH_CLIENT_ID: &str = "f0304373b74a44d2b584a3fb70ca9e56";
 pub const QWEN_OAUTH_TOKEN_URL: &str = "https://chat.qwen.ai/api/v1/oauth2/token";
@@ -791,34 +794,108 @@ fn normalize_unix_millis(timestamp: i64) -> i64 {
     }
 }
 
+fn anthropic_keychain_source_path() -> PathBuf {
+    PathBuf::from(format!(
+        "macos-keychain://{}",
+        ANTHROPIC_CLAUDE_CODE_KEYCHAIN_SERVICE
+    ))
+}
+
+fn load_anthropic_oauth_import_from_claude_credentials_json(
+    raw: &str,
+    source_path: PathBuf,
+    source: &str,
+) -> Option<AnthropicOAuthImport> {
+    let parsed = serde_json::from_str::<ExternalClaudeCredentialsFile>(raw).ok()?;
+    let oauth = parsed.claude_ai_oauth?;
+    let access_token = oauth
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let refresh_token = oauth
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let expires_at_ms = oauth.expires_at_ms.map(normalize_unix_millis);
+    Some(AnthropicOAuthImport {
+        state: AnthropicOAuthState {
+            access_token,
+            refresh_token,
+            expires_at_ms,
+        },
+        source_path,
+        source: source.to_string(),
+    })
+}
+
+fn load_anthropic_oauth_import_from_keychain_payload(raw: &str) -> Option<AnthropicOAuthImport> {
+    load_anthropic_oauth_import_from_claude_credentials_json(
+        raw,
+        anthropic_keychain_source_path(),
+        "macos_keychain",
+    )
+}
+
+fn run_anthropic_keychain_read() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+
+    let mut child = Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            ANTHROPIC_CLAUDE_CODE_KEYCHAIN_SERVICE,
+            "-w",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    let started = Instant::now();
+    loop {
+        if started.elapsed() >= ANTHROPIC_CLAUDE_CODE_KEYCHAIN_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        match child.try_wait().ok()? {
+            Some(status) => {
+                let output = child.wait_with_output().ok()?;
+                if !status.success() {
+                    return None;
+                }
+                let stdout = String::from_utf8(output.stdout).ok()?;
+                let trimmed = stdout.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                return Some(trimmed.to_string());
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+fn load_anthropic_oauth_import_from_keychain() -> Option<AnthropicOAuthImport> {
+    let raw = run_anthropic_keychain_read()?;
+    load_anthropic_oauth_import_from_keychain_payload(&raw)
+}
+
 fn load_anthropic_oauth_import_from_path(path: &Path) -> Option<AnthropicOAuthImport> {
     let raw = std::fs::read_to_string(path).ok()?;
 
-    if let Ok(parsed) = serde_json::from_str::<ExternalClaudeCredentialsFile>(&raw) {
-        if let Some(oauth) = parsed.claude_ai_oauth {
-            let access_token = oauth
-                .access_token
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())?
-                .to_string();
-            let refresh_token = oauth
-                .refresh_token
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-            let expires_at_ms = oauth.expires_at_ms.map(normalize_unix_millis);
-            return Some(AnthropicOAuthImport {
-                state: AnthropicOAuthState {
-                    access_token,
-                    refresh_token,
-                    expires_at_ms,
-                },
-                source_path: path.to_path_buf(),
-                source: "claude_code_credentials_file".to_string(),
-            });
-        }
+    if let Some(imported) = load_anthropic_oauth_import_from_claude_credentials_json(
+        &raw,
+        path.to_path_buf(),
+        "claude_code_credentials_file",
+    ) {
+        return Some(imported);
     }
 
     let parsed: Value = serde_json::from_str(&raw).ok()?;
@@ -901,6 +978,15 @@ fn load_anthropic_oauth_import_from_store(path: &Path) -> Option<AnthropicOAuthI
 }
 
 pub fn discover_existing_anthropic_oauth() -> Result<Option<AnthropicOAuthImport>, AgentError> {
+    discover_existing_anthropic_oauth_with_keychain(load_anthropic_oauth_import_from_keychain())
+}
+
+fn discover_existing_anthropic_oauth_with_keychain(
+    keychain_import: Option<AnthropicOAuthImport>,
+) -> Result<Option<AnthropicOAuthImport>, AgentError> {
+    if let Some(imported) = keychain_import {
+        return Ok(Some(imported));
+    }
     for path in anthropic_oauth_discovery_paths() {
         if let Some(imported) = load_anthropic_oauth_import_from_path(&path) {
             return Ok(Some(imported));
@@ -3244,7 +3330,7 @@ mod tests {
             cred_path.to_string_lossy().to_string(),
         );
 
-        let imported = discover_existing_anthropic_oauth()
+        let imported = discover_existing_anthropic_oauth_with_keychain(None)
             .expect("discover")
             .expect("imported");
         assert_eq!(imported.source_path, cred_path);
@@ -3252,6 +3338,84 @@ mod tests {
         assert_eq!(imported.state.access_token, "ant-access");
         assert_eq!(imported.state.refresh_token.as_deref(), Some("ant-refresh"));
         assert_eq!(imported.state.expires_at_ms, Some(expires_at));
+        std::env::remove_var("CLAUDE_CODE_CREDENTIALS_FILE");
+    }
+
+    #[test]
+    fn anthropic_oauth_keychain_payload_parses_valid_claude_code_entry() {
+        let raw = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "keychain-access",
+                "refreshToken": "keychain-refresh",
+                "expiresAt": 9_999_999_999_999i64,
+            }
+        });
+        let imported = load_anthropic_oauth_import_from_keychain_payload(
+            &serde_json::to_string(&raw).expect("serialize keychain payload"),
+        )
+        .expect("imported");
+
+        assert_eq!(imported.source_path, anthropic_keychain_source_path());
+        assert_eq!(imported.source, "macos_keychain");
+        assert_eq!(imported.state.access_token, "keychain-access");
+        assert_eq!(
+            imported.state.refresh_token.as_deref(),
+            Some("keychain-refresh")
+        );
+        assert_eq!(imported.state.expires_at_ms, Some(9_999_999_999_999));
+    }
+
+    #[test]
+    fn anthropic_oauth_keychain_payload_rejects_invalid_entries() {
+        assert!(load_anthropic_oauth_import_from_keychain_payload("").is_none());
+        assert!(load_anthropic_oauth_import_from_keychain_payload("not json").is_none());
+        assert!(load_anthropic_oauth_import_from_keychain_payload(
+            r#"{"someOtherService":{"accessToken":"tok"}}"#
+        )
+        .is_none());
+        assert!(load_anthropic_oauth_import_from_keychain_payload(
+            r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"refresh"}}"#
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn discover_existing_anthropic_oauth_prefers_keychain_over_json_file() {
+        let _guard = test_env_lock::lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join(".credentials.json");
+        let raw = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "json-access",
+                "refreshToken": "json-refresh",
+                "expiresAt": 9_999_999_999_999i64,
+            }
+        });
+        std::fs::write(
+            &cred_path,
+            serde_json::to_string_pretty(&raw).expect("serialize credentials"),
+        )
+        .expect("write credentials");
+        std::env::set_var(
+            "CLAUDE_CODE_CREDENTIALS_FILE",
+            cred_path.to_string_lossy().to_string(),
+        );
+
+        let keychain_import = AnthropicOAuthImport {
+            state: AnthropicOAuthState {
+                access_token: "keychain-access".to_string(),
+                refresh_token: Some("keychain-refresh".to_string()),
+                expires_at_ms: Some(9_999_999_999_999),
+            },
+            source_path: anthropic_keychain_source_path(),
+            source: "macos_keychain".to_string(),
+        };
+        let imported = discover_existing_anthropic_oauth_with_keychain(Some(keychain_import))
+            .expect("discover")
+            .expect("imported");
+
+        assert_eq!(imported.state.access_token, "keychain-access");
+        assert_eq!(imported.source, "macos_keychain");
         std::env::remove_var("CLAUDE_CODE_CREDENTIALS_FILE");
     }
 

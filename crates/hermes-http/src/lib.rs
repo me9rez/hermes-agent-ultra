@@ -49,6 +49,7 @@ use serde_json::Value;
 
 pub const HTTP_PLATFORM: &str = "http";
 const SESSION_KEY_HEADER: &str = "x-hermes-session-key";
+const COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
 
 #[derive(Clone, Default)]
 pub struct ChatOutboundBuffer {
@@ -791,7 +792,7 @@ pub fn build_provider(config: &GatewayConfig, model: &str) -> Arc<dyn LlmProvide
         "nous" => Arc::new(NousProvider::new(&api_key).with_model(model_name)),
         "copilot" => Arc::new(
             CopilotProvider::new(
-                base_url.unwrap_or_else(|| "https://api.github.com/copilot".to_string()),
+                base_url.unwrap_or_else(|| COPILOT_BASE_URL.to_string()),
                 &api_key,
             )
             .with_model(model_name),

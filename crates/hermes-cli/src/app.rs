@@ -4679,10 +4679,46 @@ mod tests {
 
     #[test]
     fn test_provider_api_key_from_env_supports_extended_registry() {
+        let _guard = env_test_lock();
+        let env_vars = [
+            "AI_GATEWAY_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "HF_TOKEN",
+            "KILOCODE_API_KEY",
+            "NVIDIA_API_KEY",
+            "OLLAMA_LOCAL_API_KEY",
+            "LLAMA_CPP_API_KEY",
+            "VLLM_API_KEY",
+            "MLX_API_KEY",
+            "APPLE_ANE_API_KEY",
+            "SGLANG_API_KEY",
+            "TGI_API_KEY",
+            "NOVITA_API_KEY",
+            "OPENCODE_GO_API_KEY",
+            "OPENCODE_ZEN_API_KEY",
+            "XAI_API_KEY",
+            "XIAOMI_API_KEY",
+            "GLM_API_KEY",
+            "ZAI_API_KEY",
+            "Z_AI_API_KEY",
+            "GMI_API_KEY",
+            "MINIMAX_CN_API_KEY",
+            "COPILOT_GITHUB_TOKEN",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GITHUB_COPILOT_TOKEN",
+        ];
+        for env_var in env_vars {
+            std::env::remove_var(env_var);
+        }
         let checks = [
             ("AI_GATEWAY_API_KEY", "ai-gateway"),
+            ("AI_GATEWAY_API_KEY", "vercel"),
             ("DEEPSEEK_API_KEY", "deepseek"),
             ("HF_TOKEN", "huggingface"),
+            ("HF_TOKEN", "hf"),
+            ("HF_TOKEN", "hugging-face"),
+            ("HF_TOKEN", "huggingface-hub"),
             ("KILOCODE_API_KEY", "kilocode"),
             ("NVIDIA_API_KEY", "nvidia"),
             ("OLLAMA_LOCAL_API_KEY", "ollama-local"),
@@ -4698,15 +4734,28 @@ mod tests {
             ("XAI_API_KEY", "xai"),
             ("XIAOMI_API_KEY", "xiaomi"),
             ("GLM_API_KEY", "zai"),
+            ("GLM_API_KEY", "glm"),
+            ("ZAI_API_KEY", "z-ai"),
+            ("Z_AI_API_KEY", "zhipu"),
+            ("GMI_API_KEY", "gmi-cloud"),
+            ("MINIMAX_CN_API_KEY", "minimax_cn"),
+            ("COPILOT_GITHUB_TOKEN", "github-copilot"),
+            ("GH_TOKEN", "github-models"),
+            ("GITHUB_TOKEN", "copilot"),
+            ("GITHUB_COPILOT_TOKEN", "copilot"),
         ];
         for (env_var, provider) in checks {
-            std::env::remove_var(env_var);
+            for env_var in env_vars {
+                std::env::remove_var(env_var);
+            }
             let expected = format!("token-for-{provider}");
             std::env::set_var(env_var, expected.clone());
             assert_eq!(
                 provider_api_key_from_env(provider).as_deref(),
                 Some(expected.as_str())
             );
+        }
+        for env_var in env_vars {
             std::env::remove_var(env_var);
         }
     }
@@ -4730,6 +4779,110 @@ mod tests {
         assert_eq!(normalize_runtime_provider_name("llvm"), "vllm");
         assert_eq!(normalize_runtime_provider_name("mlx-lm"), "mlx");
         assert_eq!(normalize_runtime_provider_name("ane"), "apple-ane");
+        assert_eq!(normalize_runtime_provider_name("glm"), "zai");
+        assert_eq!(normalize_runtime_provider_name("z-ai"), "zai");
+        assert_eq!(normalize_runtime_provider_name("zhipu"), "zai");
+        assert_eq!(normalize_runtime_provider_name("github-copilot"), "copilot");
+        assert_eq!(normalize_runtime_provider_name("github-models"), "copilot");
+        assert_eq!(
+            normalize_runtime_provider_name("github-copilot-acp"),
+            "copilot-acp"
+        );
+        assert_eq!(
+            normalize_runtime_provider_name("copilot-acp-agent"),
+            "copilot-acp"
+        );
+        assert_eq!(normalize_runtime_provider_name("hf"), "huggingface");
+        assert_eq!(
+            normalize_runtime_provider_name("hugging-face"),
+            "huggingface"
+        );
+        assert_eq!(
+            normalize_runtime_provider_name("huggingface-hub"),
+            "huggingface"
+        );
+        assert_eq!(normalize_runtime_provider_name("aigateway"), "ai-gateway");
+        assert_eq!(normalize_runtime_provider_name("vercel"), "ai-gateway");
+        assert_eq!(normalize_runtime_provider_name("gmi-cloud"), "gmi");
+    }
+
+    #[test]
+    fn test_provider_base_url_from_env_supports_api_provider_aliases() {
+        let _guard = env_test_lock();
+        let env_vars = [
+            "COPILOT_API_BASE_URL",
+            "GLM_BASE_URL",
+            "KIMI_BASE_URL",
+            "MINIMAX_CN_BASE_URL",
+            "GMI_BASE_URL",
+            "HF_BASE_URL",
+            "AI_GATEWAY_BASE_URL",
+        ];
+        for env_var in env_vars {
+            std::env::remove_var(env_var);
+        }
+
+        std::env::set_var("COPILOT_API_BASE_URL", "https://copilot.example/v1");
+        assert_eq!(
+            provider_base_url_from_env("github-copilot").as_deref(),
+            Some("https://copilot.example/v1")
+        );
+        std::env::set_var("GLM_BASE_URL", "https://glm.example/v4");
+        assert_eq!(
+            provider_base_url_from_env("z-ai").as_deref(),
+            Some("https://glm.example/v4")
+        );
+        std::env::set_var("KIMI_BASE_URL", "https://kimi.example/v1");
+        assert_eq!(
+            provider_base_url_from_env("moonshot").as_deref(),
+            Some("https://kimi.example/v1")
+        );
+        std::env::set_var("MINIMAX_CN_BASE_URL", "https://minimax-cn.example/v1");
+        assert_eq!(
+            provider_base_url_from_env("minimax_cn").as_deref(),
+            Some("https://minimax-cn.example/v1")
+        );
+        std::env::set_var("GMI_BASE_URL", "https://gmi.example/v1");
+        assert_eq!(
+            provider_base_url_from_env("gmi-cloud").as_deref(),
+            Some("https://gmi.example/v1")
+        );
+        std::env::set_var("HF_BASE_URL", "https://hf.example/v1");
+        assert_eq!(
+            provider_base_url_from_env("huggingface-hub").as_deref(),
+            Some("https://hf.example/v1")
+        );
+        std::env::set_var("AI_GATEWAY_BASE_URL", "https://gateway.example/v1");
+        assert_eq!(
+            provider_base_url_from_env("vercel").as_deref(),
+            Some("https://gateway.example/v1")
+        );
+
+        for env_var in env_vars {
+            std::env::remove_var(env_var);
+        }
+    }
+
+    #[test]
+    fn test_provider_default_base_url_supports_upstream_aliases() {
+        assert_eq!(
+            provider_default_base_url("github-copilot"),
+            Some(COPILOT_BASE_URL)
+        );
+        assert_eq!(provider_default_base_url("glm"), Some(ZAI_BASE_URL));
+        assert_eq!(
+            provider_default_base_url("minimax_cn"),
+            Some(MINIMAX_CN_BASE_URL)
+        );
+        assert_eq!(
+            provider_default_base_url("huggingface-hub"),
+            Some(HUGGINGFACE_BASE_URL)
+        );
+        assert_eq!(
+            provider_default_base_url("vercel"),
+            Some(AI_GATEWAY_BASE_URL)
+        );
+        assert_eq!(provider_default_base_url("gmi-cloud"), Some(GMI_BASE_URL));
     }
 
     #[test]
@@ -5480,10 +5633,12 @@ const MINIMAX_CN_BASE_URL: &str = "https://api.minimaxi.com/anthropic";
 const NOVITA_BASE_URL: &str = "https://api.novita.ai/openai/v1";
 const XAI_BASE_URL: &str = "https://api.x.ai/v1";
 const NVIDIA_BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
+const COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
 const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 const OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen/v1";
 const KILOCODE_BASE_URL: &str = "https://api.kilo.ai/api/gateway";
 const HUGGINGFACE_BASE_URL: &str = "https://router.huggingface.co/v1";
+const GMI_BASE_URL: &str = "https://api.gmi-serving.com/v1";
 const XIAOMI_BASE_URL: &str = "https://api.xiaomimimo.com/v1";
 const ZAI_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ARCEE_BASE_URL: &str = "https://api.arcee.ai/api/v1";
@@ -5509,6 +5664,12 @@ fn normalize_runtime_provider_name(provider: &str) -> String {
         "alibaba" | "alibaba-coding-plan" => "qwen".to_string(),
         "minimax-cn" => "minimax".to_string(),
         "novita-ai" | "novitaai" => "novita".to_string(),
+        "glm" | "z-ai" | "z_ai" | "zhipu" => "zai".to_string(),
+        "aigateway" | "vercel" => "ai-gateway".to_string(),
+        "github-copilot" | "github-models" => "copilot".to_string(),
+        "github-copilot-acp" | "copilot-acp-agent" => "copilot-acp".to_string(),
+        "hf" | "hugging-face" | "huggingface-hub" => "huggingface".to_string(),
+        "gmi-cloud" => "gmi".to_string(),
         "kilo" | "kilo-code" | "kilo-gateway" => "kilocode".to_string(),
         "opencode" | "opencode-zen" | "zen" => "opencode-zen".to_string(),
         "go" => "opencode-go".to_string(),
@@ -5530,19 +5691,21 @@ fn provider_default_base_url(provider: &str) -> Option<&'static str> {
         "qwen" | "alibaba" => Some(QWEN_BASE_URL),
         "alibaba-coding-plan" => Some(ALIBABA_CODING_PLAN_BASE_URL),
         "stepfun" | "step" | "step-plan" => Some(STEPFUN_BASE_URL),
-        "ai-gateway" => Some(AI_GATEWAY_BASE_URL),
+        "ai-gateway" | "aigateway" | "vercel" => Some(AI_GATEWAY_BASE_URL),
         "kimi-coding" => Some(KIMI_CODING_BASE_URL),
         "kimi-coding-cn" | "moonshot" | "kimi" => Some(KIMI_CODING_CN_BASE_URL),
-        "minimax-cn" => Some(MINIMAX_CN_BASE_URL),
+        "minimax-cn" | "minimax_cn" => Some(MINIMAX_CN_BASE_URL),
         "novita" | "novita-ai" | "novitaai" => Some(NOVITA_BASE_URL),
         "xai" => Some(XAI_BASE_URL),
         "nvidia" => Some(NVIDIA_BASE_URL),
+        "copilot" | "github-copilot" | "github-models" => Some(COPILOT_BASE_URL),
         "opencode-go" => Some(OPENCODE_GO_BASE_URL),
         "opencode-zen" | "opencode" => Some(OPENCODE_ZEN_BASE_URL),
         "kilocode" | "kilo" => Some(KILOCODE_BASE_URL),
-        "huggingface" => Some(HUGGINGFACE_BASE_URL),
+        "huggingface" | "hf" | "hugging-face" | "huggingface-hub" => Some(HUGGINGFACE_BASE_URL),
+        "gmi" | "gmi-cloud" => Some(GMI_BASE_URL),
         "xiaomi" => Some(XIAOMI_BASE_URL),
-        "zai" => Some(ZAI_BASE_URL),
+        "zai" | "glm" | "z-ai" | "z_ai" | "zhipu" => Some(ZAI_BASE_URL),
         "arcee" => Some(ARCEE_BASE_URL),
         "ollama-cloud" => Some(OLLAMA_CLOUD_BASE_URL),
         "ollama-local" | "ollama" => Some(OLLAMA_LOCAL_BASE_URL),
@@ -5732,15 +5895,44 @@ fn default_rtk_raw_mode() -> bool {
 }
 
 fn provider_base_url_from_env(provider: &str) -> Option<String> {
-    let env_var = match provider.trim().to_ascii_lowercase().as_str() {
-        "ollama-local" | "ollama" => "OLLAMA_BASE_URL",
-        "llama-cpp" | "llama.cpp" | "llamacpp" => "LLAMA_CPP_BASE_URL",
-        "vllm" | "ollvm" | "llvm" => "VLLM_BASE_URL",
-        "mlx" | "mlx-lm" | "apple-mlx" => "MLX_BASE_URL",
-        "apple-ane" | "ane" | "apple-neural-engine" => "APPLE_ANE_BASE_URL",
-        "sglang" => "SGLANG_BASE_URL",
-        "tgi" | "text-generation-inference" => "TGI_BASE_URL",
-        _ => return None,
+    let raw_provider = provider.trim().to_ascii_lowercase();
+    let normalized_provider = normalize_runtime_provider_name(raw_provider.as_str());
+    let env_var = match raw_provider.as_str() {
+        "minimax-cn" | "minimax_cn" => "MINIMAX_CN_BASE_URL",
+        _ => match normalized_provider.as_str() {
+            "openai" => "OPENAI_BASE_URL",
+            "openai-codex" | "codex" => "HERMES_OPENAI_CODEX_BASE_URL",
+            "anthropic" => "ANTHROPIC_BASE_URL",
+            "google-gemini-cli" => "HERMES_GEMINI_BASE_URL",
+            "gemini" | "google" => "GEMINI_BASE_URL",
+            "qwen" => "DASHSCOPE_BASE_URL",
+            "qwen-oauth" => "HERMES_QWEN_BASE_URL",
+            "stepfun" => "STEPFUN_BASE_URL",
+            "ai-gateway" => "AI_GATEWAY_BASE_URL",
+            "kimi" => "KIMI_BASE_URL",
+            "minimax" => "MINIMAX_BASE_URL",
+            "novita" => "NOVITA_BASE_URL",
+            "xai" => "XAI_BASE_URL",
+            "nvidia" => "NVIDIA_BASE_URL",
+            "copilot" => "COPILOT_API_BASE_URL",
+            "opencode-go" => "OPENCODE_GO_BASE_URL",
+            "opencode-zen" => "OPENCODE_ZEN_BASE_URL",
+            "kilocode" => "KILOCODE_BASE_URL",
+            "huggingface" => "HF_BASE_URL",
+            "gmi" => "GMI_BASE_URL",
+            "xiaomi" => "XIAOMI_BASE_URL",
+            "zai" => "GLM_BASE_URL",
+            "arcee" => "ARCEE_BASE_URL",
+            "deepseek" => "DEEPSEEK_BASE_URL",
+            "ollama-local" | "ollama" => "OLLAMA_BASE_URL",
+            "llama-cpp" | "llama.cpp" | "llamacpp" => "LLAMA_CPP_BASE_URL",
+            "vllm" | "ollvm" | "llvm" => "VLLM_BASE_URL",
+            "mlx" | "mlx-lm" | "apple-mlx" => "MLX_BASE_URL",
+            "apple-ane" | "ane" | "apple-neural-engine" => "APPLE_ANE_BASE_URL",
+            "sglang" => "SGLANG_BASE_URL",
+            "tgi" | "text-generation-inference" => "TGI_BASE_URL",
+            _ => return None,
+        },
     };
     std::env::var(env_var)
         .ok()
@@ -5798,7 +5990,15 @@ fn url_is_local_or_private(base_url: &str) -> bool {
 
 /// Resolve API key / token for a named LLM provider from well-known environment variables.
 pub fn provider_api_key_from_env(provider: &str) -> Option<String> {
-    let provider = normalize_runtime_provider_name(provider);
+    let raw_provider = provider.trim().to_ascii_lowercase();
+    if matches!(raw_provider.as_str(), "minimax-cn" | "minimax_cn") {
+        return std::env::var("MINIMAX_CN_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| std::env::var("MINIMAX_API_KEY").ok())
+            .filter(|s| !s.trim().is_empty());
+    }
+    let provider = normalize_runtime_provider_name(raw_provider.as_str());
     match provider.as_str() {
         "openai" => std::env::var("HERMES_OPENAI_API_KEY")
             .ok()
@@ -5860,8 +6060,14 @@ pub fn provider_api_key_from_env(provider: &str) -> Option<String> {
         "nous" => std::env::var("NOUS_API_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty()),
-        "copilot" => std::env::var("GITHUB_COPILOT_TOKEN")
+        "copilot" => std::env::var("COPILOT_GITHUB_TOKEN")
             .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| std::env::var("GH_TOKEN").ok())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| std::env::var("GITHUB_COPILOT_TOKEN").ok())
             .filter(|s| !s.trim().is_empty()),
         "ai-gateway" => std::env::var("AI_GATEWAY_API_KEY")
             .ok()
@@ -5875,6 +6081,9 @@ pub fn provider_api_key_from_env(provider: &str) -> Option<String> {
             .ok()
             .filter(|s| !s.trim().is_empty()),
         "huggingface" => std::env::var("HF_TOKEN")
+            .ok()
+            .filter(|s| !s.trim().is_empty()),
+        "gmi" => std::env::var("GMI_API_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty()),
         "kilocode" => std::env::var("KILOCODE_API_KEY")
@@ -6055,7 +6264,7 @@ pub fn build_provider(config: &GatewayConfig, model: &str) -> Arc<dyn LlmProvide
         }
         "copilot" => {
             let p = CopilotProvider::new(
-                base_url.unwrap_or_else(|| "https://api.github.com/copilot".to_string()),
+                base_url.unwrap_or_else(|| COPILOT_BASE_URL.to_string()),
                 &api_key,
             )
             .with_model(model_name.as_str());

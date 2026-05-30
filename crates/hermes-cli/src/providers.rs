@@ -26,6 +26,7 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "deepseek",
     "huggingface",
     "kilocode",
+    "gmi",
     "nvidia",
     "ollama-cloud",
     "ollama-local",
@@ -95,8 +96,14 @@ pub fn canonical_provider_id(provider: &str) -> String {
         "step" | "step-plan" => "stepfun".to_string(),
         "moonshot" | "kimi-coding" | "kimi-coding-cn" => "kimi".to_string(),
         "alibaba" | "alibaba-coding-plan" => "qwen".to_string(),
-        "minimax-cn" => "minimax".to_string(),
+        "minimax_cn" => "minimax-cn".to_string(),
         "novita-ai" | "novitaai" => "novita".to_string(),
+        "glm" | "z-ai" | "z_ai" | "zhipu" => "zai".to_string(),
+        "aigateway" | "vercel" => "ai-gateway".to_string(),
+        "github-copilot" | "github-models" => "copilot".to_string(),
+        "github-copilot-acp" | "copilot-acp-agent" => "copilot-acp".to_string(),
+        "hf" | "hugging-face" | "huggingface-hub" => "huggingface".to_string(),
+        "gmi-cloud" => "gmi".to_string(),
         "kilo" | "kilo-code" | "kilo-gateway" => "kilocode".to_string(),
         "opencode" | "opencode-zen" | "zen" => "opencode-zen".to_string(),
         "go" => "opencode-go".to_string(),
@@ -268,5 +275,19 @@ mod tests {
         assert_eq!(canonical_provider_id("ollama"), "ollama-local");
         assert_eq!(canonical_provider_id("llama.cpp"), "llama-cpp");
         assert_eq!(canonical_provider_id("llvm"), "vllm");
+        assert_eq!(canonical_provider_id("glm"), "zai");
+        assert_eq!(canonical_provider_id("z-ai"), "zai");
+        assert_eq!(canonical_provider_id("zhipu"), "zai");
+        assert_eq!(canonical_provider_id("github-copilot"), "copilot");
+        assert_eq!(canonical_provider_id("github-models"), "copilot");
+        assert_eq!(canonical_provider_id("github-copilot-acp"), "copilot-acp");
+        assert_eq!(canonical_provider_id("copilot-acp-agent"), "copilot-acp");
+        assert_eq!(canonical_provider_id("hf"), "huggingface");
+        assert_eq!(canonical_provider_id("hugging-face"), "huggingface");
+        assert_eq!(canonical_provider_id("huggingface-hub"), "huggingface");
+        assert_eq!(canonical_provider_id("aigateway"), "ai-gateway");
+        assert_eq!(canonical_provider_id("vercel"), "ai-gateway");
+        assert_eq!(canonical_provider_id("gmi-cloud"), "gmi");
+        assert_eq!(canonical_provider_id("minimax_cn"), "minimax-cn");
     }
 }

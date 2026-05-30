@@ -5231,11 +5231,13 @@ fn normalize_auth_provider(provider: &str) -> String {
         "glm" | "z-ai" | "z.ai" | "zhipu" => "zai".to_string(),
         "nim" | "nvidia-nim" | "build-nvidia" | "nemotron" => "nvidia".to_string(),
         "hf" | "hugging-face" | "huggingface-hub" => "huggingface".to_string(),
+        "gmi-cloud" => "gmi".to_string(),
         "api-server" => "api_server".to_string(),
         "home-assistant" => "homeassistant".to_string(),
         "wecom-callback" => "wecom_callback".to_string(),
         "mm" => "mattermost".to_string(),
-        "github-copilot" => "copilot".to_string(),
+        "github-copilot" | "github-models" => "copilot".to_string(),
+        "github-copilot-acp" | "copilot-acp-agent" => "copilot-acp".to_string(),
         other => other.to_string(),
     }
 }
@@ -5267,7 +5269,8 @@ fn gateway_platform_provider_key(provider: &str) -> Option<&'static str> {
 fn normalize_secret_provider(provider: &str) -> String {
     let p = provider.trim().to_ascii_lowercase();
     match p.as_str() {
-        "github-copilot" => "copilot".to_string(),
+        "github-copilot" | "github-models" => "copilot".to_string(),
+        "github-copilot-acp" | "copilot-acp-agent" => "copilot-acp".to_string(),
         "claude" | "claude-code" => "anthropic".to_string(),
         "codex" => "openai-codex".to_string(),
         "openai-oauth" | "openai-cli" => "openai".to_string(),
@@ -5286,6 +5289,7 @@ fn normalize_secret_provider(provider: &str) -> String {
         "glm" | "z-ai" | "z.ai" | "zhipu" => "zai".to_string(),
         "nim" | "nvidia-nim" | "build-nvidia" | "nemotron" => "nvidia".to_string(),
         "hf" | "hugging-face" | "huggingface-hub" => "huggingface".to_string(),
+        "gmi-cloud" => "gmi".to_string(),
         "dashscope" | "aliyun" | "alibaba-cloud" => "alibaba".to_string(),
         "alibaba_coding" | "alibaba-coding" | "alibaba_coding_plan" => {
             "alibaba-coding-plan".to_string()
@@ -5308,7 +5312,11 @@ fn secret_provider_aliases(provider: &str) -> Vec<String> {
         ],
         "kimi-coding-cn" => vec!["kimi-coding-cn".to_string()],
         "stepfun" => vec!["stepfun".to_string(), "step".to_string()],
-        "copilot" => vec!["copilot".to_string(), "github-copilot".to_string()],
+        "copilot" => vec![
+            "copilot".to_string(),
+            "github-copilot".to_string(),
+            "github-models".to_string(),
+        ],
         "openai-codex" => vec!["openai-codex".to_string(), "codex".to_string()],
         "google-gemini-cli" => vec![
             "google-gemini-cli".to_string(),
@@ -5333,6 +5341,7 @@ fn secret_provider_aliases(provider: &str) -> Vec<String> {
             "nim".to_string(),
         ],
         "huggingface" => vec!["huggingface".to_string(), "hf".to_string()],
+        "gmi" => vec!["gmi".to_string(), "gmi-cloud".to_string()],
         "ai-gateway" => vec!["ai-gateway".to_string(), "aigateway".to_string()],
         "opencode-zen" => vec!["opencode-zen".to_string(), "opencode".to_string()],
         "kilocode" => vec!["kilocode".to_string(), "kilo".to_string()],
@@ -5372,11 +5381,12 @@ fn provider_env_var(provider: &str) -> Option<&'static str> {
         "minimax-cn" => Some("MINIMAX_CN_API_KEY"),
         "stepfun" => Some("STEPFUN_API_KEY"),
         "nous" => Some("NOUS_API_KEY"),
-        "copilot" => Some("GITHUB_COPILOT_TOKEN"),
+        "copilot" => Some("COPILOT_GITHUB_TOKEN"),
         "ai-gateway" => Some("AI_GATEWAY_API_KEY"),
         "arcee" => Some("ARCEEAI_API_KEY"),
         "deepseek" => Some("DEEPSEEK_API_KEY"),
         "huggingface" => Some("HF_TOKEN"),
+        "gmi" => Some("GMI_API_KEY"),
         "kilocode" => Some("KILOCODE_API_KEY"),
         "nvidia" => Some("NVIDIA_API_KEY"),
         "ollama-cloud" => Some("OLLAMA_API_KEY"),
@@ -5566,6 +5576,7 @@ async fn hydrate_provider_env_from_vault_for_cli(cli: &Cli) -> Result<(), AgentE
         ("MINIMAX_CN_API_KEY", "minimax-cn"),
         ("STEPFUN_API_KEY", "stepfun"),
         ("NOUS_API_KEY", "nous"),
+        ("COPILOT_GITHUB_TOKEN", "copilot"),
         ("GITHUB_COPILOT_TOKEN", "copilot"),
         ("AI_GATEWAY_API_KEY", "ai-gateway"),
         ("ARCEEAI_API_KEY", "arcee"),
@@ -7952,7 +7963,7 @@ async fn run_auth(
                     })
                     .await?;
                 println!("GitHub device login complete; credential saved as provider 'copilot'.");
-                println!("Ensure GITHUB_COPILOT_TOKEN is set for the agent (see printed instructions above).");
+                println!("Ensure COPILOT_GITHUB_TOKEN is set for the agent (see printed instructions above).");
                 return Ok(());
             }
 
@@ -9282,11 +9293,12 @@ const SETUP_MINIMAX_ENV_KEYS: &[&str] = &["MINIMAX_API_KEY"];
 const SETUP_MINIMAX_CN_ENV_KEYS: &[&str] = &["MINIMAX_CN_API_KEY"];
 const SETUP_NOVITA_ENV_KEYS: &[&str] = &["NOVITA_API_KEY"];
 const SETUP_STEPFUN_ENV_KEYS: &[&str] = &["HERMES_STEPFUN_API_KEY", "STEPFUN_API_KEY"];
-const SETUP_COPILOT_ENV_KEYS: &[&str] = &["GITHUB_COPILOT_TOKEN"];
+const SETUP_COPILOT_ENV_KEYS: &[&str] = &["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"];
 const SETUP_AI_GATEWAY_ENV_KEYS: &[&str] = &["AI_GATEWAY_API_KEY"];
 const SETUP_ARCEE_ENV_KEYS: &[&str] = &["ARCEEAI_API_KEY", "ARCEE_API_KEY"];
 const SETUP_DEEPSEEK_ENV_KEYS: &[&str] = &["DEEPSEEK_API_KEY"];
 const SETUP_HUGGINGFACE_ENV_KEYS: &[&str] = &["HF_TOKEN"];
+const SETUP_GMI_ENV_KEYS: &[&str] = &["GMI_API_KEY"];
 const SETUP_KILOCODE_ENV_KEYS: &[&str] = &["KILOCODE_API_KEY"];
 const SETUP_NVIDIA_ENV_KEYS: &[&str] = &["NVIDIA_API_KEY"];
 const SETUP_OLLAMA_CLOUD_ENV_KEYS: &[&str] = &["OLLAMA_API_KEY"];
@@ -9446,6 +9458,11 @@ const SETUP_MODEL_OPTIONS: &[SetupModelOption] = &[
         provider: "kilocode",
         model: "kilocode:openai/gpt-5.4",
         label: "KiloCode",
+    },
+    SetupModelOption {
+        provider: "gmi",
+        model: "gmi:gpt-oss-120b",
+        label: "GMI Cloud",
     },
     SetupModelOption {
         provider: "ai-gateway",
@@ -9620,6 +9637,7 @@ fn setup_provider_display(provider: &str) -> &'static str {
         "copilot" => "GitHub Copilot",
         "huggingface" => "Hugging Face",
         "kilocode" => "KiloCode",
+        "gmi" => "GMI Cloud",
         "nvidia" => "NVIDIA NIM",
         "ollama-cloud" => "Ollama Cloud",
         "ollama-local" => "Ollama Local",
@@ -9663,6 +9681,7 @@ fn setup_provider_env_keys(provider: &str) -> &'static [&'static str] {
         "copilot" => SETUP_COPILOT_ENV_KEYS,
         "huggingface" => SETUP_HUGGINGFACE_ENV_KEYS,
         "kilocode" => SETUP_KILOCODE_ENV_KEYS,
+        "gmi" => SETUP_GMI_ENV_KEYS,
         "nvidia" => SETUP_NVIDIA_ENV_KEYS,
         "ollama-cloud" => SETUP_OLLAMA_CLOUD_ENV_KEYS,
         "ollama-local" => SETUP_OLLAMA_LOCAL_ENV_KEYS,
@@ -9696,8 +9715,10 @@ fn setup_provider_default_base_url(provider: &str) -> Option<&'static str> {
         "stepfun" => Some("https://api.stepfun.ai/step_plan/v1"),
         "ai-gateway" => Some("https://ai-gateway.vercel.sh/v1"),
         "arcee" => Some("https://api.arcee.ai/api/v1"),
+        "copilot" => Some("https://api.githubcopilot.com"),
         "huggingface" => Some("https://router.huggingface.co/v1"),
         "kilocode" => Some("https://api.kilo.ai/api/gateway"),
+        "gmi" => Some("https://api.gmi-serving.com/v1"),
         "nvidia" => Some("https://integrate.api.nvidia.com/v1"),
         "ollama-cloud" => Some("https://ollama.com/v1"),
         "ollama-local" => Some("http://127.0.0.1:11434/v1"),
@@ -14105,6 +14126,8 @@ mod tests {
         assert_eq!(normalize_auth_provider("z-ai"), "zai");
         assert_eq!(normalize_auth_provider("grok"), "xai");
         assert_eq!(normalize_auth_provider("hf"), "huggingface");
+        assert_eq!(normalize_auth_provider("github-models"), "copilot");
+        assert_eq!(normalize_auth_provider("copilot-acp-agent"), "copilot-acp");
         assert_eq!(normalize_auth_provider("ollama"), "ollama-local");
         assert_eq!(normalize_auth_provider("llama.cpp"), "llama-cpp");
         assert_eq!(normalize_auth_provider("ollvm"), "vllm");
@@ -14318,6 +14341,13 @@ mod tests {
             provider_env_var("qwen-oauth"),
             Some("HERMES_QWEN_OAUTH_API_KEY")
         );
+        assert_eq!(provider_env_var("copilot"), Some("COPILOT_GITHUB_TOKEN"));
+        assert_eq!(
+            secret_provider_aliases("copilot"),
+            vec!["copilot", "github-copilot", "github-models"]
+        );
+        assert_eq!(provider_env_var("gmi-cloud"), Some("GMI_API_KEY"));
+        assert_eq!(secret_provider_aliases("gmi"), vec!["gmi", "gmi-cloud"]);
         assert_eq!(
             provider_env_var("google-gemini-cli"),
             Some("HERMES_GEMINI_OAUTH_API_KEY")
@@ -14587,6 +14617,20 @@ mod tests {
         assert_eq!(
             setup_provider_env_keys("google-gemini-cli"),
             &["HERMES_GEMINI_OAUTH_API_KEY"]
+        );
+        assert_eq!(
+            setup_provider_env_keys("copilot"),
+            &["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
+        );
+        assert_eq!(
+            setup_provider_default_base_url("copilot"),
+            Some("https://api.githubcopilot.com")
+        );
+        assert_eq!(setup_provider_display("gmi"), "GMI Cloud");
+        assert_eq!(setup_provider_env_keys("gmi"), &["GMI_API_KEY"]);
+        assert_eq!(
+            setup_provider_default_base_url("gmi"),
+            Some("https://api.gmi-serving.com/v1")
         );
         assert_eq!(
             setup_provider_default_base_url("ai-gateway"),

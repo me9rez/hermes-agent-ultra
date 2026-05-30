@@ -2673,8 +2673,14 @@ impl AgentLoop {
             "nous" => std::env::var("NOUS_API_KEY")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
-            "copilot" | "copilot-acp" => std::env::var("GITHUB_COPILOT_TOKEN")
+            "copilot" | "copilot-acp" => std::env::var("COPILOT_GITHUB_TOKEN")
                 .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| std::env::var("GH_TOKEN").ok())
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| std::env::var("GITHUB_COPILOT_TOKEN").ok())
                 .filter(|v| !v.trim().is_empty()),
             _ => None,
         }
@@ -2709,6 +2715,8 @@ impl AgentLoop {
                     Some("cloudcode-pa://google".to_string())
                 } else if provider == "stepfun" {
                     Some("https://api.stepfun.ai/step_plan/v1".to_string())
+                } else if provider == "copilot" {
+                    Some("https://api.githubcopilot.com".to_string())
                 } else {
                     None
                 }
@@ -3266,7 +3274,7 @@ impl AgentLoop {
             }
             "copilot" | "copilot-acp" => {
                 let p = CopilotProvider::new(
-                    base_url.unwrap_or_else(|| "https://api.github.com/copilot".to_string()),
+                    base_url.unwrap_or_else(|| "https://api.githubcopilot.com".to_string()),
                     &api_key,
                 )
                 .with_model(model_name);
@@ -9152,6 +9160,12 @@ mod tests {
             std::env::set_var(key, value);
             Self { key, previous }
         }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -13037,6 +13051,7 @@ mod tests {
     #[test]
     fn test_runtime_provider_stepfun_env_key_and_base_url_defaults() {
         use futures::stream::BoxStream;
+        let _guard = env_test_lock();
 
         struct DummyProvider;
         #[async_trait::async_trait]
@@ -13077,14 +13092,69 @@ mod tests {
             Arc::new(DummyProvider),
         );
 
-        std::env::remove_var("HERMES_STEPFUN_API_KEY");
-        std::env::set_var("STEPFUN_API_KEY", "stepfun-secret");
+        let _hermes_stepfun = EnvVarGuard::remove("HERMES_STEPFUN_API_KEY");
+        let _stepfun = EnvVarGuard::set("STEPFUN_API_KEY", "stepfun-secret");
         let resolved = agent.resolve_runtime_api_key("stepfun", None, None);
         assert_eq!(resolved.as_deref(), Some("stepfun-secret"));
-        std::env::remove_var("STEPFUN_API_KEY");
 
         let base = agent.resolve_runtime_base_url("stepfun", None);
         assert_eq!(base.as_deref(), Some("https://api.stepfun.ai/step_plan/v1"));
+    }
+
+    #[test]
+    fn test_runtime_provider_copilot_env_aliases_and_base_url_default() {
+        use futures::stream::BoxStream;
+        let _guard = env_test_lock();
+
+        struct DummyProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for DummyProvider {
+            async fn chat_completion(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> Result<hermes_core::LlmResponse, AgentError> {
+                Ok(hermes_core::LlmResponse {
+                    message: Message::assistant("dummy"),
+                    usage: None,
+                    model: "dummy".into(),
+                    finish_reason: Some("stop".into()),
+                })
+            }
+
+            fn chat_completion_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> BoxStream<'static, Result<StreamChunk, AgentError>> {
+                futures::stream::empty().boxed()
+            }
+        }
+
+        let _copilot_github = EnvVarGuard::remove("COPILOT_GITHUB_TOKEN");
+        let _gh = EnvVarGuard::remove("GH_TOKEN");
+        let _github_token = EnvVarGuard::remove("GITHUB_TOKEN");
+        let _legacy = EnvVarGuard::remove("GITHUB_COPILOT_TOKEN");
+        let agent = AgentLoop::new(
+            AgentConfig::default(),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(DummyProvider),
+        );
+
+        let _github_token_override = EnvVarGuard::set("GITHUB_TOKEN", "gh-env-secret");
+        let resolved = agent.resolve_runtime_api_key("copilot", None, None);
+        assert_eq!(resolved.as_deref(), Some("gh-env-secret"));
+
+        let base = agent.resolve_runtime_base_url("copilot", None);
+        assert_eq!(base.as_deref(), Some("https://api.githubcopilot.com"));
     }
 
     #[test]

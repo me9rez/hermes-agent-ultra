@@ -855,7 +855,8 @@ pub fn load_from_json(path: &Path) -> Result<GatewayConfig, ConfigError> {
 ///   MOONSHOT_API_KEY           -> llm_providers["kimi"].api_key
 ///   MINIMAX_API_KEY            -> llm_providers["minimax"].api_key
 ///   NOUS_API_KEY               -> llm_providers["nous"].api_key
-///   GITHUB_COPILOT_TOKEN       -> llm_providers["copilot"].api_key
+///   COPILOT_GITHUB_TOKEN/GITHUB_COPILOT_TOKEN
+///                              -> llm_providers["copilot"].api_key
 ///   HERMES_BASE_URL            -> all llm_providers[*].base_url
 ///
 /// 另见 [`crate::python_platform_env::apply_python_named_platform_env`]：
@@ -937,6 +938,7 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
             .or_insert_with(LlmProviderConfig::default)
             .api_key = Some(v);
     }
+    let mut env_overridden_providers = std::collections::HashSet::new();
     for (env_var, provider_name) in [
         ("ANTHROPIC_API_KEY", "anthropic"),
         ("OPENROUTER_API_KEY", "openrouter"),
@@ -946,10 +948,15 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
         ("MOONSHOT_API_KEY", "kimi"),
         ("MINIMAX_API_KEY", "minimax"),
         ("NOUS_API_KEY", "nous"),
+        ("GMI_API_KEY", "gmi"),
+        ("COPILOT_GITHUB_TOKEN", "copilot"),
         ("GITHUB_COPILOT_TOKEN", "copilot"),
     ] {
         if let Ok(v) = std::env::var(env_var) {
             if v.trim().is_empty() {
+                continue;
+            }
+            if !env_overridden_providers.insert(provider_name) {
                 continue;
             }
             config
@@ -1474,6 +1481,60 @@ auxiliary:
         unsafe {
             std::env::remove_var("HERMES_OPENAI_CODEX_API_KEY");
             std::env::remove_var("HERMES_QWEN_OAUTH_API_KEY");
+        }
+    }
+
+    #[test]
+    fn apply_env_overrides_supports_copilot_env_var_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // SAFETY: test process serializes env mutation via ENV_LOCK.
+        unsafe {
+            std::env::set_var("COPILOT_GITHUB_TOKEN", "copilot-primary");
+            std::env::set_var("GITHUB_COPILOT_TOKEN", "legacy-fallback");
+        }
+
+        let mut cfg = GatewayConfig::default();
+        apply_env_overrides(&mut cfg);
+
+        assert_eq!(
+            cfg.llm_providers
+                .get("copilot")
+                .and_then(|p| p.api_key.as_deref()),
+            Some("copilot-primary")
+        );
+
+        // SAFETY: test process serializes env mutation via ENV_LOCK.
+        unsafe {
+            std::env::remove_var("COPILOT_GITHUB_TOKEN");
+            std::env::remove_var("GITHUB_COPILOT_TOKEN");
+        }
+    }
+
+    #[test]
+    fn apply_env_overrides_ignores_generic_github_tokens_for_copilot() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // SAFETY: test process serializes env mutation via ENV_LOCK.
+        unsafe {
+            std::env::remove_var("COPILOT_GITHUB_TOKEN");
+            std::env::remove_var("GITHUB_COPILOT_TOKEN");
+            std::env::set_var("GH_TOKEN", "generic-gh-token");
+            std::env::set_var("GITHUB_TOKEN", "generic-github-token");
+        }
+
+        let mut cfg = GatewayConfig::default();
+        apply_env_overrides(&mut cfg);
+
+        assert!(
+            !cfg.llm_providers.contains_key("copilot"),
+            "generic GitHub tokens should not auto-configure the Copilot provider"
+        );
+
+        // SAFETY: test process serializes env mutation via ENV_LOCK.
+        unsafe {
+            std::env::remove_var("GH_TOKEN");
+            std::env::remove_var("GITHUB_TOKEN");
         }
     }
 

@@ -179,13 +179,19 @@ fn provider_env_key_names(provider: &str) -> &'static [&'static str] {
         "kimi" => &["MOONSHOT_API_KEY"],
         "minimax" => &["MINIMAX_API_KEY"],
         "nous" => &["NOUS_API_KEY", "HERMES_NOUS_API_KEY"],
-        "copilot" | "copilot-acp" => &["GITHUB_COPILOT_TOKEN"],
+        "copilot" | "copilot-acp" => &[
+            "COPILOT_GITHUB_TOKEN",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GITHUB_COPILOT_TOKEN",
+        ],
         "stepfun" => &["STEPFUN_API_KEY"],
         "ai-gateway" => &["AI_GATEWAY_API_KEY"],
         "novita" => &["NOVITA_API_KEY"],
         "xai" => &["XAI_API_KEY"],
         "nvidia" => &["NVIDIA_API_KEY"],
         "kilocode" => &["KILOCODE_API_KEY"],
+        "gmi" => &["GMI_API_KEY"],
         "huggingface" => &["HF_TOKEN", "HUGGINGFACE_API_KEY"],
         "zai" => &["ZAI_API_KEY"],
         "arcee" => &["ARCEE_API_KEY"],
@@ -311,6 +317,19 @@ mod tests {
         assert_eq!(
             detect_provider_from_config(&config).as_deref(),
             Some("kimi")
+        );
+    }
+
+    #[test]
+    fn copilot_credentials_accept_upstream_env_aliases() {
+        assert_eq!(
+            provider_env_key_names("copilot"),
+            &[
+                "COPILOT_GITHUB_TOKEN",
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GITHUB_COPILOT_TOKEN"
+            ]
         );
     }
 }

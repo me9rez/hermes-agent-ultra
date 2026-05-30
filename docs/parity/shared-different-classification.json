@@ -171,6 +171,20 @@
       "ticket": 25
     },
     {
+      "path": "tests/gateway/test_discord_channel_controls.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord ignored_channels and no_thread_channels behavior is covered by Rust DiscordChannelControls tests for CSV/YAML parsing, DM bypass, thread-parent matching, auto-thread suppression, config env bridging, and config-to-env hydration precedence.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_discord_channel_skills.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord channel_skill_bindings resolver intent is covered by Rust DiscordChannelSkillBinding parsing and DiscordAdapter::resolve_channel_skills tests for channel matches, parent matches, single-skill shorthand, no-match, and ordered deduplication.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/gateway/test_discord_imports.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream discord.py-missing import safety is covered by the Rust-only hermes-gateway Discord module compiling and testing behind the discord feature without any discord.py runtime dependency.",
@@ -195,6 +209,13 @@
       "path": "tests/gateway/test_discord_system_messages.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream Discord system-message filtering is covered by Rust DiscordAdapter::should_accept_message tests accepting default/reply message types and rejecting thread rename, pin, join, and boost-style system message types.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_discord_thread_persistence.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord thread participation persistence is covered by Rust ThreadParticipationTracker tests for missing/corrupt state, duplicate no-op marks, ordered newest retention, capacity eviction, restart reload, and missing-parent save creation.",
       "owner": "sheawinkler",
       "ticket": 25
     },

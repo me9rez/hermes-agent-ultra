@@ -67,7 +67,9 @@ use hermes_gateway::hooks::HookRegistry;
 use hermes_gateway::platforms::api_server::{ApiInboundRequest, ApiServerAdapter, ApiServerConfig};
 use hermes_gateway::platforms::bluebubbles::{BlueBubblesAdapter, BlueBubblesConfig};
 use hermes_gateway::platforms::dingtalk::{DingTalkAdapter, DingTalkConfig};
-use hermes_gateway::platforms::discord::{DiscordAdapter, DiscordConfig};
+use hermes_gateway::platforms::discord::{
+    DiscordAdapter, DiscordChannelControls, DiscordChannelSkillBinding, DiscordConfig,
+};
 use hermes_gateway::platforms::email::{EmailAdapter, EmailConfig};
 use hermes_gateway::platforms::feishu::{FeishuAdapter, FeishuConfig};
 use hermes_gateway::platforms::homeassistant::{HomeAssistantAdapter, HomeAssistantConfig};
@@ -4438,6 +4440,10 @@ async fn register_gateway_adapters(
                         .get("intents")
                         .and_then(|v| v.as_u64())
                         .unwrap_or((1 << 0) | (1 << 9) | (1 << 15)),
+                    channel_controls: DiscordChannelControls::from_extra(&platform_cfg.extra),
+                    channel_skill_bindings: DiscordChannelSkillBinding::list_from_json(
+                        platform_cfg.extra.get("channel_skill_bindings"),
+                    ),
                 };
                 match DiscordAdapter::new(discord_cfg) {
                     Ok(adapter) => gateway.register_adapter("discord", Arc::new(adapter)).await,

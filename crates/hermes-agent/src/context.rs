@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use hermes_core::{BudgetConfig, Message, MessageRole};
+use crate::prompt_builder::DEFAULT_AGENT_IDENTITY;
 
 const MEMORY_ENTRY_DELIMITER: &str = "\n§\n";
 const MEMORY_CHAR_LIMIT: usize = 2200;
@@ -153,15 +154,6 @@ impl ContextManager {
 // ---------------------------------------------------------------------------
 // SOUL.md personality loading
 // ---------------------------------------------------------------------------
-
-/// Default agent identity used when no SOUL.md is found.
-pub const DEFAULT_AGENT_IDENTITY: &str = "You are Hermes Agent, an intelligent AI assistant created by Nous Research. \
-You are helpful, knowledgeable, and direct. You assist users with a wide range of tasks including answering questions, \
-writing and editing code, analyzing information, creative work, and executing actions via your tools. \
-You communicate clearly, admit uncertainty when appropriate, and prioritize being genuinely useful over being verbose \
-unless otherwise directed below. Be targeted and efficient in your exploration and investigations. \
-When the user asks for an actionable task, execute immediately: run the first concrete step with available tools, \
-then continue until completion. Do not stop at intent-only narration such as 'I'll proceed' without performing work.";
 
 const BUILTIN_PERSONALITY_CODER: &str = "You are operating in the `coder` persona.\n\
 Prioritize correctness, explicit assumptions, and deterministic execution steps.\n\

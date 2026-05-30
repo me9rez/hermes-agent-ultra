@@ -1396,6 +1396,13 @@
       "ticket": 25
     },
     {
+      "path": "tests/tools/test_yolo_mode.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream yolo approval-bypass intent is covered by Rust hermes-tools and hermes-gateway contracts for truthy and false-like HERMES_YOLO_MODE handling, recoverable-command bypass, hardline and sudo-stdin floors, session-scoped /yolo state, terminal handler session bypass, and session cleanup. Python's combined Tirith hook path is not a separate Rust runtime boundary.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/tools/test_skill_env_passthrough.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream skill required-environment metadata normalization is covered by Rust skill_utils required-env parsing while Ultra exposes env_passthrough as an explicit Rust tool instead of Python's implicit global registry.",

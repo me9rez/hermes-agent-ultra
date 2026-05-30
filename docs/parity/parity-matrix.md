@@ -1,10 +1,10 @@
 # Parity Matrix
 
-Generated: `2026-05-30T15:08:12.661310+00:00`
+Generated: `2026-05-30T15:37:22.785476+00:00`
 
 ## Scope
 
-- Local ref: `main` (`e1a19d8a2152c3579d6a4c72c1c07aadec0320e1`)
+- Local ref: `main` (`21da3f1e8ffe7bef1a67c1be1e4765ed1e4bfb68`)
 - Upstream ref: `upstream/main` (`6a72af044c44c9a05137bc448bc65ecf0ace5a89`)
 - Merge base: `none (history divergence)`
 
@@ -13,17 +13,17 @@ Generated: `2026-05-30T15:08:12.661310+00:00`
 | Metric | Value |
 | --- | ---: |
 | Commits behind local (`upstream` ancestry only) | 4493 |
-| Commits ahead local (`local` ancestry only) | 875 |
+| Commits ahead local (`local` ancestry only) | 877 |
 | Upstream commits missing by patch-id (`git cherry local upstream`, `+`) | 4373 |
 | Upstream commits represented by patch-id (`git cherry local upstream`, `-`) | 2 |
-| Local commits unique by patch-id (`git cherry upstream local`, `+`) | 721 |
+| Local commits unique by patch-id (`git cherry upstream local`, `+`) | 722 |
 | Files only in upstream tree | 1493 |
 | Files only in local tree | 574 |
 | Shared files identical content | 1688 |
 | Shared files different content | 1031 |
 | Total files changed (`local` vs `upstream`) | 3098 |
 | Insertions (`local` vs `upstream`) | 750036 |
-| Deletions (`local` vs `upstream`) | 399969 |
+| Deletions (`local` vs `upstream`) | 400696 |
 
 ## Top 40 upstream-only buckets
 
@@ -176,7 +176,7 @@ Generated: `2026-05-30T15:08:12.661310+00:00`
 
 - Upstream missing by patch-id: `4373`
 - Upstream represented by patch-id: `2`
-- Local unique by patch-id: `721`
+- Local unique by patch-id: `722`
 - Intentional divergence tracked items: `8` (covered files: `904`)
 - Merge base is absent; patch-id mapping is used as primary commit equivalence signal.
 

@@ -451,6 +451,7 @@ impl Gateway {
         if let Some(state) = states.get_mut(session_key) {
             state.yolo = false;
         }
+        hermes_tools::approval::clear_session(session_key);
     }
 
     fn reaction_lifecycle_plan(
@@ -1017,6 +1018,11 @@ impl Gateway {
                 let mut states = self.runtime_state.write().await;
                 let state = states.entry(session_key.to_string()).or_default();
                 state.yolo = !state.yolo;
+                if state.yolo {
+                    hermes_tools::approval::enable_session_yolo(session_key);
+                } else {
+                    hermes_tools::approval::disable_session_yolo(session_key);
+                }
                 let reply = format!("🤠 YOLO mode: {}", if state.yolo { "ON" } else { "OFF" });
                 drop(states);
                 self.send_message(&incoming.platform, &incoming.chat_id, &reply, None)
@@ -3379,16 +3385,18 @@ mod tests {
         let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
         gw.register_adapter("test", adapter).await;
 
-        let session_key_1 = gw
-            .session_manager
-            .compose_session_key("test", "chat1", "user1");
-        let session_key_2 = gw
-            .session_manager
-            .compose_session_key("test", "chat2", "user1");
+        let session_key_1 =
+            gw.session_manager
+                .compose_session_key("test", "chat-yolo-new-1", "user1");
+        let session_key_2 =
+            gw.session_manager
+                .compose_session_key("test", "chat-yolo-new-2", "user1");
+        hermes_tools::approval::clear_session(&session_key_1);
+        hermes_tools::approval::clear_session(&session_key_2);
 
         let yolo_chat1 = IncomingMessage {
             platform: "test".into(),
-            chat_id: "chat1".into(),
+            chat_id: "chat-yolo-new-1".into(),
             user_id: "user1".into(),
             text: "/yolo".into(),
             message_id: None,
@@ -3398,7 +3406,7 @@ mod tests {
 
         let yolo_chat2 = IncomingMessage {
             platform: "test".into(),
-            chat_id: "chat2".into(),
+            chat_id: "chat-yolo-new-2".into(),
             user_id: "user1".into(),
             text: "/yolo".into(),
             message_id: None,
@@ -3411,10 +3419,16 @@ mod tests {
             assert_eq!(states.get(&session_key_1).map(|s| s.yolo), Some(true));
             assert_eq!(states.get(&session_key_2).map(|s| s.yolo), Some(true));
         }
+        assert!(hermes_tools::approval::is_session_yolo_enabled(
+            &session_key_1
+        ));
+        assert!(hermes_tools::approval::is_session_yolo_enabled(
+            &session_key_2
+        ));
 
         let reset_chat1 = IncomingMessage {
             platform: "test".into(),
-            chat_id: "chat1".into(),
+            chat_id: "chat-yolo-new-1".into(),
             user_id: "user1".into(),
             text: "/new".into(),
             message_id: None,
@@ -3425,6 +3439,13 @@ mod tests {
         let states = gw.runtime_state.read().await;
         assert_eq!(states.get(&session_key_1).map(|s| s.yolo), Some(false));
         assert_eq!(states.get(&session_key_2).map(|s| s.yolo), Some(true));
+        assert!(!hermes_tools::approval::is_session_yolo_enabled(
+            &session_key_1
+        ));
+        assert!(hermes_tools::approval::is_session_yolo_enabled(
+            &session_key_2
+        ));
+        hermes_tools::approval::clear_session(&session_key_2);
     }
 
     #[tokio::test]
@@ -3440,16 +3461,17 @@ mod tests {
         let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
         gw.register_adapter("test", adapter).await;
 
-        let current_key = gw
-            .session_manager
-            .compose_session_key("test", "chat1", "user1");
-        let target_key = gw
-            .session_manager
-            .compose_session_key("test", "chat2", "user1");
+        let current_key =
+            gw.session_manager
+                .compose_session_key("test", "chat-yolo-switch-current", "user1");
+        let target_key =
+            gw.session_manager
+                .compose_session_key("test", "chat-yolo-switch-target", "user1");
+        hermes_tools::approval::clear_session(&current_key);
 
         let _ = gw
             .session_manager
-            .get_or_create_session("test", "chat2", "user1")
+            .get_or_create_session("test", "chat-yolo-switch-target", "user1")
             .await;
         gw.session_manager
             .add_message(&target_key, Message::user("history from another session"))
@@ -3457,7 +3479,7 @@ mod tests {
 
         let yolo_chat1 = IncomingMessage {
             platform: "test".into(),
-            chat_id: "chat1".into(),
+            chat_id: "chat-yolo-switch-current".into(),
             user_id: "user1".into(),
             text: "/yolo".into(),
             message_id: None,
@@ -3468,10 +3490,13 @@ mod tests {
             let states = gw.runtime_state.read().await;
             assert_eq!(states.get(&current_key).map(|s| s.yolo), Some(true));
         }
+        assert!(hermes_tools::approval::is_session_yolo_enabled(
+            &current_key
+        ));
 
         let switch = IncomingMessage {
             platform: "test".into(),
-            chat_id: "chat1".into(),
+            chat_id: "chat-yolo-switch-current".into(),
             user_id: "user1".into(),
             text: format!("/sessions {}", target_key),
             message_id: None,
@@ -3481,6 +3506,9 @@ mod tests {
 
         let states = gw.runtime_state.read().await;
         assert_eq!(states.get(&current_key).map(|s| s.yolo), Some(false));
+        assert!(!hermes_tools::approval::is_session_yolo_enabled(
+            &current_key
+        ));
     }
 
     #[tokio::test]

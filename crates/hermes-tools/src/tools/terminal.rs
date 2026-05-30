@@ -479,10 +479,8 @@ impl ToolHandler for ProcessHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::TEST_ENV_LOCK;
     use hermes_core::AgentError;
-    use std::sync::{LazyLock, Mutex};
-
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     struct EnvGuard {
         key: &'static str,
@@ -622,8 +620,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_terminal_handler_execute() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
         let _yolo = EnvGuard::remove("HERMES_YOLO_MODE");
+        let _session = EnvGuard::remove("HERMES_SESSION_KEY");
         let _sudo = EnvGuard::remove("SUDO_PASSWORD");
         let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
         let result = handler
@@ -635,8 +634,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_terminal_handler_execute_with_stdin_data() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
         let _yolo = EnvGuard::remove("HERMES_YOLO_MODE");
+        let _session = EnvGuard::remove("HERMES_SESSION_KEY");
         let _sudo = EnvGuard::remove("SUDO_PASSWORD");
         let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
         let result = handler
@@ -648,8 +648,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_terminal_handler_denies_confirmation_without_consent() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
         let _yolo = EnvGuard::remove("HERMES_YOLO_MODE");
+        let _session = EnvGuard::remove("HERMES_SESSION_KEY");
         let _sudo = EnvGuard::remove("SUDO_PASSWORD");
         let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
         let err = handler
@@ -665,8 +666,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_terminal_handler_yolo_bypasses_recoverable_confirmation() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
         let _yolo = EnvGuard::set("HERMES_YOLO_MODE", "1");
+        let _session = EnvGuard::remove("HERMES_SESSION_KEY");
         let _sudo = EnvGuard::remove("SUDO_PASSWORD");
         let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
         let result = handler
@@ -678,8 +680,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_terminal_handler_yolo_does_not_bypass_hardline() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
         let _yolo = EnvGuard::set("HERMES_YOLO_MODE", "1");
+        let _session = EnvGuard::remove("HERMES_SESSION_KEY");
         let _sudo = EnvGuard::remove("SUDO_PASSWORD");
         let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
         let err = handler
@@ -687,6 +690,25 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("denied by security policy"));
+    }
+
+    #[tokio::test]
+    async fn test_terminal_handler_session_yolo_bypasses_recoverable_confirmation() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _yolo = EnvGuard::remove("HERMES_YOLO_MODE");
+        let _session = EnvGuard::set("HERMES_SESSION_KEY", "terminal-session-yolo");
+        let _sudo = EnvGuard::remove("SUDO_PASSWORD");
+        crate::approval::clear_session("terminal-session-yolo");
+        crate::approval::enable_session_yolo("terminal-session-yolo");
+
+        let handler = TerminalHandler::new(std::sync::Arc::new(MockBackend));
+        let result = handler
+            .execute(json!({"command": "rm -rf /tmp/hermes-safe-test"}))
+            .await
+            .unwrap();
+        assert!(result.contains("rm -rf /tmp/hermes-safe-test"));
+
+        crate::approval::clear_session("terminal-session-yolo");
     }
 
     #[tokio::test]

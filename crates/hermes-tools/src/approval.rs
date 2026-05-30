@@ -4,7 +4,8 @@
 //! before execution, based on dangerous command patterns.
 
 use regex::Regex;
-use std::sync::LazyLock;
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
 
 // ---------------------------------------------------------------------------
 // ApprovalDecision
@@ -153,6 +154,12 @@ static DELETE_FROM: LazyLock<Regex> =
 
 static CONTAINER_BACKENDS: &[&str] = &["docker", "singularity", "modal", "daytona"];
 
+static SESSION_YOLO: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 fn collapse_command(command: &str) -> String {
     command
         .replace("\\\n", " ")
@@ -172,6 +179,60 @@ fn yolo_mode_from_env() -> bool {
             matches!(v.as_str(), "1" | "true" | "yes" | "on")
         })
         .unwrap_or(false)
+}
+
+fn current_session_key_from_env() -> Option<String> {
+    std::env::var("HERMES_SESSION_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn current_session_yolo_from_env() -> bool {
+    current_session_key_from_env()
+        .map(|session_key| is_session_yolo_enabled(&session_key))
+        .unwrap_or(false)
+}
+
+/// Enable yolo approval bypass for a single session key.
+pub fn enable_session_yolo(session_key: &str) {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return;
+    }
+    SESSION_YOLO
+        .lock()
+        .expect("session yolo lock poisoned")
+        .insert(session_key.to_string());
+}
+
+/// Disable yolo approval bypass for a single session key.
+pub fn disable_session_yolo(session_key: &str) {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return;
+    }
+    SESSION_YOLO
+        .lock()
+        .expect("session yolo lock poisoned")
+        .remove(session_key);
+}
+
+/// Remove approval state associated with a session boundary.
+pub fn clear_session(session_key: &str) {
+    disable_session_yolo(session_key);
+}
+
+/// Return whether yolo approval bypass is enabled for this session key.
+pub fn is_session_yolo_enabled(session_key: &str) -> bool {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return false;
+    }
+    SESSION_YOLO
+        .lock()
+        .expect("session yolo lock poisoned")
+        .contains(session_key)
 }
 
 fn environment_bypasses_host_guards(environment: &str) -> bool {
@@ -281,7 +342,7 @@ impl ApprovalManager {
         self.check_approval_with_context(
             command,
             environment,
-            yolo_mode_from_env(),
+            yolo_mode_from_env() || current_session_yolo_from_env(),
             has_sudo_password_env(),
         )
     }
@@ -359,6 +420,35 @@ pub fn check_approval(command: &str) -> ApprovalDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn remove(key: &'static str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, old }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(old) = &self.old {
+                std::env::set_var(self.key, old);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn test_approved_commands() {
@@ -598,6 +688,113 @@ mod tests {
                 "yolo must not bypass hardline for {command:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_yolo_env_truthy_values_bypass_recoverable_confirmations() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _session = EnvGuard::remove("HERMES_SESSION_KEY");
+        let _sudo = EnvGuard::remove("SUDO_PASSWORD");
+        let manager = ApprovalManager::new();
+
+        for value in ["1", "true", "yes", "on"] {
+            let _yolo = EnvGuard::set("HERMES_YOLO_MODE", value);
+            assert_eq!(
+                manager.check_approval_from_env("rm -rf /tmp/stuff", "local"),
+                ApprovalDecision::Approved,
+                "truthy HERMES_YOLO_MODE={value:?} should bypass recoverable approval"
+            );
+        }
+    }
+
+    #[test]
+    fn test_yolo_env_false_like_values_do_not_bypass() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _session = EnvGuard::remove("HERMES_SESSION_KEY");
+        let _sudo = EnvGuard::remove("SUDO_PASSWORD");
+        let manager = ApprovalManager::new();
+
+        for value in ["", "false", "False", "0", "off", "no"] {
+            let _yolo = EnvGuard::set("HERMES_YOLO_MODE", value);
+            assert_eq!(
+                manager.check_approval_from_env("rm -rf /tmp/stuff", "local"),
+                ApprovalDecision::RequiresConfirmation,
+                "false-like HERMES_YOLO_MODE={value:?} must not bypass approval"
+            );
+        }
+    }
+
+    #[test]
+    fn test_session_scoped_yolo_only_bypasses_current_session() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _yolo = EnvGuard::remove("HERMES_YOLO_MODE");
+        let _sudo = EnvGuard::remove("SUDO_PASSWORD");
+        let manager = ApprovalManager::new();
+
+        clear_session("session-a");
+        clear_session("session-b");
+        enable_session_yolo("session-a");
+
+        assert!(is_session_yolo_enabled("session-a"));
+        assert!(!is_session_yolo_enabled("session-b"));
+
+        {
+            let _session = EnvGuard::set("HERMES_SESSION_KEY", "session-a");
+            assert_eq!(
+                manager.check_approval_from_env("rm -rf /tmp/stuff", "local"),
+                ApprovalDecision::Approved,
+                "session-a yolo should bypass recoverable approval"
+            );
+        }
+
+        {
+            let _session = EnvGuard::set("HERMES_SESSION_KEY", "session-b");
+            assert_eq!(
+                manager.check_approval_from_env("rm -rf /tmp/stuff", "local"),
+                ApprovalDecision::RequiresConfirmation,
+                "session-b must not inherit session-a yolo"
+            );
+        }
+
+        clear_session("session-a");
+        clear_session("session-b");
+    }
+
+    #[test]
+    fn test_session_scoped_yolo_does_not_bypass_hardline_or_sudo_floor() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let _yolo = EnvGuard::remove("HERMES_YOLO_MODE");
+        let _sudo = EnvGuard::remove("SUDO_PASSWORD");
+        let _session = EnvGuard::set("HERMES_SESSION_KEY", "session-a");
+        let manager = ApprovalManager::new();
+
+        clear_session("session-a");
+        enable_session_yolo("session-a");
+
+        for command in ["rm -rf /", "mkfs.ext4 /dev/sda", "shutdown now"] {
+            assert_eq!(
+                manager.check_approval_from_env(command, "local"),
+                ApprovalDecision::Denied,
+                "session yolo must not bypass hardline denial for {command:?}"
+            );
+        }
+        assert_eq!(
+            manager.check_approval_from_env("sudo -S whoami", "local"),
+            ApprovalDecision::Denied,
+            "session yolo must not bypass sudo stdin/askpass denial"
+        );
+
+        clear_session("session-a");
+    }
+
+    #[test]
+    fn test_clear_session_removes_session_yolo_state() {
+        enable_session_yolo("session-a");
+        assert!(is_session_yolo_enabled("session-a"));
+
+        clear_session("session-a");
+
+        assert!(!is_session_yolo_enabled("session-a"));
     }
 
     #[test]

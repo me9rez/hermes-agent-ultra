@@ -674,8 +674,26 @@ pub enum CliCommand {
 
     /// ACP (Agent Communication Protocol) server.
     Acp {
-        /// Action: start/status/stop/restart
+        /// Action: start/status/stop/restart/check/setup/setup-browser/version
         action: Option<String>,
+        /// Run ACP startup checks without starting the server.
+        #[arg(long, conflicts_with_all = ["action", "setup", "setup_browser"])]
+        check: bool,
+        /// Run Hermes model/provider setup for ACP clients.
+        #[arg(long, conflicts_with_all = ["action", "check", "setup_browser"])]
+        setup: bool,
+        /// Check browser tooling needed by ACP browser workflows.
+        #[arg(long = "setup-browser", conflicts_with_all = ["action", "check", "setup"])]
+        setup_browser: bool,
+        /// Print version information without starting the ACP server.
+        #[arg(
+            long,
+            conflicts_with_all = ["action", "check", "setup", "setup_browser"]
+        )]
+        version: bool,
+        /// Assume yes / non-interactive mode for setup subcommands.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Backup configuration and sessions.
@@ -831,6 +849,98 @@ mod tests {
                 assert_eq!(provider_model.as_deref(), Some("openai:gpt-4o"));
             }
             _ => panic!("Expected Model command"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_acp_check_flag() {
+        let cli = Cli::try_parse_from(vec!["hermes", "acp", "--check"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Acp {
+                action,
+                check,
+                setup,
+                setup_browser,
+                version,
+                yes,
+            }) => {
+                assert!(action.is_none());
+                assert!(check);
+                assert!(!setup);
+                assert!(!setup_browser);
+                assert!(!version);
+                assert!(!yes);
+            }
+            _ => panic!("Expected ACP command with --check"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_acp_setup_browser_yes_flag() {
+        let cli = Cli::try_parse_from(vec!["hermes", "acp", "--setup-browser", "--yes"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Acp {
+                action,
+                check,
+                setup,
+                setup_browser,
+                version,
+                yes,
+            }) => {
+                assert!(action.is_none());
+                assert!(!check);
+                assert!(!setup);
+                assert!(setup_browser);
+                assert!(!version);
+                assert!(yes);
+            }
+            _ => panic!("Expected ACP command with --setup-browser --yes"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_acp_action_setup_browser_yes_flag() {
+        let cli = Cli::try_parse_from(vec!["hermes", "acp", "setup-browser", "--yes"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Acp {
+                action,
+                check,
+                setup,
+                setup_browser,
+                version,
+                yes,
+            }) => {
+                assert_eq!(action.as_deref(), Some("setup-browser"));
+                assert!(!check);
+                assert!(!setup);
+                assert!(!setup_browser);
+                assert!(!version);
+                assert!(yes);
+            }
+            _ => panic!("Expected ACP setup-browser action with --yes"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_acp_version_flag() {
+        let cli = Cli::try_parse_from(vec!["hermes", "acp", "--version"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Acp {
+                action,
+                check,
+                setup,
+                setup_browser,
+                version,
+                yes,
+            }) => {
+                assert!(action.is_none());
+                assert!(!check);
+                assert!(!setup);
+                assert!(!setup_browser);
+                assert!(version);
+                assert!(!yes);
+            }
+            _ => panic!("Expected ACP command with --version"),
         }
     }
 

@@ -24251,8 +24251,58 @@ impl hermes_acp::AcpPromptExecutor for CliAcpPromptExecutor {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AcpSetupDependencyCheck {
+    dependency: &'static str,
+    command: &'static str,
+    interactive: bool,
+    available: bool,
+}
+
+fn acp_command_exists(command: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(command)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn acp_setup_browser_dependency_checks<F>(
+    assume_yes: bool,
+    mut command_exists: F,
+) -> Result<Vec<AcpSetupDependencyCheck>, hermes_core::AgentError>
+where
+    F: FnMut(&str) -> bool,
+{
+    let interactive = !assume_yes;
+    let mut checks = Vec::new();
+
+    for (dependency, command) in [("node", "node"), ("browser", "agent-browser")] {
+        let available = command_exists(command);
+        checks.push(AcpSetupDependencyCheck {
+            dependency,
+            command,
+            interactive,
+            available,
+        });
+        if !available {
+            return Err(hermes_core::AgentError::Config(format!(
+                "ACP browser setup requires {dependency} dependency command `{command}`. Install it, then rerun `hermes acp setup-browser{}`.",
+                if assume_yes { " --yes" } else { "" }
+            )));
+        }
+    }
+
+    Ok(checks)
+}
+
 /// Handle `hermes acp [action]`.
-pub async fn handle_cli_acp(action: Option<String>) -> Result<(), hermes_core::AgentError> {
+pub async fn handle_cli_acp(
+    action: Option<String>,
+    assume_yes: bool,
+) -> Result<(), hermes_core::AgentError> {
     match action.as_deref().unwrap_or("status") {
         "start" => {
             let config = hermes_config::load_config(None)
@@ -24320,6 +24370,32 @@ pub async fn handle_cli_acp(action: Option<String>) -> Result<(), hermes_core::A
                 .await
                 .map_err(|e| hermes_core::AgentError::Io(format!("ACP server error: {}", e)))?;
         }
+        "check" => {
+            println!("Hermes ACP check OK");
+        }
+        "version" | "--version" => {
+            handle_cli_version()?;
+        }
+        "setup" => {
+            println!("ACP setup is handled by the Rust model/provider setup flow.");
+            println!("Run `hermes acp --setup` or `hermes model` to configure a provider/model.");
+        }
+        "setup-browser" | "setup_browser" => {
+            let checks = acp_setup_browser_dependency_checks(assume_yes, acp_command_exists)?;
+            for check in checks {
+                println!(
+                    "ACP browser dependency {} (`{}`): OK{}",
+                    check.dependency,
+                    check.command,
+                    if check.interactive {
+                        ""
+                    } else {
+                        " (non-interactive)"
+                    }
+                );
+            }
+            println!("Hermes ACP browser setup OK");
+        }
         "status" => {
             println!("ACP server: not running");
             println!("ACP runs as a stdio JSON-RPC server in the foreground.");
@@ -24337,7 +24413,9 @@ pub async fn handle_cli_acp(action: Option<String>) -> Result<(), hermes_core::A
         }
         other => {
             println!("Unknown ACP action '{}'.", other);
-            println!("Available actions: start, status, stop, restart");
+            println!(
+                "Available actions: start, status, stop, restart, check, setup, setup-browser, version"
+            );
         }
     }
     Ok(())
@@ -24936,6 +25014,49 @@ mod tests {
         assert_eq!(events[0].tool_call_id.as_deref(), Some("tc-untracked"));
         assert_eq!(events[0].tool_name.as_deref(), Some("terminal"));
         assert_eq!(events[0].result.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn test_acp_setup_browser_dependency_checks_forward_yes_flag() {
+        let mut calls = Vec::new();
+        let checks = acp_setup_browser_dependency_checks(true, |command| {
+            calls.push(command.to_string());
+            true
+        })
+        .expect("dependencies should pass");
+
+        assert_eq!(calls, vec!["node", "agent-browser"]);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].dependency, "node");
+        assert_eq!(checks[1].dependency, "browser");
+        assert!(checks.iter().all(|check| check.available));
+        assert!(checks.iter().all(|check| !check.interactive));
+    }
+
+    #[test]
+    fn test_acp_setup_browser_dependency_checks_stops_on_node_failure() {
+        let mut calls = Vec::new();
+        let err = acp_setup_browser_dependency_checks(false, |command| {
+            calls.push(command.to_string());
+            command != "node"
+        })
+        .expect_err("node failure should stop setup-browser");
+
+        assert_eq!(calls, vec!["node"]);
+        assert!(err.to_string().contains("node"));
+    }
+
+    #[test]
+    fn test_acp_setup_browser_dependency_checks_reports_browser_failure() {
+        let mut calls = Vec::new();
+        let err = acp_setup_browser_dependency_checks(false, |command| {
+            calls.push(command.to_string());
+            command == "node"
+        })
+        .expect_err("browser dependency failure should be reported");
+
+        assert_eq!(calls, vec!["node", "agent-browser"]);
+        assert!(err.to_string().contains("browser"));
     }
 
     #[test]

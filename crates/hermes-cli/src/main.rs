@@ -679,7 +679,44 @@ async fn main() {
             hermes_cli::commands::handle_cli_pairing(action, device_id).await
         }
         CliCommand::Claw { action } => hermes_cli::commands::handle_cli_claw(action).await,
-        CliCommand::Acp { action } => hermes_cli::commands::handle_cli_acp(action).await,
+        CliCommand::Acp {
+            action,
+            check,
+            setup,
+            setup_browser,
+            version,
+            yes,
+        } => {
+            let action = acp_action_from_flags(action, check, setup, setup_browser, version);
+            if action.as_deref() == Some("setup") {
+                let mut result = run_model(cli, None).await;
+                if result.is_ok() {
+                    if yes {
+                        result = hermes_cli::commands::handle_cli_acp(
+                            Some("setup-browser".to_string()),
+                            true,
+                        )
+                        .await;
+                    } else if std::io::stdin().is_terminal() {
+                        print!("Set up ACP browser tools now? [y/N] ");
+                        let _ = std::io::stdout().flush();
+                        let mut answer = String::new();
+                        if std::io::stdin().read_line(&mut answer).is_ok()
+                            && acp_setup_browser_answer_is_yes(&answer)
+                        {
+                            result = hermes_cli::commands::handle_cli_acp(
+                                Some("setup-browser".to_string()),
+                                false,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                result
+            } else {
+                hermes_cli::commands::handle_cli_acp(action, yes).await
+            }
+        }
         CliCommand::Backup { output } => hermes_cli::commands::handle_cli_backup(output).await,
         CliCommand::Import { path } => hermes_cli::commands::handle_cli_import(path).await,
         CliCommand::Version => hermes_cli::commands::handle_cli_version(),
@@ -9250,6 +9287,30 @@ fn default_setup_model_choice() -> usize {
         .unwrap_or(1)
 }
 
+fn acp_action_from_flags(
+    action: Option<String>,
+    check: bool,
+    setup: bool,
+    setup_browser: bool,
+    version: bool,
+) -> Option<String> {
+    if version {
+        Some("version".to_string())
+    } else if check {
+        Some("check".to_string())
+    } else if setup {
+        Some("setup".to_string())
+    } else if setup_browser {
+        Some("setup-browser".to_string())
+    } else {
+        action
+    }
+}
+
+fn acp_setup_browser_answer_is_yes(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 fn setup_provider_defaults() -> Vec<SetupModelOption> {
     let mut seen = std::collections::BTreeSet::new();
     let mut providers = Vec::new();
@@ -13708,6 +13769,39 @@ mod tests {
 
         let cfg = load_user_config_file(&tmp.path().join("config.yaml")).expect("load config");
         assert_eq!(cfg.model.as_deref(), Some("nous:nousresearch/hermes-4-70b"));
+    }
+
+    #[test]
+    fn acp_action_from_flags_maps_entry_flags() {
+        assert_eq!(
+            acp_action_from_flags(None, true, false, false, false).as_deref(),
+            Some("check")
+        );
+        assert_eq!(
+            acp_action_from_flags(None, false, true, false, false).as_deref(),
+            Some("setup")
+        );
+        assert_eq!(
+            acp_action_from_flags(None, false, false, true, false).as_deref(),
+            Some("setup-browser")
+        );
+        assert_eq!(
+            acp_action_from_flags(None, false, false, false, true).as_deref(),
+            Some("version")
+        );
+        assert_eq!(
+            acp_action_from_flags(Some("restart".to_string()), false, false, false, false)
+                .as_deref(),
+            Some("restart")
+        );
+    }
+
+    #[test]
+    fn acp_setup_browser_answer_accepts_only_explicit_yes() {
+        assert!(acp_setup_browser_answer_is_yes("y"));
+        assert!(acp_setup_browser_answer_is_yes("YES\n"));
+        assert!(!acp_setup_browser_answer_is_yes(""));
+        assert!(!acp_setup_browser_answer_is_yes("no"));
     }
 
     #[tokio::test]

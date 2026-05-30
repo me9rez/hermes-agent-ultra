@@ -88,7 +88,6 @@ jobs:
               print(f"- commits_behind: `{metrics.get('max_commits_behind')}`")
               print(f"- upstream_patch_missing: `{metrics.get('max_upstream_patch_missing')}`")
               print(f"- files_only_upstream: `{metrics.get('max_files_only_upstream')}`")
-              print(f"- shared_different: `{metrics.get('max_shared_different')}`")
               if backlog_summary:
                   print(f"- shared_diff_pending_classification: `{backlog_summary.get('pending_classification')}`")
                   print(f"- shared_diff_pending_review: `{backlog_summary.get('pending_review')}`")

@@ -1,36 +1,36 @@
 # Parity Matrix
 
-Generated: `2026-05-29T23:51:53.084285+00:00`
+Generated: `2026-05-30T00:36:38.051139+00:00`
 
 ## Scope
 
-- Local ref: `HEAD` (`5d65c13120fb246128eb356e2e83b496c4f36232`)
-- Upstream ref: `upstream/main` (`689ef5e233980f5d5a32080e959f44c8991dd03a`)
+- Local ref: `main` (`71d946dbd37df846677055d1a63fbcc8507c2303`)
+- Upstream ref: `upstream/main` (`54aa4db1de76a7c4bb02c8a7f7411727384b8fea`)
 - Merge base: `none (history divergence)`
 
 ## Summary
 
 | Metric | Value |
 | --- | ---: |
-| Commits behind local (`upstream` ancestry only) | 4399 |
-| Commits ahead local (`local` ancestry only) | 793 |
-| Upstream commits missing by patch-id (`git cherry local upstream`, `+`) | 4281 |
+| Commits behind local (`upstream` ancestry only) | 4402 |
+| Commits ahead local (`local` ancestry only) | 799 |
+| Upstream commits missing by patch-id (`git cherry local upstream`, `+`) | 4284 |
 | Upstream commits represented by patch-id (`git cherry local upstream`, `-`) | 2 |
-| Local commits unique by patch-id (`git cherry upstream local`, `+`) | 680 |
-| Files only in upstream tree | 1470 |
-| Files only in local tree | 565 |
-| Shared files identical content | 1702 |
-| Shared files different content | 1017 |
-| Total files changed (`local` vs `upstream`) | 3052 |
-| Insertions (`local` vs `upstream`) | 739593 |
-| Deletions (`local` vs `upstream`) | 377910 |
+| Local commits unique by patch-id (`git cherry upstream local`, `+`) | 683 |
+| Files only in upstream tree | 1471 |
+| Files only in local tree | 568 |
+| Shared files identical content | 1701 |
+| Shared files different content | 1018 |
+| Total files changed (`local` vs `upstream`) | 3057 |
+| Insertions (`local` vs `upstream`) | 739856 |
+| Deletions (`local` vs `upstream`) | 381880 |
 
 ## Top 40 upstream-only buckets
 
 | Bucket | Files |
 | --- | ---: |
 | `website/i18n` | 332 |
-| `tests/hermes_cli` | 85 |
+| `tests/hermes_cli` | 86 |
 | `web/src` | 77 |
 | `tests/agent` | 53 |
 | `tests/gateway` | 40 |
@@ -78,8 +78,8 @@ Generated: `2026-05-29T23:51:53.084285+00:00`
 | `website/docs` | 138 |
 | `tests/tools` | 137 |
 | `tests/hermes_cli` | 126 |
+| `tests/agent` | 58 |
 | `ui-tui/src` | 58 |
-| `tests/agent` | 57 |
 | `tests/run_agent` | 56 |
 | `tests/cli` | 29 |
 | `ui-tui/packages` | 18 |
@@ -119,10 +119,10 @@ Generated: `2026-05-29T23:51:53.084285+00:00`
 
 | Bucket | Files |
 | --- | ---: |
-| `crates/hermes-tools` | 78 |
+| `crates/hermes-tools` | 79 |
 | `crates/hermes-agent` | 47 |
 | `crates/hermes-gateway` | 46 |
-| `crates/hermes-cli` | 44 |
+| `crates/hermes-cli` | 45 |
 | `crates/hermes-intelligence` | 37 |
 | `docs/parity` | 37 |
 | `crates/hermes-config` | 18 |
@@ -164,7 +164,7 @@ Generated: `2026-05-29T23:51:53.084285+00:00`
 
 | Workstream | Issue | Name | Upstream-only | Shared-different | Risk | Effort |
 | --- | ---: | --- | ---: | ---: | --- | --- |
-| `WS6` | #10 | Tests and CI parity | 317 | 682 | high | XL |
+| `WS6` | #10 | Tests and CI parity | 318 | 683 | critical | XL |
 | `WS5` | #9 | UX parity | 493 | 231 | high | XL |
 | `WS8` | #12 | Compatibility and divergence policy | 391 | 12 | high | XL |
 | `WS3` | #7 | Tools and adapters parity | 114 | 53 | high | L |
@@ -174,9 +174,9 @@ Generated: `2026-05-29T23:51:53.084285+00:00`
 
 ## Commit Mapping
 
-- Upstream missing by patch-id: `4281`
+- Upstream missing by patch-id: `4284`
 - Upstream represented by patch-id: `2`
-- Local unique by patch-id: `680`
+- Local unique by patch-id: `683`
 - Intentional divergence tracked items: `8` (covered files: `900`)
 - Merge base is absent; patch-id mapping is used as primary commit equivalence signal.
 

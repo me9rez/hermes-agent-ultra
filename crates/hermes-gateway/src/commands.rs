@@ -60,6 +60,11 @@ pub enum GatewayCommandResult {
     ApproveUser { user_id: String },
     /// Deny and revoke a user from DM access.
     DenyUser { user_id: String },
+    /// Resolve a blocked command approval for this gateway session.
+    ResolveCommandApproval {
+        choice: hermes_tools::approval::ApprovalChoice,
+        resolve_all: bool,
+    },
     /// Reload MCP server registry/state.
     ReloadMcp,
     /// Switch active provider.
@@ -317,8 +322,32 @@ pub fn handle_command(input: &str) -> GatewayCommandResult {
         "/retry" => GatewayCommandResult::Retry,
         "/undo" => GatewayCommandResult::Undo,
         "/approve" => {
-            if args.is_empty() {
-                GatewayCommandResult::Reply("Usage: /approve <user_id>".to_string())
+            let words = args.split_whitespace().collect::<Vec<_>>();
+            if words.is_empty() {
+                GatewayCommandResult::ResolveCommandApproval {
+                    choice: hermes_tools::approval::ApprovalChoice::Once,
+                    resolve_all: false,
+                }
+            } else if words.as_slice() == ["all"] {
+                GatewayCommandResult::ResolveCommandApproval {
+                    choice: hermes_tools::approval::ApprovalChoice::Once,
+                    resolve_all: true,
+                }
+            } else if words.as_slice() == ["all", "session"] {
+                GatewayCommandResult::ResolveCommandApproval {
+                    choice: hermes_tools::approval::ApprovalChoice::Session,
+                    resolve_all: true,
+                }
+            } else if words.as_slice() == ["session"] {
+                GatewayCommandResult::ResolveCommandApproval {
+                    choice: hermes_tools::approval::ApprovalChoice::Session,
+                    resolve_all: false,
+                }
+            } else if words.as_slice() == ["always"] {
+                GatewayCommandResult::ResolveCommandApproval {
+                    choice: hermes_tools::approval::ApprovalChoice::Always,
+                    resolve_all: false,
+                }
             } else {
                 GatewayCommandResult::ApproveUser {
                     user_id: args.clone(),
@@ -326,8 +355,17 @@ pub fn handle_command(input: &str) -> GatewayCommandResult {
             }
         }
         "/deny" => {
-            if args.is_empty() {
-                GatewayCommandResult::Reply("Usage: /deny <user_id>".to_string())
+            let words = args.split_whitespace().collect::<Vec<_>>();
+            if words.is_empty() {
+                GatewayCommandResult::ResolveCommandApproval {
+                    choice: hermes_tools::approval::ApprovalChoice::Deny,
+                    resolve_all: false,
+                }
+            } else if words.as_slice() == ["all"] {
+                GatewayCommandResult::ResolveCommandApproval {
+                    choice: hermes_tools::approval::ApprovalChoice::Deny,
+                    resolve_all: true,
+                }
             } else {
                 GatewayCommandResult::DenyUser {
                     user_id: args.clone(),
@@ -606,6 +644,40 @@ mod tests {
         match handle_command("/deny bob") {
             GatewayCommandResult::DenyUser { user_id } => assert_eq!(user_id, "bob"),
             other => panic!("Expected DenyUser, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_approval_resolution_commands() {
+        match handle_command("/approve") {
+            GatewayCommandResult::ResolveCommandApproval {
+                choice,
+                resolve_all,
+            } => {
+                assert_eq!(choice, hermes_tools::approval::ApprovalChoice::Once);
+                assert!(!resolve_all);
+            }
+            other => panic!("Expected ResolveCommandApproval, got {:?}", other),
+        }
+        match handle_command("/approve all session") {
+            GatewayCommandResult::ResolveCommandApproval {
+                choice,
+                resolve_all,
+            } => {
+                assert_eq!(choice, hermes_tools::approval::ApprovalChoice::Session);
+                assert!(resolve_all);
+            }
+            other => panic!("Expected ResolveCommandApproval, got {:?}", other),
+        }
+        match handle_command("/deny all") {
+            GatewayCommandResult::ResolveCommandApproval {
+                choice,
+                resolve_all,
+            } => {
+                assert_eq!(choice, hermes_tools::approval::ApprovalChoice::Deny);
+                assert!(resolve_all);
+            }
+            other => panic!("Expected ResolveCommandApproval, got {:?}", other),
         }
     }
 

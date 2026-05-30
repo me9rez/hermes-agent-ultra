@@ -150,6 +150,13 @@
       "ticket": 25
     },
     {
+      "path": "tests/gateway/test_approve_deny_commands.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream blocking command approvals are covered by Rust hermes-tools gateway approval queue contracts and hermes-gateway slash command tests for FIFO resolution, resolve-all behavior, timeout/no-listener fallback, /approve and /deny command resolution, and session-boundary denial; Python-only stale _pending_approvals cleanup has no Rust runtime equivalent.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/gateway/test_discord_allowed_mentions.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream Discord allowed_mentions safe-default intent is covered by Rust hermes-gateway DiscordAllowedMentions payload construction and env-style parsing tests; the Python test file remains reference-only.",

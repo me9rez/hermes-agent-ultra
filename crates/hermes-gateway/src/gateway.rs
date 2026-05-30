@@ -1029,6 +1029,39 @@ impl Gateway {
                     .await?;
                 Ok(true)
             }
+            GatewayCommandResult::ResolveCommandApproval {
+                choice,
+                resolve_all,
+            } => {
+                let count = hermes_tools::approval::resolve_gateway_approval(
+                    session_key,
+                    choice,
+                    resolve_all,
+                );
+                let reply = if count == 0 {
+                    "No pending command approval for this session.".to_string()
+                } else if choice == hermes_tools::approval::ApprovalChoice::Deny {
+                    if count == 1 {
+                        "Denied pending command. The blocked agent will resume with a denial."
+                            .to_string()
+                    } else {
+                        format!("Denied {count} pending commands.")
+                    }
+                } else if count == 1 {
+                    format!(
+                        "Approved pending command with `{}` scope. Resuming.",
+                        choice.as_str()
+                    )
+                } else {
+                    format!(
+                        "Approved {count} pending commands with `{}` scope.",
+                        choice.as_str()
+                    )
+                };
+                self.send_message(&incoming.platform, &incoming.chat_id, &reply, None)
+                    .await?;
+                Ok(true)
+            }
             GatewayCommandResult::SetHome { path, reply } => {
                 let target = std::path::Path::new(&path);
                 let response = if target.exists() && target.is_dir() {
@@ -2276,6 +2309,8 @@ mod tests {
         seen: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
     }
 
+    struct FailingHook;
+
     #[async_trait]
     impl HookHandler for RecordingHook {
         async fn handle(&self, event: &HookEvent) -> Result<(), String> {
@@ -2288,6 +2323,17 @@ mod tests {
 
         fn name(&self) -> &str {
             "recording-hook"
+        }
+    }
+
+    #[async_trait]
+    impl HookHandler for FailingHook {
+        async fn handle(&self, _event: &HookEvent) -> Result<(), String> {
+            Err("boom".to_string())
+        }
+
+        fn name(&self) -> &str {
+            "failing-hook"
         }
     }
 
@@ -3393,6 +3439,8 @@ mod tests {
                 .compose_session_key("test", "chat-yolo-new-2", "user1");
         hermes_tools::approval::clear_session(&session_key_1);
         hermes_tools::approval::clear_session(&session_key_2);
+        hermes_tools::approval::approve_session(&session_key_1, "recursive delete");
+        hermes_tools::approval::approve_session(&session_key_2, "recursive delete");
 
         let yolo_chat1 = IncomingMessage {
             platform: "test".into(),
@@ -3425,6 +3473,14 @@ mod tests {
         assert!(hermes_tools::approval::is_session_yolo_enabled(
             &session_key_2
         ));
+        assert!(hermes_tools::approval::is_approved(
+            &session_key_1,
+            "recursive delete"
+        ));
+        assert!(hermes_tools::approval::is_approved(
+            &session_key_2,
+            "recursive delete"
+        ));
 
         let reset_chat1 = IncomingMessage {
             platform: "test".into(),
@@ -3444,6 +3500,14 @@ mod tests {
         ));
         assert!(hermes_tools::approval::is_session_yolo_enabled(
             &session_key_2
+        ));
+        assert!(!hermes_tools::approval::is_approved(
+            &session_key_1,
+            "recursive delete"
+        ));
+        assert!(hermes_tools::approval::is_approved(
+            &session_key_2,
+            "recursive delete"
         ));
         hermes_tools::approval::clear_session(&session_key_2);
     }
@@ -3468,6 +3532,7 @@ mod tests {
             gw.session_manager
                 .compose_session_key("test", "chat-yolo-switch-target", "user1");
         hermes_tools::approval::clear_session(&current_key);
+        hermes_tools::approval::approve_session(&current_key, "recursive delete");
 
         let _ = gw
             .session_manager
@@ -3493,6 +3558,10 @@ mod tests {
         assert!(hermes_tools::approval::is_session_yolo_enabled(
             &current_key
         ));
+        assert!(hermes_tools::approval::is_approved(
+            &current_key,
+            "recursive delete"
+        ));
 
         let switch = IncomingMessage {
             platform: "test".into(),
@@ -3509,6 +3578,229 @@ mod tests {
         assert!(!hermes_tools::approval::is_session_yolo_enabled(
             &current_key
         ));
+        assert!(!hermes_tools::approval::is_approved(
+            &current_key,
+            "recursive delete"
+        ));
+    }
+
+    #[tokio::test]
+    async fn gateway_approve_resolves_oldest_blocking_command() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(TestAdapter {
+            messages: sent.clone(),
+        });
+
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let mut dm_manager = DmManager::with_pair_behavior();
+        dm_manager.authorize_user("user1");
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        gw.register_adapter("test", adapter).await;
+
+        let session_key =
+            gw.session_manager
+                .compose_session_key("test", "chat-approve-command", "user1");
+        hermes_tools::approval::clear_session(&session_key);
+        let (tx, rx) = std::sync::mpsc::channel();
+        hermes_tools::approval::register_gateway_notify(&session_key, move |request| {
+            tx.send(request).expect("approval request should send");
+        });
+
+        let session_for_thread = session_key.clone();
+        let handle = std::thread::spawn(move || {
+            hermes_tools::approval::check_all_command_guards_with_context(
+                "rm -rf /tmp/gateway-approve-command",
+                "local",
+                hermes_tools::approval::CommandGuardContext {
+                    gateway: true,
+                    ask: true,
+                    session_key: Some(session_for_thread),
+                    gateway_approval_timeout: std::time::Duration::from_secs(5),
+                    tirith_result: Ok(Some(hermes_tools::approval::TirithResult::allow())),
+                    ..hermes_tools::approval::CommandGuardContext::default()
+                },
+                None,
+            )
+            .expect("approval guard should return")
+        });
+
+        let request = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("gateway approval notify should fire");
+        assert_eq!(request.command, "rm -rf /tmp/gateway-approve-command");
+        assert!(hermes_tools::approval::has_blocking_approval(&session_key));
+
+        let approve = IncomingMessage {
+            platform: "test".into(),
+            chat_id: "chat-approve-command".into(),
+            user_id: "user1".into(),
+            text: "/approve".into(),
+            message_id: None,
+            is_dm: true,
+        };
+        assert!(gw.route_message(&approve).await.is_ok());
+
+        let result = handle.join().expect("approval guard thread should join");
+        assert!(result.approved);
+        assert!(result.user_approved);
+        assert!(!hermes_tools::approval::has_blocking_approval(&session_key));
+
+        let replies = sent.lock().unwrap();
+        assert!(replies.iter().any(|(_, text)| {
+            text.to_ascii_lowercase().contains("approved") && text.contains("Resuming")
+        }));
+        hermes_tools::approval::unregister_gateway_notify(&session_key);
+        hermes_tools::approval::clear_session(&session_key);
+    }
+
+    #[tokio::test]
+    async fn gateway_deny_all_resolves_all_blocking_commands() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(TestAdapter {
+            messages: sent.clone(),
+        });
+
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let mut dm_manager = DmManager::with_pair_behavior();
+        dm_manager.authorize_user("user1");
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        gw.register_adapter("test", adapter).await;
+
+        let session_key =
+            gw.session_manager
+                .compose_session_key("test", "chat-deny-all-command", "user1");
+        hermes_tools::approval::clear_session(&session_key);
+        let (tx, rx) = std::sync::mpsc::channel();
+        hermes_tools::approval::register_gateway_notify(&session_key, move |request| {
+            tx.send(request).expect("approval request should send");
+        });
+
+        let mut handles = Vec::new();
+        for suffix in ["a", "b"] {
+            let session_for_thread = session_key.clone();
+            handles.push(std::thread::spawn(move || {
+                hermes_tools::approval::check_all_command_guards_with_context(
+                    &format!("rm -rf /tmp/gateway-deny-{suffix}"),
+                    "local",
+                    hermes_tools::approval::CommandGuardContext {
+                        gateway: true,
+                        ask: true,
+                        session_key: Some(session_for_thread),
+                        gateway_approval_timeout: std::time::Duration::from_secs(5),
+                        tirith_result: Ok(Some(hermes_tools::approval::TirithResult::allow())),
+                        ..hermes_tools::approval::CommandGuardContext::default()
+                    },
+                    None,
+                )
+                .expect("approval guard should return")
+            }));
+        }
+
+        for _ in 0..2 {
+            rx.recv_timeout(std::time::Duration::from_secs(2))
+                .expect("gateway approval notify should fire");
+        }
+        assert_eq!(
+            hermes_tools::approval::pending_gateway_approval_count(&session_key),
+            2
+        );
+
+        let deny = IncomingMessage {
+            platform: "test".into(),
+            chat_id: "chat-deny-all-command".into(),
+            user_id: "user1".into(),
+            text: "/deny all".into(),
+            message_id: None,
+            is_dm: true,
+        };
+        assert!(gw.route_message(&deny).await.is_ok());
+
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("approval guard thread should join"))
+            .collect::<Vec<_>>();
+        assert!(results.iter().all(|result| !result.approved));
+        assert!(results.iter().all(|result| {
+            result
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("User denied")
+        }));
+        assert!(!hermes_tools::approval::has_blocking_approval(&session_key));
+
+        let replies = sent.lock().unwrap();
+        assert!(replies
+            .iter()
+            .any(|(_, text)| text.contains("Denied 2 pending commands")));
+        hermes_tools::approval::unregister_gateway_notify(&session_key);
+        hermes_tools::approval::clear_session(&session_key);
+    }
+
+    #[tokio::test]
+    async fn gateway_new_denies_blocked_approval_for_target_session() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(TestAdapter {
+            messages: sent.clone(),
+        });
+
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let mut dm_manager = DmManager::with_pair_behavior();
+        dm_manager.authorize_user("user1");
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        gw.register_adapter("test", adapter).await;
+
+        let session_key =
+            gw.session_manager
+                .compose_session_key("test", "chat-boundary-approval", "user1");
+        hermes_tools::approval::clear_session(&session_key);
+        let (tx, rx) = std::sync::mpsc::channel();
+        hermes_tools::approval::register_gateway_notify(&session_key, move |request| {
+            tx.send(request).expect("approval request should send");
+        });
+
+        let session_for_thread = session_key.clone();
+        let handle = std::thread::spawn(move || {
+            hermes_tools::approval::check_all_command_guards_with_context(
+                "rm -rf /tmp/gateway-boundary-approval",
+                "local",
+                hermes_tools::approval::CommandGuardContext {
+                    gateway: true,
+                    ask: true,
+                    session_key: Some(session_for_thread),
+                    gateway_approval_timeout: std::time::Duration::from_secs(5),
+                    tirith_result: Ok(Some(hermes_tools::approval::TirithResult::allow())),
+                    ..hermes_tools::approval::CommandGuardContext::default()
+                },
+                None,
+            )
+            .expect("approval guard should return")
+        });
+
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("gateway approval notify should fire");
+        assert!(hermes_tools::approval::has_blocking_approval(&session_key));
+
+        let reset = IncomingMessage {
+            platform: "test".into(),
+            chat_id: "chat-boundary-approval".into(),
+            user_id: "user1".into(),
+            text: "/new".into(),
+            message_id: None,
+            is_dm: true,
+        };
+        assert!(gw.route_message(&reset).await.is_ok());
+
+        let result = handle.join().expect("approval guard thread should join");
+        assert!(!result.approved);
+        assert!(result
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("User denied"));
+        assert!(!hermes_tools::approval::has_blocking_approval(&session_key));
+        hermes_tools::approval::unregister_gateway_notify(&session_key);
+        hermes_tools::approval::clear_session(&session_key);
     }
 
     #[tokio::test]
@@ -4151,6 +4443,9 @@ mod tests {
             Box::pin(async move { Ok("assistant".to_string()) })
         }))
         .await;
+        let session_key = gw
+            .session_manager
+            .compose_session_key("test", "chat1", "user1");
 
         let normal = IncomingMessage {
             platform: "test".into(),
@@ -4174,7 +4469,57 @@ mod tests {
 
         let events = hook_seen.lock().unwrap();
         let names: Vec<String> = events.iter().map(|(name, _)| name.clone()).collect();
-        assert!(names.contains(&"session:end".to_string()));
-        assert!(names.contains(&"session:reset".to_string()));
+        assert_eq!(
+            names,
+            vec![
+                "session:start".to_string(),
+                "session:end".to_string(),
+                "session:reset".to_string()
+            ]
+        );
+        let end_payload = events
+            .iter()
+            .find(|(name, _)| name == "session:end")
+            .map(|(_, ctx)| ctx.clone())
+            .expect("session:end payload should exist");
+        let reset_payload = events
+            .iter()
+            .find(|(name, _)| name == "session:reset")
+            .map(|(_, ctx)| ctx.clone())
+            .expect("session:reset payload should exist");
+        assert_eq!(end_payload["session_id"], serde_json::json!(session_key));
+        assert_eq!(reset_payload["session_id"], serde_json::json!(session_key));
+    }
+
+    #[tokio::test]
+    async fn gateway_hook_error_does_not_break_reset_command() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(TestAdapter {
+            messages: sent.clone(),
+        });
+        let mut hooks = HookRegistry::new();
+        hooks.register_in_process("session:*", Arc::new(FailingHook));
+
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let mut dm_manager = DmManager::with_pair_behavior();
+        dm_manager.authorize_user("user1");
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        gw.set_hook_registry(Arc::new(hooks)).await;
+        gw.register_adapter("test", adapter).await;
+
+        let reset = IncomingMessage {
+            platform: "test".into(),
+            chat_id: "chat-hook-error".into(),
+            user_id: "user1".into(),
+            text: "/new".into(),
+            message_id: None,
+            is_dm: true,
+        };
+        assert!(gw.route_message(&reset).await.is_ok());
+
+        let replies = sent.lock().unwrap();
+        assert!(replies.iter().any(|(_, text)| {
+            text.contains("New conversation") || text.contains("Session reset")
+        }));
     }
 }

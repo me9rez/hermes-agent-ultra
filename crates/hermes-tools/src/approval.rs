@@ -4,8 +4,9 @@
 //! before execution, based on dangerous command patterns.
 
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // ApprovalDecision
@@ -31,6 +32,17 @@ pub enum ApprovalChoice {
     Always,
 }
 
+impl ApprovalChoice {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::Once => "once",
+            Self::Session => "session",
+            Self::Always => "always",
+        }
+    }
+}
+
 /// Human-facing prompt data for a combined command guard warning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalPrompt {
@@ -50,6 +62,8 @@ pub struct CommandGuardResult {
     pub description: Option<String>,
     pub user_approved: bool,
     pub outcome: Option<String>,
+    pub status: Option<String>,
+    pub approval_pending: bool,
 }
 
 impl CommandGuardResult {
@@ -61,6 +75,8 @@ impl CommandGuardResult {
             description: None,
             user_approved: false,
             outcome: None,
+            status: None,
+            approval_pending: false,
         }
     }
 
@@ -72,6 +88,25 @@ impl CommandGuardResult {
             description,
             user_approved: false,
             outcome: Some("denied".to_string()),
+            status: None,
+            approval_pending: false,
+        }
+    }
+
+    fn pending_approval(
+        message: String,
+        pattern_key: Option<String>,
+        description: Option<String>,
+    ) -> Self {
+        Self {
+            approved: false,
+            message: Some(message),
+            pattern_key,
+            description,
+            user_approved: false,
+            outcome: Some("pending_approval".to_string()),
+            status: Some("pending_approval".to_string()),
+            approval_pending: true,
         }
     }
 }
@@ -168,6 +203,7 @@ pub struct CommandGuardContext {
     pub cron_approval_deny: bool,
     pub session_key: Option<String>,
     pub tirith_result: Result<Option<TirithResult>, CommandGuardError>,
+    pub gateway_approval_timeout: Duration,
 }
 
 impl CommandGuardContext {
@@ -183,6 +219,7 @@ impl CommandGuardContext {
             cron_approval_deny: false,
             session_key: current_session_key_from_env().or_else(|| Some("default".to_string())),
             tirith_result: Ok(None),
+            gateway_approval_timeout: Duration::from_secs(300),
         }
     }
 
@@ -221,7 +258,65 @@ impl Default for CommandGuardContext {
             cron_approval_deny: false,
             session_key: Some("default".to_string()),
             tirith_result: Ok(None),
+            gateway_approval_timeout: Duration::from_secs(300),
         }
+    }
+}
+
+/// Approval payload queued for gateway-visible command confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayApprovalRequest {
+    pub session_key: String,
+    pub command: String,
+    pub description: String,
+    pub pattern_key: String,
+    pub pattern_keys: Vec<String>,
+    pub allow_permanent: bool,
+}
+
+#[derive(Debug)]
+pub struct GatewayApprovalEntry {
+    request: GatewayApprovalRequest,
+    result: Mutex<Option<ApprovalChoice>>,
+    resolved: Condvar,
+}
+
+impl GatewayApprovalEntry {
+    pub fn new(request: GatewayApprovalRequest) -> Self {
+        Self {
+            request,
+            result: Mutex::new(None),
+            resolved: Condvar::new(),
+        }
+    }
+
+    pub fn request(&self) -> &GatewayApprovalRequest {
+        &self.request
+    }
+
+    pub fn result(&self) -> Option<ApprovalChoice> {
+        *self.result.lock().expect("gateway approval lock poisoned")
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        self.result().is_some()
+    }
+
+    fn resolve(&self, choice: ApprovalChoice) {
+        let mut result = self.result.lock().expect("gateway approval lock poisoned");
+        if result.is_none() {
+            *result = Some(choice);
+            self.resolved.notify_all();
+        }
+    }
+
+    pub fn wait(&self, timeout: Duration) -> Option<ApprovalChoice> {
+        let result = self.result.lock().expect("gateway approval lock poisoned");
+        let (result, _) = self
+            .resolved
+            .wait_timeout_while(result, timeout, |choice| choice.is_none())
+            .expect("gateway approval condvar poisoned");
+        *result
     }
 }
 
@@ -509,6 +604,11 @@ static SESSION_APPROVED: LazyLock<Mutex<HashMap<String, HashSet<String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PERMANENT_APPROVED: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+type GatewayNotifyCallback = Arc<dyn Fn(GatewayApprovalRequest) + Send + Sync + 'static>;
+static GATEWAY_QUEUES: LazyLock<Mutex<HashMap<String, VecDeque<Arc<GatewayApprovalEntry>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static GATEWAY_NOTIFY_CBS: LazyLock<Mutex<HashMap<String, GatewayNotifyCallback>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -608,6 +708,149 @@ pub fn is_approved(session_key: &str, pattern_key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Register a gateway callback that receives newly blocked command approvals.
+pub fn register_gateway_notify<F>(session_key: &str, callback: F)
+where
+    F: Fn(GatewayApprovalRequest) + Send + Sync + 'static,
+{
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return;
+    }
+    GATEWAY_NOTIFY_CBS
+        .lock()
+        .expect("gateway notify lock poisoned")
+        .insert(session_key.to_string(), Arc::new(callback));
+}
+
+/// Remove a gateway callback and deny any blocked approval waiters for that session.
+pub fn unregister_gateway_notify(session_key: &str) {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return;
+    }
+    GATEWAY_NOTIFY_CBS
+        .lock()
+        .expect("gateway notify lock poisoned")
+        .remove(session_key);
+    cancel_gateway_approvals(session_key, ApprovalChoice::Deny);
+}
+
+/// Return whether a session currently has blocked gateway approvals.
+pub fn has_blocking_approval(session_key: &str) -> bool {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return false;
+    }
+    GATEWAY_QUEUES
+        .lock()
+        .expect("gateway queue lock poisoned")
+        .get(session_key)
+        .map(|entries| !entries.is_empty())
+        .unwrap_or(false)
+}
+
+/// Number of pending gateway approval entries for a session.
+pub fn pending_gateway_approval_count(session_key: &str) -> usize {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return 0;
+    }
+    GATEWAY_QUEUES
+        .lock()
+        .expect("gateway queue lock poisoned")
+        .get(session_key)
+        .map(VecDeque::len)
+        .unwrap_or(0)
+}
+
+/// Resolve pending gateway approvals. Without `resolve_all`, this resolves the oldest entry.
+pub fn resolve_gateway_approval(
+    session_key: &str,
+    choice: ApprovalChoice,
+    resolve_all: bool,
+) -> usize {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return 0;
+    }
+
+    let resolved = {
+        let mut queues = GATEWAY_QUEUES.lock().expect("gateway queue lock poisoned");
+        let Some(queue) = queues.get_mut(session_key) else {
+            return 0;
+        };
+        let entries = if resolve_all {
+            queue.drain(..).collect::<Vec<_>>()
+        } else {
+            queue.pop_front().into_iter().collect::<Vec<_>>()
+        };
+        let remove_queue = queue.is_empty();
+        if remove_queue {
+            queues.remove(session_key);
+        }
+        entries
+    };
+
+    for entry in &resolved {
+        entry.resolve(choice);
+    }
+    resolved.len()
+}
+
+fn cancel_gateway_approvals(session_key: &str, choice: ApprovalChoice) -> usize {
+    resolve_gateway_approval(session_key, choice, true)
+}
+
+fn gateway_notify_callback(session_key: &str) -> Option<GatewayNotifyCallback> {
+    GATEWAY_NOTIFY_CBS
+        .lock()
+        .expect("gateway notify lock poisoned")
+        .get(session_key)
+        .cloned()
+}
+
+enum GatewayApprovalWaitOutcome {
+    NoListener,
+    Resolved(ApprovalChoice),
+    TimedOut,
+}
+
+fn submit_gateway_approval_and_wait(
+    request: GatewayApprovalRequest,
+    timeout: Duration,
+) -> GatewayApprovalWaitOutcome {
+    let Some(callback) = gateway_notify_callback(&request.session_key) else {
+        return GatewayApprovalWaitOutcome::NoListener;
+    };
+
+    let session_key = request.session_key.clone();
+    let entry = Arc::new(GatewayApprovalEntry::new(request.clone()));
+    {
+        let mut queues = GATEWAY_QUEUES.lock().expect("gateway queue lock poisoned");
+        queues
+            .entry(session_key.clone())
+            .or_default()
+            .push_back(entry.clone());
+    }
+
+    callback(request);
+
+    if let Some(choice) = entry.wait(timeout) {
+        GatewayApprovalWaitOutcome::Resolved(choice)
+    } else {
+        let mut queues = GATEWAY_QUEUES.lock().expect("gateway queue lock poisoned");
+        if let Some(queue) = queues.get_mut(&session_key) {
+            queue.retain(|candidate| !Arc::ptr_eq(candidate, &entry));
+            let remove_queue = queue.is_empty();
+            if remove_queue {
+                queues.remove(&session_key);
+            }
+        }
+        GatewayApprovalWaitOutcome::TimedOut
+    }
+}
+
 /// Enable yolo approval bypass for a single session key.
 pub fn enable_session_yolo(session_key: &str) {
     let session_key = session_key.trim();
@@ -643,6 +886,7 @@ pub fn clear_session(session_key: &str) {
         .lock()
         .expect("session approval lock poisoned")
         .remove(session_key);
+    cancel_gateway_approvals(session_key, ApprovalChoice::Deny);
 }
 
 /// Return whether yolo approval bypass is enabled for this session key.
@@ -895,14 +1139,47 @@ pub fn check_all_command_guards_with_context(
         .collect::<Vec<_>>();
     let allow_permanent = !warnings.iter().any(|warning| warning.is_tirith);
 
+    let prompt = ApprovalPrompt {
+        command: command.to_string(),
+        description: combined_desc.clone(),
+        pattern_key: primary_key.clone(),
+        pattern_keys,
+        allow_permanent,
+    };
+
     let choice = if let Some(callback) = approval_callback.as_mut() {
-        callback(ApprovalPrompt {
+        callback(prompt)
+    } else if context.gateway || context.ask {
+        let request = GatewayApprovalRequest {
+            session_key: session_key.clone(),
             command: command.to_string(),
             description: combined_desc.clone(),
             pattern_key: primary_key.clone(),
-            pattern_keys,
+            pattern_keys: warnings
+                .iter()
+                .map(|warning| warning.pattern_key.clone())
+                .collect(),
             allow_permanent,
-        })
+        };
+        match submit_gateway_approval_and_wait(request, context.gateway_approval_timeout) {
+            GatewayApprovalWaitOutcome::Resolved(choice) => choice,
+            GatewayApprovalWaitOutcome::TimedOut => {
+                return Ok(CommandGuardResult::blocked(
+                    "BLOCKED: Command approval timed out waiting for a gateway response."
+                        .to_string(),
+                    Some(primary_key),
+                    Some(combined_desc),
+                ));
+            }
+            GatewayApprovalWaitOutcome::NoListener => {
+                return Ok(CommandGuardResult::pending_approval(
+                    "Command requires approval, but no gateway approval listener is registered."
+                        .to_string(),
+                    Some(primary_key),
+                    Some(combined_desc),
+                ));
+            }
+        }
     } else {
         ApprovalChoice::Deny
     };
@@ -919,6 +1196,8 @@ pub fn check_all_command_guards_with_context(
         description: Some(combined_desc),
         user_approved: true,
         outcome: None,
+        status: None,
+        approval_pending: false,
     })
 }
 
@@ -1064,6 +1343,14 @@ pub fn check_approval(command: &str) -> ApprovalDecision {
 mod tests {
     use super::*;
 
+    static TEST_STATE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn lock_test_state() -> std::sync::MutexGuard<'static, ()> {
+        TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     struct EnvGuard {
         key: &'static str,
         old: Option<String>,
@@ -1093,7 +1380,7 @@ mod tests {
         }
     }
 
-    fn reset_approval_state() {
+    fn reset_approval_state_unlocked() {
         SESSION_APPROVED
             .lock()
             .expect("session approval lock poisoned")
@@ -1105,6 +1392,14 @@ mod tests {
         PERMANENT_APPROVED
             .lock()
             .expect("permanent approval lock poisoned")
+            .clear();
+        GATEWAY_QUEUES
+            .lock()
+            .expect("gateway queue lock poisoned")
+            .clear();
+        GATEWAY_NOTIFY_CBS
+            .lock()
+            .expect("gateway notify lock poisoned")
             .clear();
     }
 
@@ -1461,7 +1756,8 @@ mod tests {
 
     #[test]
     fn test_clear_session_removes_pattern_approval_state() {
-        reset_approval_state();
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         approve_session("session-a", "recursive delete");
         approve_session("session-b", "recursive delete");
 
@@ -1472,7 +1768,232 @@ mod tests {
 
         assert!(!is_approved("session-a", "recursive delete"));
         assert!(is_approved("session-b", "recursive delete"));
-        reset_approval_state();
+        reset_approval_state_unlocked();
+    }
+
+    #[test]
+    fn test_gateway_approval_resolve_single_is_fifo() {
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
+        let session = "gateway-fifo";
+        let first = Arc::new(GatewayApprovalEntry::new(GatewayApprovalRequest {
+            session_key: session.to_string(),
+            command: "cmd1".to_string(),
+            description: "first".to_string(),
+            pattern_key: "first".to_string(),
+            pattern_keys: vec!["first".to_string()],
+            allow_permanent: true,
+        }));
+        let second = Arc::new(GatewayApprovalEntry::new(GatewayApprovalRequest {
+            session_key: session.to_string(),
+            command: "cmd2".to_string(),
+            description: "second".to_string(),
+            pattern_key: "second".to_string(),
+            pattern_keys: vec!["second".to_string()],
+            allow_permanent: true,
+        }));
+        GATEWAY_QUEUES
+            .lock()
+            .expect("gateway queue lock poisoned")
+            .insert(
+                session.to_string(),
+                VecDeque::from([first.clone(), second.clone()]),
+            );
+
+        let count = resolve_gateway_approval(session, ApprovalChoice::Once, false);
+
+        assert_eq!(count, 1);
+        assert_eq!(first.result(), Some(ApprovalChoice::Once));
+        assert_eq!(second.result(), None);
+        assert_eq!(pending_gateway_approval_count(session), 1);
+        reset_approval_state_unlocked();
+    }
+
+    #[test]
+    fn test_gateway_approval_resolve_all_unblocks_entries() {
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
+        let session = "gateway-all";
+        let first = Arc::new(GatewayApprovalEntry::new(GatewayApprovalRequest {
+            session_key: session.to_string(),
+            command: "cmd1".to_string(),
+            description: "first".to_string(),
+            pattern_key: "first".to_string(),
+            pattern_keys: vec!["first".to_string()],
+            allow_permanent: true,
+        }));
+        let second = Arc::new(GatewayApprovalEntry::new(GatewayApprovalRequest {
+            session_key: session.to_string(),
+            command: "cmd2".to_string(),
+            description: "second".to_string(),
+            pattern_key: "second".to_string(),
+            pattern_keys: vec!["second".to_string()],
+            allow_permanent: true,
+        }));
+        GATEWAY_QUEUES
+            .lock()
+            .expect("gateway queue lock poisoned")
+            .insert(
+                session.to_string(),
+                VecDeque::from([first.clone(), second.clone()]),
+            );
+
+        let count = resolve_gateway_approval(session, ApprovalChoice::Session, true);
+
+        assert_eq!(count, 2);
+        assert_eq!(first.result(), Some(ApprovalChoice::Session));
+        assert_eq!(second.result(), Some(ApprovalChoice::Session));
+        assert!(!has_blocking_approval(session));
+        reset_approval_state_unlocked();
+    }
+
+    #[test]
+    fn test_clear_session_denies_and_signals_gateway_entries() {
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
+        let session = "gateway-boundary-cleanup";
+        let first = Arc::new(GatewayApprovalEntry::new(GatewayApprovalRequest {
+            session_key: session.to_string(),
+            command: "cmd1".to_string(),
+            description: "first".to_string(),
+            pattern_key: "first".to_string(),
+            pattern_keys: vec!["first".to_string()],
+            allow_permanent: true,
+        }));
+        let second = Arc::new(GatewayApprovalEntry::new(GatewayApprovalRequest {
+            session_key: session.to_string(),
+            command: "cmd2".to_string(),
+            description: "second".to_string(),
+            pattern_key: "second".to_string(),
+            pattern_keys: vec!["second".to_string()],
+            allow_permanent: true,
+        }));
+        GATEWAY_QUEUES
+            .lock()
+            .expect("gateway queue lock poisoned")
+            .insert(
+                session.to_string(),
+                VecDeque::from([first.clone(), second.clone()]),
+            );
+
+        clear_session(session);
+
+        assert_eq!(first.result(), Some(ApprovalChoice::Deny));
+        assert_eq!(second.result(), Some(ApprovalChoice::Deny));
+        assert!(!has_blocking_approval(session));
+        reset_approval_state_unlocked();
+    }
+
+    #[test]
+    fn test_combined_guards_gateway_blocks_until_resolved() {
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
+        let session = "gateway-e2e";
+        let (tx, rx) = std::sync::mpsc::channel();
+        register_gateway_notify(session, move |request| {
+            tx.send(request).expect("notify request should send");
+        });
+
+        let session_for_thread = session.to_string();
+        let handle = std::thread::spawn(move || {
+            check_all_command_guards_with_context(
+                "echo gateway-e2e",
+                "local",
+                CommandGuardContext {
+                    gateway: true,
+                    ask: true,
+                    session_key: Some(session_for_thread),
+                    gateway_approval_timeout: Duration::from_secs(5),
+                    tirith_result: Ok(Some(TirithResult::warn(
+                        "gateway_unique_e2e",
+                        "gateway warning",
+                    ))),
+                    ..CommandGuardContext::default()
+                },
+                None,
+            )
+            .expect("gateway guard should return")
+        });
+
+        let request = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("gateway notify should fire");
+        assert_eq!(request.command, "echo gateway-e2e");
+        assert_eq!(request.pattern_key, "tirith:gateway_unique_e2e");
+        assert!(has_blocking_approval(session));
+
+        assert_eq!(
+            resolve_gateway_approval(session, ApprovalChoice::Session, false),
+            1
+        );
+        let result = handle.join().expect("gateway guard thread should join");
+        assert!(result.approved);
+        assert!(result.user_approved);
+        assert!(is_approved(session, "tirith:gateway_unique_e2e"));
+        unregister_gateway_notify(session);
+        reset_approval_state_unlocked();
+    }
+
+    #[test]
+    fn test_combined_guards_gateway_timeout_blocks() {
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
+        let session = "gateway-timeout";
+        register_gateway_notify(session, |_request| {});
+
+        let result = check_all_command_guards_with_context(
+            "echo gateway-timeout",
+            "local",
+            CommandGuardContext {
+                gateway: true,
+                ask: true,
+                session_key: Some(session.to_string()),
+                gateway_approval_timeout: Duration::from_millis(10),
+                tirith_result: Ok(Some(TirithResult::warn(
+                    "gateway_unique_timeout",
+                    "gateway warning",
+                ))),
+                ..CommandGuardContext::default()
+            },
+            None,
+        )
+        .expect("gateway guard should return");
+
+        assert!(!result.approved);
+        assert!(result
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("timed out"));
+        assert!(!has_blocking_approval(session));
+        unregister_gateway_notify(session);
+        reset_approval_state_unlocked();
+    }
+
+    #[test]
+    fn test_combined_guards_gateway_without_listener_returns_pending() {
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
+        let result = check_all_command_guards_with_context(
+            "echo gateway-pending",
+            "local",
+            CommandGuardContext {
+                ask: true,
+                session_key: Some("gateway-no-listener".to_string()),
+                tirith_result: Ok(Some(TirithResult::warn(
+                    "gateway_unique_pending",
+                    "gateway warning",
+                ))),
+                ..CommandGuardContext::default()
+            },
+            None,
+        )
+        .expect("gateway guard should return");
+
+        assert!(!result.approved);
+        assert_eq!(result.status.as_deref(), Some("pending_approval"));
+        assert!(result.approval_pending);
+        reset_approval_state_unlocked();
     }
 
     #[test]
@@ -1499,7 +2020,8 @@ mod tests {
 
     #[test]
     fn test_combined_guards_tirith_allow_safe_command() {
-        reset_approval_state();
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         let result = check_all_command_guards_with_context(
             "echo hello",
             "local",
@@ -1531,7 +2053,8 @@ mod tests {
 
     #[test]
     fn test_combined_guards_tirith_block_prompts_as_approvable_warning() {
-        reset_approval_state();
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         let result = check_all_command_guards_with_context(
             "curl http://homograph.test",
             "local",
@@ -1551,7 +2074,8 @@ mod tests {
 
     #[test]
     fn test_combined_guards_tirith_block_plus_dangerous_prompt_combines() {
-        reset_approval_state();
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         let mut prompts = Vec::new();
         let mut callback = |prompt: ApprovalPrompt| {
             prompts.push(prompt);
@@ -1574,7 +2098,8 @@ mod tests {
 
     #[test]
     fn test_combined_guards_dangerous_only_cli_deny_allows_permanent_prompt() {
-        reset_approval_state();
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         let mut prompts = Vec::new();
         let mut callback = |prompt: ApprovalPrompt| {
             prompts.push(prompt);
@@ -1596,7 +2121,8 @@ mod tests {
 
     #[test]
     fn test_combined_guards_tirith_warn_safe_prompts_without_permanent() {
-        reset_approval_state();
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         let mut prompts = Vec::new();
         let mut callback = |prompt: ApprovalPrompt| {
             prompts.push(prompt);
@@ -1621,7 +2147,8 @@ mod tests {
 
     #[test]
     fn test_combined_guards_tirith_warn_session_approval_skips_prompt() {
-        reset_approval_state();
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         approve_session("session-a", "tirith:shortened_url");
         let mut callback = |_prompt: ApprovalPrompt| ApprovalChoice::Deny;
 
@@ -1642,7 +2169,7 @@ mod tests {
         .unwrap();
 
         assert!(result.approved);
-        reset_approval_state();
+        reset_approval_state_unlocked();
     }
 
     #[test]
@@ -1666,7 +2193,8 @@ mod tests {
 
     #[test]
     fn test_combined_guards_tirith_warn_and_dangerous_session_approves_both() {
-        reset_approval_state();
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         let mut prompts = Vec::new();
         let mut callback = |prompt: ApprovalPrompt| {
             prompts.push(prompt);
@@ -1693,12 +2221,13 @@ mod tests {
             "session-combined",
             "pipe remote content to shell"
         ));
-        reset_approval_state();
+        reset_approval_state_unlocked();
     }
 
     #[test]
     fn test_combined_guards_dangerous_only_always_approves_permanent() {
-        reset_approval_state();
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         let mut prompts = Vec::new();
         let mut callback = |prompt: ApprovalPrompt| {
             prompts.push(prompt);
@@ -1716,7 +2245,7 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].allow_permanent);
         assert!(is_approved("another-session", "recursive delete"));
-        reset_approval_state();
+        reset_approval_state_unlocked();
     }
 
     #[test]
@@ -1738,7 +2267,8 @@ mod tests {
 
     #[test]
     fn test_combined_guards_tirith_warn_empty_findings_prompts() {
-        reset_approval_state();
+        let _guard = lock_test_state();
+        reset_approval_state_unlocked();
         let mut prompts = Vec::new();
         let mut callback = |prompt: ApprovalPrompt| {
             prompts.push(prompt);

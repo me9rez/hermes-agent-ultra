@@ -4,6 +4,7 @@
 //! Requirement 22.3
 
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use hermes_core::ToolError;
@@ -48,6 +49,21 @@ const PROTECTED_FILE_NAMES: &[&str] = &[
 
 /// Directory names that are always protected.
 const PROTECTED_DIR_NAMES: &[&str] = &[".ssh", ".gnupg", ".aws", ".config/gcloud", ".kube"];
+
+const WRITE_DENY_EXACT_ABSOLUTE: &[&str] = &["/etc/shadow", "/etc/passwd", "/etc/sudoers"];
+const WRITE_DENY_PREFIX_ABSOLUTE: &[&str] = &["/etc/sudoers.d", "/etc/systemd/system"];
+const WRITE_DENY_HOME_EXACT: &[&str] = &[
+    ".netrc",
+    ".bashrc",
+    ".zshrc",
+    ".profile",
+    ".bash_profile",
+    ".zprofile",
+    ".npmrc",
+    ".pypirc",
+    ".pgpass",
+];
+const WRITE_DENY_HOME_PREFIX: &[&str] = &[".ssh", ".aws", ".gnupg", ".kube"];
 
 // ---------------------------------------------------------------------------
 // Content secret patterns
@@ -169,6 +185,13 @@ impl CredentialGuard {
     /// Returns `Err(ToolError)` if the target is a protected file or if the
     /// content contains detectable secrets (when content scanning is enabled).
     pub fn check_write_access(&self, path: &Path, content: &str) -> Result<(), ToolError> {
+        if is_write_denied(path) {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Write denied: '{}' is a protected system or credential path",
+                path.display()
+            )));
+        }
+
         // Check path first
         if self.is_protected_file(path) {
             return Err(ToolError::ExecutionFailed(format!(
@@ -205,6 +228,98 @@ impl Default for CredentialGuard {
 /// (using the built-in pattern list only).
 pub fn is_protected_file(path: &Path) -> bool {
     is_protected_file_with_extra(path, &[])
+}
+
+/// Check whether a file path is write-denied even if it is not a credential
+/// file by name. This covers sensitive system files, shell profiles, package
+/// manager credential files, and profile-aware `$HERMES_HOME/.env`.
+pub fn is_write_denied(path: &Path) -> bool {
+    is_write_denied_with_roots(
+        path,
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        std::env::var_os("HERMES_HOME")
+            .map(PathBuf::from)
+            .as_deref(),
+    )
+}
+
+fn expand_home(path: &Path, home: Option<&Path>) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return home
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf());
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = home {
+            return home.join(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
+fn path_has_component_prefix(path: &Path, root: &Path, prefix: &str) -> bool {
+    let rel = match path.strip_prefix(root) {
+        Ok(rel) => rel,
+        Err(_) => return false,
+    };
+    let Some(first) = rel.components().next().and_then(|c| match c {
+        std::path::Component::Normal(os) => os.to_str(),
+        _ => None,
+    }) else {
+        return false;
+    };
+    first == prefix
+}
+
+/// Root-injected form for deterministic tests and callers that already know
+/// the active profile/home roots.
+pub fn is_write_denied_with_roots(
+    path: &Path,
+    home: Option<&Path>,
+    hermes_home: Option<&Path>,
+) -> bool {
+    let expanded = expand_home(path, home);
+    let normalized = expanded.to_string_lossy();
+
+    if WRITE_DENY_EXACT_ABSOLUTE
+        .iter()
+        .any(|candidate| normalized == *candidate)
+    {
+        return true;
+    }
+    if WRITE_DENY_PREFIX_ABSOLUTE
+        .iter()
+        .any(|prefix| normalized == *prefix || normalized.starts_with(&format!("{prefix}/")))
+    {
+        return true;
+    }
+
+    if let Some(home) = home {
+        if let Ok(rel) = expanded.strip_prefix(home) {
+            let rel_str = rel.to_string_lossy();
+            if WRITE_DENY_HOME_EXACT
+                .iter()
+                .any(|candidate| rel_str == *candidate)
+            {
+                return true;
+            }
+            if WRITE_DENY_HOME_PREFIX
+                .iter()
+                .any(|prefix| path_has_component_prefix(&expanded, home, prefix))
+            {
+                return true;
+            }
+        }
+    }
+
+    if let Some(hermes_home) = hermes_home {
+        if expanded == hermes_home.join(".env") {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn is_protected_file_with_extra(path: &Path, extra: &[String]) -> bool {
@@ -347,6 +462,9 @@ mod tests {
         assert!(guard
             .check_write_access(Path::new(".env"), "hello")
             .is_err());
+        assert!(guard
+            .check_write_access(Path::new("/etc/passwd"), "root:x:0:0")
+            .is_err());
     }
 
     #[test]
@@ -418,5 +536,94 @@ mod tests {
         assert!(is_protected_file(Path::new("Credentials.JSON")));
         assert!(is_protected_file(Path::new("ID_RSA")));
         assert!(is_protected_file(Path::new("Server.KEY")));
+    }
+
+    #[test]
+    fn write_deny_matches_upstream_sensitive_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let hermes_home = tmp.path().join("profile");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&hermes_home).expect("profile");
+
+        for path in ["/etc/shadow", "/etc/passwd", "/etc/sudoers"] {
+            assert!(is_write_denied_with_roots(
+                Path::new(path),
+                Some(&home),
+                Some(&hermes_home)
+            ));
+        }
+        assert!(is_write_denied_with_roots(
+            Path::new("/etc/sudoers.d/custom"),
+            Some(&home),
+            Some(&hermes_home)
+        ));
+        assert!(is_write_denied_with_roots(
+            Path::new("/etc/systemd/system/evil.service"),
+            Some(&home),
+            Some(&hermes_home)
+        ));
+
+        for rel in [
+            ".ssh/authorized_keys",
+            ".ssh/id_ed25519",
+            ".aws/credentials",
+            ".gnupg/secring.gpg",
+            ".kube/config",
+            ".netrc",
+            ".bashrc",
+            ".zshrc",
+            ".profile",
+            ".bash_profile",
+            ".zprofile",
+            ".npmrc",
+            ".pypirc",
+            ".pgpass",
+        ] {
+            assert!(is_write_denied_with_roots(
+                &home.join(rel),
+                Some(&home),
+                Some(&hermes_home)
+            ));
+        }
+
+        assert!(is_write_denied_with_roots(
+            &hermes_home.join(".env"),
+            Some(&home),
+            Some(&hermes_home)
+        ));
+        assert!(!is_write_denied_with_roots(
+            &hermes_home.join("config.yaml"),
+            Some(&home),
+            Some(&hermes_home)
+        ));
+        assert!(!is_write_denied_with_roots(
+            Path::new("/tmp/safe_file.txt"),
+            Some(&home),
+            Some(&hermes_home)
+        ));
+        assert!(!is_write_denied_with_roots(
+            Path::new("/home/user/project/main.py"),
+            Some(&home),
+            Some(&hermes_home)
+        ));
+    }
+
+    #[test]
+    fn write_deny_expands_tilde_against_home_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+
+        assert!(is_write_denied_with_roots(
+            Path::new("~/.ssh/id_rsa"),
+            Some(&home),
+            None
+        ));
+        assert!(is_write_denied_with_roots(
+            Path::new("~/.netrc"),
+            Some(&home),
+            None
+        ));
     }
 }

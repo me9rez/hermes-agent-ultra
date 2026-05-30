@@ -206,6 +206,13 @@
       "ticket": 25
     },
     {
+      "path": "tests/agent/test_usage_pricing.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream usage-pricing normalization, subscription billing, cache-rate safety, and DeepSeek v4 Pro pricing intent is covered by Rust hermes-intelligence usage_pricing tests; dynamic Python metadata monkeypatch tests remain reference-only for Hermes Ultra's Rust pricing snapshot path.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/run_agent",
       "classification": "functional",
       "rationale": "Run-agent tests cover orchestration and provider execution semantics.",

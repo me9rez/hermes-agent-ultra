@@ -1042,7 +1042,10 @@ impl Gateway {
         // 5. Process through agent loop (streaming or non-streaming)
         let prep_ms = route_start.elapsed().as_millis() as u64;
         let process_start = Instant::now();
-        let processing_result = if self.config.streaming_enabled {
+        let supports_streaming = self.config.streaming_enabled
+            // 微信 iLink API 不支持消息编辑，streaming 模式会导致只显示 "..."
+            && !incoming.platform.eq_ignore_ascii_case("weixin");
+        let processing_result = if supports_streaming {
             self.route_streaming(&incoming, messages, &session_key, &route_id)
                 .await
         } else {

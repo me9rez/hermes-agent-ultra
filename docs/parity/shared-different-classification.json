@@ -206,6 +206,13 @@
       "ticket": 25
     },
     {
+      "path": "tests/agent/test_auxiliary_config_bridge.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream auxiliary config/default-shape and config-to-AUXILIARY_* bridge intent is covered by Rust hermes-config auxiliary task override parsing, default task metadata, and bridge contract tests; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/agent/test_redact.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream redaction test intent is covered by Rust hermes-intelligence redaction contracts for vendor prefixes, env/json/auth tokens, JWTs, Discord IDs, URL query/userinfo, DB connection strings, and form bodies; the Python test file remains reference-only.",

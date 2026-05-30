@@ -362,7 +362,7 @@ fn normalize_provider_secrets(config: &mut GatewayConfig) {
     });
 }
 
-const CONFIG_PATCH_HELP: &str = "model, personality, max_turns, system_prompt, budget.max_result_size_chars, budget.max_aggregate_chars, proxy.http, proxy.socks, security.allow_private_urls, sessions.auto_prune|retention_days|vacuum_after_prune|min_interval_hours, llm.<provider>.api_key|api_key_env|base_url|model|command|args|oauth_token_url|oauth_client_id, smart_model_routing.enabled|max_simple_chars|max_simple_words|cheap_model.model|cheap_model.provider";
+const CONFIG_PATCH_HELP: &str = "model, personality, max_turns, system_prompt, budget.max_result_size_chars, budget.max_aggregate_chars, proxy.http, proxy.socks, security.allow_private_urls, sessions.auto_prune|retention_days|vacuum_after_prune|min_interval_hours, llm.<provider>.api_key|api_key_env|base_url|model|command|args|oauth_token_url|oauth_client_id, auxiliary.<task>.provider|model|base_url|api_key|timeout|download_timeout, smart_model_routing.enabled|max_simple_chars|max_simple_words|cheap_model.model|cheap_model.provider";
 
 fn mask_secret(s: &str) -> String {
     if s.is_empty() {
@@ -514,6 +514,40 @@ fn apply_user_config_patch_dotted(
                     value
                 ))
             })?;
+        }
+        ["auxiliary", task, field] => {
+            let entry = config
+                .auxiliary
+                .entry((*task).to_string())
+                .or_insert_with(crate::config::AuxiliaryTaskConfig::default);
+            match *field {
+                "provider" => entry.provider = value.to_string(),
+                "model" => entry.model = value.to_string(),
+                "base_url" => entry.base_url = value.to_string(),
+                "api_key" => entry.api_key = value.to_string(),
+                "timeout" | "timeout_secs" => {
+                    entry.timeout = Some(value.parse().map_err(|_| {
+                        ConfigError::ValidationError(format!(
+                            "auxiliary.{}.{} must be a non-negative integer: {}",
+                            task, field, value
+                        ))
+                    })?);
+                }
+                "download_timeout" => {
+                    entry.download_timeout = Some(value.parse().map_err(|_| {
+                        ConfigError::ValidationError(format!(
+                            "auxiliary.{}.download_timeout must be a non-negative integer: {}",
+                            task, value
+                        ))
+                    })?);
+                }
+                other => {
+                    return Err(ConfigError::NotFound(format!(
+                        "unknown auxiliary field: auxiliary.{}.{} (supported: provider, model, base_url, api_key, timeout, download_timeout)",
+                        task, other
+                    )));
+                }
+            }
         }
         ["llm", provider, field] => {
             let entry = config
@@ -702,6 +736,46 @@ pub fn user_config_field_display(config: &GatewayConfig, key: &str) -> Result<St
             .and_then(|c| c.oauth_client_id.as_deref())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
+            .unwrap_or_else(|| "(not set)".to_string())),
+        ["auxiliary", task, "provider"] => Ok(config
+            .auxiliary
+            .get(*task)
+            .map(|c| c.provider.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "auto".to_string())),
+        ["auxiliary", task, "model"] => Ok(config
+            .auxiliary
+            .get(*task)
+            .map(|c| c.model.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "(not set)".to_string())),
+        ["auxiliary", task, "base_url"] => Ok(config
+            .auxiliary
+            .get(*task)
+            .map(|c| c.base_url.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "(not set)".to_string())),
+        ["auxiliary", task, "api_key"] => Ok(config
+            .auxiliary
+            .get(*task)
+            .map(|c| c.api_key.trim())
+            .filter(|s| !s.is_empty())
+            .map(mask_secret)
+            .unwrap_or_else(|| "(not set)".to_string())),
+        ["auxiliary", task, "timeout"] | ["auxiliary", task, "timeout_secs"] => Ok(config
+            .auxiliary
+            .get(*task)
+            .and_then(|c| c.timeout)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(not set)".to_string())),
+        ["auxiliary", task, "download_timeout"] => Ok(config
+            .auxiliary
+            .get(*task)
+            .and_then(|c| c.download_timeout)
+            .map(|v| v.to_string())
             .unwrap_or_else(|| "(not set)".to_string())),
         ["smart_model_routing", "enabled"] => Ok(config.smart_model_routing.enabled.to_string()),
         ["smart_model_routing", "max_simple_chars"] => {
@@ -1078,6 +1152,46 @@ mod tests {
     }
 
     #[test]
+    fn load_user_config_file_parses_auxiliary_task_overrides() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            r#"
+auxiliary:
+  vision:
+    provider: openrouter
+    model: google/gemini-2.5-flash
+    base_url: http://localhost:1234/v1
+    api_key: local-key
+    timeout: 120
+    download_timeout: 30
+  web_extract:
+    provider: auto
+    model: custom-llm
+"#,
+        )
+        .unwrap();
+
+        let loaded = load_user_config_file(&path).unwrap();
+        let vision = loaded.auxiliary.get("vision").expect("vision config");
+        assert_eq!(vision.provider, "openrouter");
+        assert_eq!(vision.model, "google/gemini-2.5-flash");
+        assert_eq!(vision.base_url, "http://localhost:1234/v1");
+        assert_eq!(vision.api_key, "local-key");
+        assert_eq!(vision.timeout, Some(120));
+        assert_eq!(vision.download_timeout, Some(30));
+        let web_extract = loaded
+            .auxiliary
+            .get("web_extract")
+            .expect("web extract config");
+        assert_eq!(web_extract.provider, "auto");
+        assert_eq!(web_extract.model, "custom-llm");
+    }
+
+    #[test]
     fn apply_patch_dotted_llm_proxy_budget() {
         let mut c = GatewayConfig::default();
         apply_user_config_patch(&mut c, "llm.openai.api_key", "sk-test").unwrap();
@@ -1138,6 +1252,47 @@ mod tests {
         assert_eq!(
             user_config_field_display(&c, "sessions.retention_days").unwrap(),
             "30"
+        );
+    }
+
+    #[test]
+    fn apply_patch_dotted_auxiliary_values() {
+        let mut c = GatewayConfig::default();
+        apply_user_config_patch(&mut c, "auxiliary.vision.provider", "openrouter").unwrap();
+        apply_user_config_patch(&mut c, "auxiliary.vision.model", "google/gemini-2.5-flash")
+            .unwrap();
+        apply_user_config_patch(
+            &mut c,
+            "auxiliary.vision.base_url",
+            "http://localhost:1234/v1",
+        )
+        .unwrap();
+        apply_user_config_patch(&mut c, "auxiliary.vision.api_key", "local-key").unwrap();
+        apply_user_config_patch(&mut c, "auxiliary.vision.timeout", "120").unwrap();
+        apply_user_config_patch(&mut c, "auxiliary.vision.download_timeout", "30").unwrap();
+
+        let vision = c.auxiliary.get("vision").expect("vision config");
+        assert_eq!(vision.provider, "openrouter");
+        assert_eq!(vision.model, "google/gemini-2.5-flash");
+        assert_eq!(vision.base_url, "http://localhost:1234/v1");
+        assert_eq!(vision.api_key, "local-key");
+        assert_eq!(vision.timeout, Some(120));
+        assert_eq!(vision.download_timeout, Some(30));
+        assert_eq!(
+            user_config_field_display(&c, "auxiliary.vision.provider").unwrap(),
+            "openrouter"
+        );
+        assert_eq!(
+            user_config_field_display(&c, "auxiliary.vision.model").unwrap(),
+            "google/gemini-2.5-flash"
+        );
+        assert_eq!(
+            user_config_field_display(&c, "auxiliary.vision.api_key").unwrap(),
+            "***-key"
+        );
+        assert_eq!(
+            user_config_field_display(&c, "auxiliary.vision.timeout").unwrap(),
+            "120"
         );
     }
 

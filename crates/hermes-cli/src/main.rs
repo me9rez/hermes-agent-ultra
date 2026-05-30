@@ -4126,6 +4126,18 @@ fn extra_bool_loose(platform_cfg: &PlatformConfig, key: &str) -> Option<bool> {
     })
 }
 
+fn discord_allow_bots_bypasses_gateway_allowlist(
+    platform: &str,
+    platform_cfg: &PlatformConfig,
+) -> bool {
+    if !platform.eq_ignore_ascii_case("discord") {
+        return false;
+    }
+    extra_string(platform_cfg, "allow_bots")
+        .map(|raw| matches!(raw.trim().to_ascii_lowercase().as_str(), "all" | "mentions"))
+        .unwrap_or(false)
+}
+
 fn build_gateway_dm_manager(config: &hermes_config::GatewayConfig) -> DmManager {
     let mut dm_manager = DmManager::with_pair_behavior();
     for platform_cfg in config.platforms.values().filter(|p| p.enabled) {
@@ -4196,6 +4208,11 @@ fn build_gateway_platform_access_policies(
                 admin_users,
                 group_mode,
                 slash_requires_allowlist,
+                bot_sender_bypasses_allowlist: discord_allow_bots_bypasses_gateway_allowlist(
+                    platform,
+                    platform_cfg,
+                ),
+                reactions_enabled: extra_bool_loose(platform_cfg, "reactions"),
             },
         );
     }

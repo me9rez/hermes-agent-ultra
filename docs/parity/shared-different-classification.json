@@ -157,9 +157,44 @@
       "ticket": 25
     },
     {
+      "path": "tests/gateway/test_discord_bot_auth_bypass.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord bot-allowance auth bypass intent is covered by Rust Gateway route_message_from_sender tests for Discord bot senders, human allowlists, and non-Discord isolation, with DISCORD_ALLOW_BOTS env bridging into platform policy.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_discord_bot_filter.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream DISCORD_ALLOW_BOTS filtering semantics are covered by Rust DiscordBotMessagePolicy parsing and DiscordAdapter::should_accept_message tests for own messages, humans, all bots, mentioned bots, and default rejection.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_discord_imports.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream discord.py-missing import safety is covered by the Rust-only hermes-gateway Discord module compiling and testing behind the discord feature without any discord.py runtime dependency.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
       "path": "tests/gateway/test_discord_media_metadata.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream Discord media metadata signature intent is covered by Rust hermes-gateway DiscordSendMetadata routing tests plus metadata-aware send_voice, send_image_file, and send_image method contracts; the Python test file remains reference-only.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_discord_reactions.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord processing-reaction lifecycle is covered by Rust Gateway Discord reaction lifecycle tests, platform-specific Discord emoji mapping, reactions_enabled policy tests, and Discord REST reaction parser/adapter contracts.",
+      "owner": "sheawinkler",
+      "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_discord_system_messages.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream Discord system-message filtering is covered by Rust DiscordAdapter::should_accept_message tests accepting default/reply message types and rejecting thread rename, pin, join, and boost-style system message types.",
       "owner": "sheawinkler",
       "ticket": 25
     },

@@ -96,6 +96,7 @@ const DISCORD_ALLOW_MENTION_EVERYONE_ENV: &str = "DISCORD_ALLOW_MENTION_EVERYONE
 const DISCORD_ALLOW_MENTION_ROLES_ENV: &str = "DISCORD_ALLOW_MENTION_ROLES";
 const DISCORD_ALLOW_MENTION_USERS_ENV: &str = "DISCORD_ALLOW_MENTION_USERS";
 const DISCORD_ALLOW_MENTION_REPLIED_USER_ENV: &str = "DISCORD_ALLOW_MENTION_REPLIED_USER";
+const DISCORD_ALLOW_BOTS_ENV: &str = "DISCORD_ALLOW_BOTS";
 
 /// Discord REST `allowed_mentions` payload.
 ///
@@ -171,6 +172,50 @@ fn with_allowed_mentions(
 
 fn with_default_allowed_mentions(body: serde_json::Value) -> serde_json::Value {
     with_allowed_mentions(body, default_discord_allowed_mentions())
+}
+
+/// Discord bot-message acceptance policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscordBotMessagePolicy {
+    /// Reject other bot/webhook senders.
+    None,
+    /// Accept bot/webhook senders only when they mention this bot.
+    Mentions,
+    /// Accept all bot/webhook senders.
+    All,
+}
+
+impl DiscordBotMessagePolicy {
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(value) if value.eq_ignore_ascii_case("all") => Self::All,
+            Some(value) if value.eq_ignore_ascii_case("mentions") => Self::Mentions,
+            _ => Self::None,
+        }
+    }
+
+    pub fn from_lookup<F>(mut lookup: F) -> Self
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        Self::parse(lookup(DISCORD_ALLOW_BOTS_ENV).as_deref())
+    }
+
+    pub fn bypasses_gateway_allowlist(self) -> bool {
+        matches!(self, Self::Mentions | Self::All)
+    }
+}
+
+fn discord_message_type_is_user_visible(message_type: u8) -> bool {
+    matches!(message_type, 0 | 19)
+}
+
+/// Parse Discord reaction lifecycle opt-in values. Default is enabled.
+pub fn discord_reactions_enabled_from_raw(raw: Option<&str>) -> bool {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(value) => parse_allowed_mention_bool(value, true),
+        None => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -452,6 +497,21 @@ pub struct IncomingDiscordMessage {
     pub username: Option<String>,
     pub content: String,
     pub is_bot: bool,
+    pub message_type: u8,
+    pub mention_user_ids: Vec<String>,
+    pub reply_to_message_id: Option<String>,
+    pub reply_to_text: Option<String>,
+}
+
+impl IncomingDiscordMessage {
+    pub fn mentions_user(&self, user_id: &str) -> bool {
+        let needle = user_id.trim();
+        !needle.is_empty()
+            && self
+                .mention_user_ids
+                .iter()
+                .any(|mentioned| mentioned.trim() == needle)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1397,6 +1457,30 @@ impl DiscordAdapter {
             .and_then(|a| a.get("bot"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let message_type = data.get("type").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+        let mention_user_ids = data
+            .get("mentions")
+            .and_then(|v| v.as_array())
+            .map(|mentions| {
+                mentions
+                    .iter()
+                    .filter_map(|mention| mention.get("id").and_then(|id| id.as_str()))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let reply_to_message_id = data
+            .get("message_reference")
+            .and_then(|reference| reference.get("message_id"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let reply_to_text = data
+            .get("referenced_message")
+            .and_then(|message| message.get("content"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(String::from);
 
         Some(IncomingDiscordMessage {
             channel_id,
@@ -1405,7 +1489,40 @@ impl DiscordAdapter {
             username,
             content,
             is_bot,
+            message_type,
+            mention_user_ids,
+            reply_to_message_id,
+            reply_to_text,
         })
+    }
+
+    /// Apply Discord inbound self/system/bot filtering to a parsed message.
+    pub fn should_accept_message(
+        message: &IncomingDiscordMessage,
+        client_user_id: Option<&str>,
+        bot_policy: DiscordBotMessagePolicy,
+    ) -> bool {
+        if let (Some(author_id), Some(client_id)) = (message.user_id.as_deref(), client_user_id) {
+            if author_id.trim() == client_id.trim() {
+                return false;
+            }
+        }
+
+        if !discord_message_type_is_user_visible(message.message_type) {
+            return false;
+        }
+
+        if !message.is_bot {
+            return true;
+        }
+
+        match bot_policy {
+            DiscordBotMessagePolicy::None => false,
+            DiscordBotMessagePolicy::All => true,
+            DiscordBotMessagePolicy::Mentions => client_user_id
+                .map(|id| message.mentions_user(id))
+                .unwrap_or(false),
+        }
     }
 
     /// Parse a MESSAGE_UPDATE dispatch event.
@@ -1806,6 +1923,145 @@ mod tests {
     }
 
     #[test]
+    fn bot_message_policy_defaults_to_none_and_parses_case_insensitively() {
+        assert_eq!(
+            DiscordBotMessagePolicy::parse(None),
+            DiscordBotMessagePolicy::None
+        );
+        assert_eq!(
+            DiscordBotMessagePolicy::parse(Some(" ALL ")),
+            DiscordBotMessagePolicy::All
+        );
+        assert_eq!(
+            DiscordBotMessagePolicy::parse(Some("mentions")),
+            DiscordBotMessagePolicy::Mentions
+        );
+        assert_eq!(
+            DiscordBotMessagePolicy::parse(Some("banana")),
+            DiscordBotMessagePolicy::None
+        );
+        assert_eq!(
+            DiscordBotMessagePolicy::from_lookup(|name| {
+                (name == DISCORD_ALLOW_BOTS_ENV).then(|| "Mentions".to_string())
+            }),
+            DiscordBotMessagePolicy::Mentions
+        );
+        assert!(!DiscordBotMessagePolicy::None.bypasses_gateway_allowlist());
+        assert!(DiscordBotMessagePolicy::Mentions.bypasses_gateway_allowlist());
+        assert!(DiscordBotMessagePolicy::All.bypasses_gateway_allowlist());
+    }
+
+    #[test]
+    fn bot_message_filter_matches_upstream_contract() {
+        let human = IncomingDiscordMessage {
+            channel_id: "channel".into(),
+            message_id: "message".into(),
+            user_id: Some("human".into()),
+            username: Some("Jezza".into()),
+            content: "hello".into(),
+            is_bot: false,
+            message_type: 0,
+            mention_user_ids: Vec::new(),
+            reply_to_message_id: None,
+            reply_to_text: None,
+        };
+        assert!(DiscordAdapter::should_accept_message(
+            &human,
+            Some("self"),
+            DiscordBotMessagePolicy::None
+        ));
+
+        let bot = IncomingDiscordMessage {
+            is_bot: true,
+            user_id: Some("bot".into()),
+            username: Some("Worker".into()),
+            mention_user_ids: vec!["self".into()],
+            ..human.clone()
+        };
+        assert!(!DiscordAdapter::should_accept_message(
+            &bot,
+            Some("self"),
+            DiscordBotMessagePolicy::None
+        ));
+        assert!(DiscordAdapter::should_accept_message(
+            &bot,
+            Some("self"),
+            DiscordBotMessagePolicy::All
+        ));
+        assert!(DiscordAdapter::should_accept_message(
+            &bot,
+            Some("self"),
+            DiscordBotMessagePolicy::Mentions
+        ));
+
+        let unmentioned_bot = IncomingDiscordMessage {
+            mention_user_ids: vec!["someone-else".into()],
+            ..bot.clone()
+        };
+        assert!(!DiscordAdapter::should_accept_message(
+            &unmentioned_bot,
+            Some("self"),
+            DiscordBotMessagePolicy::Mentions
+        ));
+
+        let own_message = IncomingDiscordMessage {
+            user_id: Some("self".into()),
+            is_bot: true,
+            ..bot
+        };
+        assert!(!DiscordAdapter::should_accept_message(
+            &own_message,
+            Some("self"),
+            DiscordBotMessagePolicy::All
+        ));
+    }
+
+    #[test]
+    fn system_message_filter_only_accepts_default_and_reply() {
+        let mut msg = IncomingDiscordMessage {
+            channel_id: "channel".into(),
+            message_id: "message".into(),
+            user_id: Some("human".into()),
+            username: Some("Jezza".into()),
+            content: "hello".into(),
+            is_bot: false,
+            message_type: 0,
+            mention_user_ids: Vec::new(),
+            reply_to_message_id: None,
+            reply_to_text: None,
+        };
+        assert!(DiscordAdapter::should_accept_message(
+            &msg,
+            Some("self"),
+            DiscordBotMessagePolicy::None
+        ));
+        msg.message_type = 19;
+        assert!(DiscordAdapter::should_accept_message(
+            &msg,
+            Some("self"),
+            DiscordBotMessagePolicy::None
+        ));
+        for system_type in [1, 6, 7, 8] {
+            msg.message_type = system_type;
+            assert!(!DiscordAdapter::should_accept_message(
+                &msg,
+                Some("self"),
+                DiscordBotMessagePolicy::None
+            ));
+        }
+    }
+
+    #[test]
+    fn discord_reactions_default_enabled_and_false_values_disable() {
+        assert!(discord_reactions_enabled_from_raw(None));
+        assert!(discord_reactions_enabled_from_raw(Some("")));
+        assert!(discord_reactions_enabled_from_raw(Some("yes")));
+        assert!(!discord_reactions_enabled_from_raw(Some("false")));
+        assert!(!discord_reactions_enabled_from_raw(Some("0")));
+        assert!(!discord_reactions_enabled_from_raw(Some("off")));
+    }
+
+    #[test]
     fn media_methods_accept_metadata_contract() {
         let adapter = DiscordAdapter::new(test_config()).unwrap();
         let metadata = DiscordSendMetadata::with_thread_id("thread-1");
@@ -1871,6 +2127,12 @@ mod tests {
             "id": "msg123",
             "channel_id": "ch456",
             "content": "hello world",
+            "type": 19,
+            "mentions": [
+                { "id": "bot-self", "username": "Hermes" }
+            ],
+            "message_reference": { "message_id": "origin-1" },
+            "referenced_message": { "content": "original message" },
             "author": {
                 "id": "user789",
                 "username": "testuser",
@@ -1885,6 +2147,10 @@ mod tests {
         assert_eq!(msg.user_id, Some("user789".into()));
         assert_eq!(msg.username, Some("testuser".into()));
         assert!(!msg.is_bot);
+        assert_eq!(msg.message_type, 19);
+        assert!(msg.mentions_user("bot-self"));
+        assert_eq!(msg.reply_to_message_id.as_deref(), Some("origin-1"));
+        assert_eq!(msg.reply_to_text.as_deref(), Some("original message"));
     }
 
     #[test]

@@ -131,8 +131,47 @@ fn apply_ntfy_env(config: &mut GatewayConfig) {
     }
 }
 
+fn apply_discord_env(config: &mut GatewayConfig) {
+    let discord = config
+        .platforms
+        .entry("discord".into())
+        .or_insert_with(PlatformConfig::default);
+
+    if let Some(token) = env_nonempty("DISCORD_BOT_TOKEN") {
+        let enabled_was_explicit = discord
+            .extra
+            .remove("_enabled_explicit")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !discord.enabled && !enabled_was_explicit {
+            discord.enabled = true;
+        }
+        discord.token = Some(token);
+    }
+    if let Some(v) = env_nonempty("DISCORD_APPLICATION_ID") {
+        set_extra(discord, "application_id", json!(v));
+    }
+    if let Some(v) = env_nonempty("DISCORD_ALLOW_BOTS") {
+        set_extra(discord, "allow_bots", json!(v));
+    }
+    if let Some(v) = env_nonempty("DISCORD_REACTIONS") {
+        set_extra(
+            discord,
+            "reactions",
+            json!(matches!(
+                v.to_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )),
+        );
+    }
+    if let Some(v) = env_nonempty("DISCORD_REPLY_TO_MODE") {
+        set_extra(discord, "reply_to_mode", json!(v));
+    }
+}
+
 /// 应用与 Python 文档一致的平台环境变量到 `platforms`。
 pub fn apply_python_named_platform_env(config: &mut GatewayConfig) {
+    apply_discord_env(config);
     apply_weixin_env(config);
     apply_dingtalk_env(config);
     apply_ntfy_env(config);
@@ -175,6 +214,45 @@ mod tests {
             std::env::remove_var("WEIXIN_TOKEN");
             std::env::remove_var("WEIXIN_DM_POLICY");
             std::env::remove_var("WEIXIN_ALLOWED_USERS");
+        }
+    }
+
+    #[test]
+    fn discord_env_sets_bot_policy_and_reaction_fields() {
+        unsafe {
+            std::env::set_var("DISCORD_BOT_TOKEN", "discord-token");
+            std::env::set_var("DISCORD_APPLICATION_ID", "app-123");
+            std::env::set_var("DISCORD_ALLOW_BOTS", "mentions");
+            std::env::set_var("DISCORD_REACTIONS", "false");
+            std::env::set_var("DISCORD_REPLY_TO_MODE", "all");
+        }
+        let mut cfg = GatewayConfig::default();
+        apply_python_named_platform_env(&mut cfg);
+        let discord = cfg.platforms.get("discord").expect("discord block");
+        assert!(discord.enabled);
+        assert_eq!(discord.token.as_deref(), Some("discord-token"));
+        assert_eq!(
+            discord.extra.get("application_id").and_then(|v| v.as_str()),
+            Some("app-123")
+        );
+        assert_eq!(
+            discord.extra.get("allow_bots").and_then(|v| v.as_str()),
+            Some("mentions")
+        );
+        assert_eq!(
+            discord.extra.get("reactions").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            discord.extra.get("reply_to_mode").and_then(|v| v.as_str()),
+            Some("all")
+        );
+        unsafe {
+            std::env::remove_var("DISCORD_BOT_TOKEN");
+            std::env::remove_var("DISCORD_APPLICATION_ID");
+            std::env::remove_var("DISCORD_ALLOW_BOTS");
+            std::env::remove_var("DISCORD_REACTIONS");
+            std::env::remove_var("DISCORD_REPLY_TO_MODE");
         }
     }
 

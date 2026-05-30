@@ -102,6 +102,23 @@ pub struct IncomingMessage {
     pub is_dm: bool,
 }
 
+/// Sender metadata carried by platform adapters when routing a message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IncomingSender {
+    /// True when the source user is a bot/webhook account.
+    pub is_bot: bool,
+}
+
+impl IncomingSender {
+    pub fn human() -> Self {
+        Self { is_bot: false }
+    }
+
+    pub fn bot() -> Self {
+        Self { is_bot: true }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MessageHandler callback
 // ---------------------------------------------------------------------------
@@ -278,6 +295,8 @@ pub struct PlatformAccessPolicy {
     pub admin_users: HashSet<String>,
     pub group_mode: GroupAccessMode,
     pub slash_requires_allowlist: bool,
+    pub bot_sender_bypasses_allowlist: bool,
+    pub reactions_enabled: Option<bool>,
 }
 
 impl PlatformAccessPolicy {
@@ -308,6 +327,23 @@ impl PlatformAccessPolicy {
         Self::user_matches_any(user_id, &self.admin_users)
             || Self::user_matches_any(user_id, &self.allowed_users)
     }
+
+    fn allows_sender_without_user_allowlist(
+        &self,
+        incoming: &IncomingMessage,
+        sender: IncomingSender,
+    ) -> bool {
+        incoming.platform.eq_ignore_ascii_case("discord")
+            && sender.is_bot
+            && self.bot_sender_bypasses_allowlist
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReactionLifecyclePlan {
+    start: &'static str,
+    success: &'static str,
+    error: &'static str,
 }
 
 impl Gateway {
@@ -395,12 +431,12 @@ impl Gateway {
         }
     }
 
-    fn should_apply_slack_reaction_lifecycle(incoming: &IncomingMessage) -> bool {
-        if !incoming.platform.eq_ignore_ascii_case("slack") {
-            return false;
-        }
+    fn reaction_lifecycle_plan(
+        incoming: &IncomingMessage,
+        access_policy: Option<&PlatformAccessPolicy>,
+    ) -> Option<ReactionLifecyclePlan> {
         if incoming.text.trim_start().starts_with('/') {
-            return false;
+            return None;
         }
         if incoming
             .message_id
@@ -409,9 +445,33 @@ impl Gateway {
             .filter(|s| !s.is_empty())
             .is_none()
         {
-            return false;
+            return None;
         }
-        incoming.is_dm || incoming.text.contains("<@")
+        if matches!(
+            access_policy.and_then(|policy| policy.reactions_enabled),
+            Some(false)
+        ) {
+            return None;
+        }
+        if !(incoming.is_dm || incoming.text.contains("<@")) {
+            return None;
+        }
+
+        if incoming.platform.eq_ignore_ascii_case("slack") {
+            return Some(ReactionLifecyclePlan {
+                start: "eyes",
+                success: "white_check_mark",
+                error: "x",
+            });
+        }
+        if incoming.platform.eq_ignore_ascii_case("discord") {
+            return Some(ReactionLifecyclePlan {
+                start: "👀",
+                success: "✅",
+                error: "❌",
+            });
+        }
+        None
     }
 
     /// Set the message handler for processing incoming messages.
@@ -522,9 +582,21 @@ impl Gateway {
     /// Route an incoming message through the full pipeline:
     /// DM check → session lookup → agent loop → response.
     pub async fn route_message(&self, incoming: &IncomingMessage) -> Result<(), GatewayError> {
+        self.route_message_from_sender(incoming, IncomingSender::human())
+            .await
+    }
+
+    /// Route an incoming message with platform-provided sender metadata.
+    pub async fn route_message_from_sender(
+        &self,
+        incoming: &IncomingMessage,
+        sender: IncomingSender,
+    ) -> Result<(), GatewayError> {
         let access_policy = self.platform_access_policy(&incoming.platform).await;
         let is_slash_command = incoming.text.trim_start().starts_with('/');
         if let Some(policy) = access_policy.as_ref() {
+            let bypasses_user_allowlist =
+                policy.allows_sender_without_user_allowlist(incoming, sender);
             if !incoming.is_dm {
                 match policy.group_mode {
                     GroupAccessMode::Disabled => {
@@ -536,7 +608,7 @@ impl Gateway {
                         return Ok(());
                     }
                     GroupAccessMode::Allowlist => {
-                        if !policy.is_user_allowed(&incoming.user_id) {
+                        if !bypasses_user_allowlist && !policy.is_user_allowed(&incoming.user_id) {
                             debug!(
                                 platform = incoming.platform,
                                 user_id = incoming.user_id,
@@ -551,6 +623,7 @@ impl Gateway {
             if is_slash_command
                 && policy.slash_requires_allowlist
                 && policy.has_allowlist()
+                && !bypasses_user_allowlist
                 && !policy.is_user_allowed(&incoming.user_id)
             {
                 debug!(
@@ -629,16 +702,19 @@ impl Gateway {
             }
         }
 
-        let reaction_adapter = if Self::should_apply_slack_reaction_lifecycle(incoming) {
+        let reaction_plan = Self::reaction_lifecycle_plan(incoming, access_policy.as_ref());
+        let reaction_adapter = if reaction_plan.is_some() {
             self.get_adapter(&incoming.platform).await
         } else {
             None
         };
-        if let (Some(adapter), Some(message_id)) =
-            (&reaction_adapter, incoming.message_id.as_deref())
-        {
+        if let (Some(adapter), Some(message_id), Some(plan)) = (
+            &reaction_adapter,
+            incoming.message_id.as_deref(),
+            reaction_plan,
+        ) {
             if let Err(err) = adapter
-                .add_reaction(&incoming.chat_id, message_id, "eyes")
+                .add_reaction(&incoming.chat_id, message_id, plan.start)
                 .await
             {
                 debug!(
@@ -675,11 +751,13 @@ impl Gateway {
                 .await
         };
 
-        if let (Some(adapter), Some(message_id)) =
-            (&reaction_adapter, incoming.message_id.as_deref())
-        {
+        if let (Some(adapter), Some(message_id), Some(plan)) = (
+            &reaction_adapter,
+            incoming.message_id.as_deref(),
+            reaction_plan,
+        ) {
             if let Err(err) = adapter
-                .remove_reaction(&incoming.chat_id, message_id, "eyes")
+                .remove_reaction(&incoming.chat_id, message_id, plan.start)
                 .await
             {
                 debug!(
@@ -691,9 +769,9 @@ impl Gateway {
                 );
             }
             let emoji = if processing_result.is_ok() {
-                "white_check_mark"
+                plan.success
             } else {
-                "x"
+                plan.error
             };
             if let Err(err) = adapter
                 .add_reaction(&incoming.chat_id, message_id, emoji)
@@ -2611,6 +2689,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_discord_bot_sender_can_bypass_user_allowlist_when_enabled() {
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let dm_manager = DmManager::with_ignore_behavior();
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        let mut policies = HashMap::new();
+        let mut policy = PlatformAccessPolicy {
+            group_mode: GroupAccessMode::Allowlist,
+            bot_sender_bypasses_allowlist: true,
+            ..PlatformAccessPolicy::default()
+        };
+        policy.allowed_users.insert("human_user".to_string());
+        policies.insert("discord".to_string(), policy);
+        gw.set_platform_access_policies(policies).await;
+
+        let incoming = IncomingMessage {
+            platform: "discord".into(),
+            chat_id: "guild:1".into(),
+            user_id: "worker_bot".into(),
+            text: "notion event".into(),
+            message_id: Some("m1".into()),
+            is_dm: false,
+        };
+
+        assert!(gw
+            .route_message_from_sender(&incoming, IncomingSender::bot())
+            .await
+            .is_err());
+        assert_eq!(
+            gw.session_transcript_len("discord", "guild:1", "worker_bot")
+                .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_discord_bot_sender_still_rejected_when_bypass_disabled() {
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let dm_manager = DmManager::with_ignore_behavior();
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        let mut policies = HashMap::new();
+        let mut policy = PlatformAccessPolicy {
+            group_mode: GroupAccessMode::Allowlist,
+            bot_sender_bypasses_allowlist: false,
+            ..PlatformAccessPolicy::default()
+        };
+        policy.allowed_users.insert("human_user".to_string());
+        policies.insert("discord".to_string(), policy);
+        gw.set_platform_access_policies(policies).await;
+
+        let incoming = IncomingMessage {
+            platform: "discord".into(),
+            chat_id: "guild:1".into(),
+            user_id: "worker_bot".into(),
+            text: "notion event".into(),
+            message_id: Some("m1".into()),
+            is_dm: false,
+        };
+
+        assert!(gw
+            .route_message_from_sender(&incoming, IncomingSender::bot())
+            .await
+            .is_ok());
+        assert_eq!(
+            gw.session_transcript_len("discord", "guild:1", "worker_bot")
+                .await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_discord_bot_bypass_does_not_apply_to_humans_or_other_platforms() {
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let dm_manager = DmManager::with_ignore_behavior();
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        let mut policies = HashMap::new();
+        let mut discord_policy = PlatformAccessPolicy {
+            group_mode: GroupAccessMode::Allowlist,
+            bot_sender_bypasses_allowlist: true,
+            ..PlatformAccessPolicy::default()
+        };
+        discord_policy
+            .allowed_users
+            .insert("human_user".to_string());
+        policies.insert("discord".to_string(), discord_policy);
+        let mut telegram_policy = PlatformAccessPolicy {
+            group_mode: GroupAccessMode::Allowlist,
+            bot_sender_bypasses_allowlist: true,
+            ..PlatformAccessPolicy::default()
+        };
+        telegram_policy
+            .allowed_users
+            .insert("human_user".to_string());
+        policies.insert("telegram".to_string(), telegram_policy);
+        gw.set_platform_access_policies(policies).await;
+
+        let discord_human = IncomingMessage {
+            platform: "discord".into(),
+            chat_id: "guild:1".into(),
+            user_id: "other_human".into(),
+            text: "hello".into(),
+            message_id: Some("m1".into()),
+            is_dm: false,
+        };
+        assert!(gw
+            .route_message_from_sender(&discord_human, IncomingSender::human())
+            .await
+            .is_ok());
+        assert_eq!(
+            gw.session_transcript_len("discord", "guild:1", "other_human")
+                .await,
+            0
+        );
+
+        let telegram_bot = IncomingMessage {
+            platform: "telegram".into(),
+            chat_id: "-100123".into(),
+            user_id: "worker_bot".into(),
+            text: "hello".into(),
+            message_id: Some("m2".into()),
+            is_dm: false,
+        };
+        assert!(gw
+            .route_message_from_sender(&telegram_bot, IncomingSender::bot())
+            .await
+            .is_ok());
+        assert_eq!(
+            gw.session_transcript_len("telegram", "-100123", "worker_bot")
+                .await,
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn gateway_executes_status_command_without_agent_handler() {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let adapter = Arc::new(TestAdapter {
@@ -3201,6 +3412,87 @@ mod tests {
                 "add:C123:1710000000.123:white_check_mark".to_string()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn gateway_discord_reaction_lifecycle_success_uses_discord_emojis() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let reactions = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(ReactionTestAdapter {
+            messages: sent.clone(),
+            reactions: reactions.clone(),
+        });
+
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let mut dm_manager = DmManager::with_pair_behavior();
+        dm_manager.authorize_user("user1");
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        gw.register_adapter("discord", adapter).await;
+        gw.set_message_handler(Arc::new(|_messages| {
+            Box::pin(async { Ok("done".to_string()) })
+        }))
+        .await;
+
+        let incoming = IncomingMessage {
+            platform: "discord".into(),
+            chat_id: "C123".into(),
+            user_id: "user1".into(),
+            text: "hello".into(),
+            message_id: Some("123456789".into()),
+            is_dm: true,
+        };
+        assert!(gw.route_message(&incoming).await.is_ok());
+
+        let got = reactions.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![
+                "add:C123:123456789:👀".to_string(),
+                "remove:C123:123456789:👀".to_string(),
+                "add:C123:123456789:✅".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_discord_reactions_can_be_disabled_by_policy() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let reactions = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(ReactionTestAdapter {
+            messages: sent.clone(),
+            reactions: reactions.clone(),
+        });
+
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let mut dm_manager = DmManager::with_pair_behavior();
+        dm_manager.authorize_user("user1");
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        gw.register_adapter("discord", adapter).await;
+        gw.set_message_handler(Arc::new(|_messages| {
+            Box::pin(async { Ok("done".to_string()) })
+        }))
+        .await;
+
+        let mut policies = HashMap::new();
+        policies.insert(
+            "discord".to_string(),
+            PlatformAccessPolicy {
+                reactions_enabled: Some(false),
+                ..PlatformAccessPolicy::default()
+            },
+        );
+        gw.set_platform_access_policies(policies).await;
+
+        let incoming = IncomingMessage {
+            platform: "discord".into(),
+            chat_id: "C123".into(),
+            user_id: "user1".into(),
+            text: "hello".into(),
+            message_id: Some("123456789".into()),
+            is_dm: true,
+        };
+        assert!(gw.route_message(&incoming).await.is_ok());
+        assert!(reactions.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

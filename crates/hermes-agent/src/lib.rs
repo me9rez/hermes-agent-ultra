@@ -7,6 +7,7 @@
 pub mod agent_loop;
 pub mod api_bridge;
 pub mod auxiliary_builder;
+pub mod bedrock;
 pub mod budget;
 pub mod code_index;
 pub mod compression;
@@ -55,6 +56,7 @@ pub use auxiliary_builder::{
     build_auxiliary_client_with_main_runtime, build_default_auxiliary_client, AuxiliaryMainRuntime,
     AuxiliaryWiringSummary,
 };
+pub use bedrock::BedrockProvider;
 pub use provider::{AnthropicProvider, GenericProvider, OpenAiProvider, OpenRouterProvider};
 pub use providers_extra::{
     CopilotProvider, KimiProvider, MiniMaxProvider, NousProvider, QwenProvider,

@@ -29,6 +29,9 @@ use hermes_core::{
 };
 
 use crate::api_bridge::CodexProvider;
+use crate::bedrock::{
+    bedrock_runtime_base_url, resolve_bedrock_region, BedrockProvider, BEDROCK_AUTH_MARKER,
+};
 use crate::budget;
 use crate::code_index::CodeIndex;
 use crate::context::{
@@ -937,7 +940,11 @@ fn classify_error(err: &str) -> ErrorClass {
     let openrouter_privacy_guardrail =
         lower.contains("privacy guardrail") || lower.contains("openrouter privacy");
 
-    if lower.contains("rate limit") || lower.contains("429") || lower.contains("too many") {
+    if lower.contains("rate limit")
+        || lower.contains("429")
+        || lower.contains("too many")
+        || lower.contains("throttlingexception")
+    {
         ErrorClass::RateLimit
     } else if lower.contains("404") || lower.contains("not found") {
         if model_not_found || openrouter_privacy_guardrail {
@@ -949,6 +956,7 @@ fn classify_error(err: &str) -> ErrorClass {
         || lower.contains("maximum context")
         || lower.contains("token limit")
         || lower.contains("context_length_exceeded")
+        || lower.contains("input is too long")
     {
         ErrorClass::ContextOverflow
     } else if lower.contains("401")
@@ -2588,6 +2596,12 @@ impl AgentLoop {
         if provider == "copilot-acp" {
             return Some("copilot-acp".to_string());
         }
+        if matches!(
+            provider,
+            "bedrock" | "aws" | "aws-bedrock" | "amazon-bedrock" | "amazon"
+        ) {
+            return Some(BEDROCK_AUTH_MARKER.to_string());
+        }
         if let Some(token) = self.resolve_oauth_store_api_key(provider) {
             return Some(token);
         }
@@ -2736,6 +2750,15 @@ impl AgentLoop {
                     Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string())
                 } else if provider == "google-gemini-cli" {
                     Some("cloudcode-pa://google".to_string())
+                } else if matches!(
+                    provider,
+                    "bedrock" | "aws" | "aws-bedrock" | "amazon-bedrock" | "amazon"
+                ) {
+                    std::env::var("BEDROCK_BASE_URL")
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| Some(bedrock_runtime_base_url(&resolve_bedrock_region())))
                 } else if provider == "stepfun" {
                     Some("https://api.stepfun.ai/step_plan/v1".to_string())
                 } else if provider == "copilot" {
@@ -3306,6 +3329,15 @@ impl AgentLoop {
             }
             "nous" => {
                 let mut p = NousProvider::new(&api_key).with_model(model_name);
+                if let Some(url) = base_url {
+                    p = p.with_base_url(url);
+                }
+                Arc::new(p)
+            }
+            "bedrock" | "aws" | "aws-bedrock" | "amazon-bedrock" | "amazon" => {
+                let mut p = BedrockProvider::new()
+                    .with_region(resolve_bedrock_region())
+                    .with_model(model_name);
                 if let Some(url) = base_url {
                     p = p.with_base_url(url);
                 }

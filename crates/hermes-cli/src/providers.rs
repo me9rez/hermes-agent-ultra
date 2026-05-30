@@ -109,6 +109,7 @@ pub fn canonical_provider_id(provider: &str) -> String {
         "arcee-ai" | "arceeai" => "arcee".to_string(),
         "mimo" | "xiaomi-mimo" => "xiaomi".to_string(),
         "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => "tencent-tokenhub".to_string(),
+        "aws" | "aws-bedrock" | "amazon-bedrock" | "amazon" => "bedrock".to_string(),
         "kilo" | "kilo-code" | "kilo-gateway" => "kilocode".to_string(),
         "opencode" | "opencode-zen" | "zen" => "opencode-zen".to_string(),
         "go" => "opencode-go".to_string(),
@@ -301,6 +302,10 @@ mod tests {
         assert_eq!(canonical_provider_id("xiaomi-mimo"), "xiaomi");
         assert_eq!(canonical_provider_id("tencent-cloud"), "tencent-tokenhub");
         assert_eq!(canonical_provider_id("tokenhub"), "tencent-tokenhub");
+        assert_eq!(canonical_provider_id("aws"), "bedrock");
+        assert_eq!(canonical_provider_id("aws-bedrock"), "bedrock");
+        assert_eq!(canonical_provider_id("amazon-bedrock"), "bedrock");
+        assert_eq!(canonical_provider_id("amazon"), "bedrock");
         assert_eq!(canonical_provider_id("minimax_cn"), "minimax-cn");
     }
 }

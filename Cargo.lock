@@ -1646,6 +1646,7 @@ dependencies = [
  "hermes-intelligence",
  "hermes-skills",
  "hex",
+ "hmac",
  "lazy_static",
  "proptest",
  "regex",

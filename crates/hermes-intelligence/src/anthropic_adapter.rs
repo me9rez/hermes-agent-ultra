@@ -163,17 +163,32 @@ pub struct ReasoningConfig {
 // Model name normalization
 // ---------------------------------------------------------------------------
 
+/// Return true for AWS Bedrock model IDs where dots are semantic delimiters.
+pub fn is_bedrock_model_id(model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    [
+        "anthropic.",
+        "us.anthropic.",
+        "eu.anthropic.",
+        "ap.anthropic.",
+        "global.anthropic.",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+}
+
 /// Normalize a model name for the Anthropic API.
 ///
 /// Strips `anthropic/` prefix and converts dots to hyphens unless
-/// `preserve_dots` is true.
+/// `preserve_dots` is true. AWS Bedrock model IDs keep dots because those
+/// dots are part of Bedrock's provider model identifier.
 pub fn normalize_model_name(model: &str, preserve_dots: bool) -> String {
     let mut result = model.to_string();
     let lower = result.to_lowercase();
     if lower.starts_with("anthropic/") {
         result = result[10..].to_string();
     }
-    if !preserve_dots {
+    if !preserve_dots && !is_bedrock_model_id(&result) {
         result = result.replace('.', "-");
     }
     result
@@ -924,6 +939,14 @@ mod tests {
         assert_eq!(
             normalize_model_name("claude-sonnet-4", false),
             "claude-sonnet-4"
+        );
+        assert_eq!(
+            normalize_model_name("global.anthropic.claude-opus-4-7", false),
+            "global.anthropic.claude-opus-4-7"
+        );
+        assert_eq!(
+            normalize_model_name("claude-opus-4.6", false),
+            "claude-opus-4-6"
         );
     }
 

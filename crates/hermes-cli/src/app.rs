@@ -14,6 +14,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use hermes_agent::agent_loop::ToolRegistry as AgentToolRegistry;
+use hermes_agent::bedrock::{
+    bedrock_runtime_base_url, resolve_bedrock_region, BedrockProvider, BEDROCK_AUTH_MARKER,
+};
 use hermes_agent::plugins::HookType;
 use hermes_agent::provider::{
     openai_codex_provider, AnthropicProvider, GenericProvider, OpenAiProvider, OpenRouterProvider,
@@ -4832,6 +4835,9 @@ mod tests {
             normalize_runtime_provider_name("tokenhub"),
             "tencent-tokenhub"
         );
+        assert_eq!(normalize_runtime_provider_name("aws"), "bedrock");
+        assert_eq!(normalize_runtime_provider_name("aws-bedrock"), "bedrock");
+        assert_eq!(normalize_runtime_provider_name("amazon"), "bedrock");
     }
 
     #[test]
@@ -4848,6 +4854,7 @@ mod tests {
             "TOKENHUB_BASE_URL",
             "ARCEE_BASE_URL",
             "XIAOMI_BASE_URL",
+            "BEDROCK_BASE_URL",
         ];
         for env_var in env_vars {
             std::env::remove_var(env_var);
@@ -4906,6 +4913,11 @@ mod tests {
         assert_eq!(
             provider_base_url_from_env("mimo").as_deref(),
             Some("https://mimo.example/v1")
+        );
+        std::env::set_var("BEDROCK_BASE_URL", "https://bedrock-runtime.example");
+        assert_eq!(
+            provider_base_url_from_env("aws").as_deref(),
+            Some("https://bedrock-runtime.example")
         );
 
         for env_var in env_vars {
@@ -5732,6 +5744,7 @@ fn normalize_runtime_provider_name(provider: &str) -> String {
         "arcee-ai" | "arceeai" => "arcee".to_string(),
         "mimo" | "xiaomi-mimo" => "xiaomi".to_string(),
         "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => "tencent-tokenhub".to_string(),
+        "aws" | "aws-bedrock" | "amazon-bedrock" | "amazon" => "bedrock".to_string(),
         "kilo" | "kilo-code" | "kilo-gateway" => "kilocode".to_string(),
         "opencode" | "opencode-zen" | "zen" => "opencode-zen".to_string(),
         "go" => "opencode-go".to_string(),
@@ -5968,6 +5981,7 @@ fn provider_base_url_from_env(provider: &str) -> Option<String> {
             "openai" => "OPENAI_BASE_URL",
             "openai-codex" | "codex" => "HERMES_OPENAI_CODEX_BASE_URL",
             "anthropic" => "ANTHROPIC_BASE_URL",
+            "bedrock" => "BEDROCK_BASE_URL",
             "google-gemini-cli" => "HERMES_GEMINI_BASE_URL",
             "gemini" | "google" => "GEMINI_BASE_URL",
             "qwen" => "DASHSCOPE_BASE_URL",
@@ -6016,6 +6030,8 @@ fn provider_is_local_backend(provider: &str) -> bool {
 fn allow_no_api_key(provider_name: &str, runtime_provider: &str, base_url: Option<&str>) -> bool {
     provider_is_local_backend(runtime_provider)
         || provider_is_local_backend(provider_name)
+        || runtime_provider == "bedrock"
+        || provider_name == "bedrock"
         || base_url.is_some_and(url_is_local_or_private)
 }
 
@@ -6081,6 +6097,7 @@ pub fn provider_api_key_from_env(provider: &str) -> Option<String> {
             .filter(|s| !s.trim().is_empty())
             .or_else(|| std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok())
             .filter(|s| !s.trim().is_empty()),
+        "bedrock" => Some(BEDROCK_AUTH_MARKER.to_string()),
         "google-gemini-cli" | "gemini-cli" | "gemini-oauth" => {
             std::env::var("HERMES_GEMINI_OAUTH_API_KEY")
                 .ok()
@@ -6291,6 +6308,17 @@ pub fn build_provider(config: &GatewayConfig, model: &str) -> Arc<dyn LlmProvide
         "anthropic" => {
             let mut p = AnthropicProvider::new(&api_key).with_model(model_name.as_str());
             if let Some(url) = base_url {
+                p = p.with_base_url(url);
+            }
+            Arc::new(p)
+        }
+        "bedrock" => {
+            let mut p = BedrockProvider::new()
+                .with_region(resolve_bedrock_region())
+                .with_model(model_name.as_str());
+            if let Some(url) =
+                base_url.or_else(|| Some(bedrock_runtime_base_url(&resolve_bedrock_region())))
+            {
                 p = p.with_base_url(url);
             }
             Arc::new(p)

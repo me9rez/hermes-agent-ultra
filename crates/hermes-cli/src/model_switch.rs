@@ -3,6 +3,10 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use hermes_agent::bedrock::{
+    curated_bedrock_models_for_region, discover_bedrock_model_ids, has_aws_credentials,
+    resolve_bedrock_region,
+};
 use hermes_core::AgentError;
 use hermes_intelligence::models_dev::{default_client, ModelsDevClient};
 use hmac::{Hmac, Mac};
@@ -84,6 +88,20 @@ const CURATED_PROVIDER_MODELS: &[(&str, &[&str])] = &[
             "claude-sonnet-4-6",
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
+        ],
+    ),
+    (
+        "bedrock",
+        &[
+            "anthropic.claude-sonnet-4-6",
+            "us.anthropic.claude-sonnet-4-6",
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "amazon.nova-pro-v1:0",
+            "us.amazon.nova-pro-v1:0",
+            "amazon.nova-micro-v1:0",
+            "us.amazon.nova-micro-v1:0",
         ],
     ),
     (
@@ -836,7 +854,32 @@ pub async fn provider_model_ids_with_client(
         }
     }
 
-    let computed = if normalized == "nous" {
+    let computed = if normalized == "bedrock" {
+        let region = resolve_bedrock_region();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut merged: Vec<String> = Vec::new();
+        if has_aws_credentials() {
+            for model in discover_bedrock_model_ids(region.as_str()).await {
+                let key = model.to_ascii_lowercase();
+                if seen.insert(key) {
+                    merged.push(model);
+                }
+            }
+        }
+        for model in curated_bedrock_models_for_region(region.as_str()) {
+            let key = model.to_ascii_lowercase();
+            if seen.insert(key) {
+                merged.push(model);
+            }
+        }
+        for model in curated {
+            let key = model.to_ascii_lowercase();
+            if seen.insert(key) {
+                merged.push((*model).to_string());
+            }
+        }
+        merged
+    } else if normalized == "nous" {
         // Nous model picker should always include curated compatibility picks
         // (including kimi-k2.6), then append live/models.dev discoveries.
         let mut seen: HashSet<String> = HashSet::new();
@@ -1161,6 +1204,19 @@ mod tests {
         assert!(provider_curated_models("arcee-ai").contains(&"trinity-mini"));
         assert!(provider_curated_models("mimo").contains(&"mimo-v2.5-pro"));
         assert!(provider_curated_models("tokenhub").contains(&"hy3-preview"));
+    }
+
+    #[tokio::test]
+    async fn bedrock_provider_models_include_region_aware_curated_fallback_and_aliases() {
+        let _guard = env_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _env = ScopedCatalogEnv::new(tmp.path());
+        std::env::set_var("AWS_REGION", "eu-central-1");
+        let client = seeded_client(json!({}));
+        let out = provider_model_ids_with_client("aws-bedrock", &client).await;
+        assert!(out.iter().any(|model| model.starts_with("eu.anthropic.")));
+        assert!(out.iter().any(|model| model.contains("amazon.nova")));
+        std::env::remove_var("AWS_REGION");
     }
 
     #[tokio::test]

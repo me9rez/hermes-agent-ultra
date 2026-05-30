@@ -5298,6 +5298,7 @@ fn normalize_secret_provider(provider: &str) -> String {
         "arcee-ai" | "arceeai" => "arcee".to_string(),
         "mimo" | "xiaomi-mimo" => "xiaomi".to_string(),
         "tencent" | "tokenhub" | "tencent-cloud" | "tencentmaas" => "tencent-tokenhub".to_string(),
+        "aws" | "aws-bedrock" | "amazon-bedrock" | "amazon" => "bedrock".to_string(),
         "dashscope" | "aliyun" | "alibaba-cloud" => "alibaba".to_string(),
         "alibaba_coding" | "alibaba-coding" | "alibaba_coding_plan" => {
             "alibaba-coding-plan".to_string()
@@ -5371,6 +5372,13 @@ fn secret_provider_aliases(provider: &str) -> Vec<String> {
             "tencent-cloud".to_string(),
             "tencentmaas".to_string(),
         ],
+        "bedrock" => vec![
+            "bedrock".to_string(),
+            "aws".to_string(),
+            "aws-bedrock".to_string(),
+            "amazon-bedrock".to_string(),
+            "amazon".to_string(),
+        ],
         "ai-gateway" => vec!["ai-gateway".to_string(), "aigateway".to_string()],
         "opencode-zen" => vec!["opencode-zen".to_string(), "opencode".to_string()],
         "kilocode" => vec!["kilocode".to_string(), "kilo".to_string()],
@@ -5398,6 +5406,7 @@ fn provider_env_var(provider: &str) -> Option<&'static str> {
         "openai" => Some("HERMES_OPENAI_API_KEY"),
         "openai-codex" => Some("HERMES_OPENAI_CODEX_API_KEY"),
         "anthropic" => Some("ANTHROPIC_API_KEY"),
+        "bedrock" => None,
         "google-gemini-cli" => Some("HERMES_GEMINI_OAUTH_API_KEY"),
         "gemini" => Some("GOOGLE_API_KEY"),
         "openrouter" => Some("OPENROUTER_API_KEY"),
@@ -9382,6 +9391,11 @@ const SETUP_MODEL_OPTIONS: &[SetupModelOption] = &[
         label: "Anthropic Claude (OAuth/API key)",
     },
     SetupModelOption {
+        provider: "bedrock",
+        model: "bedrock:anthropic.claude-sonnet-4-6",
+        label: "AWS Bedrock",
+    },
+    SetupModelOption {
         provider: "openrouter",
         model: "openrouter:auto",
         label: "OpenRouter auto (multi-provider)",
@@ -9780,7 +9794,7 @@ fn setup_provider_default_base_url(provider: &str) -> Option<&'static str> {
 fn setup_provider_requires_api_key(provider: &str) -> bool {
     !matches!(
         provider,
-        "ollama-local" | "llama-cpp" | "vllm" | "mlx" | "apple-ane" | "sglang" | "tgi"
+        "bedrock" | "ollama-local" | "llama-cpp" | "vllm" | "mlx" | "apple-ane" | "sglang" | "tgi"
     )
 }
 
@@ -14426,6 +14440,11 @@ mod tests {
             secret_provider_aliases("claude"),
             vec!["anthropic", "claude", "claude-code"]
         );
+        assert_eq!(provider_env_var("bedrock"), None);
+        assert_eq!(
+            secret_provider_aliases("aws-bedrock"),
+            vec!["bedrock", "aws", "aws-bedrock", "amazon-bedrock", "amazon"]
+        );
         assert_eq!(provider_env_var("ollama"), Some("OLLAMA_LOCAL_API_KEY"));
         assert_eq!(provider_env_var("llama.cpp"), Some("LLAMA_CPP_API_KEY"));
         assert_eq!(provider_env_var("ollvm"), Some("VLLM_API_KEY"));
@@ -14681,6 +14700,16 @@ mod tests {
         );
         assert!(!setup_provider_requires_api_key("ollama-local"));
         assert!(!setup_provider_requires_api_key("apple-ane"));
+        assert!(!setup_provider_requires_api_key("bedrock"));
+        assert_eq!(setup_provider_display("bedrock"), "AWS Bedrock");
+        assert_eq!(
+            setup_provider_env_keys("bedrock"),
+            &[
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_SESSION_TOKEN"
+            ]
+        );
         assert!(setup_provider_requires_api_key("openai"));
         assert_eq!(setup_provider_display("alibaba"), "Alibaba Cloud DashScope");
         assert_eq!(

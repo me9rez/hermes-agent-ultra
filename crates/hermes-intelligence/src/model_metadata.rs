@@ -57,6 +57,21 @@ static DEFAULT_CONTEXT_LENGTHS: &[(&str, u64)] = &[
     ("claude-sonnet-4-6", 1_000_000),
     ("claude-opus-4.6", 1_000_000),
     ("claude-sonnet-4.6", 1_000_000),
+    ("global.anthropic.claude-opus-4-7", 1_000_000),
+    ("anthropic.claude-sonnet-4-6", 1_000_000),
+    ("global.anthropic.claude-sonnet-4-6", 1_000_000),
+    ("us.anthropic.claude-sonnet-4-6", 1_000_000),
+    ("eu.anthropic.claude-sonnet-4-6", 1_000_000),
+    ("au.anthropic.claude-sonnet-4-6", 1_000_000),
+    ("jp.anthropic.claude-sonnet-4-6", 1_000_000),
+    ("anthropic.claude-haiku-4-5", 200_000),
+    ("global.anthropic.claude-haiku-4-5", 200_000),
+    ("us.anthropic.claude-haiku-4-5", 200_000),
+    ("eu.anthropic.claude-haiku-4-5", 200_000),
+    ("au.anthropic.claude-haiku-4-5", 200_000),
+    ("jp.anthropic.claude-haiku-4-5", 200_000),
+    ("anthropic.claude-3-5-sonnet", 200_000),
+    ("amazon.nova", 300_000),
     // Older Claude
     ("claude", 200_000),
     // OpenAI
@@ -540,6 +555,7 @@ pub fn infer_provider_from_url(base_url: &str) -> Option<&'static str> {
         ("api.openai.com", "openai"),
         ("chatgpt.com", "openai"),
         ("api.anthropic.com", "anthropic"),
+        ("bedrock-runtime.", "bedrock"),
         ("api.z.ai", "zai"),
         ("open.bigmodel.cn", "zai"),
         ("api.moonshot.ai", "kimi-coding"),
@@ -636,6 +652,14 @@ mod tests {
     fn test_get_model_context_length() {
         assert_eq!(get_model_context_length("gpt-4o"), 128_000);
         assert_eq!(get_model_context_length("claude-opus-4-6"), 1_000_000);
+        assert_eq!(
+            get_model_context_length("us.anthropic.claude-sonnet-4-6"),
+            1_000_000
+        );
+        assert_eq!(
+            get_model_context_length("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+            200_000
+        );
         assert_eq!(get_model_context_length("gemini-2.0-flash"), 1_048_576);
         assert_eq!(get_model_context_length("gemma4:31b-cloud"), 256_000);
         assert_eq!(get_model_context_length("xiaomi/mimo-v2.5-pro"), 1_000_000);
@@ -706,6 +730,10 @@ mod tests {
         assert_eq!(
             infer_provider_from_url("https://api.anthropic.com"),
             Some("anthropic")
+        );
+        assert_eq!(
+            infer_provider_from_url("https://bedrock-runtime.us-east-1.amazonaws.com"),
+            Some("bedrock")
         );
         assert_eq!(
             infer_provider_from_url("https://open.bigmodel.cn/api/paas/v4"),

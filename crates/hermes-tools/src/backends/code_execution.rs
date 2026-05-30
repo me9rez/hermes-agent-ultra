@@ -1,4 +1,4 @@
-//! Real code execution backend: run scripts via tokio::process::Command.
+//! Real code execution backend: run snippets via tokio::process::Command.
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -8,7 +8,7 @@ use tokio::process::Command as TokioCommand;
 use crate::tools::code_execution::CodeExecutionBackend;
 use hermes_core::ToolError;
 
-/// Code execution backend using local interpreters.
+/// Code execution backend using local non-Python interpreters.
 pub struct LocalCodeExecutionBackend {
     default_timeout_secs: u64,
 }
@@ -35,11 +35,19 @@ impl CodeExecutionBackend for LocalCodeExecutionBackend {
         language: Option<&str>,
         timeout: Option<u64>,
     ) -> Result<String, ToolError> {
-        let lang = language.unwrap_or("python");
+        let Some(lang) = language else {
+            return Err(ToolError::InvalidParams(
+                "Missing language parameter; Hermes Agent Ultra does not default to Python in the Rust-only runtime".into(),
+            ));
+        };
         let timeout_secs = timeout.unwrap_or(self.default_timeout_secs);
 
         let (interpreter, flag) = match lang {
-            "python" | "python3" => ("python3", "-c"),
+            "python" | "python3" => {
+                return Err(ToolError::InvalidParams(
+                    "Python execution is disabled in Hermes Agent Ultra's Rust-only runtime".into(),
+                ))
+            }
             "javascript" | "js" | "node" => ("node", "-e"),
             "typescript" | "ts" => ("npx", ""),
             "bash" | "sh" => ("bash", "-c"),
@@ -99,5 +107,32 @@ impl CodeExecutionBackend for LocalCodeExecutionBackend {
                 timeout_secs
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_language_does_not_default_to_python() {
+        let backend = LocalCodeExecutionBackend::default();
+        let err = backend
+            .execute("print(1)", None, Some(1))
+            .await
+            .expect_err("missing language should fail");
+        assert!(err
+            .to_string()
+            .contains("does not default to Python in the Rust-only runtime"));
+    }
+
+    #[tokio::test]
+    async fn python_execution_is_disabled() {
+        let backend = LocalCodeExecutionBackend::default();
+        let err = backend
+            .execute("print(1)", Some("python"), Some(1))
+            .await
+            .expect_err("python should fail");
+        assert!(err.to_string().contains("Python execution is disabled"));
     }
 }

@@ -9,7 +9,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,7 +18,7 @@ use futures::StreamExt;
 use hermes_auth::{exchange_refresh_token, OAuth2Endpoints};
 use hermes_intelligence::get_model_context_length;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
@@ -266,7 +265,9 @@ Only act if there's something genuinely worth saving. \
 If nothing stands out, just say 'Nothing to save.' and stop.";
 
 const TOOL_USE_ENFORCEMENT_GUIDANCE: &str = "# Tool-use enforcement\nUse tools whenever they are necessary to verify facts, inspect code/files, or execute requested actions. Do not describe an action without making the corresponding tool call in the same response. Do not call tools only to satisfy policy or to emit no-op commands. If the request is fully answerable without tools, return a direct final answer. Avoid repetitive tool loops: if additional tool calls will not add new evidence, stop and provide the best grounded final result.";
-const CONTEXTLATTICE_OPERATIONAL_GUIDANCE: &str = "# ContextLattice operational guidance\nWhen a user asks to confirm, connect, verify, or harden ContextLattice integration, do not answer from assumptions. First check local integration instructions when present (env `HERMES_CONTEXTLATTICE_INSTRUCTIONS_PATH`, or local `scripts/agent_orchestration.py` in the workspace, typically `/Users/sheawinkler/Documents/Projects/scripts/agent_orchestration.py`). Then attempt ContextLattice tool calls: use `contextlattice_search` for a direct probe and `contextlattice_context_pack` when broader grounding is needed. If a call fails, report the concrete error and provide the exact remediation steps. Never run shell command `contextlattice` for this workflow; use the ContextLattice tools directly. Do not claim lack of access before attempting at least one ContextLattice tool call in the current turn.";
+const CONTEXTLATTICE_OPERATIONAL_GUIDANCE: &str = "# ContextLattice operational guidance\nWhen a user asks to confirm, connect, verify, or harden ContextLattice integration, do not answer from assumptions. First check local integration instructions when present via env `HERMES_CONTEXTLATTICE_INSTRUCTIONS_PATH`. Then attempt ContextLattice tool calls: use `contextlattice_search` for a direct probe and `contextlattice_context_pack` when broader grounding is needed. Use `contextlattice_write` for checkpoints. If a call fails, report the concrete error and provide the exact remediation steps. Never run shell command `contextlattice` for this workflow; use the ContextLattice tools directly. Do not claim lack of access before attempting at least one ContextLattice tool call in the current turn.";
+const CONTEXTLATTICE_DEFAULT_ORCHESTRATOR_URL: &str = "http://127.0.0.1:8075";
+const CONTEXTLATTICE_COMPACTION_FILE: &str = "notes/hermes-agent-compaction.md";
 
 const OPENAI_MODEL_EXECUTION_GUIDANCE: &str = "# Execution discipline (OpenAI)\nUse tools whenever they improve correctness, completeness, or grounding. Do not stop early when another tool call would materially improve the result. Verify outcomes before declaring completion.";
 
@@ -306,25 +307,54 @@ fn compaction_governance_mode_runtime() -> CompactionGovernanceMode {
         .unwrap_or(CompactionGovernanceMode::Advisory)
 }
 
-fn contextlattice_orchestration_script_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("HERMES_CONTEXTLATTICE_ORCH_SCRIPT") {
-        let candidate = PathBuf::from(path);
-        if candidate.exists() {
-            return Some(candidate);
+fn contextlattice_orchestrator_url_runtime() -> String {
+    std::env::var("CONTEXTLATTICE_ORCHESTRATOR_URL")
+        .or_else(|_| std::env::var("MEMMCP_ORCHESTRATOR_URL"))
+        .unwrap_or_else(|_| CONTEXTLATTICE_DEFAULT_ORCHESTRATOR_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn contextlattice_timeout_runtime() -> Duration {
+    let seconds = std::env::var("HERMES_CONTEXTLATTICE_TIMEOUT_SECS")
+        .or_else(|_| std::env::var("CONTEXTLATTICE_TIMEOUT_SECS"))
+        .ok()
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .unwrap_or(10.0)
+        .clamp(1.0, 60.0);
+    Duration::from_secs_f64(seconds)
+}
+
+fn write_contextlattice_checkpoint(
+    topic_path: &str,
+    file_name: &str,
+    content: &str,
+) -> Result<(), String> {
+    let url = format!("{}/memory/write", contextlattice_orchestrator_url_runtime());
+    let payload = json!({
+        "projectName": "hermes-agent-ultra",
+        "fileName": file_name,
+        "topicPath": topic_path,
+        "content": content,
+    });
+    let client = reqwest::blocking::Client::builder()
+        .timeout(contextlattice_timeout_runtime())
+        .build()
+        .map_err(|err| err.to_string())?;
+    let mut request = client.post(&url).json(&payload);
+    if let Ok(api_key) = std::env::var("CONTEXTLATTICE_API_KEY") {
+        if !api_key.trim().is_empty() {
+            request = request.bearer_auth(api_key);
         }
     }
-    let default =
-        PathBuf::from("/Users/sheawinkler/Documents/Projects/scripts/agent_orchestration.py");
-    if default.exists() {
-        return Some(default);
+    let response = request.send().map_err(|err| err.to_string())?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        let candidate = cwd.join("scripts").join("agent_orchestration.py");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    let body = response.text().unwrap_or_default();
+    let preview: String = body.chars().take(240).collect();
+    Err(format!("HTTP {status}: {}", preview.trim()))
 }
 
 fn should_inject_tool_enforcement_for_model(_model: &str) -> bool {
@@ -3480,16 +3510,6 @@ impl AgentLoop {
             return;
         }
 
-        let Some(script_path) = contextlattice_orchestration_script_path() else {
-            if matches!(mode, CompactionGovernanceMode::Enforce) {
-                self.emit_status(
-                    "lifecycle",
-                    "Compaction governance enforce-mode: ContextLattice script missing; checkpoint skipped.",
-                );
-            }
-            return;
-        };
-
         let session = self
             .config
             .session_id
@@ -3510,35 +3530,8 @@ impl AgentLoop {
             pressure_after
         );
 
-        let output = Command::new("python3")
-            .arg(script_path)
-            .arg("write")
-            .arg("hermes-agent-ultra")
-            .arg(topic)
-            .arg(content)
-            .env(
-                "MEMMCP_ORCHESTRATOR_URL",
-                std::env::var("MEMMCP_ORCHESTRATOR_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:8075".to_string()),
-            )
-            .env(
-                "CONTEXTLATTICE_ORCHESTRATOR_URL",
-                std::env::var("CONTEXTLATTICE_ORCHESTRATOR_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:8075".to_string()),
-            )
-            .env(
-                "CONTEXTLATTICE_AGENT_ID",
-                std::env::var("CONTEXTLATTICE_AGENT_ID")
-                    .unwrap_or_else(|_| "codex_gpt5".to_string()),
-            )
-            .env(
-                "MEMMCP_AGENT_ID",
-                std::env::var("MEMMCP_AGENT_ID").unwrap_or_else(|_| "codex_gpt5".to_string()),
-            )
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => {
+        match write_contextlattice_checkpoint(&topic, CONTEXTLATTICE_COMPACTION_FILE, &content) {
+            Ok(()) => {
                 self.emit_status(
                     "lifecycle",
                     &format!(
@@ -3547,24 +3540,12 @@ impl AgentLoop {
                     ),
                 );
             }
-            Ok(out) => {
-                if matches!(mode, CompactionGovernanceMode::Enforce) {
-                    self.emit_status(
-                        "lifecycle",
-                        &format!(
-                            "Compaction governance enforce-mode: checkpoint failed (exit={}) {}",
-                            out.status.code().unwrap_or(-1),
-                            String::from_utf8_lossy(&out.stderr)
-                        ),
-                    );
-                }
-            }
             Err(err) => {
                 if matches!(mode, CompactionGovernanceMode::Enforce) {
                     self.emit_status(
                         "lifecycle",
                         &format!(
-                            "Compaction governance enforce-mode: checkpoint error: {}",
+                            "Compaction governance enforce-mode: checkpoint failed: {}",
                             err
                         ),
                     );
@@ -8739,7 +8720,6 @@ fn contextlattice_connect_system_hint(messages: &[Message]) -> Option<String> {
     Some(
         "[SYSTEM] ContextLattice integration intent detected. Execute this order: \
          (1) If available, inspect local instructions file from `HERMES_CONTEXTLATTICE_INSTRUCTIONS_PATH` \
-         or workspace `scripts/agent_orchestration.py` (preferred path: `/Users/sheawinkler/Documents/Projects/scripts/agent_orchestration.py`); \
          (2) call `contextlattice_search` for a direct connectivity probe; \
          (3) if needed call `contextlattice_context_pack` for broader grounding; \
          (4) call `contextlattice_write` to checkpoint what was verified. \
@@ -12871,7 +12851,7 @@ mod tests {
         let msgs = vec![Message::user("connect to contextlattice and verify health")];
         let hint = contextlattice_connect_system_hint(&msgs).expect("expected hint");
         assert!(hint.contains("contextlattice_search"));
-        assert!(hint.contains("scripts/agent_orchestration.py"));
+        assert!(hint.contains("HERMES_CONTEXTLATTICE_INSTRUCTIONS_PATH"));
         assert!(hint.contains("Never use terminal command `contextlattice`"));
     }
 

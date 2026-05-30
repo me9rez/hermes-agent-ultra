@@ -1,16 +1,17 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
 use chrono::Utc;
 use hermes_core::AgentError;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 const KANBAN_STATE_DIR: &str = "alpha/kanban";
 const KANBAN_STORE_FILE: &str = "boards.json";
 const KANBAN_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_BOARD_ID: &str = "main";
-const CONTEXTLATTICE_DEFAULT_SCRIPT: &str =
-    "/Users/sheawinkler/Documents/Projects/scripts/agent_orchestration.py";
+const CONTEXTLATTICE_DEFAULT_ORCHESTRATOR_URL: &str = "http://127.0.0.1:8075";
+const CONTEXTLATTICE_KANBAN_FILE: &str = "notes/hermes-kanban.md";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -362,15 +363,6 @@ pub fn maybe_checkpoint_to_contextlattice(
                 .to_string(),
         };
     }
-    let Some(script_path) = contextlattice_script_path() else {
-        return KanbanCheckpointResult {
-            attempted: false,
-            succeeded: false,
-            detail: "ContextLattice orchestration script not found; skipped checkpoint."
-                .to_string(),
-        };
-    };
-
     let mut content = format!(
         "kanban_action={} board_id={} board_name={} summary={}",
         payload.action,
@@ -386,51 +378,16 @@ pub fn maybe_checkpoint_to_contextlattice(
     }
 
     let topic_path = format!("runbooks/kanban/{}", board.id);
-    let output = Command::new("python3")
-        .arg(&script_path)
-        .arg("write")
-        .arg("hermes-agent-ultra")
-        .arg(&topic_path)
-        .arg(content)
-        .env(
-            "MEMMCP_ORCHESTRATOR_URL",
-            std::env::var("MEMMCP_ORCHESTRATOR_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8075".to_string()),
-        )
-        .env(
-            "CONTEXTLATTICE_ORCHESTRATOR_URL",
-            std::env::var("CONTEXTLATTICE_ORCHESTRATOR_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8075".to_string()),
-        )
-        .env(
-            "CONTEXTLATTICE_AGENT_ID",
-            std::env::var("CONTEXTLATTICE_AGENT_ID").unwrap_or_else(|_| "codex_gpt5".to_string()),
-        )
-        .env(
-            "MEMMCP_AGENT_ID",
-            std::env::var("MEMMCP_AGENT_ID").unwrap_or_else(|_| "codex_gpt5".to_string()),
-        )
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => KanbanCheckpointResult {
+    match write_contextlattice_checkpoint(&topic_path, CONTEXTLATTICE_KANBAN_FILE, &content) {
+        Ok(()) => KanbanCheckpointResult {
             attempted: true,
             succeeded: true,
             detail: format!("ContextLattice checkpointed to topic `{topic_path}`."),
         },
-        Ok(out) => KanbanCheckpointResult {
-            attempted: true,
-            succeeded: false,
-            detail: format!(
-                "ContextLattice checkpoint failed (exit={}): {}",
-                out.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        },
         Err(err) => KanbanCheckpointResult {
             attempted: true,
             succeeded: false,
-            detail: format!("ContextLattice checkpoint error: {err}"),
+            detail: format!("ContextLattice checkpoint failed: {err}"),
         },
     }
 }
@@ -558,21 +515,54 @@ fn kanban_contextlattice_sync_enabled() -> bool {
         .unwrap_or(true)
 }
 
-fn contextlattice_script_path() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(path) = std::env::var("HERMES_KANBAN_CONTEXTLATTICE_SCRIPT") {
-        candidates.push(PathBuf::from(path));
-    }
-    candidates.push(PathBuf::from(CONTEXTLATTICE_DEFAULT_SCRIPT));
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("scripts/agent_orchestration.py"));
-    }
-    for candidate in candidates {
-        if candidate.is_file() {
-            return Some(candidate);
+fn contextlattice_orchestrator_url() -> String {
+    std::env::var("CONTEXTLATTICE_ORCHESTRATOR_URL")
+        .or_else(|_| std::env::var("MEMMCP_ORCHESTRATOR_URL"))
+        .unwrap_or_else(|_| CONTEXTLATTICE_DEFAULT_ORCHESTRATOR_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn contextlattice_timeout() -> Duration {
+    let seconds = std::env::var("HERMES_KANBAN_CONTEXTLATTICE_TIMEOUT_SECS")
+        .or_else(|_| std::env::var("CONTEXTLATTICE_TIMEOUT_SECS"))
+        .ok()
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .unwrap_or(10.0)
+        .clamp(1.0, 60.0);
+    Duration::from_secs_f64(seconds)
+}
+
+fn write_contextlattice_checkpoint(
+    topic_path: &str,
+    file_name: &str,
+    content: &str,
+) -> Result<(), String> {
+    let url = format!("{}/memory/write", contextlattice_orchestrator_url());
+    let payload = json!({
+        "projectName": "hermes-agent-ultra",
+        "fileName": file_name,
+        "topicPath": topic_path,
+        "content": content,
+    });
+    let client = reqwest::blocking::Client::builder()
+        .timeout(contextlattice_timeout())
+        .build()
+        .map_err(|err| err.to_string())?;
+    let mut request = client.post(&url).json(&payload);
+    if let Ok(api_key) = std::env::var("CONTEXTLATTICE_API_KEY") {
+        if !api_key.trim().is_empty() {
+            request = request.bearer_auth(api_key);
         }
     }
-    None
+    let response = request.send().map_err(|err| err.to_string())?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = response.text().unwrap_or_default();
+    let preview: String = body.chars().take(240).collect();
+    Err(format!("HTTP {status}: {}", preview.trim()))
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! Code execution tool: run Python scripts with hermes_tools RPC
+//! Code execution tool: run local non-Python snippets through hermes_tools RPC.
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// Backend for code execution operations.
 #[async_trait]
 pub trait CodeExecutionBackend: Send + Sync {
-    /// Execute Python code and return the output.
+    /// Execute code and return the output.
     async fn execute(
         &self,
         code: &str,
@@ -28,7 +28,7 @@ pub trait CodeExecutionBackend: Send + Sync {
 // ExecuteCodeHandler
 // ---------------------------------------------------------------------------
 
-/// Tool for executing code (primarily Python) in a sandboxed environment.
+/// Tool for executing code in a sandboxed environment.
 pub struct ExecuteCodeHandler {
     backend: Arc<dyn CodeExecutionBackend>,
 }
@@ -47,10 +47,18 @@ impl ToolHandler for ExecuteCodeHandler {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParams("Missing 'code' parameter".into()))?;
 
-        let language = params.get("language").and_then(|v| v.as_str());
+        let language = params
+            .get("language")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ToolError::InvalidParams(
+                    "Missing 'language' parameter; Python is not a default in Hermes Agent Ultra"
+                        .into(),
+                )
+            })?;
         let timeout = params.get("timeout").and_then(|v| v.as_u64());
 
-        self.backend.execute(code, language, timeout).await
+        self.backend.execute(code, Some(language), timeout).await
     }
 
     fn schema(&self) -> ToolSchema {
@@ -66,9 +74,8 @@ impl ToolHandler for ExecuteCodeHandler {
             "language".into(),
             json!({
                 "type": "string",
-                "description": "Programming language (default: 'python')",
-                "enum": ["python", "javascript", "typescript"],
-                "default": "python"
+                "description": "Programming language. Python execution is disabled in Hermes Agent Ultra's Rust-only runtime.",
+                "enum": ["javascript", "typescript", "bash", "sh"]
             }),
         );
         props.insert(
@@ -82,8 +89,8 @@ impl ToolHandler for ExecuteCodeHandler {
 
         tool_schema(
             "execute_code",
-            "Execute code in a sandboxed environment. Supports Python, JavaScript, and TypeScript.",
-            JsonSchema::object(props, vec!["code".into()]),
+            "Execute code in a sandboxed environment. Supports JavaScript, TypeScript, and shell snippets; Python execution is disabled in Hermes Agent Ultra's Rust-only runtime.",
+            JsonSchema::object(props, vec!["code".into(), "language".into()]),
         )
     }
 }
@@ -108,16 +115,30 @@ mod tests {
     #[tokio::test]
     async fn test_execute_code_schema() {
         let handler = ExecuteCodeHandler::new(Arc::new(MockCodeBackend));
-        assert_eq!(handler.schema().name, "execute_code");
+        let schema = handler.schema();
+        assert_eq!(schema.name, "execute_code");
+        let rendered = serde_json::to_string(&schema.parameters).expect("schema json");
+        assert!(!rendered.contains("\"python\""));
+        assert!(rendered.contains("\"language\""));
     }
 
     #[tokio::test]
     async fn test_execute_code() {
         let handler = ExecuteCodeHandler::new(Arc::new(MockCodeBackend));
         let result = handler
-            .execute(json!({"code": "print(1+1)"}))
+            .execute(json!({"code": "console.log(1+1)", "language": "javascript"}))
             .await
             .unwrap();
-        assert!(result.contains("print(1+1)"));
+        assert!(result.contains("console.log(1+1)"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_code_requires_language() {
+        let handler = ExecuteCodeHandler::new(Arc::new(MockCodeBackend));
+        let err = handler
+            .execute(json!({"code": "print(1+1)"}))
+            .await
+            .expect_err("language is required");
+        assert!(err.to_string().contains("Missing 'language' parameter"));
     }
 }

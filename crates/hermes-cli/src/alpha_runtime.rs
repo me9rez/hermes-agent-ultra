@@ -340,7 +340,7 @@ pub struct LoopRuntimeState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextLatticeStatus {
     pub health_line: String,
-    pub preflight_script_line: String,
+    pub preflight_line: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1741,13 +1741,18 @@ pub fn refresh_loop_runtime_state(
 }
 
 pub async fn contextlattice_status() -> ContextLatticeStatus {
+    let base_url = std::env::var("CONTEXTLATTICE_ORCHESTRATOR_URL")
+        .or_else(|_| std::env::var("MEMMCP_ORCHESTRATOR_URL"))
+        .unwrap_or_else(|_| "http://127.0.0.1:8075".to_string())
+        .trim_end_matches('/')
+        .to_string();
     let health_line = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
     {
-        Ok(client) => match client.get("http://127.0.0.1:8075/health").send().await {
+        Ok(client) => match client.get(format!("{base_url}/health")).send().await {
             Ok(resp) if resp.status().is_success() => {
-                "contextlattice: healthy (127.0.0.1:8075)".to_string()
+                format!("contextlattice: healthy ({base_url})")
             }
             Ok(resp) => format!("contextlattice: unhealthy (status {})", resp.status()),
             Err(err) => format!("contextlattice: unreachable ({})", err),
@@ -1755,20 +1760,13 @@ pub async fn contextlattice_status() -> ContextLatticeStatus {
         Err(err) => format!("contextlattice: client_error ({})", err),
     };
 
-    let script_path =
-        PathBuf::from("/Users/sheawinkler/Documents/Projects/scripts/agent_orchestration.py");
-    let preflight_script_line = if script_path.exists() {
-        format!(
-            "contextlattice preflight: available ({})",
-            script_path.display()
-        )
-    } else {
-        "contextlattice preflight: missing scripts/agent_orchestration.py".to_string()
-    };
+    let preflight_line = format!(
+        "contextlattice preflight: Rust-native memory write endpoint {base_url}/memory/write"
+    );
 
     ContextLatticeStatus {
         health_line,
-        preflight_script_line,
+        preflight_line,
     }
 }
 
@@ -1975,7 +1973,7 @@ pub async fn render_mission_board(
 
     out.push_str("ContextLattice\n");
     out.push_str(&format!("- {}\n", ctx_status.health_line));
-    out.push_str(&format!("- {}\n", ctx_status.preflight_script_line));
+    out.push_str(&format!("- {}\n", ctx_status.preflight_line));
     out.push_str(&format!(
         "- policy: preflight={} context_pack_on_start={} degradation_aware={} readback_required={}\n",
         ctx_policy.preflight_required,

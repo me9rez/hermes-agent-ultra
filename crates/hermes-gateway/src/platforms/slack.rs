@@ -21,6 +21,7 @@ use hermes_core::errors::GatewayError;
 use hermes_core::traits::{ParseMode, PlatformAdapter};
 
 use crate::adapter::{describe_secret, AdapterProxyConfig, BasePlatformAdapter};
+use crate::channel_directory::{ChannelDirectoryProvider, ChannelEntry};
 
 /// Slack Web API base URL.
 const SLACK_API_BASE: &str = "https://slack.com/api";
@@ -73,6 +74,33 @@ pub struct SlackResponse {
     pub ts: Option<String>,
     #[serde(default)]
     pub channel: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackConversationsResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub channels: Vec<SlackConversation>,
+    #[serde(default)]
+    pub response_metadata: SlackResponseMetadata,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SlackResponseMetadata {
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackConversation {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub is_private: bool,
 }
 
 /// Response for `users.info`.
@@ -1040,6 +1068,83 @@ impl SlackAdapter {
         Ok(())
     }
 
+    /// List channels visible to the bot user for channel-directory discovery.
+    pub async fn list_user_conversations(&self) -> Result<Vec<ChannelEntry>, GatewayError> {
+        self.list_user_conversations_from_base(SLACK_API_BASE).await
+    }
+
+    async fn list_user_conversations_from_base(
+        &self,
+        base_url: &str,
+    ) -> Result<Vec<ChannelEntry>, GatewayError> {
+        let endpoint = format!("{}/users.conversations", base_url.trim_end_matches('/'));
+        let mut cursor: Option<String> = None;
+        let mut entries = Vec::new();
+
+        loop {
+            let mut query = vec![
+                ("types", "public_channel,private_channel".to_string()),
+                ("limit", "200".to_string()),
+            ];
+            if let Some(cursor) = cursor.as_deref().filter(|cursor| !cursor.is_empty()) {
+                query.push(("cursor", cursor.to_string()));
+            }
+
+            let resp = self
+                .client
+                .get(&endpoint)
+                .header("Authorization", format!("Bearer {}", self.config.token))
+                .query(&query)
+                .send()
+                .await
+                .map_err(|e| {
+                    GatewayError::ConnectionFailed(format!(
+                        "Slack users.conversations failed: {}",
+                        e
+                    ))
+                })?;
+
+            let page: SlackConversationsResponse = resp.json().await.map_err(|e| {
+                GatewayError::ConnectionFailed(format!(
+                    "Failed to parse Slack users.conversations response: {}",
+                    e
+                ))
+            })?;
+
+            if !page.ok {
+                return Err(GatewayError::ConnectionFailed(format!(
+                    "Slack users.conversations error: {}",
+                    page.error.unwrap_or_else(|| "unknown".into())
+                )));
+            }
+
+            for channel in page.channels {
+                let Some(id) = channel.id.filter(|id| !id.is_empty()) else {
+                    continue;
+                };
+                let Some(name) = channel.name.filter(|name| !name.is_empty()) else {
+                    continue;
+                };
+                let kind = if channel.is_private {
+                    "private"
+                } else {
+                    "channel"
+                };
+                entries.push(ChannelEntry::new("slack", id, name).with_kind(kind));
+            }
+
+            cursor = page
+                .response_metadata
+                .next_cursor
+                .filter(|cursor| !cursor.is_empty());
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(entries)
+    }
+
     // -----------------------------------------------------------------------
     // Web API: Permalinks
     // -----------------------------------------------------------------------
@@ -1116,6 +1221,17 @@ impl SlackAdapter {
         }
 
         Ok(result)
+    }
+}
+
+#[async_trait]
+impl ChannelDirectoryProvider for SlackAdapter {
+    fn platform_name(&self) -> &str {
+        "slack"
+    }
+
+    async fn list_channel_entries(&self) -> Result<Vec<ChannelEntry>, GatewayError> {
+        self.list_user_conversations().await
     }
 }
 
@@ -1278,6 +1394,8 @@ fn slack_image_url_blocks(image_url: &str, caption: Option<&str>) -> (serde_json
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     // --- Original tests (preserved) ---
 
@@ -1700,6 +1818,90 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "ok": false, "error": "user_not_found" }))
                 .unwrap();
         assert_eq!(err.error.as_deref(), Some("user_not_found"));
+    }
+
+    #[tokio::test]
+    async fn list_user_conversations_paginates_and_skips_invalid_channels() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users.conversations"))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "channels": [
+                    {"id": "C001", "name": "first", "is_private": false},
+                    {"id": "", "name": "no-id"},
+                    {"id": "C002"}
+                ],
+                "response_metadata": {"next_cursor": "cur1"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/users.conversations"))
+            .and(query_param("cursor", "cur1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "channels": [
+                    {"id": "G123", "name": "secret-chat", "is_private": true}
+                ],
+                "response_metadata": {"next_cursor": ""}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = SlackAdapter::new(SlackConfig {
+            token: "xoxb-test-token".into(),
+            app_token: None,
+            socket_mode: false,
+            reactions: true,
+            proxy: AdapterProxyConfig::default(),
+        })
+        .expect("adapter");
+
+        let entries = adapter
+            .list_user_conversations_from_base(&server.uri())
+            .await
+            .expect("conversations");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["C001", "G123"]
+        );
+        assert_eq!(entries[0].kind.as_deref(), Some("channel"));
+        assert_eq!(entries[1].kind.as_deref(), Some("private"));
+    }
+
+    #[tokio::test]
+    async fn list_user_conversations_not_ok_returns_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users.conversations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "error": "missing_scope"
+            })))
+            .mount(&server)
+            .await;
+
+        let adapter = SlackAdapter::new(SlackConfig {
+            token: "xoxb-test-token".into(),
+            app_token: None,
+            socket_mode: false,
+            reactions: true,
+            proxy: AdapterProxyConfig::default(),
+        })
+        .expect("adapter");
+
+        let err = adapter
+            .list_user_conversations_from_base(&server.uri())
+            .await
+            .expect_err("missing scope");
+        assert!(err.to_string().contains("missing_scope"));
     }
 
     #[test]

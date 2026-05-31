@@ -54,7 +54,10 @@ pub use ssrf::{is_safe_url, validate_url};
 
 // Re-export DM management
 pub use channel_directory::{ChannelDirectory, ChannelEntry};
-pub use delivery::{parse_target, DeliveryItem, DeliveryQueue, DeliveryRouter, DeliveryTarget};
+pub use delivery::{
+    parse_target, parse_target_with_origin, DeliveryItem, DeliveryOrigin, DeliveryQueue,
+    DeliveryRouter, DeliveryTarget,
+};
 pub use dm::{DmDecision, DmManager};
 pub use mirror::MirrorManager;
 pub use pairing::{PairingManager, PairingState};

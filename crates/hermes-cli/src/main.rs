@@ -3877,9 +3877,17 @@ fn build_agent_for_gateway_context(
     agent_tools: Arc<hermes_agent::agent_loop::ToolRegistry>,
     runtime_tools: Arc<hermes_tools::ToolRegistry>,
 ) -> AgentLoop {
+    let perf_enabled = std::env::var("HERMES_GATEWAY_AGENT_BUILD_PERF")
+        .map(|v| {
+            let lowered = v.trim().to_ascii_lowercase();
+            lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on"
+        })
+        .unwrap_or(false);
+    let build_start = Instant::now();
     let effective_model =
         resolve_model_for_gateway(config.model.as_deref().unwrap_or("gpt-4o"), ctx);
     let provider = build_provider(config, &effective_model);
+    let provider_ready_ms = build_start.elapsed().as_millis() as u64;
     let mut agent_config = build_agent_config(config, &effective_model);
     if let Some(personality) = ctx.personality.clone() {
         agent_config.personality = Some(personality);
@@ -3916,10 +3924,26 @@ fn build_agent_for_gateway_context(
             Path::new(h),
         );
     }
-    hermes_agent::attach_agent_runtime(
-        AgentLoop::new(agent_config, agent_tools, provider)
-            .with_async_tool_dispatch(async_tool_dispatch_for(runtime_tools)),
-    )
+    let config_ready_ms = build_start.elapsed().as_millis() as u64;
+    let base_agent = AgentLoop::new(agent_config, agent_tools, provider)
+        .with_async_tool_dispatch(async_tool_dispatch_for(runtime_tools));
+    let base_ready_ms = build_start.elapsed().as_millis() as u64;
+    let agent = hermes_agent::attach_agent_runtime(base_agent);
+    let runtime_ready_ms = build_start.elapsed().as_millis() as u64;
+    if perf_enabled {
+        tracing::info!(
+            session_key = %ctx.session_key,
+            model = %effective_model,
+            provider_ready_ms = provider_ready_ms,
+            config_ready_ms = config_ready_ms,
+            base_agent_ready_ms = base_ready_ms,
+            runtime_ready_ms = runtime_ready_ms,
+            runtime_attach_ms = runtime_ready_ms.saturating_sub(base_ready_ms),
+            total_ms = runtime_ready_ms,
+            "gateway agent build perf breakdown"
+        );
+    }
+    agent
 }
 
 const GATEWAY_AGENT_CACHE_MAX_SIZE: usize = 128;

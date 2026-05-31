@@ -1893,12 +1893,17 @@ impl Gateway {
                 None
             };
             if let Some(stream_id) = stream_id.as_ref() {
-                if let Some(mid) = anchor_id.as_deref().or(Some("stream-anchor")) {
+                if incoming.platform == "feishu" {
+                    // Feishu does not use placeholder message edits in legacy streaming.
+                    // Keep anchor unset so finalize sends the final text directly.
+                } else if let Some(mid) = anchor_id.as_deref().or(Some("stream-anchor")) {
                     self.stream_manager.set_message_id(stream_id, mid).await;
                 }
             }
-            first_visible_emitted.store(true, Ordering::Release);
-            first_visible_chunk_ms.store(0, Ordering::Release);
+            if incoming.platform != "feishu" {
+                first_visible_emitted.store(true, Ordering::Release);
+                first_visible_chunk_ms.store(0, Ordering::Release);
+            }
 
             let stream_manager = self.stream_manager.clone();
             let platform = incoming.platform.clone();
@@ -4898,6 +4903,51 @@ mod tests {
                 "💾 stream-bg-review".to_string()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn gateway_feishu_streaming_sends_final_text_without_anchor_edit() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(TestAdapter {
+            messages: sent.clone(),
+        });
+
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let mut dm_manager = DmManager::with_pair_behavior();
+        dm_manager.authorize_user("user1");
+        let mut cfg = GatewayConfig::default();
+        cfg.streaming_enabled = true;
+        let gw = Arc::new(Gateway::new(session_mgr, dm_manager, cfg));
+        gw.register_adapter("feishu", adapter).await;
+
+        gw.set_streaming_handler(Arc::new(|_messages, on_chunk| {
+            Box::pin(async move {
+                on_chunk("你".to_string());
+                on_chunk("好".to_string());
+                Ok("你好".to_string())
+            })
+        }))
+        .await;
+
+        let incoming = IncomingMessage {
+            platform: "feishu".into(),
+            chat_id: "chat1".into(),
+            user_id: "user1".into(),
+            text: "hello".into(),
+            media_urls: vec![],
+            media_types: vec![],
+            message_id: None,
+            is_dm: true,
+            interaction_id: None,
+            interaction_token: None,
+            role_ids: vec![],
+            ..Default::default()
+        };
+        assert!(gw.route_message(&incoming).await.is_ok());
+
+        let msgs = sent.lock().unwrap();
+        let ordered: Vec<String> = msgs.iter().map(|(_, t)| t.clone()).collect();
+        assert_eq!(ordered, vec!["你好".to_string()]);
     }
 
     #[tokio::test]

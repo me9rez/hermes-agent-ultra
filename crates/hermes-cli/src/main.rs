@@ -4265,32 +4265,310 @@ fn discord_allow_bots_bypasses_gateway_allowlist(
         .unwrap_or(false)
 }
 
+#[derive(Clone, Copy)]
+struct PlatformGatewayAuthEnv {
+    platform: &'static str,
+    allowed_users: &'static str,
+    allow_all_users: &'static str,
+    group_allowed_users: Option<&'static str>,
+    group_allowed_chats: Option<&'static str>,
+}
+
+const PLATFORM_GATEWAY_AUTH_ENVS: &[PlatformGatewayAuthEnv] = &[
+    PlatformGatewayAuthEnv {
+        platform: "telegram",
+        allowed_users: "TELEGRAM_ALLOWED_USERS",
+        allow_all_users: "TELEGRAM_ALLOW_ALL_USERS",
+        group_allowed_users: Some("TELEGRAM_GROUP_ALLOWED_USERS"),
+        group_allowed_chats: Some("TELEGRAM_GROUP_ALLOWED_CHATS"),
+    },
+    PlatformGatewayAuthEnv {
+        platform: "discord",
+        allowed_users: "DISCORD_ALLOWED_USERS",
+        allow_all_users: "DISCORD_ALLOW_ALL_USERS",
+        group_allowed_users: None,
+        group_allowed_chats: None,
+    },
+    PlatformGatewayAuthEnv {
+        platform: "whatsapp",
+        allowed_users: "WHATSAPP_ALLOWED_USERS",
+        allow_all_users: "WHATSAPP_ALLOW_ALL_USERS",
+        group_allowed_users: None,
+        group_allowed_chats: None,
+    },
+    PlatformGatewayAuthEnv {
+        platform: "slack",
+        allowed_users: "SLACK_ALLOWED_USERS",
+        allow_all_users: "SLACK_ALLOW_ALL_USERS",
+        group_allowed_users: None,
+        group_allowed_chats: None,
+    },
+    PlatformGatewayAuthEnv {
+        platform: "signal",
+        allowed_users: "SIGNAL_ALLOWED_USERS",
+        allow_all_users: "SIGNAL_ALLOW_ALL_USERS",
+        group_allowed_users: Some("SIGNAL_GROUP_ALLOWED_USERS"),
+        group_allowed_chats: None,
+    },
+    PlatformGatewayAuthEnv {
+        platform: "email",
+        allowed_users: "EMAIL_ALLOWED_USERS",
+        allow_all_users: "EMAIL_ALLOW_ALL_USERS",
+        group_allowed_users: None,
+        group_allowed_chats: None,
+    },
+    PlatformGatewayAuthEnv {
+        platform: "sms",
+        allowed_users: "SMS_ALLOWED_USERS",
+        allow_all_users: "SMS_ALLOW_ALL_USERS",
+        group_allowed_users: None,
+        group_allowed_chats: None,
+    },
+    PlatformGatewayAuthEnv {
+        platform: "mattermost",
+        allowed_users: "MATTERMOST_ALLOWED_USERS",
+        allow_all_users: "MATTERMOST_ALLOW_ALL_USERS",
+        group_allowed_users: None,
+        group_allowed_chats: None,
+    },
+    PlatformGatewayAuthEnv {
+        platform: "matrix",
+        allowed_users: "MATRIX_ALLOWED_USERS",
+        allow_all_users: "MATRIX_ALLOW_ALL_USERS",
+        group_allowed_users: None,
+        group_allowed_chats: None,
+    },
+    PlatformGatewayAuthEnv {
+        platform: "dingtalk",
+        allowed_users: "DINGTALK_ALLOWED_USERS",
+        allow_all_users: "DINGTALK_ALLOW_ALL_USERS",
+        group_allowed_users: None,
+        group_allowed_chats: None,
+    },
+    PlatformGatewayAuthEnv {
+        platform: "feishu",
+        allowed_users: "FEISHU_ALLOWED_USERS",
+        allow_all_users: "FEISHU_ALLOW_ALL_USERS",
+        group_allowed_users: None,
+        group_allowed_chats: None,
+    },
+    PlatformGatewayAuthEnv {
+        platform: "wecom",
+        allowed_users: "WECOM_ALLOWED_USERS",
+        allow_all_users: "WECOM_ALLOW_ALL_USERS",
+        group_allowed_users: None,
+        group_allowed_chats: None,
+    },
+    PlatformGatewayAuthEnv {
+        platform: "qqbot",
+        allowed_users: "QQ_ALLOWED_USERS",
+        allow_all_users: "QQ_ALLOW_ALL_USERS",
+        group_allowed_users: None,
+        group_allowed_chats: Some("QQ_GROUP_ALLOWED_USERS"),
+    },
+];
+
+fn canonical_gateway_platform(platform: &str) -> String {
+    let platform = platform.trim().to_ascii_lowercase();
+    match platform.as_str() {
+        "qq" | "qq_bot" => "qqbot".to_string(),
+        _ => platform,
+    }
+}
+
+fn platform_gateway_auth_env(platform: &str) -> Option<PlatformGatewayAuthEnv> {
+    let platform = canonical_gateway_platform(platform);
+    PLATFORM_GATEWAY_AUTH_ENVS
+        .iter()
+        .copied()
+        .find(|entry| entry.platform == platform)
+}
+
+fn env_list_from_lookup<F>(lookup: &mut F, key: &str) -> HashSet<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    lookup(key)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn env_truthy_from_lookup<F>(lookup: &mut F, key: &str) -> bool
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    lookup(key).is_some_and(|value| env_value_truthy(&value))
+}
+
+fn explicit_platform_unauthorized_dm_behavior(
+    platform_cfg: &PlatformConfig,
+) -> Option<UnauthorizedDmBehavior> {
+    if let Some(raw) = extra_string(platform_cfg, "unauthorized_dm_behavior") {
+        return match raw.trim().to_ascii_lowercase().as_str() {
+            "pair" => Some(UnauthorizedDmBehavior::Pair),
+            "ignore" | "deny" | "drop" => Some(UnauthorizedDmBehavior::Ignore),
+            _ => None,
+        };
+    }
+    (platform_cfg.unauthorized_dm_behavior == UnauthorizedDmBehavior::Pair)
+        .then_some(UnauthorizedDmBehavior::Pair)
+}
+
+fn split_group_authorization_values(
+    platform: &str,
+    values: impl IntoIterator<Item = String>,
+) -> (HashSet<String>, HashSet<String>) {
+    let platform = canonical_gateway_platform(platform);
+    let mut users = HashSet::new();
+    let mut chats = HashSet::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if platform == "qqbot" || (platform == "telegram" && value.starts_with('-')) {
+            chats.insert(value.to_string());
+        } else {
+            users.insert(value.to_string());
+        }
+    }
+    (users, chats)
+}
+
+const GATEWAY_CONFIG_DIRECT_USER_ALLOWLIST_EXTRA_KEYS: &[&str] = &[
+    "allow_from",
+    "allowed_user_ids",
+    "allowed_senders",
+    "allowed_accounts",
+];
+const GATEWAY_CONFIG_GROUP_USER_ALLOWLIST_EXTRA_KEYS: &[&str] =
+    &["group_allow_from", "group_allowed_users"];
+const GATEWAY_CONFIG_GROUP_CHAT_ALLOWLIST_EXTRA_KEYS: &[&str] = &[
+    "group_allowed_chats",
+    "allowed_group_chats",
+    "allowed_groups",
+];
+
 fn build_gateway_dm_manager(config: &hermes_config::GatewayConfig) -> DmManager {
-    let mut dm_manager = DmManager::with_pair_behavior();
+    build_gateway_dm_manager_with_lookup(config, |key| std::env::var(key).ok())
+}
+
+fn build_gateway_dm_manager_with_lookup<F>(
+    config: &hermes_config::GatewayConfig,
+    mut lookup: F,
+) -> DmManager
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut global_users = env_list_from_lookup(&mut lookup, "GATEWAY_ALLOWED_USERS");
+    if env_truthy_from_lookup(&mut lookup, "GATEWAY_ALLOW_ALL_USERS") {
+        global_users.insert("*".to_string());
+    }
+    let has_global_allowlist = !global_users.is_empty();
+    let mut dm_manager = DmManager::new(
+        global_users,
+        HashSet::new(),
+        if has_global_allowlist {
+            UnauthorizedDmBehavior::Ignore
+        } else {
+            UnauthorizedDmBehavior::Pair
+        },
+    );
+    let hermes_home_dir = config
+        .home_dir
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(hermes_home);
     for (platform, platform_cfg) in config.platforms.iter().filter(|(_, p)| p.enabled) {
+        let platform = canonical_gateway_platform(platform);
         let mut has_platform_allowlist = false;
         for user in &platform_cfg.allowed_users {
             let trimmed = user.trim();
             if !trimmed.is_empty() {
                 has_platform_allowlist = true;
-                dm_manager.authorize_user_for_platform(platform, trimmed.to_string());
+                dm_manager.authorize_user_for_platform(&platform, trimmed.to_string());
             }
         }
         for admin in &platform_cfg.admin_users {
             let trimmed = admin.trim();
             if !trimmed.is_empty() {
                 has_platform_allowlist = true;
-                dm_manager.add_admin_for_platform(platform, trimmed.to_string());
+                dm_manager.add_admin_for_platform(&platform, trimmed.to_string());
             }
         }
-        let behavior = if platform_cfg.unauthorized_dm_behavior == UnauthorizedDmBehavior::Pair {
-            UnauthorizedDmBehavior::Pair
+        for key in GATEWAY_CONFIG_DIRECT_USER_ALLOWLIST_EXTRA_KEYS {
+            for user in extra_string_set(platform_cfg, key) {
+                has_platform_allowlist = true;
+                dm_manager.authorize_user_for_platform(&platform, user);
+            }
+        }
+        if gateway_platform_config_allows_all_users(platform_cfg) {
+            has_platform_allowlist = true;
+            dm_manager.authorize_user_for_platform(&platform, "*");
+        }
+        if let Some(env) = platform_gateway_auth_env(&platform) {
+            for user in env_list_from_lookup(&mut lookup, env.allowed_users) {
+                has_platform_allowlist = true;
+                dm_manager.authorize_user_for_platform(&platform, user);
+            }
+            if env_truthy_from_lookup(&mut lookup, env.allow_all_users) {
+                has_platform_allowlist = true;
+                dm_manager.authorize_user_for_platform(&platform, "*");
+            }
+            if let Some(group_users_env) = env.group_allowed_users {
+                let (users, chats) = split_group_authorization_values(
+                    &platform,
+                    env_list_from_lookup(&mut lookup, group_users_env),
+                );
+                for user in users {
+                    has_platform_allowlist = true;
+                    dm_manager.authorize_group_user_for_platform(&platform, user);
+                }
+                for chat in chats {
+                    has_platform_allowlist = true;
+                    dm_manager.authorize_group_chat_for_platform(&platform, chat);
+                }
+            }
+            if let Some(group_chats_env) = env.group_allowed_chats {
+                for chat in env_list_from_lookup(&mut lookup, group_chats_env) {
+                    has_platform_allowlist = true;
+                    dm_manager.authorize_group_chat_for_platform(&platform, chat);
+                }
+            }
+        }
+        let mut config_group_values = Vec::new();
+        for key in GATEWAY_CONFIG_GROUP_USER_ALLOWLIST_EXTRA_KEYS {
+            config_group_values.extend(extra_string_set(platform_cfg, key));
+        }
+        let (group_users, legacy_group_chats) =
+            split_group_authorization_values(&platform, config_group_values);
+        for user in group_users {
+            has_platform_allowlist = true;
+            dm_manager.authorize_group_user_for_platform(&platform, user);
+        }
+        for chat in legacy_group_chats {
+            has_platform_allowlist = true;
+            dm_manager.authorize_group_chat_for_platform(&platform, chat);
+        }
+        for key in GATEWAY_CONFIG_GROUP_CHAT_ALLOWLIST_EXTRA_KEYS {
+            for chat in extra_string_set(platform_cfg, key) {
+                has_platform_allowlist = true;
+                dm_manager.authorize_group_chat_for_platform(&platform, chat);
+            }
+        }
+        if platform == "whatsapp" {
+            dm_manager.load_whatsapp_lid_mappings_from_home(&hermes_home_dir);
+        }
+        if let Some(behavior) = explicit_platform_unauthorized_dm_behavior(platform_cfg) {
+            dm_manager.set_platform_unauthorized_behavior(&platform, behavior);
         } else if has_platform_allowlist {
-            UnauthorizedDmBehavior::Ignore
-        } else {
-            UnauthorizedDmBehavior::Pair
-        };
-        dm_manager.set_platform_unauthorized_behavior(platform, behavior);
+            dm_manager
+                .set_platform_unauthorized_behavior(&platform, UnauthorizedDmBehavior::Ignore);
+        }
     }
     dm_manager
 }
@@ -4298,6 +4576,7 @@ fn build_gateway_dm_manager(config: &hermes_config::GatewayConfig) -> DmManager 
 const GATEWAY_USER_ALLOWLIST_ENV_VARS: &[&str] = &[
     "TELEGRAM_ALLOWED_USERS",
     "TELEGRAM_GROUP_ALLOWED_USERS",
+    "TELEGRAM_GROUP_ALLOWED_CHATS",
     "DISCORD_ALLOWED_USERS",
     "WHATSAPP_ALLOWED_USERS",
     "SLACK_ALLOWED_USERS",
@@ -4333,11 +4612,15 @@ const GATEWAY_ALLOW_ALL_ENV_VARS: &[&str] = &[
 ];
 
 const GATEWAY_CONFIG_USER_ALLOWLIST_EXTRA_KEYS: &[&str] = &[
+    "allow_from",
     "group_allow_from",
     "group_allowed_users",
+    "group_allowed_chats",
     "allowed_user_ids",
     "allowed_senders",
     "allowed_accounts",
+    "allowed_group_chats",
+    "allowed_groups",
 ];
 
 fn env_value_truthy(raw: &str) -> bool {
@@ -4401,18 +4684,31 @@ fn gateway_allowlist_startup_would_warn(config: &GatewayConfig) -> bool {
     gateway_allowlist_startup_would_warn_with_lookup(config, |key| std::env::var(key).ok())
 }
 
-fn parse_group_access_mode(platform_cfg: &PlatformConfig) -> GroupAccessMode {
+fn explicit_group_access_mode(platform_cfg: &PlatformConfig) -> Option<GroupAccessMode> {
     let explicit = extra_string(platform_cfg, "group_policy")
         .or_else(|| extra_string(platform_cfg, "group_access"));
     if let Some(policy) = explicit {
         match policy.trim().to_ascii_lowercase().as_str() {
-            "disabled" | "deny" | "off" | "none" => return GroupAccessMode::Disabled,
-            "allowlist" | "restricted" | "whitelist" => return GroupAccessMode::Allowlist,
-            "open" | "all" | "enabled" => return GroupAccessMode::Open,
+            "disabled" | "deny" | "off" | "none" => return Some(GroupAccessMode::Disabled),
+            "allowlist" | "restricted" | "whitelist" => return Some(GroupAccessMode::Allowlist),
+            "open" | "all" | "enabled" => return Some(GroupAccessMode::Open),
             _ => {}
         }
     }
-    if !platform_cfg.allowed_users.is_empty() || !platform_cfg.admin_users.is_empty() {
+    None
+}
+
+fn parse_group_access_mode(
+    platform_cfg: &PlatformConfig,
+    has_group_authorization: bool,
+) -> GroupAccessMode {
+    if let Some(mode) = explicit_group_access_mode(platform_cfg) {
+        return mode;
+    }
+    if has_group_authorization
+        || !platform_cfg.allowed_users.is_empty()
+        || !platform_cfg.admin_users.is_empty()
+    {
         GroupAccessMode::Allowlist
     } else {
         GroupAccessMode::Open
@@ -4422,10 +4718,24 @@ fn parse_group_access_mode(platform_cfg: &PlatformConfig) -> GroupAccessMode {
 fn build_gateway_platform_access_policies(
     config: &hermes_config::GatewayConfig,
 ) -> std::collections::HashMap<String, PlatformAccessPolicy> {
+    build_gateway_platform_access_policies_with_lookup(config, |key| std::env::var(key).ok())
+}
+
+fn build_gateway_platform_access_policies_with_lookup<F>(
+    config: &hermes_config::GatewayConfig,
+    mut lookup: F,
+) -> std::collections::HashMap<String, PlatformAccessPolicy>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let global_allowed_users = env_list_from_lookup(&mut lookup, "GATEWAY_ALLOWED_USERS");
+    let global_allow_all = env_truthy_from_lookup(&mut lookup, "GATEWAY_ALLOW_ALL_USERS");
     let mut policies = std::collections::HashMap::new();
     for (platform, platform_cfg) in config.platforms.iter().filter(|(_, cfg)| cfg.enabled) {
+        let platform = canonical_gateway_platform(platform);
         let mut allowed_users = HashSet::new();
         let mut admin_users = HashSet::new();
+        let mut authorized_group_chats = HashSet::new();
         for user in &platform_cfg.allowed_users {
             let trimmed = user.trim();
             if !trimmed.is_empty() {
@@ -4438,40 +4748,80 @@ fn build_gateway_platform_access_policies(
                 admin_users.insert(trimmed.to_string());
             }
         }
+        for key in GATEWAY_CONFIG_DIRECT_USER_ALLOWLIST_EXTRA_KEYS {
+            allowed_users.extend(extra_string_set(platform_cfg, key));
+        }
+        allowed_users.extend(global_allowed_users.iter().cloned());
+        if global_allow_all || gateway_platform_config_allows_all_users(platform_cfg) {
+            allowed_users.insert("*".to_string());
+        }
+        if let Some(env) = platform_gateway_auth_env(&platform) {
+            allowed_users.extend(env_list_from_lookup(&mut lookup, env.allowed_users));
+            if env_truthy_from_lookup(&mut lookup, env.allow_all_users) {
+                allowed_users.insert("*".to_string());
+            }
+            if let Some(group_users_env) = env.group_allowed_users {
+                let (users, chats) = split_group_authorization_values(
+                    &platform,
+                    env_list_from_lookup(&mut lookup, group_users_env),
+                );
+                allowed_users.extend(users);
+                authorized_group_chats.extend(chats);
+            }
+            if let Some(group_chats_env) = env.group_allowed_chats {
+                authorized_group_chats.extend(env_list_from_lookup(&mut lookup, group_chats_env));
+            }
+        }
+        let mut config_group_values = Vec::new();
+        for key in GATEWAY_CONFIG_GROUP_USER_ALLOWLIST_EXTRA_KEYS {
+            config_group_values.extend(extra_string_set(platform_cfg, key));
+        }
+        let (group_users, legacy_group_chats) =
+            split_group_authorization_values(&platform, config_group_values);
+        allowed_users.extend(group_users);
+        authorized_group_chats.extend(legacy_group_chats);
+        for key in GATEWAY_CONFIG_GROUP_CHAT_ALLOWLIST_EXTRA_KEYS {
+            authorized_group_chats.extend(extra_string_set(platform_cfg, key));
+        }
 
-        let group_mode = parse_group_access_mode(platform_cfg);
+        let group_mode = parse_group_access_mode(
+            platform_cfg,
+            !authorized_group_chats.is_empty()
+                || !allowed_users.is_empty()
+                || !admin_users.is_empty(),
+        );
         let has_allowlist = !allowed_users.is_empty() || !admin_users.is_empty();
         let slash_requires_allowlist = extra_bool_loose(platform_cfg, "slash_requires_allowlist")
             .or_else(|| extra_bool_loose(platform_cfg, "require_allowlist_for_slash"))
-            .unwrap_or_else(|| platform.eq_ignore_ascii_case("discord") && has_allowlist);
+            .unwrap_or_else(|| platform == "discord" && has_allowlist);
 
         let mut allowed_channels = extra_string_set(platform_cfg, "allowed_channels");
-        if platform.eq_ignore_ascii_case("telegram") {
-            allowed_channels.extend(extra_string_set(platform_cfg, "allowed_chats"));
-            allowed_channels.extend(extra_string_set(platform_cfg, "group_allowed_chats"));
-        }
-        if platform.eq_ignore_ascii_case("dingtalk") {
+        if platform == "telegram" {
             allowed_channels.extend(extra_string_set(platform_cfg, "allowed_chats"));
         }
-        if platform.eq_ignore_ascii_case("matrix") {
+        if platform == "dingtalk" {
+            allowed_channels.extend(extra_string_set(platform_cfg, "allowed_chats"));
+        }
+        if platform == "matrix" {
             allowed_channels.extend(extra_string_set(platform_cfg, "allowed_rooms"));
         }
         let mut ignored_channels = extra_string_set(platform_cfg, "ignored_channels");
-        if platform.eq_ignore_ascii_case("telegram") {
+        if platform == "telegram" {
             ignored_channels.extend(extra_string_set(platform_cfg, "ignored_threads"));
         }
 
         policies.insert(
-            platform.to_ascii_lowercase(),
+            platform.clone(),
             PlatformAccessPolicy {
                 allowed_users,
                 admin_users,
                 allowed_channels,
+                authorized_group_chats,
                 ignored_channels,
                 group_mode,
                 slash_requires_allowlist,
                 bot_sender_bypasses_allowlist: discord_allow_bots_bypasses_gateway_allowlist(
-                    platform,
+                    &platform,
                     platform_cfg,
                 ),
                 reactions_enabled: extra_bool_loose(platform_cfg, "reactions"),
@@ -14755,8 +15105,8 @@ mod tests {
         let policy = policies.get("telegram").expect("telegram policy");
         assert!(policy.allowed_channels.contains("-100"));
         assert!(policy.allowed_channels.contains("*"));
-        assert!(policy.allowed_channels.contains("-200"));
-        assert!(policy.allowed_channels.contains("-300"));
+        assert!(policy.authorized_group_chats.contains("-200"));
+        assert!(policy.authorized_group_chats.contains("-300"));
         assert!(policy.ignored_channels.contains("31"));
         assert!(policy.ignored_channels.contains("32"));
     }
@@ -14834,6 +15184,153 @@ mod tests {
             dm.handle_dm("+15559999999", "signal").await,
             hermes_gateway::DmDecision::Pair { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn gateway_dm_manager_global_allowlist_ignores_unauthorized_dm() {
+        let mut config = hermes_config::GatewayConfig::default();
+        let signal = PlatformConfig {
+            enabled: true,
+            ..PlatformConfig::default()
+        };
+        config.platforms.insert("signal".to_string(), signal);
+        let env = std::collections::HashMap::from([(
+            "GATEWAY_ALLOWED_USERS".to_string(),
+            "111111111".to_string(),
+        )]);
+
+        let dm = build_gateway_dm_manager_with_lookup(&config, |key| env.get(key).cloned());
+        assert_eq!(
+            dm.handle_dm("111111111", "signal").await,
+            hermes_gateway::DmDecision::Allow
+        );
+        assert_eq!(
+            dm.handle_dm("+15559999999", "signal").await,
+            hermes_gateway::DmDecision::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_dm_manager_group_authorization_matches_upstream_contract() {
+        let mut config = hermes_config::GatewayConfig::default();
+        let mut telegram = PlatformConfig {
+            enabled: true,
+            ..PlatformConfig::default()
+        };
+        telegram.extra.insert(
+            "group_allow_from".to_string(),
+            serde_json::json!(["999", "-1001878443972"]),
+        );
+        telegram.extra.insert(
+            "group_allowed_chats".to_string(),
+            serde_json::json!(["-200"]),
+        );
+        config.platforms.insert("telegram".to_string(), telegram);
+        let mut qq = PlatformConfig {
+            enabled: true,
+            ..PlatformConfig::default()
+        };
+        qq.extra.insert(
+            "group_allowed_chats".to_string(),
+            serde_json::json!(["group-openid-1"]),
+        );
+        config.platforms.insert("qq".to_string(), qq);
+
+        let dm = build_gateway_dm_manager_with_lookup(&config, |_key| None);
+        assert!(dm.is_authorized_source("telegram", "999", "-1009999999999", false));
+        assert!(dm.is_authorized_source("telegram", "123", "-1001878443972", false));
+        assert!(dm.is_authorized_source("telegram", "123", "-200", false));
+        assert!(!dm.is_authorized_source("telegram", "999", "999", true));
+        assert_eq!(
+            dm.handle_dm("999", "telegram").await,
+            hermes_gateway::DmDecision::Deny
+        );
+        assert!(dm.is_authorized_source("qqbot", "member-openid-999", "group-openid-1", false));
+        assert!(!dm.is_authorized_source("qqbot", "member-openid-999", "group-openid-2", false));
+    }
+
+    #[tokio::test]
+    async fn gateway_dm_manager_whatsapp_lid_mapping_authorizes_phone_allowlist() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_dir = tmp.path().join("whatsapp").join("session");
+        std::fs::create_dir_all(&session_dir).expect("session dir");
+        std::fs::write(
+            session_dir.join("lid-mapping-15550000001.json"),
+            "\"900000000000001\"",
+        )
+        .expect("forward mapping");
+        std::fs::write(
+            session_dir.join("lid-mapping-900000000000001_reverse.json"),
+            "\"15550000001\"",
+        )
+        .expect("reverse mapping");
+
+        let mut config = hermes_config::GatewayConfig {
+            home_dir: Some(tmp.path().to_string_lossy().to_string()),
+            ..hermes_config::GatewayConfig::default()
+        };
+        config.platforms.insert(
+            "whatsapp".to_string(),
+            PlatformConfig {
+                enabled: true,
+                ..PlatformConfig::default()
+            },
+        );
+        let env = std::collections::HashMap::from([(
+            "WHATSAPP_ALLOWED_USERS".to_string(),
+            "15550000001".to_string(),
+        )]);
+
+        let dm = build_gateway_dm_manager_with_lookup(&config, |key| env.get(key).cloned());
+        assert_eq!(
+            dm.handle_dm("900000000000001@lid", "whatsapp").await,
+            hermes_gateway::DmDecision::Allow
+        );
+    }
+
+    #[test]
+    fn gateway_platform_access_policy_group_authorization_matches_env_contract() {
+        let mut config = hermes_config::GatewayConfig::default();
+        config.platforms.insert(
+            "telegram".to_string(),
+            PlatformConfig {
+                enabled: true,
+                ..PlatformConfig::default()
+            },
+        );
+        config.platforms.insert(
+            "qqbot".to_string(),
+            PlatformConfig {
+                enabled: true,
+                ..PlatformConfig::default()
+            },
+        );
+        let env = std::collections::HashMap::from([
+            (
+                "TELEGRAM_GROUP_ALLOWED_USERS".to_string(),
+                "999,-1001878443972".to_string(),
+            ),
+            (
+                "TELEGRAM_GROUP_ALLOWED_CHATS".to_string(),
+                "-200".to_string(),
+            ),
+            (
+                "QQ_GROUP_ALLOWED_USERS".to_string(),
+                "group-openid-1".to_string(),
+            ),
+        ]);
+
+        let policies = build_gateway_platform_access_policies_with_lookup(&config, |key| {
+            env.get(key).cloned()
+        });
+        let telegram = policies.get("telegram").expect("telegram policy");
+        assert_eq!(telegram.group_mode, GroupAccessMode::Allowlist);
+        assert!(telegram.allowed_users.contains("999"));
+        assert!(telegram.authorized_group_chats.contains("-1001878443972"));
+        assert!(telegram.authorized_group_chats.contains("-200"));
+        let qq = policies.get("qqbot").expect("qqbot policy");
+        assert_eq!(qq.group_mode, GroupAccessMode::Allowlist);
+        assert!(qq.authorized_group_chats.contains("group-openid-1"));
     }
 
     #[test]

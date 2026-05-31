@@ -185,6 +185,13 @@
       "ticket": 302
     },
     {
+      "path": "tests/gateway/test_unauthorized_dm_behavior.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream unauthorized-DM behavior is covered by Rust DmManager, Gateway route, and CLI builder tests for platform/global allowlists, wildcard allowlists, WhatsApp LID-to-phone mapping, Telegram group sender allowlists, Telegram legacy group-chat IDs, QQ group chat allowlists, allowlist-derived ignore defaults, explicit pair overrides, pairing-code replies, and pairing rate-limit suppression.",
+      "owner": "sheawinkler",
+      "ticket": 302
+    },
+    {
       "path": "tests/gateway/test_hooks.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream gateway hook discovery, wildcard emit ordering, error containment, default empty context, and emit_collect decision hooks are covered by Rust HookRegistry tests; user hook loading intentionally uses zero-Python HOOK.yaml command handlers instead of dynamic handler.py imports.",

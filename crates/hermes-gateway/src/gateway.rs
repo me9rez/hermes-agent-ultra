@@ -294,6 +294,7 @@ pub struct PlatformAccessPolicy {
     pub allowed_users: HashSet<String>,
     pub admin_users: HashSet<String>,
     pub allowed_channels: HashSet<String>,
+    pub authorized_group_chats: HashSet<String>,
     pub ignored_channels: HashSet<String>,
     pub group_mode: GroupAccessMode,
     pub slash_requires_allowlist: bool,
@@ -351,6 +352,10 @@ impl PlatformAccessPolicy {
 
     fn is_channel_ignored(&self, channel_id: &str) -> bool {
         Self::channel_matches_any(channel_id, &self.ignored_channels)
+    }
+
+    pub fn is_group_chat_authorized(&self, channel_id: &str) -> bool {
+        Self::channel_matches_any(channel_id, &self.authorized_group_chats)
     }
 
     fn allows_sender_without_user_allowlist(
@@ -710,7 +715,10 @@ impl Gateway {
                         return Ok(());
                     }
                     GroupAccessMode::Allowlist => {
-                        if !bypasses_user_allowlist && !policy.is_user_allowed(&incoming.user_id) {
+                        if !bypasses_user_allowlist
+                            && !policy.is_user_allowed(&incoming.user_id)
+                            && !policy.is_group_chat_authorized(&incoming.chat_id)
+                        {
                             debug!(
                                 platform = incoming.platform,
                                 user_id = incoming.user_id,
@@ -2848,6 +2856,123 @@ mod tests {
             gw.session_transcript_len("telegram", "-100123", "any_user")
                 .await,
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_group_chat_authorization_allows_listed_chat_sender() {
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let dm_manager = DmManager::with_ignore_behavior();
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        let mut policies = HashMap::new();
+        let mut policy = PlatformAccessPolicy {
+            group_mode: GroupAccessMode::Allowlist,
+            ..PlatformAccessPolicy::default()
+        };
+        policy.allowed_users.insert("999".to_string());
+        policy
+            .authorized_group_chats
+            .insert("-1001878443972".to_string());
+        policies.insert("telegram".to_string(), policy);
+        gw.set_platform_access_policies(policies).await;
+
+        let legacy_chat_source = IncomingMessage {
+            platform: "telegram".into(),
+            chat_id: "-1001878443972".into(),
+            user_id: "123".into(),
+            text: "hello group".into(),
+            message_id: None,
+            is_dm: false,
+        };
+        assert!(gw.route_message(&legacy_chat_source).await.is_err());
+        assert_eq!(
+            gw.session_transcript_len("telegram", "-1001878443972", "123")
+                .await,
+            1
+        );
+
+        let sender_source = IncomingMessage {
+            platform: "telegram".into(),
+            chat_id: "-1009999999999".into(),
+            user_id: "999".into(),
+            text: "hello group".into(),
+            message_id: None,
+            is_dm: false,
+        };
+        assert!(gw.route_message(&sender_source).await.is_err());
+        assert_eq!(
+            gw.session_transcript_len("telegram", "-1009999999999", "999")
+                .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_route_unauthorized_dm_pairs_with_code_message() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(TestAdapter {
+            messages: sent.clone(),
+        });
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let dm_manager = DmManager::with_pair_behavior();
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        gw.register_adapter("whatsapp", adapter).await;
+
+        let incoming = IncomingMessage {
+            platform: "whatsapp".into(),
+            chat_id: "15551234567@s.whatsapp.net".into(),
+            user_id: "15551234567@s.whatsapp.net".into(),
+            text: "hello".into(),
+            message_id: None,
+            is_dm: true,
+        };
+
+        assert!(gw.route_message(&incoming).await.is_ok());
+        let messages = sent.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].1.contains("pairing code"));
+        assert_eq!(
+            gw.session_transcript_len(
+                "whatsapp",
+                "15551234567@s.whatsapp.net",
+                "15551234567@s.whatsapp.net"
+            )
+            .await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_route_rate_limited_dm_sends_no_response() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(TestAdapter {
+            messages: sent.clone(),
+        });
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let dm_manager = DmManager::with_pair_behavior();
+        dm_manager.record_pairing_rate_limit("whatsapp", "15551234567@s.whatsapp.net");
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        gw.register_adapter("whatsapp", adapter).await;
+
+        let incoming = IncomingMessage {
+            platform: "whatsapp".into(),
+            chat_id: "15551234567@s.whatsapp.net".into(),
+            user_id: "15551234567@s.whatsapp.net".into(),
+            text: "hello".into(),
+            message_id: None,
+            is_dm: true,
+        };
+
+        assert!(gw.route_message(&incoming).await.is_ok());
+        assert!(sent.lock().unwrap().is_empty());
+        assert_eq!(
+            gw.session_transcript_len(
+                "whatsapp",
+                "15551234567@s.whatsapp.net",
+                "15551234567@s.whatsapp.net"
+            )
+            .await,
+            0
         );
     }
 

@@ -178,6 +178,20 @@
       "ticket": 302
     },
     {
+      "path": "tests/gateway/test_delivery.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream delivery target parsing is covered by Rust DeliveryTarget tests for origin resolution, local fallback, platform-home targets, explicit chat IDs, thread IDs, case-insensitive platform names, case-preserving chat IDs, Matrix-style colon splitting, target string roundtrips, and unknown-platform local fallback.",
+      "owner": "sheawinkler",
+      "ticket": 302
+    },
+    {
+      "path": "tests/gateway/test_channel_directory.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream channel-directory cache behavior is covered by Rust tests for missing/corrupt load fallback, atomic writes, session-derived channel discovery with topic composite IDs, exact/display/guild/prefix/id resolution, channel-type lookup, display formatting, provider error isolation, provider/session merge dedupe, and Slack users.conversations pagination.",
+      "owner": "sheawinkler",
+      "ticket": 302
+    },
+    {
       "path": "tests/gateway/test_platform_http_client_limits.py",
       "classification": "intentional_divergence",
       "rationale": "Upstream persistent-platform HTTP pool limits are covered by Rust BasePlatformAdapter reqwest pool-limit tests for default keepalive tightening, env overrides, malformed env fallback, and shared builder use by long-lived adapters; Python httpx import failure and aiohttp response-leak checks are not part of the Rust runtime.",

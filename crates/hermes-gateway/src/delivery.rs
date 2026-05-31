@@ -1,10 +1,11 @@
 //! Delivery queue and router for deferred platform sends.
 //!
-//! Provides a `DeliveryQueue` for queuing messages, a `DeliveryTarget` enum
+//! Provides a `DeliveryQueue` for queuing messages, a `DeliveryTarget`
 //! for specifying where messages should be routed, and a `DeliveryRouter`
 //! that holds registered adapters and dispatches messages accordingly.
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -61,40 +62,227 @@ impl DeliveryQueue {
 // DeliveryTarget
 // ---------------------------------------------------------------------------
 
+/// Source information used when resolving an `origin` delivery target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryOrigin {
+    pub platform: String,
+    pub chat_id: String,
+    pub thread_id: Option<String>,
+}
+
+impl DeliveryOrigin {
+    pub fn new(platform: impl Into<String>, chat_id: impl Into<String>) -> Self {
+        Self {
+            platform: platform.into(),
+            chat_id: chat_id.into(),
+            thread_id: None,
+        }
+    }
+
+    pub fn with_thread(
+        platform: impl Into<String>,
+        chat_id: impl Into<String>,
+        thread_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            platform: platform.into(),
+            chat_id: chat_id.into(),
+            thread_id: Some(thread_id.into()),
+        }
+    }
+}
+
 /// Specifies where a message should be delivered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeliveryTarget {
-    /// Send back to the originating platform/chat.
-    Origin,
-    /// Deliver to the local agent (e.g., for internal processing).
-    Local,
-    /// Deliver to a specific platform and chat.
-    Platform { name: String, chat_id: String },
+pub struct DeliveryTarget {
+    /// Normalized platform name (`local`, `telegram`, `discord`, ...).
+    pub platform: String,
+    /// Platform channel/chat identifier. `None` means the platform home target.
+    pub chat_id: Option<String>,
+    /// Optional thread/topic identifier for platforms that support threaded sends.
+    pub thread_id: Option<String>,
+    /// True when this target was parsed from `origin`.
+    pub is_origin: bool,
+    /// True when a chat/channel id was explicitly supplied in the target string.
+    pub is_explicit: bool,
+}
+
+impl DeliveryTarget {
+    pub fn local() -> Self {
+        Self {
+            platform: "local".to_string(),
+            chat_id: None,
+            thread_id: None,
+            is_origin: false,
+            is_explicit: false,
+        }
+    }
+
+    pub fn origin_fallback() -> Self {
+        Self {
+            is_origin: true,
+            ..Self::local()
+        }
+    }
+
+    pub fn platform_home(name: impl AsRef<str>) -> Self {
+        Self {
+            platform: normalize_platform(name.as_ref()),
+            chat_id: None,
+            thread_id: None,
+            is_origin: false,
+            is_explicit: false,
+        }
+    }
+
+    pub fn platform_chat(name: impl AsRef<str>, chat_id: impl Into<String>) -> Self {
+        Self {
+            platform: normalize_platform(name.as_ref()),
+            chat_id: Some(chat_id.into()),
+            thread_id: None,
+            is_origin: false,
+            is_explicit: true,
+        }
+    }
+
+    pub fn platform_thread(
+        name: impl AsRef<str>,
+        chat_id: impl Into<String>,
+        thread_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            platform: normalize_platform(name.as_ref()),
+            chat_id: Some(chat_id.into()),
+            thread_id: Some(thread_id.into()),
+            is_origin: false,
+            is_explicit: true,
+        }
+    }
+
+    pub fn parse(target_str: &str) -> Self {
+        Self::parse_with_origin(target_str, None)
+    }
+
+    pub fn parse_with_origin(target_str: &str, origin: Option<&DeliveryOrigin>) -> Self {
+        let trimmed = target_str.trim();
+        if trimmed.eq_ignore_ascii_case("origin") {
+            return origin.map_or_else(Self::origin_fallback, |origin| Self {
+                platform: normalize_platform(&origin.platform),
+                chat_id: Some(origin.chat_id.clone()),
+                thread_id: origin.thread_id.clone(),
+                is_origin: true,
+                is_explicit: false,
+            });
+        }
+
+        if trimmed.eq_ignore_ascii_case("local") || trimmed.is_empty() {
+            return Self::local();
+        }
+
+        if let Some((platform_raw, rest)) = trimmed.split_once(':') {
+            let platform = normalize_platform(platform_raw);
+            if !is_known_platform(&platform) {
+                return Self::local();
+            }
+
+            let mut parts = rest.splitn(2, ':');
+            let chat_id = parts.next().map(str::trim).filter(|s| !s.is_empty());
+            let thread_id = parts.next().map(str::trim).filter(|s| !s.is_empty());
+
+            return match (chat_id, thread_id) {
+                (Some(chat_id), Some(thread_id)) => {
+                    Self::platform_thread(platform, chat_id.to_string(), thread_id.to_string())
+                }
+                (Some(chat_id), None) => Self::platform_chat(platform, chat_id.to_string()),
+                (None, _) => Self::platform_home(platform),
+            };
+        }
+
+        let platform = normalize_platform(trimmed);
+        if is_known_platform(&platform) {
+            Self::platform_home(platform)
+        } else {
+            Self::local()
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.platform == "local"
+    }
+
+    pub fn target_label(&self) -> String {
+        if self.is_origin {
+            return "origin".to_string();
+        }
+        if self.is_local() {
+            return "local".to_string();
+        }
+        match (&self.chat_id, &self.thread_id) {
+            (Some(chat_id), Some(thread_id)) => {
+                format!("{}:{}:{}", self.platform, chat_id, thread_id)
+            }
+            (Some(chat_id), None) => format!("{}:{}", self.platform, chat_id),
+            (None, _) => self.platform.clone(),
+        }
+    }
+}
+
+impl fmt::Display for DeliveryTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.target_label())
+    }
+}
+
+fn normalize_platform(name: &str) -> String {
+    name.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn is_known_platform(name: &str) -> bool {
+    matches!(
+        name,
+        "local"
+            | "telegram"
+            | "discord"
+            | "slack"
+            | "whatsapp"
+            | "signal"
+            | "matrix"
+            | "mattermost"
+            | "dingtalk"
+            | "feishu"
+            | "wecom"
+            | "wecom_callback"
+            | "weixin"
+            | "qqbot"
+            | "qq"
+            | "bluebubbles"
+            | "email"
+            | "sms"
+            | "homeassistant"
+            | "ntfy"
+            | "api_server"
+            | "webhook"
+    )
 }
 
 /// Parse a target string into a `DeliveryTarget`.
 ///
 /// Supported formats:
-/// - `"origin"` -> `DeliveryTarget::Origin`
-/// - `"local"` -> `DeliveryTarget::Local`
-/// - `"telegram:12345"` -> `DeliveryTarget::Platform { name: "telegram", chat_id: "12345" }`
-/// - `"discord:channel_id"` -> `DeliveryTarget::Platform { name: "discord", chat_id: "channel_id" }`
+/// - `"origin"` -> local fallback unless origin metadata is supplied
+/// - `"local"` -> local queue
+/// - `"telegram:12345"` -> explicit Telegram chat
+/// - `"discord"` -> Discord home target
+/// - `"slack:C123ABC:thread123"` -> explicit Slack channel/thread
 pub fn parse_target(target_str: &str) -> DeliveryTarget {
-    let trimmed = target_str.trim();
-    if trimmed.eq_ignore_ascii_case("origin") {
-        return DeliveryTarget::Origin;
-    }
-    if trimmed.eq_ignore_ascii_case("local") {
-        return DeliveryTarget::Local;
-    }
-    if let Some((name_raw, chat_id_raw)) = trimmed.split_once(':') {
-        DeliveryTarget::Platform {
-            name: name_raw.trim().to_ascii_lowercase(),
-            chat_id: chat_id_raw.trim().to_string(),
-        }
-    } else {
-        DeliveryTarget::Origin
-    }
+    DeliveryTarget::parse(target_str)
+}
+
+/// Parse a target string and resolve `origin` using explicit source metadata.
+pub fn parse_target_with_origin(
+    target_str: &str,
+    origin: Option<&DeliveryOrigin>,
+) -> DeliveryTarget {
+    DeliveryTarget::parse_with_origin(target_str, origin)
 }
 
 // ---------------------------------------------------------------------------
@@ -136,9 +324,9 @@ impl DeliveryRouter {
 
     /// Route a delivery to the appropriate target.
     ///
-    /// - `Origin` target requires `origin_platform` and `origin_chat_id` to be provided.
-    /// - `Local` target enqueues to the fallback queue for internal processing.
-    /// - `Platform` target sends directly to the named adapter.
+    /// - `origin` targets use explicit origin args when supplied, otherwise their parsed source.
+    /// - `local` targets enqueue to the fallback queue for internal processing.
+    /// - Platform targets with explicit chat IDs send directly to the named adapter.
     pub async fn route_delivery(
         &self,
         target: &DeliveryTarget,
@@ -146,31 +334,35 @@ impl DeliveryRouter {
         origin_platform: Option<&str>,
         origin_chat_id: Option<&str>,
     ) -> Result<(), GatewayError> {
-        match target {
-            DeliveryTarget::Origin => {
-                let platform_name = origin_platform.ok_or_else(|| {
-                    GatewayError::SendFailed(
-                        "Origin target but no origin platform specified".into(),
-                    )
-                })?;
-                let chat_id = origin_chat_id.ok_or_else(|| {
-                    GatewayError::SendFailed("Origin target but no origin chat_id specified".into())
-                })?;
-                self.send_to_platform(platform_name, chat_id, message).await
-            }
-            DeliveryTarget::Local => {
-                self.fallback_queue.enqueue(DeliveryItem {
-                    platform: "local".to_string(),
-                    chat_id: "local".to_string(),
-                    text: message.to_string(),
-                });
-                debug!("Message enqueued to local delivery queue");
-                Ok(())
-            }
-            DeliveryTarget::Platform { name, chat_id } => {
-                self.send_to_platform(name, chat_id, message).await
-            }
+        let platform_name = origin_platform
+            .filter(|_| target.is_origin)
+            .unwrap_or(target.platform.as_str());
+        let chat_id = origin_chat_id
+            .filter(|_| target.is_origin)
+            .or(target.chat_id.as_deref());
+
+        if platform_name == "local" {
+            self.enqueue_local(message);
+            return Ok(());
         }
+
+        if let Some(chat_id) = chat_id {
+            self.send_to_platform(platform_name, chat_id, message).await
+        } else {
+            Err(GatewayError::SendFailed(format!(
+                "Delivery target '{}' has no chat_id/home channel configured",
+                target
+            )))
+        }
+    }
+
+    fn enqueue_local(&self, message: &str) {
+        self.fallback_queue.enqueue(DeliveryItem {
+            platform: "local".to_string(),
+            chat_id: "local".to_string(),
+            text: message.to_string(),
+        });
+        debug!("Message enqueued to local delivery queue");
     }
 
     /// Send a message to a specific platform adapter.
@@ -218,32 +410,30 @@ impl DeliveryRouter {
         origin_platform: Option<&str>,
         origin_chat_id: Option<&str>,
     ) -> Result<(), GatewayError> {
-        let (platform_name, chat_id) = match target {
-            DeliveryTarget::Origin => {
-                let p = origin_platform.ok_or_else(|| {
-                    GatewayError::SendFailed("Origin target but no origin platform".into())
-                })?;
-                let c = origin_chat_id.ok_or_else(|| {
-                    GatewayError::SendFailed("Origin target but no origin chat_id".into())
-                })?;
-                (p, c)
-            }
-            DeliveryTarget::Local => {
-                debug!("File delivery to local is not supported, queueing as text");
-                let msg = format!(
-                    "[file:{}]{}",
-                    file_path,
-                    caption.map(|c| format!(" {c}")).unwrap_or_default()
-                );
-                self.fallback_queue.enqueue(DeliveryItem {
-                    platform: "local".to_string(),
-                    chat_id: "local".to_string(),
-                    text: msg,
-                });
-                return Ok(());
-            }
-            DeliveryTarget::Platform { name, chat_id } => (name.as_str(), chat_id.as_str()),
-        };
+        let platform_name = origin_platform
+            .filter(|_| target.is_origin)
+            .unwrap_or(target.platform.as_str());
+        let chat_id = origin_chat_id
+            .filter(|_| target.is_origin)
+            .or(target.chat_id.as_deref());
+
+        if platform_name == "local" {
+            debug!("File delivery to local is not supported, queueing as text");
+            let msg = format!(
+                "[file:{}]{}",
+                file_path,
+                caption.map(|c| format!(" {c}")).unwrap_or_default()
+            );
+            self.enqueue_local(&msg);
+            return Ok(());
+        }
+
+        let chat_id = chat_id.ok_or_else(|| {
+            GatewayError::SendFailed(format!(
+                "File delivery target '{}' has no chat_id/home channel configured",
+                target
+            ))
+        })?;
 
         let adapters = self.adapters.read().await;
         match adapters.get(platform_name) {
@@ -273,47 +463,66 @@ mod tests {
 
     #[test]
     fn test_parse_target_origin() {
-        assert_eq!(parse_target("origin"), DeliveryTarget::Origin);
-        assert_eq!(parse_target("ORIGIN"), DeliveryTarget::Origin);
+        let target = parse_target("origin");
+        assert_eq!(target.platform, "local");
+        assert!(target.is_origin);
+        assert_eq!(target.to_string(), "origin");
+
+        let origin = DeliveryOrigin::with_thread("TELEGRAM", "789", "42");
+        let resolved = parse_target_with_origin("ORIGIN", Some(&origin));
+        assert_eq!(resolved.platform, "telegram");
+        assert_eq!(resolved.chat_id.as_deref(), Some("789"));
+        assert_eq!(resolved.thread_id.as_deref(), Some("42"));
+        assert!(resolved.is_origin);
     }
 
     #[test]
     fn test_parse_target_local() {
-        assert_eq!(parse_target("local"), DeliveryTarget::Local);
+        let target = parse_target("local");
+        assert_eq!(target.platform, "local");
+        assert_eq!(target.chat_id, None);
+        assert!(!target.is_origin);
     }
 
     #[test]
     fn test_parse_target_platform() {
-        assert_eq!(
-            parse_target("telegram:12345"),
-            DeliveryTarget::Platform {
-                name: "telegram".into(),
-                chat_id: "12345".into()
-            }
-        );
-        assert_eq!(
-            parse_target("discord:channel_abc"),
-            DeliveryTarget::Platform {
-                name: "discord".into(),
-                chat_id: "channel_abc".into()
-            }
-        );
+        let telegram = parse_target("telegram:12345");
+        assert_eq!(telegram.platform, "telegram");
+        assert_eq!(telegram.chat_id.as_deref(), Some("12345"));
+        assert!(telegram.is_explicit);
+
+        let discord = parse_target("discord");
+        assert_eq!(discord.platform, "discord");
+        assert_eq!(discord.chat_id, None);
+        assert!(!discord.is_explicit);
     }
 
     #[test]
     fn test_parse_target_platform_preserves_chat_id_case() {
-        assert_eq!(
-            parse_target("SLACK:ChanID-AbC123"),
-            DeliveryTarget::Platform {
-                name: "slack".into(),
-                chat_id: "ChanID-AbC123".into()
-            }
-        );
+        let target = parse_target("SLACK:ChanID-AbC123");
+        assert_eq!(target.platform, "slack");
+        assert_eq!(target.chat_id.as_deref(), Some("ChanID-AbC123"));
+        assert_eq!(target.to_string(), "slack:ChanID-AbC123");
+    }
+
+    #[test]
+    fn test_parse_target_thread_preserves_case_and_limits_split() {
+        let target = parse_target("slack:C123ABC:thread123");
+        assert_eq!(target.platform, "slack");
+        assert_eq!(target.chat_id.as_deref(), Some("C123ABC"));
+        assert_eq!(target.thread_id.as_deref(), Some("thread123"));
+        assert_eq!(target.to_string(), "slack:C123ABC:thread123");
+
+        let matrix = parse_target("matrix:!RoomABC:example.org");
+        assert_eq!(matrix.platform, "matrix");
+        assert_eq!(matrix.chat_id.as_deref(), Some("!RoomABC"));
+        assert_eq!(matrix.thread_id.as_deref(), Some("example.org"));
     }
 
     #[test]
     fn test_parse_target_fallback() {
-        assert_eq!(parse_target("unknown"), DeliveryTarget::Origin);
+        assert_eq!(parse_target("unknown").platform, "local");
+        assert_eq!(parse_target("unknown:123").platform, "local");
     }
 
     #[test]

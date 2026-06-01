@@ -14,6 +14,9 @@ pub fn set_var_if_unset(key: &str, value: &str) {
 /// Apply gateway-friendly defaults for browser and web tooling.
 pub fn apply_gateway_runtime_defaults() {
     set_var_if_unset("HERMES_BROWSER_AUTO_START", "1");
+    set_var_if_unset("HERMES_DDGS_BACKENDS", "lite,html,yandex,mojeek");
+    set_var_if_unset("HERMES_DDGS_TIMEOUT_SECS", "8");
+    set_var_if_unset("HERMES_DDGS_REGION", "cn-zh");
 }
 
 #[cfg(test)]

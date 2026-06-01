@@ -261,6 +261,84 @@ impl ToolHandler for ContentNormalizeHandler {
     }
 }
 
+fn step_tool_hints(step: &str) -> &'static [&'static str] {
+    match step {
+        "open_channel" => &["browser_navigate", "browser_snapshot"],
+        "locate_candidates" => &["browser_snapshot", "browser_scroll"],
+        "apply_filters" => &["browser_snapshot"],
+        "extract_items" => &["browser_snapshot", "content_normalize"],
+        "dedupe_and_rank" => &["content_normalize"],
+        "deliver_digest" => &["send_message", "memory"],
+        _ => &["browser_snapshot"],
+    }
+}
+
+pub struct ContentExecuteHandler;
+
+#[async_trait]
+impl ToolHandler for ContentExecuteHandler {
+    async fn execute(&self, params: Value) -> Result<String, ToolError> {
+        let plan = params.get("plan").cloned().ok_or_else(|| {
+            ToolError::InvalidParams("Missing 'plan' object from content_plan".into())
+        })?;
+        let steps = plan
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| ToolError::InvalidParams("plan.steps must be an array".into()))?;
+        if steps.is_empty() {
+            return Err(ToolError::InvalidParams("plan.steps is empty".into()));
+        }
+
+        let step_index = params
+            .get("step_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        if step_index >= steps.len() {
+            return Ok(json!({
+                "done": true,
+                "step_index": step_index,
+                "message": "All playbook steps completed"
+            })
+            .to_string());
+        }
+
+        let current = &steps[step_index];
+        let step_name = current
+            .get("step")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let suggested_tools = step_tool_hints(step_name);
+
+        Ok(json!({
+            "done": false,
+            "step_index": step_index,
+            "total_steps": steps.len(),
+            "current_step": current,
+            "suggested_tools": suggested_tools,
+            "next_step_index": step_index + 1,
+            "objective": plan.get("objective"),
+        })
+        .to_string())
+    }
+
+    fn schema(&self) -> ToolSchema {
+        let mut props = IndexMap::new();
+        props.insert(
+            "plan".into(),
+            json!({"type":"object","description":"Playbook object returned by content_plan"}),
+        );
+        props.insert(
+            "step_index".into(),
+            json!({"type":"integer","description":"Zero-based step to execute (default 0)","default":0}),
+        );
+        tool_schema(
+            "content_execute",
+            "Return the current playbook step and suggested tools (LLM-driven executor; does not run browser itself).",
+            JsonSchema::object(props, vec!["plan".into()]),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +359,23 @@ mod tests {
         let value: Value = serde_json::from_str(&out).expect("json");
         assert_eq!(value["stats"]["output_count"], 1);
         assert_eq!(value["stats"]["duplicates_removed"], 1);
+    }
+
+    #[tokio::test]
+    async fn execute_returns_first_step_hints() {
+        let handler = ContentExecuteHandler;
+        let plan = ContentPlanHandler
+            .execute(json!({"objective":"test"}))
+            .await
+            .expect("plan");
+        let plan_value: Value = serde_json::from_str(&plan).expect("json");
+        let out = handler
+            .execute(json!({"plan": plan_value, "step_index": 0}))
+            .await
+            .expect("execute");
+        let value: Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(value["done"], false);
+        assert!(value["suggested_tools"].as_array().unwrap().len() >= 1);
     }
 
     #[tokio::test]

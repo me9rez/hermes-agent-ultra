@@ -142,6 +142,20 @@ fn register_builtin_tools_impl(
         "🧩",
         vec![],
     );
+    reg(
+        registry,
+        "content",
+        Arc::new(crate::tools::content_framework::ContentExecuteHandler),
+        "▶️",
+        vec![],
+    );
+    reg(
+        registry,
+        "capture",
+        Arc::new(crate::tools::capture::CaptureHandler),
+        "📥",
+        vec![],
+    );
 
     // -- Terminal ------------------------------------------------------------
     reg(
@@ -446,7 +460,7 @@ fn register_builtin_tools_impl(
     // -- Browser (10 tools) --------------------------------------------------
     {
         let browser_backend: Arc<dyn crate::tools::browser::BrowserBackend> =
-            Arc::new(crate::backends::browser::CdpBrowserBackend::from_env());
+            crate::backends::agent_browser::create_browser_backend();
         reg(
             registry,
             "browser",

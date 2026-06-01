@@ -17,21 +17,43 @@ use hermes_core::{tool_schema, JsonSchema, ToolError, ToolHandler, ToolSchema};
 /// Injected backend for browser automation operations.
 #[async_trait]
 pub trait BrowserBackend: Send + Sync {
-    async fn navigate(&self, url: &str) -> Result<String, ToolError>;
+    async fn navigate(&self, url: &str, task_id: Option<&str>) -> Result<String, ToolError>;
     async fn snapshot(
         &self,
         full: bool,
         user_task: Option<&str>,
         task_id: Option<&str>,
     ) -> Result<String, ToolError>;
-    async fn click(&self, ref_id: &str) -> Result<String, ToolError>;
-    async fn r#type(&self, ref_id: &str, text: &str) -> Result<String, ToolError>;
-    async fn scroll(&self, direction: &str, amount: Option<u32>) -> Result<String, ToolError>;
-    async fn go_back(&self) -> Result<String, ToolError>;
-    async fn press(&self, key: &str) -> Result<String, ToolError>;
-    async fn get_images(&self, selector: Option<&str>) -> Result<String, ToolError>;
-    async fn vision(&self, instruction: &str) -> Result<String, ToolError>;
-    async fn console(&self, action: &str) -> Result<String, ToolError>;
+    async fn click(&self, ref_id: &str, task_id: Option<&str>) -> Result<String, ToolError>;
+    async fn r#type(
+        &self,
+        ref_id: &str,
+        text: &str,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError>;
+    async fn scroll(
+        &self,
+        direction: &str,
+        amount: Option<u32>,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError>;
+    async fn go_back(&self, task_id: Option<&str>) -> Result<String, ToolError>;
+    async fn press(&self, key: &str, task_id: Option<&str>) -> Result<String, ToolError>;
+    async fn get_images(
+        &self,
+        selector: Option<&str>,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError>;
+    async fn vision(
+        &self,
+        instruction: &str,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError>;
+    async fn console(&self, action: &str, task_id: Option<&str>) -> Result<String, ToolError>;
+}
+
+fn param_task_id<'a>(params: &'a Value) -> Option<&'a str> {
+    params.get("task_id").and_then(|v| v.as_str())
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +77,7 @@ impl ToolHandler for BrowserNavigateHandler {
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParams("Missing 'url' parameter".into()))?;
-        self.backend.navigate(url).await
+        self.backend.navigate(url, param_task_id(&params)).await
     }
 
     fn schema(&self) -> ToolSchema {
@@ -155,7 +177,7 @@ impl ToolHandler for BrowserClickHandler {
             .or_else(|| params.get("selector"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParams("Missing 'ref' parameter".into()))?;
-        self.backend.click(ref_id).await
+        self.backend.click(ref_id, param_task_id(&params)).await
     }
 
     fn schema(&self) -> ToolSchema {
@@ -208,7 +230,9 @@ impl ToolHandler for BrowserTypeHandler {
             .get("text")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParams("Missing 'text' parameter".into()))?;
-        self.backend.r#type(ref_id, text).await
+        self.backend
+            .r#type(ref_id, text, param_task_id(&params))
+            .await
     }
 
     fn schema(&self) -> ToolSchema {
@@ -267,7 +291,9 @@ impl ToolHandler for BrowserScrollHandler {
             .get("amount")
             .and_then(|v| v.as_u64())
             .map(|n| n as u32);
-        self.backend.scroll(direction, amount).await
+        self.backend
+            .scroll(direction, amount, param_task_id(&params))
+            .await
     }
 
     fn schema(&self) -> ToolSchema {
@@ -312,8 +338,8 @@ impl BrowserBackHandler {
 
 #[async_trait]
 impl ToolHandler for BrowserBackHandler {
-    async fn execute(&self, _params: Value) -> Result<String, ToolError> {
-        self.backend.go_back().await
+    async fn execute(&self, params: Value) -> Result<String, ToolError> {
+        self.backend.go_back(param_task_id(&params)).await
     }
 
     fn schema(&self) -> ToolSchema {
@@ -346,7 +372,7 @@ impl ToolHandler for BrowserPressHandler {
             .get("key")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParams("Missing 'key' parameter".into()))?;
-        self.backend.press(key).await
+        self.backend.press(key, param_task_id(&params)).await
     }
 
     fn schema(&self) -> ToolSchema {
@@ -384,7 +410,9 @@ impl BrowserGetImagesHandler {
 impl ToolHandler for BrowserGetImagesHandler {
     async fn execute(&self, params: Value) -> Result<String, ToolError> {
         let selector = params.get("selector").and_then(|v| v.as_str());
-        self.backend.get_images(selector).await
+        self.backend
+            .get_images(selector, param_task_id(&params))
+            .await
     }
 
     fn schema(&self) -> ToolSchema {
@@ -425,7 +453,9 @@ impl ToolHandler for BrowserVisionHandler {
             .get("instruction")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParams("Missing 'instruction' parameter".into()))?;
-        self.backend.vision(instruction).await
+        self.backend
+            .vision(instruction, param_task_id(&params))
+            .await
     }
 
     fn schema(&self) -> ToolSchema {
@@ -466,7 +496,7 @@ impl ToolHandler for BrowserConsoleHandler {
             .get("action")
             .and_then(|v| v.as_str())
             .unwrap_or("read");
-        self.backend.console(action).await
+        self.backend.console(action, param_task_id(&params)).await
     }
 
     fn schema(&self) -> ToolSchema {
@@ -492,7 +522,7 @@ mod tests {
     struct MockBrowserBackend;
     #[async_trait]
     impl BrowserBackend for MockBrowserBackend {
-        async fn navigate(&self, url: &str) -> Result<String, ToolError> {
+        async fn navigate(&self, url: &str, _task_id: Option<&str>) -> Result<String, ToolError> {
             Ok(format!("Navigated to {}", url))
         }
         async fn snapshot(
@@ -506,28 +536,50 @@ mod tests {
                 full, user_task, task_id
             ))
         }
-        async fn click(&self, ref_id: &str) -> Result<String, ToolError> {
+        async fn click(&self, ref_id: &str, _task_id: Option<&str>) -> Result<String, ToolError> {
             Ok(format!("Clicked {}", ref_id))
         }
-        async fn r#type(&self, ref_id: &str, text: &str) -> Result<String, ToolError> {
+        async fn r#type(
+            &self,
+            ref_id: &str,
+            text: &str,
+            _task_id: Option<&str>,
+        ) -> Result<String, ToolError> {
             Ok(format!("Typed '{}' into {}", text, ref_id))
         }
-        async fn scroll(&self, dir: &str, _amt: Option<u32>) -> Result<String, ToolError> {
+        async fn scroll(
+            &self,
+            dir: &str,
+            _amt: Option<u32>,
+            _task_id: Option<&str>,
+        ) -> Result<String, ToolError> {
             Ok(format!("Scrolled {}", dir))
         }
-        async fn go_back(&self) -> Result<String, ToolError> {
+        async fn go_back(&self, _task_id: Option<&str>) -> Result<String, ToolError> {
             Ok("Went back".into())
         }
-        async fn press(&self, key: &str) -> Result<String, ToolError> {
+        async fn press(&self, key: &str, _task_id: Option<&str>) -> Result<String, ToolError> {
             Ok(format!("Pressed {}", key))
         }
-        async fn get_images(&self, sel: Option<&str>) -> Result<String, ToolError> {
+        async fn get_images(
+            &self,
+            sel: Option<&str>,
+            _task_id: Option<&str>,
+        ) -> Result<String, ToolError> {
             Ok(format!("Images: {:?}", sel))
         }
-        async fn vision(&self, inst: &str) -> Result<String, ToolError> {
+        async fn vision(
+            &self,
+            inst: &str,
+            _task_id: Option<&str>,
+        ) -> Result<String, ToolError> {
             Ok(format!("Vision: {}", inst))
         }
-        async fn console(&self, action: &str) -> Result<String, ToolError> {
+        async fn console(
+            &self,
+            action: &str,
+            _task_id: Option<&str>,
+        ) -> Result<String, ToolError> {
             Ok(format!("Console: {}", action))
         }
     }

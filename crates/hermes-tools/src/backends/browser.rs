@@ -256,11 +256,11 @@ impl CdpBrowserBackend {
 
 #[async_trait]
 impl BrowserBackend for CdpBrowserBackend {
-    async fn navigate(&self, url: &str) -> Result<String, ToolError> {
+    async fn navigate(&self, url: &str, task_id: Option<&str>) -> Result<String, ToolError> {
         let result = self
             .cdp_command("Page.navigate", json!({"url": url}))
             .await?;
-        Ok(json!({"status": "navigated", "url": url, "cdp": result}).to_string())
+        Ok(json!({"status": "navigated", "url": url, "task_id": task_id, "cdp": result}).to_string())
     }
 
     async fn snapshot(
@@ -273,18 +273,22 @@ impl BrowserBackend for CdpBrowserBackend {
         let result = self
             .cdp_command("Accessibility.getFullAXTree", json!({}))
             .await?;
+        let raw = result.to_string();
+        let snapshot_text = super::browser_snapshot_util::process_snapshot_text(&raw, user_task).await;
         Ok(json!({
             "status": "snapshot",
             "full": full,
+            "snapshot": snapshot_text,
             "user_task": user_task,
             "task_id": task_id,
             "elapsed_ms": started.elapsed().as_millis() as u64,
+            "backend": "cdp",
             "cdp": result
         })
         .to_string())
     }
 
-    async fn click(&self, ref_id: &str) -> Result<String, ToolError> {
+    async fn click(&self, ref_id: &str, task_id: Option<&str>) -> Result<String, ToolError> {
         // Use Runtime.evaluate to find and click the element
         let js = format!(
             "document.querySelector('{}')?.click(); 'clicked'",
@@ -293,10 +297,15 @@ impl BrowserBackend for CdpBrowserBackend {
         let result = self
             .cdp_command("Runtime.evaluate", json!({"expression": js}))
             .await?;
-        Ok(json!({"status": "clicked", "ref": ref_id, "cdp": result}).to_string())
+        Ok(json!({"status": "clicked", "ref": ref_id, "task_id": task_id, "cdp": result}).to_string())
     }
 
-    async fn r#type(&self, ref_id: &str, text: &str) -> Result<String, ToolError> {
+    async fn r#type(
+        &self,
+        ref_id: &str,
+        text: &str,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError> {
         let js = format!(
             "let el = document.querySelector('{}'); if(el) {{ el.value = '{}'; el.dispatchEvent(new Event('input')); 'typed' }} else {{ 'not found' }}",
             ref_id.replace('\'', "\\'"),
@@ -306,12 +315,17 @@ impl BrowserBackend for CdpBrowserBackend {
             .cdp_command("Runtime.evaluate", json!({"expression": js}))
             .await?;
         Ok(
-            json!({"status": "typed", "ref": ref_id, "text": text, "cdp": result})
+            json!({"status": "typed", "ref": ref_id, "text": text, "task_id": task_id, "cdp": result})
                 .to_string(),
         )
     }
 
-    async fn scroll(&self, direction: &str, amount: Option<u32>) -> Result<String, ToolError> {
+    async fn scroll(
+        &self,
+        direction: &str,
+        amount: Option<u32>,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError> {
         let px = amount.unwrap_or(500) as i32;
         let (x, y) = match direction {
             "up" => (0, -px),
@@ -325,22 +339,22 @@ impl BrowserBackend for CdpBrowserBackend {
             .cdp_command("Runtime.evaluate", json!({"expression": js}))
             .await?;
         Ok(
-            json!({"status": "scrolled", "direction": direction, "amount": px, "cdp": result})
+            json!({"status": "scrolled", "direction": direction, "amount": px, "task_id": task_id, "cdp": result})
                 .to_string(),
         )
     }
 
-    async fn go_back(&self) -> Result<String, ToolError> {
+    async fn go_back(&self, task_id: Option<&str>) -> Result<String, ToolError> {
         let result = self
             .cdp_command(
                 "Runtime.evaluate",
                 json!({"expression": "history.back(); 'back'"}),
             )
             .await?;
-        Ok(json!({"status": "navigated_back", "cdp": result}).to_string())
+        Ok(json!({"status": "navigated_back", "task_id": task_id, "cdp": result}).to_string())
     }
 
-    async fn press(&self, key: &str) -> Result<String, ToolError> {
+    async fn press(&self, key: &str, task_id: Option<&str>) -> Result<String, ToolError> {
         let result = self
             .cdp_command(
                 "Input.dispatchKeyEvent",
@@ -350,10 +364,14 @@ impl BrowserBackend for CdpBrowserBackend {
                 }),
             )
             .await?;
-        Ok(json!({"status": "key_pressed", "key": key, "cdp": result}).to_string())
+        Ok(json!({"status": "key_pressed", "key": key, "task_id": task_id, "cdp": result}).to_string())
     }
 
-    async fn get_images(&self, selector: Option<&str>) -> Result<String, ToolError> {
+    async fn get_images(
+        &self,
+        selector: Option<&str>,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError> {
         let sel = selector.unwrap_or("img");
         let js = format!(
             "JSON.stringify(Array.from(document.querySelectorAll('{}')).map(img => ({{src: img.src, alt: img.alt, width: img.width, height: img.height}})))",
@@ -365,10 +383,14 @@ impl BrowserBackend for CdpBrowserBackend {
                 json!({"expression": js, "returnByValue": true}),
             )
             .await?;
-        Ok(json!({"status": "images_found", "selector": sel, "cdp": result}).to_string())
+        Ok(json!({"status": "images_found", "selector": sel, "task_id": task_id, "cdp": result}).to_string())
     }
 
-    async fn vision(&self, instruction: &str) -> Result<String, ToolError> {
+    async fn vision(
+        &self,
+        instruction: &str,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError> {
         // Take a screenshot and analyze with vision model
         let result = self
             .cdp_command("Page.captureScreenshot", json!({"format": "png"}))
@@ -376,19 +398,20 @@ impl BrowserBackend for CdpBrowserBackend {
         Ok(json!({
             "status": "vision_analysis",
             "instruction": instruction,
+            "task_id": task_id,
             "screenshot": result,
             "note": "Screenshot captured; vision analysis requires LLM integration"
         })
         .to_string())
     }
 
-    async fn console(&self, action: &str) -> Result<String, ToolError> {
+    async fn console(&self, action: &str, task_id: Option<&str>) -> Result<String, ToolError> {
         match action {
             "read" => {
                 let result = self.cdp_command("Runtime.evaluate", json!({
                     "expression": "'Console messages require Runtime.consoleAPICalled event listener'"
                 })).await?;
-                Ok(json!({"status": "console_read", "cdp": result}).to_string())
+                Ok(json!({"status": "console_read", "task_id": task_id, "cdp": result}).to_string())
             }
             "clear" => {
                 let result = self
@@ -397,7 +420,7 @@ impl BrowserBackend for CdpBrowserBackend {
                         json!({"expression": "console.clear(); 'cleared'"}),
                     )
                     .await?;
-                Ok(json!({"status": "console_cleared", "cdp": result}).to_string())
+                Ok(json!({"status": "console_cleared", "task_id": task_id, "cdp": result}).to_string())
             }
             other => Err(ToolError::InvalidParams(format!(
                 "Unknown console action: {}",
@@ -409,8 +432,8 @@ impl BrowserBackend for CdpBrowserBackend {
 
 #[async_trait]
 impl BrowserBackend for CamoFoxBrowserBackend {
-    async fn navigate(&self, url: &str) -> Result<String, ToolError> {
-        let mut result = self.inner.navigate(url).await?;
+    async fn navigate(&self, url: &str, task_id: Option<&str>) -> Result<String, ToolError> {
+        let mut result = self.inner.navigate(url, task_id).await?;
         result.push_str(&format!("\n{{\"camofox_profile\":\"{}\"}}", self.profile));
         Ok(result)
     }
@@ -423,28 +446,46 @@ impl BrowserBackend for CamoFoxBrowserBackend {
     ) -> Result<String, ToolError> {
         self.inner.snapshot(full, user_task, task_id).await
     }
-    async fn click(&self, ref_id: &str) -> Result<String, ToolError> {
-        self.inner.click(ref_id).await
+    async fn click(&self, ref_id: &str, task_id: Option<&str>) -> Result<String, ToolError> {
+        self.inner.click(ref_id, task_id).await
     }
-    async fn r#type(&self, ref_id: &str, text: &str) -> Result<String, ToolError> {
-        self.inner.r#type(ref_id, text).await
+    async fn r#type(
+        &self,
+        ref_id: &str,
+        text: &str,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError> {
+        self.inner.r#type(ref_id, text, task_id).await
     }
-    async fn scroll(&self, direction: &str, amount: Option<u32>) -> Result<String, ToolError> {
-        self.inner.scroll(direction, amount).await
+    async fn scroll(
+        &self,
+        direction: &str,
+        amount: Option<u32>,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError> {
+        self.inner.scroll(direction, amount, task_id).await
     }
-    async fn go_back(&self) -> Result<String, ToolError> {
-        self.inner.go_back().await
+    async fn go_back(&self, task_id: Option<&str>) -> Result<String, ToolError> {
+        self.inner.go_back(task_id).await
     }
-    async fn press(&self, key: &str) -> Result<String, ToolError> {
-        self.inner.press(key).await
+    async fn press(&self, key: &str, task_id: Option<&str>) -> Result<String, ToolError> {
+        self.inner.press(key, task_id).await
     }
-    async fn get_images(&self, selector: Option<&str>) -> Result<String, ToolError> {
-        self.inner.get_images(selector).await
+    async fn get_images(
+        &self,
+        selector: Option<&str>,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError> {
+        self.inner.get_images(selector, task_id).await
     }
-    async fn vision(&self, instruction: &str) -> Result<String, ToolError> {
-        self.inner.vision(instruction).await
+    async fn vision(
+        &self,
+        instruction: &str,
+        task_id: Option<&str>,
+    ) -> Result<String, ToolError> {
+        self.inner.vision(instruction, task_id).await
     }
-    async fn console(&self, action: &str) -> Result<String, ToolError> {
-        self.inner.console(action).await
+    async fn console(&self, action: &str, task_id: Option<&str>) -> Result<String, ToolError> {
+        self.inner.console(action, task_id).await
     }
 }

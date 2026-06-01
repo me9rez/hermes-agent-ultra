@@ -27,7 +27,9 @@ use hermes_core::traits::{ParseMode, PlatformAdapter};
 
 use crate::adapter::{AdapterProxyConfig, BasePlatformAdapter};
 use crate::gateway::IncomingMessage;
-use crate::platforms::helpers::split_long_message;
+
+#[path = "weixin_format.rs"]
+mod weixin_format;
 
 const ILINK_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
 const WEIXIN_CDN_BASE: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
@@ -45,9 +47,29 @@ const MSG_TYPE_BOT: i32 = 2;
 const MSG_STATE_FINISH: i32 = 2;
 const ITEM_TEXT: i32 = 1;
 const DEDUP_TTL: Duration = Duration::from_secs(300);
-const MAX_TEXT: usize = 4000;
+const MAX_TEXT: usize = 2000;
+const RATE_LIMIT_ERRCODE: i64 = -2;
 
 const EP_GET_UPLOAD_URL: &str = "ilink/bot/getuploadurl";
+const EP_GET_BOT_QR: &str = "ilink/bot/get_bot_qrcode";
+const EP_GET_QR_STATUS: &str = "ilink/bot/get_qrcode_status";
+const EP_SEND_TYPING: &str = "ilink/bot/sendtyping";
+const EP_GET_CONFIG: &str = "ilink/bot/getconfig";
+const QR_TIMEOUT_MS: u64 = 35_000;
+const CONFIG_TIMEOUT_MS: u64 = 10_000;
+const TYPING_START: u8 = 1;
+const TYPING_STOP: u8 = 2;
+const TYPING_TICKET_TTL: Duration = Duration::from_secs(600);
+
+const WEIXIN_CDN_ALLOWLIST: &[&str] = &[
+    "novac2c.cdn.weixin.qq.com",
+    "ilinkai.weixin.qq.com",
+    "wx.qlogo.cn",
+    "thirdwx.qlogo.cn",
+    "res.wx.qq.com",
+    "mmbiz.qpic.cn",
+    "mmbiz.qlogo.cn",
+];
 const MEDIA_IMAGE: i32 = 1;
 const MEDIA_VIDEO: i32 = 2;
 const MEDIA_FILE: i32 = 3;
@@ -207,6 +229,77 @@ fn mime_from_path(path: &Path) -> &'static str {
     }
 }
 
+/// Credentials returned by [`qr_login`] on successful scan + confirm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeixinCredentials {
+    pub account_id: String,
+    pub token: String,
+    pub base_url: String,
+    pub user_id: String,
+}
+
+/// Short-lived typing ticket cache (10-minute TTL), mirrors Python `TypingTicketCache`.
+struct TypingTicketCache {
+    cache: std::sync::Mutex<HashMap<String, (String, Instant)>>,
+}
+
+impl TypingTicketCache {
+    fn new() -> Self {
+        Self {
+            cache: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn get(&self, user_id: &str) -> Option<String> {
+        let mut g = self.cache.lock().unwrap();
+        let entry = g.get(user_id)?;
+        if entry.1.elapsed() >= TYPING_TICKET_TTL {
+            g.remove(user_id);
+            return None;
+        }
+        Some(entry.0.clone())
+    }
+
+    fn set(&self, user_id: &str, ticket: &str) {
+        let mut g = self.cache.lock().unwrap();
+        g.insert(user_id.to_string(), (ticket.to_string(), Instant::now()));
+    }
+}
+
+/// Validate that a URL's host is in the Weixin CDN allowlist (SSRF guard).
+fn assert_weixin_cdn_url(url: &str) -> Result<(), GatewayError> {
+    let parsed = Url::parse(url)
+        .map_err(|e| GatewayError::Platform(format!("weixin SSRF: invalid url: {e}")))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| GatewayError::Platform("weixin SSRF: url has no host".into()))?;
+    if WEIXIN_CDN_ALLOWLIST.iter().any(|&allowed| allowed == host) {
+        Ok(())
+    } else {
+        Err(GatewayError::Platform(format!(
+            "weixin SSRF: host '{host}' not in CDN allowlist"
+        )))
+    }
+}
+
+/// Distinguish a real rate limit from a stale/expired session.
+///
+/// iLink sometimes returns `ret=-2` / `errcode=-2` with `errmsg="unknown error"`
+/// when the session context_token is stale rather than a genuine rate limit.
+fn is_stale_session(ret: i64, errcode: i64, errmsg: &str) -> bool {
+    (ret == RATE_LIMIT_ERRCODE || errcode == RATE_LIMIT_ERRCODE)
+        && errmsg.to_lowercase() == "unknown error"
+}
+
+/// Classify a chat by its ID suffix.
+fn get_chat_type(chat_id: &str) -> &'static str {
+    if chat_id.ends_with("@chatroom") {
+        "group"
+    } else {
+        "dm"
+    }
+}
+
 /// iLink WeChat configuration (mirrors Python `extra` + env names in docs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WeixinConfig {
@@ -312,6 +405,7 @@ struct WeixinInner {
     base: BasePlatformAdapter,
     context_tokens: Mutex<HashMap<String, String>>,
     seen: Mutex<HashMap<String, Instant>>,
+    typing_cache: TypingTicketCache,
     inbound_tx: RwLock<Option<mpsc::Sender<IncomingMessage>>>,
     stop: Notify,
 }
@@ -339,6 +433,12 @@ impl WeChatAdapter {
                 "Weixin iLink requires token (WEIXIN_TOKEN or saved account file)".into(),
             ));
         }
+        // Load base_url from persisted account if not explicitly configured
+        if config.base_url == default_base_url() || config.base_url.is_empty() {
+            if let Some(url) = Self::load_persisted_base_url(&config.account_id) {
+                config.base_url = url;
+            }
+        }
         let base = BasePlatformAdapter::new(&config.token).with_proxy(config.proxy.clone());
         base.validate_token()?;
         let client = base.build_client()?;
@@ -348,6 +448,7 @@ impl WeChatAdapter {
             base,
             context_tokens: Mutex::new(HashMap::new()),
             seen: Mutex::new(HashMap::new()),
+            typing_cache: TypingTicketCache::new(),
             inbound_tx: RwLock::new(None),
             stop: Notify::new(),
         });
@@ -387,6 +488,17 @@ impl WeChatAdapter {
         let s = std::fs::read_to_string(p).ok()?;
         let v: Value = serde_json::from_str(&s).ok()?;
         v.get("token")
+            .and_then(|t| t.as_str())
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .map(String::from)
+    }
+
+    fn load_persisted_base_url(account_id: &str) -> Option<String> {
+        let p = Self::account_json_path(account_id);
+        let s = std::fs::read_to_string(p).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+        v.get("base_url")
             .and_then(|t| t.as_str())
             .map(str::trim)
             .filter(|x| !x.is_empty())
@@ -450,6 +562,7 @@ impl WeChatAdapter {
             let u = cdn_download_url(&inner.config.cdn_base_url, eq)?;
             Self::download_bytes_http(inner, &u, timeout).await?
         } else if let Some(u) = full_url.filter(|s| !s.is_empty()) {
+            assert_weixin_cdn_url(u)?;
             Self::download_bytes_http(inner, u, timeout).await?
         } else {
             return Err(GatewayError::Platform(
@@ -962,12 +1075,29 @@ impl WeChatAdapter {
             let _ = Self::persist_context(&inner).await;
         }
 
+        // Pre-fetch typing ticket for this user (best-effort, non-blocking)
+        let inner_t = inner.clone();
+        let sender_t = sender.clone();
+        tokio::spawn(async move {
+            let _ = WeChatAdapter::get_typing_ticket(&inner_t, &sender_t).await;
+        });
+
         let item_list: Vec<Value> = message
             .get("item_list")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
         let mut text = Self::extract_text(&item_list);
+
+        // Content fingerprint dedup: MD5 of text content per sender
+        if !text.is_empty() {
+            let md5_hex = Self::md5_hex(text.as_bytes());
+            let content_key = format!("content:{sender}:{md5_hex}");
+            if Self::is_dup(&inner, &content_key).await {
+                debug!(sender = %sender, "weixin: duplicate content fingerprint, skipping");
+                return;
+            }
+        }
         let media_lines = Self::collect_media_lines(&inner, &item_list).await;
         if !media_lines.is_empty() {
             if !text.is_empty() {
@@ -1074,9 +1204,12 @@ impl WeChatAdapter {
 
     /// Send plain text over iLink (with `context_token` when known).
     pub async fn send_ilink_text(&self, to_user_id: &str, text: &str) -> Result<(), GatewayError> {
+        let formatted = weixin_format::format_message_for_weixin(text);
         let key = format!("{}:{}", self.inner.config.account_id, to_user_id);
         let ctx = self.inner.context_tokens.lock().await.get(&key).cloned();
-        for chunk in split_long_message(text, MAX_TEXT) {
+        let chunks =
+            weixin_format::split_delivery_units(&formatted, weixin_format::DEFAULT_MAX_DELIVERY_LENGTH);
+        for chunk in &chunks {
             let client_id = format!("hermes-weixin-{}", Uuid::new_v4().simple());
             let mut msg = json!({
                 "from_user_id": "",
@@ -1091,13 +1224,43 @@ impl WeChatAdapter {
                     .unwrap()
                     .insert("context_token".into(), json!(t));
             }
-            Self::ilink_post(
+            let resp = Self::ilink_post(
                 &self.inner,
                 EP_SEND_MESSAGE,
                 json!({ "msg": msg }),
                 API_TIMEOUT_MS,
             )
             .await?;
+
+            // If the session looks stale (rate-limit code + "unknown error"),
+            // remove context_token and retry once without it.
+            let ret = resp.get("ret").and_then(|v| v.as_i64()).unwrap_or(0);
+            let errcode = resp.get("errcode").and_then(|v| v.as_i64()).unwrap_or(0);
+            let errmsg = resp
+                .get("errmsg")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if is_stale_session(ret, errcode, errmsg) {
+                debug!(to_user_id, "weixin: stale session detected, retrying without context_token");
+                self.inner.context_tokens.lock().await.remove(&key);
+                let _ = Self::persist_context(&self.inner).await;
+                let client_id2 = format!("hermes-weixin-{}", Uuid::new_v4().simple());
+                let msg2 = json!({
+                    "from_user_id": "",
+                    "to_user_id": to_user_id,
+                    "client_id": client_id2,
+                    "message_type": MSG_TYPE_BOT,
+                    "message_state": MSG_STATE_FINISH,
+                    "item_list": [{"type": ITEM_TEXT, "text_item": {"text": chunk}}],
+                });
+                Self::ilink_post(
+                    &self.inner,
+                    EP_SEND_MESSAGE,
+                    json!({ "msg": msg2 }),
+                    API_TIMEOUT_MS,
+                )
+                .await?;
+            }
         }
         Ok(())
     }
@@ -1239,6 +1402,302 @@ impl WeChatAdapter {
         .await?;
         Ok(())
     }
+
+    /// Fetch a typing ticket for `user_id` via `getconfig`, caching the result for 10 min.
+    async fn get_typing_ticket(inner: &WeixinInner, user_id: &str) -> Option<String> {
+        if let Some(ticket) = inner.typing_cache.get(user_id) {
+            return Some(ticket);
+        }
+        // Fetch from API
+        let ctx_key = format!("{}:{}", inner.config.account_id, user_id);
+        let ctx = inner.context_tokens.lock().await.get(&ctx_key).cloned();
+        let mut payload = json!({ "ilink_user_id": user_id });
+        if let Some(ref ct) = ctx {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("context_token".into(), json!(ct));
+        }
+        match Self::ilink_post(inner, EP_GET_CONFIG, payload, CONFIG_TIMEOUT_MS).await {
+            Ok(resp) => {
+                if let Some(ticket) = resp
+                    .get("typing_ticket")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    inner.typing_cache.set(user_id, ticket);
+                    Some(ticket.to_string())
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                debug!(user_id, error = %e, "weixin: getconfig failed for typing ticket");
+                None
+            }
+        }
+    }
+
+    /// Send a typing start/stop signal to the iLink API.
+    async fn send_typing_signal(
+        inner: &WeixinInner,
+        to_user_id: &str,
+        status: u8,
+    ) -> Result<(), GatewayError> {
+        let ticket = Self::get_typing_ticket(inner, to_user_id)
+            .await
+            .ok_or_else(|| {
+                GatewayError::Platform("weixin: no typing ticket available".into())
+            })?;
+        Self::ilink_post(
+            inner,
+            EP_SEND_TYPING,
+            json!({
+                "ilink_user_id": to_user_id,
+                "typing_ticket": ticket,
+                "status": status,
+            }),
+            CONFIG_TIMEOUT_MS,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// Perform a GET request to an iLink endpoint (no auth token required).
+async fn ilink_get(
+    client: &Client,
+    base_url: &str,
+    endpoint: &str,
+    timeout_ms: u64,
+) -> Result<Value, GatewayError> {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    let url = format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        endpoint.trim_start_matches('/')
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("ilink-app-id"),
+        HeaderValue::from_static(ILINK_APP_ID),
+    );
+    headers.insert(
+        HeaderName::from_static("ilink-app-clientversion"),
+        HeaderValue::from_str(&ILINK_APP_CLIENT_VERSION.to_string()).unwrap(),
+    );
+    let resp = client
+        .get(&url)
+        .headers(headers)
+        .timeout(Duration::from_millis(timeout_ms.max(1000)))
+        .send()
+        .await
+        .map_err(|e| GatewayError::ConnectionFailed(format!("weixin GET {endpoint}: {e}")))?;
+    let txt = resp
+        .text()
+        .await
+        .map_err(|e| GatewayError::ConnectionFailed(format!("weixin read GET {endpoint}: {e}")))?;
+    serde_json::from_str(&txt).map_err(|e| {
+        GatewayError::ConnectionFailed(format!("weixin JSON GET {endpoint}: {e} [{txt}]"))
+    })
+}
+
+/// QR code login for Weixin iLink Bot.
+///
+/// Performs the interactive QR scan flow:
+/// 1. Fetches a QR code URL from `get_bot_qrcode`
+/// 2. Prints the URL to the terminal
+/// 3. Polls `get_qrcode_status` every 2 seconds
+/// 4. On "confirmed", extracts credentials and persists them
+///
+/// Returns [`WeixinCredentials`] on success.
+pub async fn qr_login(
+    hermes_home: &Path,
+    bot_type: &str,
+    timeout_seconds: u64,
+) -> Result<WeixinCredentials, GatewayError> {
+    let client = Client::builder()
+        .build()
+        .map_err(|e| GatewayError::Platform(format!("weixin qr: build client: {e}")))?;
+
+    // Step 1: fetch QR code
+    let qr_resp = ilink_get(
+        &client,
+        ILINK_BASE_URL,
+        &format!("{EP_GET_BOT_QR}?bot_type={bot_type}"),
+        QR_TIMEOUT_MS,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "weixin: failed to fetch QR code");
+        e
+    })?;
+
+    let qrcode_value = qr_resp
+        .get("qrcode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let qrcode_url = qr_resp
+        .get("qrcode_img_content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if qrcode_value.is_empty() {
+        return Err(GatewayError::Platform(
+            "weixin: QR response missing qrcode".into(),
+        ));
+    }
+
+    // Print QR URL to terminal (no qrcode crate required)
+    println!("\n请使用微信扫描以下二维码：");
+    if !qrcode_url.is_empty() {
+        println!("{qrcode_url}");
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut current_base_url = ILINK_BASE_URL.to_string();
+    let mut refresh_count = 0u32;
+    let mut qrcode_value = qrcode_value;
+
+    // Step 2: poll status
+    while Instant::now() < deadline {
+        let status_resp = match ilink_get(
+            &client,
+            &current_base_url,
+            &format!("{EP_GET_QR_STATUS}?qrcode={qrcode_value}"),
+            QR_TIMEOUT_MS,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, "weixin: QR poll error");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        let status = status_resp
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("wait");
+
+        match status {
+            "wait" => {
+                print!(".");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            "scaned" => {
+                println!("\n已扫码，请在微信里确认...");
+            }
+            "scaned_but_redirect" => {
+                if let Some(host) = status_resp
+                    .get("redirect_host")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    current_base_url = format!("https://{host}");
+                }
+            }
+            "expired" => {
+                refresh_count += 1;
+                if refresh_count > 3 {
+                    println!("\n二维码多次过期，请重新执行登录。");
+                    return Err(GatewayError::Platform(
+                        "weixin: QR code expired after 3 refreshes".into(),
+                    ));
+                }
+                println!("\n二维码已过期，正在刷新... ({refresh_count}/3)");
+                match ilink_get(
+                    &client,
+                    ILINK_BASE_URL,
+                    &format!("{EP_GET_BOT_QR}?bot_type={bot_type}"),
+                    QR_TIMEOUT_MS,
+                )
+                .await
+                {
+                    Ok(new_qr) => {
+                        qrcode_value = new_qr
+                            .get("qrcode")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let new_url = new_qr
+                            .get("qrcode_img_content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !new_url.is_empty() {
+                            println!("{new_url}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "weixin: QR refresh failed");
+                        return Err(e);
+                    }
+                }
+            }
+            "confirmed" => {
+                let account_id = status_resp
+                    .get("ilink_bot_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let token = status_resp
+                    .get("bot_token")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let base_url = status_resp
+                    .get("baseurl")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(ILINK_BASE_URL)
+                    .to_string();
+                let user_id = status_resp
+                    .get("ilink_user_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if account_id.is_empty() || token.is_empty() {
+                    return Err(GatewayError::Platform(
+                        "weixin: QR confirmed but credential payload was incomplete".into(),
+                    ));
+                }
+
+                // Save credentials
+                let accounts_dir = hermes_home.join("weixin").join("accounts");
+                let _ = std::fs::create_dir_all(&accounts_dir);
+                let account_path = accounts_dir.join(format!("{account_id}.json"));
+                let payload = json!({
+                    "token": token,
+                    "base_url": base_url,
+                    "user_id": user_id,
+                });
+                let _ = std::fs::write(&account_path, payload.to_string());
+
+                println!("\n微信连接成功，account_id={account_id}");
+
+                return Ok(WeixinCredentials {
+                    account_id,
+                    token,
+                    base_url,
+                    user_id,
+                });
+            }
+            _ => {}
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    println!("\n微信登录超时。");
+    Err(GatewayError::Platform(
+        "weixin: QR login timed out".into(),
+    ))
 }
 
 fn normalized_image_content_type(content_type: Option<&str>) -> Option<String> {
@@ -1467,6 +1926,16 @@ impl PlatformAdapter for WeChatAdapter {
 
     fn platform_name(&self) -> &str {
         "weixin"
+    }
+
+    async fn trigger_typing(&self, chat_id: &str) -> Result<(), GatewayError> {
+        match WeChatAdapter::send_typing_signal(&self.inner, chat_id, TYPING_START).await {
+            Ok(()) => {}
+            Err(e) => {
+                debug!(chat_id, error = %e, "weixin: trigger_typing failed");
+            }
+        }
+        Ok(())
     }
 }
 

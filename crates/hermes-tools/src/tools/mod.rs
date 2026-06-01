@@ -12,6 +12,7 @@ pub mod cronjob;
 pub mod dashboard_control;
 pub mod delegation;
 pub mod env_passthrough;
+pub mod feishu;
 pub mod file;
 pub mod homeassistant;
 pub mod image_gen;

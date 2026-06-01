@@ -646,6 +646,39 @@ fn register_builtin_tools_impl(
         vec![],
     );
 
+    // -- Feishu (3 tools) ----------------------------------------------------
+    if let Some(feishu_client) = crate::tools::feishu::FeishuApiClient::from_env() {
+        let feishu = Arc::new(feishu_client);
+        let feishu_deps = vec!["FEISHU_APP_ID".into()];
+        reg(
+            registry,
+            "feishu",
+            Arc::new(crate::tools::feishu::FeishuCalendarHandler::new(
+                feishu.clone(),
+            )),
+            "📅",
+            feishu_deps.clone(),
+        );
+        reg(
+            registry,
+            "feishu",
+            Arc::new(crate::tools::feishu::FeishuDocsHandler::new(
+                feishu.clone(),
+            )),
+            "📄",
+            feishu_deps.clone(),
+        );
+        reg(
+            registry,
+            "feishu",
+            Arc::new(crate::tools::feishu::FeishuTaskHandler::new(feishu)),
+            "✅",
+            feishu_deps,
+        );
+    } else {
+        tracing::debug!("Skipping feishu tools — FEISHU_APP_ID / FEISHU_APP_SECRET not set");
+    }
+
     tracing::info!(
         tool_count = registry.list_tools().len(),
         "Registered built-in tools"

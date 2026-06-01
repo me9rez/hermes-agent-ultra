@@ -5,28 +5,21 @@
 
 mod gateway_handlers;
 
-use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::Aead;
-use base64::Engine as _;
+use aes_gcm::Aes256Gcm;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use clap_complete::{Shell as CompletionShell, generate};
-use hermes_agent::AgentLoop;
+use base64::Engine as _;
+use clap_complete::{generate, Shell as CompletionShell};
 use hermes_agent::session_persistence::SessionPersistence;
+use hermes_agent::{AgentLoop};
 use hermes_auth::{
-    AuthManager, FileTokenStore, OAuth2Endpoints, OAuthCredential, exchange_refresh_token,
+    exchange_refresh_token, AuthManager, FileTokenStore, OAuth2Endpoints, OAuthCredential,
 };
-use hermes_cli::App;
 use hermes_cli::app::{
     async_tool_dispatch_for, bridge_tool_registry, build_agent_config, build_provider,
     provider_api_key_from_env,
 };
 use hermes_cli::auth::{
-    ANTHROPIC_OAUTH_CLIENT_ID, ANTHROPIC_OAUTH_TOKEN_URL, AnthropicOAuthLoginOptions,
-    CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_TOKEN_URL, CodexDeviceCodeOptions, DEFAULT_CODEX_BASE_URL,
-    DEFAULT_NOUS_AGENT_KEY_MIN_TTL_SECONDS, DEFAULT_NOUS_CLIENT_ID, DEFAULT_NOUS_PORTAL_URL,
-    DEFAULT_OPENAI_BASE_URL, GeminiOAuthLoginOptions, NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
-    NousAuthState, NousDeviceCodeOptions, NousRuntimeCredentials,
-    QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, QWEN_OAUTH_CLIENT_ID, QWEN_OAUTH_TOKEN_URL,
     clear_provider_auth_state, discover_existing_anthropic_oauth, discover_existing_nous_oauth,
     discover_existing_openai_codex_oauth, discover_existing_openai_oauth,
     get_anthropic_oauth_status, get_gemini_oauth_auth_status, get_qwen_auth_status,
@@ -34,31 +27,38 @@ use hermes_cli::auth::{
     login_openai_codex_device_code, login_openai_device_code, read_provider_auth_state,
     resolve_gemini_oauth_runtime_credentials, resolve_nous_runtime_credentials,
     resolve_qwen_runtime_credentials, save_codex_auth_state, save_nous_auth_state,
-    save_openai_auth_state, save_provider_auth_state,
+    save_openai_auth_state, save_provider_auth_state, AnthropicOAuthLoginOptions,
+    CodexDeviceCodeOptions, GeminiOAuthLoginOptions, NousAuthState, NousDeviceCodeOptions,
+    NousRuntimeCredentials, ANTHROPIC_OAUTH_CLIENT_ID, ANTHROPIC_OAUTH_TOKEN_URL,
+    CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_TOKEN_URL, DEFAULT_CODEX_BASE_URL,
+    DEFAULT_NOUS_AGENT_KEY_MIN_TTL_SECONDS, DEFAULT_NOUS_CLIENT_ID, DEFAULT_NOUS_PORTAL_URL,
+    DEFAULT_OPENAI_BASE_URL, NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
+    QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, QWEN_OAUTH_CLIENT_ID, QWEN_OAUTH_TOKEN_URL,
 };
 use hermes_cli::cli::{Cli, CliCommand};
 use hermes_cli::config_env::hydrate_env_from_config;
-use hermes_cli::cron_delivery::GatewayCronDeliveryBackend;
 use hermes_cli::model_switch::{
     cached_provider_catalog_status, curated_provider_slugs, normalize_provider_model,
     provider_catalog_entries, provider_model_ids,
 };
 use hermes_cli::providers::provider_capability_for;
+use hermes_cli::cron_delivery::GatewayCronDeliveryBackend;
 use hermes_cli::runtime_tool_wiring::{
     wire_cron_scheduler_backend, wire_gateway_clarify_backend, wire_gateway_messaging_backend,
 };
 use hermes_cli::terminal_backend::build_terminal_backend;
+use hermes_cli::App;
 use hermes_config::{
-    ConfigError, GatewayConfig, PlatformConfig, UnauthorizedDmBehavior, apply_user_config_patch,
-    gateway_pid_path_in, hermes_home, load_config, load_user_config_file, save_config_yaml,
-    state_dir, user_config_field_display, validate_config,
+    apply_user_config_patch, gateway_pid_path_in, hermes_home, load_config, load_user_config_file,
+    save_config_yaml, state_dir, user_config_field_display, validate_config, ConfigError,
+    GatewayConfig, PlatformConfig, UnauthorizedDmBehavior,
 };
 use hermes_core::AgentError;
-use hermes_core::MessageRole;
 use hermes_core::PlatformAdapter;
+use hermes_core::MessageRole;
 use hermes_cron::{
-    CronCompletionEvent, CronError, CronRunner, CronScheduler, FileJobPersistence,
-    cron_scheduler_for_data_dir,
+    cron_scheduler_for_data_dir, CronCompletionEvent, CronError, CronRunner, CronScheduler,
+    FileJobPersistence,
 };
 use hermes_gateway::gateway::GatewayConfig as RuntimeGatewayConfig;
 use hermes_gateway::gateway::IncomingMessage as GatewayIncomingMessage;
@@ -89,15 +89,15 @@ use hermes_gateway::tool_backends::ClarifyDispatcher;
 use hermes_gateway::{DmManager, Gateway, GatewayRuntimeContext, SessionManager};
 use hermes_skills::{FileSkillStore, SkillManager};
 use hermes_telemetry::init_telemetry_from_env;
-use hermes_tools::{ToolRegistry, default_tool_policy_counters_path, load_tool_policy_counters};
+use hermes_tools::{default_tool_policy_counters_path, load_tool_policy_counters, ToolRegistry};
 use hmac::KeyInit as _;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
@@ -317,7 +317,11 @@ fn main_thread_entry() -> Result<(), i32> {
     );
 
     if cfg!(debug_assertions) {
-        if std::env::var("HERMES_CLI_PARSE_PROBE").ok().as_deref() == Some("1") {
+        if std::env::var("HERMES_CLI_PARSE_PROBE")
+            .ok()
+            .as_deref()
+            == Some("1")
+        {
             eprintln!("[probe] before Cli::try_parse()");
             let parse_result = Cli::try_parse();
             eprintln!("[probe] after Cli::try_parse()");
@@ -688,7 +692,9 @@ async fn run(cli: Cli) {
             target,
             yes,
         } => hermes_cli::commands::handle_cli_memory(action, target, yes).await,
-        CliCommand::Interest { action } => hermes_cli::commands::handle_cli_interest(action).await,
+        CliCommand::Interest { action } => {
+            hermes_cli::commands::handle_cli_interest(action).await
+        }
         CliCommand::Mcp {
             action,
             name,
@@ -734,11 +740,9 @@ async fn run(cli: Cli) {
             .await
         }
         CliCommand::Whatsapp { action } => hermes_cli::commands::handle_cli_whatsapp(action).await,
-        CliCommand::Pairing {
-            action,
-            device_id,
-            args,
-        } => hermes_cli::commands::handle_cli_pairing(action, device_id, args).await,
+        CliCommand::Pairing { action, device_id } => {
+            hermes_cli::commands::handle_cli_pairing(action, device_id).await
+        }
         CliCommand::Claw { action } => hermes_cli::commands::handle_cli_claw(action).await,
         CliCommand::Acp { action } => hermes_cli::commands::handle_cli_acp(action).await,
         CliCommand::Backup { output } => hermes_cli::commands::handle_cli_backup(output).await,
@@ -830,7 +834,9 @@ async fn run(cli: Cli) {
             title,
             mode,
             diarize,
-        } => hermes_cli::commands::handle_cli_meeting(action, audio, title, mode, diarize).await,
+        } => {
+            hermes_cli::commands::handle_cli_meeting(action, audio, title, mode, diarize).await
+        }
         CliCommand::PluginExternal(raw) => {
             hermes_cli::commands::handle_cli_external_plugin_subcommand(raw).await
         }
@@ -2035,7 +2041,8 @@ async fn install_cua_driver_rs_windows() -> bool {
     };
 
     println!("  - installing cua-driver-rs via official installer...");
-    let script = "irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.ps1 | iex";
+    let script =
+        "irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.ps1 | iex";
     let output = tokio::process::Command::new(ps_bin)
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
@@ -2979,12 +2986,14 @@ async fn run_gateway(
                 }))
                 .await;
             gateway
-                .set_streaming_handler_with_context(Arc::new(move |messages, ctx, on_chunk| {
-                    let deps = handler_deps_stream.clone();
-                    Box::pin(gateway_handlers::gateway_handle_message_streaming(
-                        messages, ctx, on_chunk, deps,
-                    ))
-                }))
+                .set_streaming_handler_with_context(Arc::new(
+                    move |messages, ctx, on_chunk| {
+                        let deps = handler_deps_stream.clone();
+                        Box::pin(gateway_handlers::gateway_handle_message_streaming(
+                            messages, ctx, on_chunk, deps,
+                        ))
+                    },
+                ))
                 .await;
 
             // Cron: same on-disk dir as `hermes cron` + real LLM/tools as the gateway agent.
@@ -2995,8 +3004,9 @@ async fn run_gateway(
             let cron_persistence = Arc::new(FileJobPersistence::with_dir(cron_dir.clone()));
             let cron_llm = build_provider(&config, &default_model);
             let cron_runner = Arc::new(
-                CronRunner::new(cron_llm, agent_tools_for_cron)
-                    .with_delivery(Arc::new(GatewayCronDeliveryBackend::new(gateway.clone()))),
+                CronRunner::new(cron_llm, agent_tools_for_cron).with_delivery(Arc::new(
+                    GatewayCronDeliveryBackend::new(gateway.clone()),
+                )),
             );
             let mut cron_scheduler = CronScheduler::new(cron_persistence, cron_runner);
             let (cron_tx, cron_rx) = broadcast::channel::<CronCompletionEvent>(64);
@@ -3007,11 +3017,7 @@ async fn run_gateway(
                 .map_err(|e| AgentError::Config(format!("cron load: {e}")))?;
             cron_scheduler.start().await;
             let cron_scheduler = Arc::new(cron_scheduler);
-            wire_cron_scheduler_backend(
-                &tool_registry,
-                cron_scheduler.clone(),
-                messaging_session.clone(),
-            );
+            wire_cron_scheduler_backend(&tool_registry, cron_scheduler.clone(), messaging_session.clone());
             wire_gateway_messaging_backend(
                 &tool_registry,
                 gateway.clone(),
@@ -3194,10 +3200,7 @@ fn gateway_session_manager_with_persistence(config: &GatewayConfig) -> SessionMa
         .unwrap_or_else(hermes_home);
     let sp = Arc::new(SessionPersistence::new(&home));
     if let Err(err) = sp.ensure_db() {
-        tracing::debug!(
-            "sessions db init skipped for gateway history hydration: {}",
-            err
-        );
+        tracing::debug!("sessions db init skipped for gateway history hydration: {}", err);
     }
     let group_sessions_per_user = config
         .platforms
@@ -3389,8 +3392,10 @@ async fn configure_platform_basic_prompts(
             set_extra_string_if_nonempty(p, "bot_id", &bot_id);
             let secret = prompt_line("WeCom AI Bot secret (WECOM_SECRET): ").await?;
             set_extra_string_if_nonempty(p, "secret", &secret);
-            let ws = prompt_line("WeCom websocket_url (default wss://openws.work.weixin.qq.com): ")
-                .await?;
+            let ws = prompt_line(
+                "WeCom websocket_url (default wss://openws.work.weixin.qq.com): ",
+            )
+            .await?;
             if !ws.trim().is_empty() {
                 set_extra_string_if_nonempty(p, "websocket_url", &ws);
             }
@@ -3627,14 +3632,8 @@ fn gateway_platform_is_configured(key: &str, platform: Option<&PlatformConfig>) 
             platform_token_or_extra(platform).is_some()
                 && platform_extra_nonempty(platform, "account_id")
         }
-        "qqbot" => {
-            platform_extra_nonempty(platform, "app_id")
-                && platform_extra_nonempty(platform, "client_secret")
-        }
-        "wecom" => {
-            platform_extra_nonempty(platform, "bot_id")
-                && platform_extra_nonempty(platform, "secret")
-        }
+        "qqbot" => platform_extra_nonempty(platform, "app_id") && platform_extra_nonempty(platform, "client_secret"),
+        "wecom" => platform_extra_nonempty(platform, "bot_id") && platform_extra_nonempty(platform, "secret"),
         "wecom_callback" => {
             platform_extra_nonempty(platform, "corp_id")
                 && platform_extra_nonempty(platform, "corp_secret")
@@ -3642,16 +3641,13 @@ fn gateway_platform_is_configured(key: &str, platform: Option<&PlatformConfig>) 
                 && platform_extra_nonempty(platform, "encoding_aes_key")
         }
         "dingtalk" => {
-            platform_extra_nonempty(platform, "client_id")
-                && platform_extra_nonempty(platform, "client_secret")
+            platform_extra_nonempty(platform, "client_id") && platform_extra_nonempty(platform, "client_secret")
         }
         "feishu" => {
-            platform_extra_nonempty(platform, "app_id")
-                && platform_extra_nonempty(platform, "app_secret")
+            platform_extra_nonempty(platform, "app_id") && platform_extra_nonempty(platform, "app_secret")
         }
         "sms" => {
-            platform_extra_nonempty(platform, "account_sid")
-                && platform_extra_nonempty(platform, "auth_token")
+            platform_extra_nonempty(platform, "account_sid") && platform_extra_nonempty(platform, "auth_token")
         }
         "webhook" => platform_extra_nonempty(platform, "secret"),
         "api_server" => true,
@@ -3659,10 +3655,7 @@ fn gateway_platform_is_configured(key: &str, platform: Option<&PlatformConfig>) 
     }
 }
 
-fn gateway_platform_menu_label(
-    entry: &GatewayPlatformEntry,
-    platform: Option<&PlatformConfig>,
-) -> String {
+fn gateway_platform_menu_label(entry: &GatewayPlatformEntry, platform: Option<&PlatformConfig>) -> String {
     let status = if gateway_platform_is_configured(entry.key, platform) {
         "configured"
     } else {
@@ -3690,8 +3683,7 @@ async fn configure_gateway_platform(
                 true,
             )
             .await?;
-            *disk =
-                load_user_config_file(cfg_path).map_err(|e| AgentError::Config(e.to_string()))?;
+            *disk = load_user_config_file(cfg_path).map_err(|e| AgentError::Config(e.to_string()))?;
             let wx = disk
                 .platforms
                 .entry("weixin".to_string())
@@ -3778,8 +3770,7 @@ async fn configure_gateway_platform(
                 false,
             )
             .await?;
-            *disk =
-                load_user_config_file(cfg_path).map_err(|e| AgentError::Config(e.to_string()))?;
+            *disk = load_user_config_file(cfg_path).map_err(|e| AgentError::Config(e.to_string()))?;
             let tg = disk
                 .platforms
                 .entry("telegram".to_string())
@@ -3877,17 +3868,9 @@ fn build_agent_for_gateway_context(
     agent_tools: Arc<hermes_agent::agent_loop::ToolRegistry>,
     runtime_tools: Arc<hermes_tools::ToolRegistry>,
 ) -> AgentLoop {
-    let perf_enabled = std::env::var("HERMES_GATEWAY_AGENT_BUILD_PERF")
-        .map(|v| {
-            let lowered = v.trim().to_ascii_lowercase();
-            lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on"
-        })
-        .unwrap_or(false);
-    let build_start = Instant::now();
     let effective_model =
         resolve_model_for_gateway(config.model.as_deref().unwrap_or("gpt-4o"), ctx);
     let provider = build_provider(config, &effective_model);
-    let provider_ready_ms = build_start.elapsed().as_millis() as u64;
     let mut agent_config = build_agent_config(config, &effective_model);
     if let Some(personality) = ctx.personality.clone() {
         agent_config.personality = Some(personality);
@@ -3924,26 +3907,10 @@ fn build_agent_for_gateway_context(
             Path::new(h),
         );
     }
-    let config_ready_ms = build_start.elapsed().as_millis() as u64;
-    let base_agent = AgentLoop::new(agent_config, agent_tools, provider)
-        .with_async_tool_dispatch(async_tool_dispatch_for(runtime_tools));
-    let base_ready_ms = build_start.elapsed().as_millis() as u64;
-    let agent = hermes_agent::attach_agent_runtime(base_agent);
-    let runtime_ready_ms = build_start.elapsed().as_millis() as u64;
-    if perf_enabled {
-        tracing::info!(
-            session_key = %ctx.session_key,
-            model = %effective_model,
-            provider_ready_ms = provider_ready_ms,
-            config_ready_ms = config_ready_ms,
-            base_agent_ready_ms = base_ready_ms,
-            runtime_ready_ms = runtime_ready_ms,
-            runtime_attach_ms = runtime_ready_ms.saturating_sub(base_ready_ms),
-            total_ms = runtime_ready_ms,
-            "gateway agent build perf breakdown"
-        );
-    }
-    agent
+    hermes_agent::attach_agent_runtime(
+        AgentLoop::new(agent_config, agent_tools, provider)
+            .with_async_tool_dispatch(async_tool_dispatch_for(runtime_tools)),
+    )
 }
 
 const GATEWAY_AGENT_CACHE_MAX_SIZE: usize = 128;
@@ -3957,12 +3924,8 @@ struct GatewayAgentCacheEntry {
 
 type GatewayAgentCache = Arc<tokio::sync::Mutex<HashMap<String, GatewayAgentCacheEntry>>>;
 
-fn gateway_agent_signature(
-    config: &hermes_config::GatewayConfig,
-    ctx: &GatewayRuntimeContext,
-) -> String {
-    let effective_model =
-        resolve_model_for_gateway(config.model.as_deref().unwrap_or("gpt-4o"), ctx);
+fn gateway_agent_signature(config: &hermes_config::GatewayConfig, ctx: &GatewayRuntimeContext) -> String {
+    let effective_model = resolve_model_for_gateway(config.model.as_deref().unwrap_or("gpt-4o"), ctx);
     let home = ctx
         .home
         .as_deref()
@@ -4264,10 +4227,9 @@ fn build_gateway_dm_manager(config: &hermes_config::GatewayConfig) -> DmManager 
         .all(|(name, cfg)| platform_dm_is_open(name, cfg))
     {
         DmManager::with_open_behavior()
-    } else if enabled
-        .iter()
-        .any(|(_, cfg)| cfg.unauthorized_dm_behavior == UnauthorizedDmBehavior::Ignore)
-    {
+    } else if enabled.iter().any(|(_, cfg)| {
+        cfg.unauthorized_dm_behavior == UnauthorizedDmBehavior::Ignore
+    }) {
         DmManager::with_ignore_behavior()
     } else {
         DmManager::with_pair_behavior()
@@ -4468,7 +4430,6 @@ async fn run_api_server_inbound_loop(
             interaction_id: None,
             interaction_token: None,
             role_ids: vec![],
-            ..Default::default()
         };
         if let Err(err) = gateway.route_message(&incoming).await {
             tracing::warn!("Failed to route api_server message: {}", err);
@@ -4492,7 +4453,6 @@ async fn run_webhook_inbound_loop(gateway: Arc<Gateway>, mut rx: mpsc::Receiver<
             interaction_id: None,
             interaction_token: None,
             role_ids: vec![],
-            ..Default::default()
         };
         if let Err(err) = gateway.route_message(&incoming).await {
             tracing::warn!("Failed to route webhook message: {}", err);
@@ -4593,7 +4553,9 @@ async fn register_gateway_adapters(
                         let adapter = Arc::new(adapter);
                         let (tx, rx) = mpsc::channel::<GatewayIncomingMessage>(512);
                         adapter.set_inbound_sender(tx).await;
-                        gateway.register_discord_adapter(adapter.clone()).await;
+                        gateway
+                            .register_adapter("discord", adapter.clone())
+                            .await;
                         let gw_clone = gateway.clone();
                         sidecar_tasks.push(tokio::spawn(async move {
                             run_gateway_incoming_loop(gw_clone, rx, "discord").await;
@@ -4762,22 +4724,12 @@ async fn register_gateway_adapters(
                 let feishu_cfg = FeishuConfig {
                     app_id,
                     app_secret,
-                    domain: extra_string(platform_cfg, "domain"),
                     verification_token: extra_string(platform_cfg, "verification_token"),
                     encrypt_key: extra_string(platform_cfg, "encrypt_key"),
                     proxy: Default::default(),
                 };
                 match FeishuAdapter::new(feishu_cfg) {
-                    Ok(adapter) => {
-                        let adapter = Arc::new(adapter);
-                        let (tx, rx) = mpsc::channel::<GatewayIncomingMessage>(512);
-                        adapter.set_inbound_sender(tx).await;
-                        gateway.register_adapter("feishu", adapter).await;
-                        let gw_clone = gateway.clone();
-                        sidecar_tasks.push(tokio::spawn(async move {
-                            run_gateway_incoming_loop(gw_clone, rx, "feishu").await;
-                        }));
-                    }
+                    Ok(adapter) => gateway.register_adapter("feishu", Arc::new(adapter)).await,
                     Err(e) => println!("Feishu enabled but failed to initialize: {}", e),
                 }
             }
@@ -5104,7 +5056,6 @@ async fn run_telegram_poll_loop(gateway: Arc<Gateway>, adapter: Arc<TelegramAdap
                         interaction_id: None,
                         interaction_token: None,
                         role_ids: vec![],
-                        ..Default::default()
                     };
 
                     if let Err(err) = gateway.route_message(&incoming).await {
@@ -5477,10 +5428,7 @@ async fn hydrate_provider_env_from_vault_for_cli(cli: &Cli) -> Result<(), AgentE
             Ok(creds) => {
                 hermes_cli::env_vars::set_var("NOUS_API_KEY", creds.api_key.clone());
                 if !creds.base_url.trim().is_empty() {
-                    hermes_cli::env_vars::set_var(
-                        "NOUS_INFERENCE_BASE_URL",
-                        creds.base_url.clone(),
-                    );
+                    hermes_cli::env_vars::set_var("NOUS_INFERENCE_BASE_URL", creds.base_url.clone());
                 }
                 let expires_at = parse_rfc3339_utc(creds.expires_at.as_deref());
                 let _ = manager
@@ -5851,9 +5799,7 @@ fn qqbot_onboard_endpoints_from_disk(disk: &hermes_config::GatewayConfig) -> (St
 fn qqbot_generate_bind_key_base64() -> String {
     use rand::TryRng;
     let mut key = [0u8; 32];
-    rand::rngs::SysRng
-        .try_fill_bytes(&mut key)
-        .expect("rng failed");
+    rand::rngs::SysRng.try_fill_bytes(&mut key).expect("rng failed");
     BASE64_STANDARD.encode(key)
 }
 
@@ -5921,7 +5867,7 @@ fn qqbot_connect_url(task_id: &str) -> String {
 }
 
 fn qqbot_api_headers() -> reqwest::header::HeaderMap {
-    use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
+    use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
@@ -6145,144 +6091,6 @@ fn weixin_login_endpoints_from_disk(disk: &hermes_config::GatewayConfig) -> (Str
     (start_ep, poll_ep)
 }
 
-// ── WeCom QR login helpers ──
-
-#[derive(serde::Deserialize)]
-struct WeComQRGenerateResponse {
-    #[serde(default)]
-    errcode: i32,
-    #[serde(default)]
-    errmsg: String,
-    data: Option<WeComQRData>,
-}
-
-#[derive(serde::Deserialize)]
-struct WeComQRData {
-    #[serde(default)]
-    scode: String,
-    #[serde(default)]
-    auth_url: String,
-}
-
-#[derive(serde::Deserialize)]
-struct WeComQRQueryResponse {
-    #[serde(default)]
-    errcode: i32,
-    #[serde(default)]
-    errmsg: String,
-    data: Option<WeComQRQueryData>,
-}
-
-#[derive(serde::Deserialize)]
-struct WeComQRQueryData {
-    #[serde(default)]
-    status: String,
-    bot_info: Option<WeComBotInfo>,
-}
-
-#[derive(serde::Deserialize)]
-struct WeComBotInfo {
-    #[serde(default)]
-    botid: String,
-    #[serde(default)]
-    secret: String,
-}
-
-async fn wecom_qr_login_flow() -> Result<(String, String), AgentError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| AgentError::Config(format!("build client: {}", e)))?;
-
-    let resp: WeComQRGenerateResponse = client
-        .get("https://work.weixin.qq.com/ai/qc/generate")
-        .query(&[("source", "hermes"), ("plat", "1")])
-        .send()
-        .await
-        .map_err(|e| AgentError::Config(format!("wecom qr generate request: {}", e)))?
-        .json()
-        .await
-        .map_err(|e| AgentError::Config(format!("wecom qr generate parse: {}", e)))?;
-
-    if resp.errcode != 0 {
-        return Err(AgentError::Config(format!(
-            "WeCom QR API error {}: {}",
-            resp.errcode, resp.errmsg
-        )));
-    }
-    let data = resp
-        .data
-        .ok_or_else(|| AgentError::Config("WeCom QR response missing data".to_string()))?;
-    if data.auth_url.is_empty() {
-        return Err(AgentError::Config(
-            "WeCom QR response has empty auth_url".to_string(),
-        ));
-    }
-
-    println!();
-    println!("{}", data.auth_url);
-    render_qr_to_terminal(&data.auth_url);
-    println!();
-    println!("请使用企业微信扫描二维码，创建新的机器人。");
-    println!("扫描后等待确认...");
-
-    let poll_interval = std::time::Duration::from_secs(2);
-    let timeout = std::time::Duration::from_secs(300);
-    let started = std::time::Instant::now();
-
-    loop {
-        if started.elapsed() >= timeout {
-            return Err(AgentError::Config(
-                "WeCom QR login timed out after 300s".to_string(),
-            ));
-        }
-        tokio::time::sleep(poll_interval).await;
-
-        let poll_resp: WeComQRQueryResponse = client
-            .get("https://work.weixin.qq.com/ai/qc/query_result")
-            .query(&[("scode", &data.scode)])
-            .send()
-            .await
-            .map_err(|e| AgentError::Config(format!("wecom qr poll request: {}", e)))?
-            .json()
-            .await
-            .map_err(|e| AgentError::Config(format!("wecom qr poll parse: {}", e)))?;
-
-        if poll_resp.errcode != 0 {
-            return Err(AgentError::Config(format!(
-                "WeCom QR poll error {}: {}",
-                poll_resp.errcode, poll_resp.errmsg
-            )));
-        }
-        let poll_data = match poll_resp.data {
-            Some(d) => d,
-            None => continue,
-        };
-
-        match poll_data.status.as_str() {
-            "success" => {
-                if let Some(info) = poll_data.bot_info {
-                    println!("WeCom 机器人创建成功！bot_id: {}", info.botid);
-                    return Ok((info.botid, info.secret));
-                }
-                return Err(AgentError::Config(
-                    "WeCom QR confirmed but missing bot_info".to_string(),
-                ));
-            }
-            "waiting" | "scanning" => continue,
-            "expired" => {
-                return Err(AgentError::Config(
-                    "WeCom QR code expired, please try again".to_string(),
-                ));
-            }
-            other => {
-                println!("WeCom QR status: {} (等待中...)", other);
-                continue;
-            }
-        }
-    }
-}
-
 fn weixin_extract_string(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
     for key in keys {
         if let Some(s) = v.get(*key).and_then(|x| x.as_str()) {
@@ -6296,34 +6104,56 @@ fn weixin_extract_string(v: &serde_json::Value, keys: &[&str]) -> Option<String>
 }
 
 fn render_qr_to_terminal(data: &str) {
-    let code = match qrcode::QrCode::new(data.as_bytes()) {
+    use qrcode::QrCode;
+
+    let code = match QrCode::new(data.as_bytes()) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("QR 码生成失败: {}", e);
+            println!("  (QR code generation failed: {e})");
+            println!("  Please open the URL above in your browser to scan.");
             return;
         }
     };
-    let side = code.width() as usize;
-    let modules = code.to_colors();
-    let padded = side + 8;
-    let is_dark = |r: usize, c: usize| modules[r * side + c] == qrcode::Color::Dark;
+
+    let colors = code.to_colors();
+    let width = code.width();
+
+    // Use Unicode half-block characters for compact rendering
+    // Upper half = top row, lower half = bottom row
+    // ▀ (U+2580) = top black, bottom white
+    // ▄ (U+2584) = top white, bottom black
+    // █ (U+2588) = both black
+    // ' ' = both white
+
+    // Add quiet zone (white border)
+    let quiet = 2;
+    let total_w = width + quiet * 2;
+
+    // Print rows two at a time using half-block characters
     let mut row = 0usize;
-    while row < padded {
+    while row < width + quiet * 2 {
         let mut line = String::new();
-        for col in 0..padded {
-            let qr_row = row.wrapping_sub(4);
-            let qr_col = col.wrapping_sub(4);
-            let top = qr_row < side && qr_col < side && is_dark(qr_row, qr_col);
-            let qr_row2 = (row + 1).wrapping_sub(4);
-            let bottom = qr_row2 < side && qr_col < side && is_dark(qr_row2, qr_col);
-            line.push(match (top, bottom) {
-                (true, true) => '█',
-                (true, false) => '▀',
-                (false, true) => '▄',
-                (false, false) => ' ',
-            });
+        line.push_str("  "); // indent
+        for col in 0..total_w {
+            let top_dark = if row >= quiet && row < width + quiet && col >= quiet && col < width + quiet {
+                colors[(row - quiet) * width + (col - quiet)] == qrcode::Color::Dark
+            } else {
+                false
+            };
+            let bot_dark = if row + 1 >= quiet && row + 1 < width + quiet && col >= quiet && col < width + quiet {
+                colors[(row + 1 - quiet) * width + (col - quiet)] == qrcode::Color::Dark
+            } else {
+                false
+            };
+
+            match (top_dark, bot_dark) {
+                (true, true) => line.push('█'),
+                (true, false) => line.push('▀'),
+                (false, true) => line.push('▄'),
+                (false, false) => line.push(' '),
+            }
         }
-        println!("  {}", line);
+        println!("{line}");
         row += 2;
     }
 }
@@ -7735,81 +7565,6 @@ async fn run_auth(
                 );
                 return Ok(());
             }
-            if provider == "wecom" {
-                let cfg_path = hermes_state_root(&cli).join("config.yaml");
-                let mut disk = load_user_config_file(&cfg_path)
-                    .map_err(|e| AgentError::Config(e.to_string()))?;
-                let qr_preferred = qr
-                    || std::env::var("HERMES_WECOM_QR_LOGIN")
-                        .ok()
-                        .map(|v| is_truthy(&v))
-                        .unwrap_or(false);
-                if qr_preferred {
-                    match wecom_qr_login_flow().await {
-                        Ok((bot_id, secret)) => {
-                            let wc = disk
-                                .platforms
-                                .entry("wecom".to_string())
-                                .or_insert_with(PlatformConfig::default);
-                            wc.enabled = true;
-                            wc.extra.insert(
-                                "bot_id".to_string(),
-                                serde_json::Value::String(bot_id.clone()),
-                            );
-                            wc.extra.insert(
-                                "secret".to_string(),
-                                serde_json::Value::String(secret.clone()),
-                            );
-                            wc.extra.insert(
-                                "websocket_url".to_string(),
-                                serde_json::Value::String(
-                                    "wss://openws.work.weixin.qq.com".to_string(),
-                                ),
-                            );
-                            validate_config(&disk)
-                                .map_err(|e| AgentError::Config(e.to_string()))?;
-                            save_config_yaml(&cfg_path, &disk)
-                                .map_err(|e| AgentError::Config(e.to_string()))?;
-                            println!(
-                                "WeCom: bot_id/secret saved and platform enabled in {}",
-                                cfg_path.display()
-                            );
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            println!("WeCom QR 登录失败，将回退到手动输入: {}", e);
-                        }
-                    }
-                }
-                let wc = disk
-                    .platforms
-                    .entry("wecom".to_string())
-                    .or_insert_with(PlatformConfig::default);
-                wc.enabled = true;
-                let bot_id = prompt_line("WeCom AI Bot bot_id (WECOM_BOT_ID): ").await?;
-                wc.extra
-                    .insert("bot_id".to_string(), serde_json::Value::String(bot_id));
-                let secret = prompt_line("WeCom AI Bot secret (WECOM_SECRET): ").await?;
-                wc.extra
-                    .insert("secret".to_string(), serde_json::Value::String(secret));
-                let ws =
-                    prompt_line("WeCom websocket_url (default wss://openws.work.weixin.qq.com): ")
-                        .await?;
-                if !ws.trim().is_empty() {
-                    wc.extra.insert(
-                        "websocket_url".to_string(),
-                        serde_json::Value::String(ws.trim().to_string()),
-                    );
-                }
-                validate_config(&disk).map_err(|e| AgentError::Config(e.to_string()))?;
-                save_config_yaml(&cfg_path, &disk)
-                    .map_err(|e| AgentError::Config(e.to_string()))?;
-                println!(
-                    "WeCom: bot_id/secret saved and platform enabled in {}",
-                    cfg_path.display()
-                );
-                return Ok(());
-            }
             if provider == "qqbot" {
                 let cfg_path = hermes_state_root(&cli).join("config.yaml");
                 let mut disk = load_user_config_file(&cfg_path)
@@ -8082,9 +7837,7 @@ async fn run_auth(
                     })
                     .await?;
                 println!("GitHub device login complete; credential saved as provider 'copilot'.");
-                println!(
-                    "Ensure GITHUB_COPILOT_TOKEN is set for the agent (see printed instructions above)."
-                );
+                println!("Ensure GITHUB_COPILOT_TOKEN is set for the agent (see printed instructions above).");
                 return Ok(());
             }
 
@@ -8559,7 +8312,13 @@ fn parse_deliver_config(raw: &str) -> Option<hermes_cron::DeliverConfig> {
         "homeassistant" | "ha" => hermes_cron::DeliverTarget::HomeAssistant,
         _ => return None,
     };
-    let platform = chat_id.map(|s| s.split(':').next().unwrap_or(s.as_str()).trim().to_string());
+    let platform = chat_id.map(|s| {
+        s.split(':')
+            .next()
+            .unwrap_or(s.as_str())
+            .trim()
+            .to_string()
+    });
     Some(hermes_cron::DeliverConfig { target, platform })
 }
 
@@ -11336,9 +11095,7 @@ fn load_or_create_provenance_key(cli: &Cli, allow_create: bool) -> Result<Vec<u8
     let mut key_bytes = [0u8; 32];
     {
         use rand::TryRng;
-        rand::rngs::SysRng
-            .try_fill_bytes(&mut key_bytes)
-            .map_err(|e| AgentError::Config(e.to_string()))?;
+        rand::rngs::SysRng.try_fill_bytes(&mut key_bytes).map_err(|e| AgentError::Config(e.to_string()))?;
     }
     let key_hex = hex::encode(key_bytes);
     std::fs::write(&path, format!("{key_hex}\n"))
@@ -11952,7 +11709,7 @@ async fn run_route_learning(
             return Err(AgentError::Config(format!(
                 "route-learning: unsupported action '{}'; use show/list/inspect/reset/clear",
                 action
-            )));
+            )))
         }
     }
 
@@ -12273,7 +12030,7 @@ async fn run_route_health(cli: Cli, action: Option<String>, json: bool) -> Resul
             return Err(AgentError::Config(format!(
                 "route-health: unsupported action '{}'; use show/list/inspect/reset/clear",
                 action
-            )));
+            )))
         }
     }
 
@@ -12459,9 +12216,9 @@ async fn run_route_autotune(
         "show" | "list" | "inspect" | "plan" | "apply" => {}
         _ => {
             return Err(AgentError::Config(format!(
-                "route-autotune: unsupported action '{}'; use show/list/inspect/plan/apply/reset/clear",
-                action
-            )));
+            "route-autotune: unsupported action '{}'; use show/list/inspect/plan/apply/reset/clear",
+            action
+        )))
         }
     }
 
@@ -12718,9 +12475,7 @@ async fn run_rotate_provenance_key(cli: Cli, json: bool) -> Result<(), AgentErro
     let mut key_bytes = [0u8; 32];
     {
         use rand::TryRng;
-        rand::rngs::SysRng
-            .try_fill_bytes(&mut key_bytes)
-            .map_err(|e| AgentError::Config(e.to_string()))?;
+        rand::rngs::SysRng.try_fill_bytes(&mut key_bytes).map_err(|e| AgentError::Config(e.to_string()))?;
     }
     let key_hex = hex::encode(key_bytes);
     std::fs::write(&path, format!("{key_hex}\n"))
@@ -14069,8 +13824,8 @@ async fn run_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hermes_config::PlatformConfig;
     use hermes_config::session::SessionConfig;
+    use hermes_config::PlatformConfig;
     use hermes_gateway::dm::DmManager;
     use hermes_gateway::{Gateway, SessionManager};
     use std::sync::{Mutex, OnceLock};
@@ -14813,13 +14568,11 @@ mod tests {
         let verified = verify_artifact_provenance(&cli, &artifact, None).expect("verify");
         assert!(!verified.ok, "missing sidecar must fail");
         assert_eq!(verified.code, "signature_read_error");
-        assert!(
-            verified
-                .reason
-                .as_deref()
-                .unwrap_or("")
-                .contains(".sig.json")
-        );
+        assert!(verified
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains(".sig.json"));
     }
 
     #[tokio::test]
@@ -15476,11 +15229,9 @@ max_turns: 50
         assert!(state_root.join("profiles").exists());
         assert!(state_root.join("sessions").exists());
         assert!(state_root.join("logs").exists());
-        assert!(
-            actions
-                .iter()
-                .any(|entry| entry.get("status").and_then(|v| v.as_str()) == Some("created"))
-        );
+        assert!(actions
+            .iter()
+            .any(|entry| entry.get("status").and_then(|v| v.as_str()) == Some("created")));
     }
 
     #[test]
@@ -15900,11 +15651,9 @@ max_turns: 50
         hermes_cli::env_vars::remove_var("HERMES_SMART_ROUTING_LEARNING_ALPHA");
         hermes_cli::env_vars::set_var("HERMES_SMART_ROUTING_LEARNING_SWITCH_MARGIN", "0.999");
         let applied = apply_route_autotune_env_overrides(&cli);
-        assert!(
-            applied
-                .iter()
-                .any(|k| k == "HERMES_SMART_ROUTING_LEARNING_ALPHA")
-        );
+        assert!(applied
+            .iter()
+            .any(|k| k == "HERMES_SMART_ROUTING_LEARNING_ALPHA"));
         assert_eq!(
             std::env::var("HERMES_SMART_ROUTING_LEARNING_ALPHA").ok(),
             Some("0.300".to_string())

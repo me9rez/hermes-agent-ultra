@@ -19,6 +19,8 @@ pub fn apply_gateway_runtime_defaults() {
     set_var_if_unset("HERMES_DDGS_REGION", "cn-zh");
     set_var_if_unset("HERMES_TOOL_PROGRESS_INITIAL_DELAY_MS", "4000");
     set_var_if_unset("HERMES_TOOL_PROGRESS_INTERVAL_MS", "15000");
+    set_var_if_unset("HERMES_WEB_TOOL_BUDGET_MAX_CALLS", "3");
+    set_var_if_unset("HERMES_WEB_SEARCH_BUDGET_MAX_CALLS", "2");
 }
 
 #[cfg(test)]

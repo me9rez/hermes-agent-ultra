@@ -1661,7 +1661,15 @@ fn web_tool_budget_max_calls() -> u32 {
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
         .filter(|v| *v > 0)
-        .unwrap_or(4)
+        .unwrap_or(3)
+}
+
+fn web_search_budget_max_calls() -> u32 {
+    std::env::var("HERMES_WEB_SEARCH_BUDGET_MAX_CALLS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(2)
 }
 
 fn web_tool_budget_max_consecutive_errors() -> u32 {
@@ -1673,7 +1681,20 @@ fn web_tool_budget_max_consecutive_errors() -> u32 {
 }
 
 fn is_budgeted_web_tool(name: &str) -> bool {
-    matches!(name, "web_search" | "web_extract")
+    matches!(name, "web_search" | "web_extract" | "browser_navigate")
+}
+
+fn web_tool_budget_user_notice(tool_name: &str, blocked_by_errors: bool) -> String {
+    match tool_name {
+        "web_search" => "网络检索次数已达上限，将基于已有信息直接回复。".to_string(),
+        "web_extract" | "browser_navigate" if blocked_by_errors => {
+            "网页读取多次失败，将基于已有信息直接回复。".to_string()
+        }
+        "web_extract" | "browser_navigate" => {
+            "网页抓取次数已达上限，将基于已有信息直接回复。".to_string()
+        }
+        _ => format!("工具 {tool_name} 调用受限，将基于已有信息直接回复。"),
+    }
 }
 
 fn tool_progress_enabled() -> bool {
@@ -1707,7 +1728,7 @@ fn format_tool_progress_message(turn: u32, tool_names: &[String], pulse: u32) ->
     let joined = tool_names.join(", ");
     let webish = tool_names
         .iter()
-        .any(|name| matches!(name.as_str(), "web_search" | "web_extract"));
+        .any(|name| matches!(name.as_str(), "web_search" | "web_extract" | "browser_navigate"));
     let base = if webish {
         format!("处理中：正在检索网络数据（第 {turn} 步，工具 {joined}）")
     } else if tool_names.len() > 1 {
@@ -1819,11 +1840,13 @@ impl Drop for ToolProgressWatchdog {
 fn apply_web_tool_budget(
     tool_calls: &mut Vec<ToolCall>,
     web_tool_calls_used: u32,
+    web_search_calls_used: u32,
     consecutive_web_error_turns: u32,
     turn: u32,
-) -> Vec<ToolResult> {
-    let mut blocked_results: Vec<ToolResult> = Vec::new();
+) -> Vec<(String, ToolResult)> {
+    let mut blocked_results: Vec<(String, ToolResult)> = Vec::new();
     let max_calls = web_tool_budget_max_calls();
+    let max_search_calls = web_search_budget_max_calls();
     let max_consecutive_errors = web_tool_budget_max_consecutive_errors();
     let mut remaining = max_calls.saturating_sub(web_tool_calls_used);
     let blocked_by_errors = consecutive_web_error_turns >= max_consecutive_errors;
@@ -1833,9 +1856,16 @@ fn apply_web_tool_budget(
             kept.push(tc);
             continue;
         }
-        let block = blocked_by_errors || remaining == 0;
+        let search_cap_hit = tc.function.name == "web_search"
+            && web_search_calls_used >= max_search_calls;
+        let block = blocked_by_errors || remaining == 0 || search_cap_hit;
         if block {
-            let reason = if blocked_by_errors {
+            let reason = if search_cap_hit {
+                format!(
+                    "Web search budget exceeded on turn {}: blocked '{}' after {} web_search call(s).",
+                    turn, tc.function.name, web_search_calls_used
+                )
+            } else if blocked_by_errors {
                 format!(
                     "Web tool budget guard tripped on turn {}: blocked '{}' after {} consecutive web-tool error turn(s).",
                     turn, tc.function.name, consecutive_web_error_turns
@@ -1846,7 +1876,10 @@ fn apply_web_tool_budget(
                     turn, tc.function.name, web_tool_calls_used
                 )
             };
-            blocked_results.push(ToolResult::err(tc.id, reason));
+            blocked_results.push((
+                tc.function.name.clone(),
+                ToolResult::err(tc.id, reason),
+            ));
             continue;
         }
         remaining = remaining.saturating_sub(1);
@@ -6086,6 +6119,7 @@ impl AgentLoop {
         let mut governor_tool_error_window: VecDeque<f64> = VecDeque::new();
         let mut governor_consecutive_error_turns: u32 = 0;
         let mut web_tool_calls_used: u32 = 0;
+        let mut web_search_calls_used: u32 = 0;
         let mut web_tool_consecutive_error_turns: u32 = 0;
         let mut repo_review_budget_state = RepoReviewBudgetState::default();
         let mut objective_guard_retries: u32 = 0;
@@ -6912,22 +6946,24 @@ impl AgentLoop {
             let deferred_web_budget_results = apply_web_tool_budget(
                 &mut tool_calls,
                 web_tool_calls_used,
+                web_search_calls_used,
                 web_tool_consecutive_error_turns,
                 total_turns,
             );
             if !deferred_web_budget_results.is_empty() {
-                self.emit_status(
-                    "lifecycle",
-                    &format!(
-                        "Applied web tool budget guard: blocked {} call(s).",
-                        deferred_web_budget_results.len()
-                    ),
-                );
+                let blocked_by_errors =
+                    web_tool_consecutive_error_turns >= web_tool_budget_max_consecutive_errors();
+                for (tool_name, _) in &deferred_web_budget_results {
+                    self.emit_status(
+                        "tool_failure",
+                        &web_tool_budget_user_notice(tool_name, blocked_by_errors),
+                    );
+                }
             }
             let contextlattice_connect_intent =
                 detect_contextlattice_connect_intent(ctx.get_messages());
             if tool_calls.is_empty() {
-                for result in deferred_web_budget_results {
+                for (_, result) in deferred_web_budget_results {
                     ctx.add_message(Message::tool_result(&result.tool_call_id, &result.content));
                 }
                 continue;
@@ -7029,7 +7065,11 @@ impl AgentLoop {
                 )
                 .await;
             if !deferred_web_budget_results.is_empty() {
-                results.extend(deferred_web_budget_results);
+                results.extend(
+                    deferred_web_budget_results
+                        .into_iter()
+                        .map(|(_, result)| result),
+                );
             }
             let tool_elapsed = tool_start.elapsed().as_millis() as u64;
             _total_tool_time_ms += tool_elapsed;
@@ -7055,6 +7095,11 @@ impl AgentLoop {
                         web_tool_consecutive_error_turns.saturating_add(1);
                 } else {
                     web_tool_consecutive_error_turns = 0;
+                }
+            }
+            for tc in &tool_calls {
+                if tc.function.name == "web_search" {
+                    web_search_calls_used = web_search_calls_used.saturating_add(1);
                 }
             }
             tracing::info!(
@@ -7490,6 +7535,7 @@ impl AgentLoop {
         let mut governor_tool_error_window: VecDeque<f64> = VecDeque::new();
         let mut governor_consecutive_error_turns: u32 = 0;
         let mut web_tool_calls_used: u32 = 0;
+        let mut web_search_calls_used: u32 = 0;
         let mut web_tool_consecutive_error_turns: u32 = 0;
         let mut repo_review_budget_state = RepoReviewBudgetState::default();
         let mut objective_guard_retries: u32 = 0;
@@ -8398,22 +8444,24 @@ impl AgentLoop {
             let deferred_web_budget_results = apply_web_tool_budget(
                 &mut tool_calls,
                 web_tool_calls_used,
+                web_search_calls_used,
                 web_tool_consecutive_error_turns,
                 total_turns,
             );
             if !deferred_web_budget_results.is_empty() {
-                self.emit_status(
-                    "lifecycle",
-                    &format!(
-                        "Applied web tool budget guard: blocked {} call(s).",
-                        deferred_web_budget_results.len()
-                    ),
-                );
+                let blocked_by_errors =
+                    web_tool_consecutive_error_turns >= web_tool_budget_max_consecutive_errors();
+                for (tool_name, _) in &deferred_web_budget_results {
+                    self.emit_status(
+                        "tool_failure",
+                        &web_tool_budget_user_notice(tool_name, blocked_by_errors),
+                    );
+                }
             }
             let contextlattice_connect_intent =
                 detect_contextlattice_connect_intent(ctx.get_messages());
             if tool_calls.is_empty() {
-                for result in deferred_web_budget_results {
+                for (_, result) in deferred_web_budget_results {
                     ctx.add_message(Message::tool_result(&result.tool_call_id, &result.content));
                 }
                 continue;
@@ -8510,7 +8558,11 @@ impl AgentLoop {
                 )
                 .await;
             if !deferred_web_budget_results.is_empty() {
-                results.extend(deferred_web_budget_results);
+                results.extend(
+                    deferred_web_budget_results
+                        .into_iter()
+                        .map(|(_, result)| result),
+                );
             }
             let tool_elapsed = tool_start.elapsed().as_millis() as u64;
             _total_tool_time_ms += tool_elapsed;
@@ -8536,6 +8588,11 @@ impl AgentLoop {
                         web_tool_consecutive_error_turns.saturating_add(1);
                 } else {
                     web_tool_consecutive_error_turns = 0;
+                }
+            }
+            for tc in &tool_calls {
+                if tc.function.name == "web_search" {
+                    web_search_calls_used = web_search_calls_used.saturating_add(1);
                 }
             }
             tracing::info!(
@@ -16112,5 +16169,38 @@ mod tests {
         )
         .expect("expected user notice");
         assert!(msg.contains("浏览器"));
+    }
+
+    #[test]
+    fn test_apply_web_tool_budget_caps_web_search_calls() {
+        let _guard = env_test_lock();
+        hermes_core::test_env::set_var("HERMES_WEB_SEARCH_BUDGET_MAX_CALLS", "2");
+        let mut calls = vec![ToolCall {
+            id: "s1".to_string(),
+            function: hermes_core::FunctionCall {
+                name: "web_search".to_string(),
+                arguments: r#"{"query":"test"}"#.to_string(),
+            },
+            extra_content: None,
+        }];
+        let blocked = apply_web_tool_budget(&mut calls, 0, 2, 0, 1);
+        assert_eq!(blocked.len(), 1);
+        assert!(calls.is_empty());
+        hermes_core::test_env::remove_var("HERMES_WEB_SEARCH_BUDGET_MAX_CALLS");
+    }
+
+    #[test]
+    fn test_apply_web_tool_budget_includes_browser_navigate() {
+        let mut calls = vec![ToolCall {
+            id: "b1".to_string(),
+            function: hermes_core::FunctionCall {
+                name: "browser_navigate".to_string(),
+                arguments: r#"{"url":"https://example.com"}"#.to_string(),
+            },
+            extra_content: None,
+        }];
+        let blocked = apply_web_tool_budget(&mut calls, 3, 0, 0, 1);
+        assert_eq!(blocked.len(), 1);
+        assert!(calls.is_empty());
     }
 }

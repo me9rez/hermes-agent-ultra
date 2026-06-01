@@ -5,6 +5,8 @@
 
 mod gateway_handlers;
 
+use hermes_cli::gateway_runtime_defaults;
+
 use aes_gcm::aead::Aead;
 use aes_gcm::Aes256Gcm;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -2911,6 +2913,8 @@ async fn run_gateway(
                         .join(", ")
                 );
             }
+
+            gateway_runtime_defaults::apply_gateway_runtime_defaults();
 
             // Build gateway runtime and context-aware message handler.
             let runtime_gateway_config = RuntimeGatewayConfig {

@@ -27,6 +27,7 @@ pub mod env_loader;
 pub mod env_vars;
 pub mod gateway_cmd;
 pub mod gateway_inbound_wiring;
+pub mod gateway_runtime_defaults;
 pub mod kanban;
 pub mod live_messaging;
 pub mod lumio;

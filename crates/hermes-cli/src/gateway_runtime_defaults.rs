@@ -1,0 +1,63 @@
+//! Runtime defaults applied when the gateway starts.
+//!
+//! Values are set only when the corresponding environment variable is unset,
+//! so explicit user configuration always wins.
+
+/// Set an environment variable if it is not already defined.
+pub fn set_var_if_unset(key: &str, value: &str) {
+    if std::env::var_os(key).is_none() {
+        // SAFETY: Gateway startup is single-threaded before worker pools fan out.
+        unsafe { std::env::set_var(key, value) };
+    }
+}
+
+/// Apply gateway-friendly defaults for browser and web tooling.
+pub fn apply_gateway_runtime_defaults() {
+    set_var_if_unset("HERMES_BROWSER_AUTO_START", "1");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_test_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn apply_sets_browser_auto_start_when_unset() {
+        let _guard = env_test_lock();
+        let key = "HERMES_BROWSER_AUTO_START";
+        let prior = std::env::var_os(key);
+        unsafe { std::env::remove_var(key) };
+        apply_gateway_runtime_defaults();
+        assert_eq!(
+            std::env::var(key).ok().as_deref(),
+            Some("1"),
+            "expected browser auto-start default"
+        );
+        unsafe { std::env::remove_var(key) };
+        if let Some(v) = prior {
+            unsafe { std::env::set_var(key, v) };
+        }
+    }
+
+    #[test]
+    fn apply_does_not_override_existing_browser_auto_start() {
+        let _guard = env_test_lock();
+        let key = "HERMES_BROWSER_AUTO_START";
+        let prior = std::env::var_os(key);
+        unsafe { std::env::set_var(key, "0") };
+        apply_gateway_runtime_defaults();
+        assert_eq!(std::env::var(key).ok().as_deref(), Some("0"));
+        unsafe { std::env::remove_var(key) };
+        if let Some(v) = prior {
+            unsafe { std::env::set_var(key, v) };
+        } else {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+}

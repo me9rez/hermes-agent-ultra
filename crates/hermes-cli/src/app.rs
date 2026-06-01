@@ -29,7 +29,9 @@ use hermes_agent::sub_agent_orchestrator::SubAgentOrchestrator;
 use hermes_agent::{
     AgentCallbacks, AgentConfig, AgentLoop, InterruptController, SessionPersistence,
 };
-use hermes_config::{hermes_home as hermes_home_dir, load_config, state_dir, GatewayConfig};
+use hermes_config::{
+    hermes_home as hermes_home_dir, load_config, normalize_service_tier, state_dir, GatewayConfig,
+};
 use hermes_core::ToolSchema;
 use hermes_core::{AgentError, LlmProvider};
 use hermes_cron::cron_scheduler_for_data_dir;
@@ -4352,6 +4354,26 @@ mod tests {
     }
 
     #[test]
+    fn test_build_agent_config_merges_fast_service_tier_into_extra_body() {
+        let mut cfg = GatewayConfig::default();
+        cfg.agent.service_tier = Some("fast".to_string());
+        cfg.llm_providers.insert(
+            "nous".to_string(),
+            LlmProviderConfig {
+                extra_body: Some(serde_json::json!({
+                    "reasoning_effort": "medium"
+                })),
+                ..LlmProviderConfig::default()
+            },
+        );
+
+        let agent_cfg = build_agent_config(&cfg, "nous:moonshotai/kimi-k2.6");
+        let body = agent_cfg.extra_body.expect("extra body");
+        assert_eq!(body["reasoning_effort"], "medium");
+        assert_eq!(body["service_tier"], "priority");
+    }
+
+    #[test]
     fn test_build_agent_config_infers_provider_for_bare_model() {
         let mut cfg = GatewayConfig::default();
         cfg.model = Some("claude-opus-4-6".to_string());
@@ -5594,6 +5616,8 @@ pub fn build_agent_config(config: &GatewayConfig, model: &str) -> AgentConfig {
             })
         })
         .and_then(|cfg| cfg.extra_body.clone());
+    let extra_body =
+        merge_service_tier_extra_body(provider_extra_body, config.agent.normalized_service_tier());
     let skip_memory_env = std::env::var("HERMES_SKIP_MEMORY")
         .ok()
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
@@ -5618,7 +5642,7 @@ pub fn build_agent_config(config: &GatewayConfig, model: &str) -> AgentConfig {
         model: model.to_string(),
         system_prompt: config.system_prompt.clone(),
         personality: config.personality.clone(),
-        extra_body: provider_extra_body,
+        extra_body,
         hermes_home: config.home_dir.clone(),
         provider: Some(resolved_provider),
         stream: config.streaming.enabled,
@@ -5670,6 +5694,27 @@ pub fn build_agent_config(config: &GatewayConfig, model: &str) -> AgentConfig {
         lsp_context_max_chars: config.agent.lsp_context_max_chars,
         ..AgentConfig::default()
     }
+}
+
+fn merge_service_tier_extra_body(
+    extra_body: Option<Value>,
+    service_tier: Option<String>,
+) -> Option<Value> {
+    let Some(service_tier) = service_tier.and_then(|tier| normalize_service_tier(Some(&tier)))
+    else {
+        return extra_body;
+    };
+    let mut map = match extra_body {
+        Some(Value::Object(map)) => map,
+        Some(other) => {
+            let mut map = serde_json::Map::new();
+            map.insert("extra_body".to_string(), other);
+            map
+        }
+        None => serde_json::Map::new(),
+    };
+    map.insert("service_tier".to_string(), Value::String(service_tier));
+    Some(Value::Object(map))
 }
 
 // ---------------------------------------------------------------------------

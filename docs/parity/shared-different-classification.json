@@ -2164,6 +2164,27 @@
       "rationale": "Session search behavior is covered by Rust SessionSearchHandler and SqliteSessionSearchBackend contracts, including schema shape, browse/search modes, role filters, current-session exclusion, result limit capping, timestamp formatting, scrolling, pattern matching, and hidden-source filtering.",
       "owner": "sheawinkler",
       "ticket": 25
+    },
+    {
+      "path": "tests/gateway/test_fast_command.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream gateway fast-command priority behavior is covered by Rust gateway /fast handling: command parsing accepts fast/priority and off modes, stores service_tier=priority in gateway runtime state/context, injects the service tier into agent extra_body, and exposes it in runtime hints/status.",
+      "owner": "sheawinkler",
+      "ticket": 302
+    },
+    {
+      "path": "tests/gateway/test_gateway_command_help.py",
+      "classification": "intentional_divergence",
+      "rationale": "Gateway help/start command behavior is covered by Rust gateway command contracts: /start is a no-op platform start event, /commands aliases /help, registered command bypass recognizes aliases, and generated help exposes normalized lowercase command names.",
+      "owner": "sheawinkler",
+      "ticket": 302
+    },
+    {
+      "path": "tests/gateway/test_verbose_command.py",
+      "classification": "intentional_divergence",
+      "rationale": "Upstream gateway /verbose tool-progress behavior is covered by Rust DisplayConfig and gateway runtime tests: bool-like display.tool_progress_command gating, quoted false disablement, per-platform/default tool_progress resolution, off/new/all/verbose cycling, and runtime verbose/tool_progress state updates.",
+      "owner": "sheawinkler",
+      "ticket": 302
     }
   ]
 }

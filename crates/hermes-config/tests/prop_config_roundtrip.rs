@@ -120,6 +120,7 @@ fn arb_gateway_config() -> impl Strategy<Value = GatewayConfig> {
                 session,
                 sessions: SessionsMaintenanceConfig::default(),
                 streaming,
+                display: Default::default(),
                 terminal: TerminalConfig::default(),
                 llm_providers: HashMap::new(),
                 fallback_model: None,

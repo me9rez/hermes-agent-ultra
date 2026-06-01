@@ -2760,6 +2760,8 @@ async fn run_gateway(
             // Build gateway runtime and context-aware message handler.
             let runtime_gateway_config = RuntimeGatewayConfig {
                 streaming_enabled: config.streaming.enabled,
+                display: config.display.clone(),
+                service_tier: config.agent.normalized_service_tier(),
                 quick_commands: config.quick_commands.clone(),
                 ..RuntimeGatewayConfig::default()
             };
@@ -4002,6 +4004,22 @@ fn build_agent_for_gateway_context(
         if !provider.trim().is_empty() {
             agent_config.provider = Some(provider);
         }
+    }
+    if let Some(service_tier) = ctx.service_tier.clone() {
+        let mut extra = match agent_config.extra_body.take() {
+            Some(serde_json::Value::Object(map)) => map,
+            Some(other) => {
+                let mut map = serde_json::Map::new();
+                map.insert("extra_body".to_string(), other);
+                map
+            }
+            None => serde_json::Map::new(),
+        };
+        extra.insert(
+            "service_tier".to_string(),
+            serde_json::Value::String(service_tier),
+        );
+        agent_config.extra_body = Some(serde_json::Value::Object(extra));
     }
     if !ctx.session_key.trim().is_empty() {
         agent_config.session_id = Some(ctx.session_key.clone());

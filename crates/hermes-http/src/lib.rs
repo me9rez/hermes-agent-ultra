@@ -143,6 +143,8 @@ impl HttpServerState {
         run_sessions_db_auto_maintenance(&config);
         let runtime_gateway_config = RuntimeGatewayConfig {
             streaming_enabled: config.streaming.enabled,
+            display: config.display.clone(),
+            service_tier: config.agent.normalized_service_tier(),
             ..RuntimeGatewayConfig::default()
         };
         let session_manager = Arc::new(SessionManager::new(config.session.clone()));

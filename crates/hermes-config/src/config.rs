@@ -2,7 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde::{Deserialize, Serialize};
+use serde::de::{Error as DeError, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use hermes_core::BudgetConfig;
 
@@ -60,6 +61,10 @@ pub struct GatewayConfig {
     /// Streaming / progressive-output settings.
     #[serde(default)]
     pub streaming: StreamingConfig,
+
+    /// Display controls shared by CLI/gateway surfaces.
+    #[serde(default)]
+    pub display: DisplayConfig,
 
     /// Terminal / command-execution backend settings.
     #[serde(default)]
@@ -153,6 +158,7 @@ impl Default for GatewayConfig {
             session: SessionConfig::default(),
             sessions: SessionsMaintenanceConfig::default(),
             streaming: StreamingConfig::default(),
+            display: DisplayConfig::default(),
             terminal: TerminalConfig::default(),
             llm_providers: HashMap::new(),
             fallback_model: None,
@@ -172,6 +178,46 @@ impl Default for GatewayConfig {
             home_dir: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DisplayConfig {
+    /// Enable `/verbose` as a runtime tool-progress cycling command.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_boolish",
+        skip_serializing_if = "is_false"
+    )]
+    pub tool_progress_command: bool,
+
+    /// Global tool-progress display mode: `off`, `new`, `all`, or `verbose`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_progress: Option<String>,
+
+    /// Per-platform display overrides keyed by normalized platform name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub platforms: BTreeMap<String, PlatformDisplayConfig>,
+}
+
+impl DisplayConfig {
+    pub fn tool_progress_command_enabled(&self) -> bool {
+        self.tool_progress_command
+    }
+
+    pub fn platform_tool_progress(&self, platform: &str) -> Option<&str> {
+        let key = platform.trim().to_ascii_lowercase().replace('-', "_");
+        self.platforms
+            .get(&key)
+            .and_then(|cfg| cfg.tool_progress.as_deref())
+            .or(self.tool_progress.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PlatformDisplayConfig {
+    /// Platform-specific tool-progress mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_progress: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,6 +548,9 @@ pub struct AgentLoopBehaviorConfig {
     /// Character budget for injected LSP context block.
     #[serde(default = "default_agent_lsp_context_max_chars")]
     pub lsp_context_max_chars: usize,
+    /// Optional provider request service tier. `fast` maps to provider `priority`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
 }
 
 fn default_agent_memory_nudge_interval() -> u32 {
@@ -552,12 +601,78 @@ impl Default for AgentLoopBehaviorConfig {
             code_index_max_symbols: default_agent_code_index_max_symbols(),
             lsp_context_enabled: default_agent_lsp_context_enabled(),
             lsp_context_max_chars: default_agent_lsp_context_max_chars(),
+            service_tier: None,
         }
+    }
+}
+
+impl AgentLoopBehaviorConfig {
+    pub fn normalized_service_tier(&self) -> Option<String> {
+        normalize_service_tier(self.service_tier.as_deref())
+    }
+}
+
+pub fn normalize_service_tier(raw: Option<&str>) -> Option<String> {
+    let value = raw?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    match value.to_ascii_lowercase().as_str() {
+        "fast" | "priority" => Some("priority".to_string()),
+        "off" | "normal" | "standard" | "default" | "none" => None,
+        other => Some(other.to_string()),
     }
 }
 
 fn default_max_turns() -> u32 {
     250
+}
+
+fn deserialize_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BoolishVisitor;
+
+    impl<'de> Visitor<'de> for BoolishVisitor {
+        type Value = bool;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a bool or a bool-like string")
+        }
+
+        fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+            Ok(value)
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+            Ok(value != 0)
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+            Ok(value != 0)
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: DeError,
+        {
+            match value.trim().to_ascii_lowercase().as_str() {
+                "" | "0" | "false" | "no" | "off" => Ok(false),
+                "1" | "true" | "yes" | "on" => Ok(true),
+                other => Err(E::custom(format!("invalid bool-like value `{other}`"))),
+            }
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: DeError,
+        {
+            self.visit_str(&value)
+        }
+    }
+
+    deserializer.deserialize_any(BoolishVisitor)
 }
 
 fn default_tools() -> Vec<String> {
@@ -1120,6 +1235,40 @@ quick_commands:
         let alias = cfg.quick_commands.get("sc").expect("alias command");
         assert_eq!(alias.kind, "alias");
         assert_eq!(alias.target.as_deref(), Some("/context"));
+    }
+
+    #[test]
+    fn display_config_accepts_boolish_verbose_gate_and_platform_modes() {
+        let cfg: GatewayConfig = serde_yaml::from_str(
+            r#"
+display:
+  tool_progress_command: "true"
+  tool_progress: all
+  platforms:
+    telegram:
+      tool_progress: off
+agent:
+  service_tier: fast
+"#,
+        )
+        .expect("display config");
+
+        assert!(cfg.display.tool_progress_command_enabled());
+        assert_eq!(cfg.display.platform_tool_progress("telegram"), Some("off"));
+        assert_eq!(cfg.display.platform_tool_progress("slack"), Some("all"));
+        assert_eq!(
+            cfg.agent.normalized_service_tier().as_deref(),
+            Some("priority")
+        );
+
+        let disabled: GatewayConfig = serde_yaml::from_str(
+            r#"
+display:
+  tool_progress_command: "false"
+"#,
+        )
+        .expect("quoted false");
+        assert!(!disabled.display.tool_progress_command_enabled());
     }
 
     #[test]

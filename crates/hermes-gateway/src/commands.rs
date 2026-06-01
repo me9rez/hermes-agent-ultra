@@ -50,8 +50,11 @@ pub enum GatewayCommandResult {
     BtwTask { prompt: String },
     /// Toggle reasoning display.
     ToggleReasoning(String),
-    /// Switch to fast model.
-    SwitchFast(String),
+    /// Switch gateway turns into or out of priority processing.
+    SwitchFast {
+        service_tier: Option<String>,
+        reply: String,
+    },
     /// Retry the last message.
     Retry,
     /// Undo the last exchange.
@@ -94,6 +97,12 @@ pub struct CommandInfo {
 /// All registered gateway slash commands.
 pub fn all_commands() -> Vec<CommandInfo> {
     vec![
+        CommandInfo {
+            name: "/start",
+            aliases: &[],
+            description: "Acknowledge platform start events without entering the agent loop",
+            usage: "/start",
+        },
         CommandInfo {
             name: "/new",
             aliases: &[],
@@ -319,6 +328,18 @@ fn normalize_command_args(args: &str) -> String {
         .replace('\u{2013}', "-")
 }
 
+fn parse_fast_service_tier(args: &str) -> Result<Option<String>, String> {
+    let value = args.trim();
+    if value.is_empty() {
+        return Ok(Some("priority".to_string()));
+    }
+    match value.to_ascii_lowercase().as_str() {
+        "fast" | "priority" => Ok(Some("priority".to_string())),
+        "off" | "normal" | "standard" | "default" | "none" => Ok(None),
+        _ => Err("Usage: /fast [fast|off]".to_string()),
+    }
+}
+
 pub fn canonical_command_name(raw: &str) -> Option<String> {
     let token = raw
         .trim()
@@ -363,6 +384,7 @@ pub fn handle_command(input: &str) -> GatewayCommandResult {
     let args = normalize_command_args(parts.get(1).map(|s| s.trim()).unwrap_or(""));
 
     match cmd.as_str() {
+        "/start" => GatewayCommandResult::Noop,
         "/new" => GatewayCommandResult::ResetSession("🆕 New conversation started.".to_string()),
         "/reset" | "/clear" => GatewayCommandResult::ResetSession("🔄 Session reset.".to_string()),
         "/model" => {
@@ -483,7 +505,17 @@ pub fn handle_command(input: &str) -> GatewayCommandResult {
         "/reasoning" | "/think" => {
             GatewayCommandResult::ToggleReasoning("🧠 Reasoning display toggled.".to_string())
         }
-        "/fast" => GatewayCommandResult::SwitchFast("⚡ Switched to fast model.".to_string()),
+        "/fast" => match parse_fast_service_tier(&args) {
+            Ok(Some(service_tier)) => GatewayCommandResult::SwitchFast {
+                service_tier: Some(service_tier),
+                reply: "⚡ Priority processing enabled for this gateway session.".to_string(),
+            },
+            Ok(None) => GatewayCommandResult::SwitchFast {
+                service_tier: None,
+                reply: "⚡ Priority processing disabled for this gateway session.".to_string(),
+            },
+            Err(msg) => GatewayCommandResult::Reply(msg),
+        },
         "/verbose" => GatewayCommandResult::ToggleVerbose("📝 Verbose mode toggled.".to_string()),
         "/yolo" => GatewayCommandResult::ToggleYolo(
             "🤠 YOLO mode toggled. Auto-approving all actions.".to_string(),
@@ -690,6 +722,41 @@ mod tests {
             }
             other => panic!("Expected ShowHelp, got {:?}", other),
         }
+
+        match handle_command("/commands") {
+            GatewayCommandResult::ShowHelp(text) => {
+                assert!(text.contains("Available Commands"));
+                assert!(text.contains("`/start`"));
+            }
+            other => panic!("Expected ShowHelp for /commands, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_start_noop_and_fast_service_tier() {
+        match handle_command("/start") {
+            GatewayCommandResult::Noop => {}
+            other => panic!("Expected Noop for /start, got {:?}", other),
+        }
+
+        match handle_command("/fast") {
+            GatewayCommandResult::SwitchFast { service_tier, .. } => {
+                assert_eq!(service_tier.as_deref(), Some("priority"));
+            }
+            other => panic!("Expected SwitchFast for /fast, got {:?}", other),
+        }
+
+        match handle_command("/fast off") {
+            GatewayCommandResult::SwitchFast { service_tier, .. } => {
+                assert!(service_tier.is_none());
+            }
+            other => panic!("Expected SwitchFast disable for /fast off, got {:?}", other),
+        }
+
+        match handle_command("/fast turbo") {
+            GatewayCommandResult::Reply(text) => assert!(text.contains("Usage")),
+            other => panic!("Expected usage reply for invalid /fast, got {:?}", other),
+        }
     }
 
     #[test]
@@ -761,7 +828,9 @@ mod tests {
             "tasks",
             "background",
             "steer",
+            "start",
             "help",
+            "commands",
             "update",
             "queue",
             "model",

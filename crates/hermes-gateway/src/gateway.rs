@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use hermes_config::QuickCommandConfig;
+use hermes_config::{normalize_service_tier, DisplayConfig, QuickCommandConfig};
 use hermes_core::errors::GatewayError;
 use hermes_core::traits::{ParseMode, PlatformAdapter};
 use hermes_core::types::{Message, MessageRole};
@@ -58,6 +58,14 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub streaming: StreamConfig,
 
+    /// Display command/runtime settings.
+    #[serde(default)]
+    pub display: DisplayConfig,
+
+    /// Default provider service tier for gateway agent turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+
     /// User-defined slash commands that bypass the agent loop.
     #[serde(default)]
     pub quick_commands: BTreeMap<String, QuickCommandConfig>,
@@ -71,6 +79,8 @@ impl Default for GatewayConfig {
             media_cache_max_bytes: 0,
             streaming_enabled: false,
             streaming: StreamConfig::default(),
+            display: DisplayConfig::default(),
+            service_tier: None,
             quick_commands: BTreeMap::new(),
         }
     }
@@ -155,6 +165,8 @@ pub struct GatewayRuntimeContext {
     pub branch: Option<String>,
     pub personality: Option<String>,
     pub home: Option<String>,
+    pub service_tier: Option<String>,
+    pub tool_progress: Option<String>,
     pub verbose: bool,
     pub yolo: bool,
     pub reasoning: bool,
@@ -223,6 +235,8 @@ struct SessionRuntimeState {
     branch: Option<String>,
     personality: Option<String>,
     home: Option<String>,
+    service_tier: Option<String>,
+    tool_progress: Option<String>,
     /// Optional usage budget (same units as `/budget` input; gateway displays as-is).
     budget: Option<f64>,
     verbose: bool,
@@ -239,6 +253,8 @@ impl Default for SessionRuntimeState {
             branch: None,
             personality: None,
             home: None,
+            service_tier: None,
+            tool_progress: None,
             budget: None,
             verbose: false,
             yolo: false,
@@ -272,6 +288,7 @@ pub struct Gateway {
     streaming_handler_with_context: RwLock<Option<StreamingMessageHandlerWithContext>>,
     /// Runtime command state for each session.
     runtime_state: RwLock<HashMap<String, SessionRuntimeState>>,
+    tool_progress_modes: RwLock<BTreeMap<String, String>>,
     /// Basic usage counters for each session.
     usage_stats: RwLock<HashMap<String, UsageStats>>,
     /// Tracks async `/background` and `/btw` tasks.
@@ -404,6 +421,7 @@ impl Gateway {
             streaming_handler: RwLock::new(None),
             streaming_handler_with_context: RwLock::new(None),
             runtime_state: RwLock::new(HashMap::new()),
+            tool_progress_modes: RwLock::new(BTreeMap::new()),
             usage_stats: RwLock::new(HashMap::new()),
             background_tasks: Arc::new(BackgroundTaskManager::new(8)),
             mcp_reload_generation: RwLock::new(0),
@@ -1000,7 +1018,6 @@ impl Gateway {
                     | GatewayCommandResult::ShowHelp(text)
                     | GatewayCommandResult::Unknown(text)
                     | GatewayCommandResult::ResetSession(text)
-                    | GatewayCommandResult::SwitchFast(text)
                     | GatewayCommandResult::ToggleVerbose(text)
                     | GatewayCommandResult::ToggleYolo(text)
                     | GatewayCommandResult::ToggleReasoning(text)
@@ -1009,6 +1026,7 @@ impl Gateway {
                     | GatewayCommandResult::CompressContext(text)
                     | GatewayCommandResult::StopAgent(text) => Some(text),
                     GatewayCommandResult::SwitchModel { reply, .. }
+                    | GatewayCommandResult::SwitchFast { reply, .. }
                     | GatewayCommandResult::SwitchPersonality { reply, .. }
                     | GatewayCommandResult::SetHome { reply, .. } => Some(reply),
                     _ => Some(format!("Quick command `{key}` routed to `{rewritten}`.")),
@@ -1018,6 +1036,79 @@ impl Gateway {
                 "Quick command `{key}` has unsupported type `{other}`."
             ))),
         }
+    }
+
+    fn normalize_tool_progress_mode(raw: &str) -> Option<String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "false" | "0" => Some("off".to_string()),
+            "new" => Some("new".to_string()),
+            "all" | "true" | "1" => Some("all".to_string()),
+            "verbose" => Some("verbose".to_string()),
+            _ => None,
+        }
+    }
+
+    fn default_tool_progress_for_platform(&self, platform: &str) -> String {
+        let platform_key = platform.trim().to_ascii_lowercase().replace('-', "_");
+        self.config
+            .display
+            .platform_tool_progress(&platform_key)
+            .and_then(Self::normalize_tool_progress_mode)
+            .unwrap_or_else(|| match platform_key.as_str() {
+                // Inbox-style gateway platforms stay quiet unless explicitly raised.
+                "telegram" | "slack" => "off".to_string(),
+                _ => "all".to_string(),
+            })
+    }
+
+    fn next_tool_progress_mode(current: &str) -> &'static str {
+        match current {
+            "off" => "new",
+            "new" => "all",
+            "all" => "verbose",
+            _ => "off",
+        }
+    }
+
+    async fn apply_verbose_command(
+        &self,
+        incoming: &IncomingMessage,
+        session_key: &str,
+    ) -> Result<String, GatewayError> {
+        if !self.config.display.tool_progress_command_enabled() {
+            return Ok(
+                "Tool progress command is not enabled. Set `display.tool_progress_command: true` to use `/verbose`."
+                    .to_string(),
+            );
+        }
+
+        let platform = incoming
+            .platform
+            .trim()
+            .to_ascii_lowercase()
+            .replace('-', "_");
+        let default_mode = self.default_tool_progress_for_platform(&platform);
+        let next = {
+            let mut modes = self.tool_progress_modes.write().await;
+            let current = modes
+                .get(&platform)
+                .cloned()
+                .unwrap_or_else(|| default_mode.clone());
+            let next = Self::next_tool_progress_mode(&current).to_string();
+            modes.insert(platform.clone(), next.clone());
+            next
+        };
+
+        let mut states = self.runtime_state.write().await;
+        let state = states.entry(session_key.to_string()).or_default();
+        state.tool_progress = Some(next.clone());
+        state.verbose = next == "verbose";
+        drop(states);
+
+        Ok(format!(
+            "📝 Tool progress for {platform}: {}",
+            next.to_ascii_uppercase()
+        ))
     }
 
     async fn execute_slash_command(
@@ -1216,14 +1307,7 @@ impl Gateway {
                 Ok(true)
             }
             GatewayCommandResult::ToggleVerbose(_) => {
-                let mut states = self.runtime_state.write().await;
-                let state = states.entry(session_key.to_string()).or_default();
-                state.verbose = !state.verbose;
-                let reply = format!(
-                    "📝 Verbose mode: {}",
-                    if state.verbose { "ON" } else { "OFF" }
-                );
-                drop(states);
+                let reply = self.apply_verbose_command(incoming, session_key).await?;
                 self.send_message(&incoming.platform, &incoming.chat_id, &reply, None)
                     .await?;
                 Ok(true)
@@ -1403,18 +1487,18 @@ impl Gateway {
                     .await?;
                 Ok(true)
             }
-            GatewayCommandResult::SwitchFast(_) => {
+            GatewayCommandResult::SwitchFast {
+                service_tier,
+                reply,
+            } => {
                 let mut states = self.runtime_state.write().await;
-                states.entry(session_key.to_string()).or_default().model =
-                    Some("openai:gpt-4o-mini".to_string());
+                states
+                    .entry(session_key.to_string())
+                    .or_default()
+                    .service_tier = service_tier.clone();
                 drop(states);
-                self.send_message(
-                    &incoming.platform,
-                    &incoming.chat_id,
-                    "⚡ Fast model enabled: openai:gpt-4o-mini",
-                    None,
-                )
-                .await?;
+                self.send_message(&incoming.platform, &incoming.chat_id, &reply, None)
+                    .await?;
                 Ok(true)
             }
             GatewayCommandResult::Retry => {
@@ -1844,6 +1928,12 @@ impl Gateway {
         if let Some(branch) = state.branch {
             hints.push(format!("branch={}", branch));
         }
+        if let Some(service_tier) = state
+            .service_tier
+            .or_else(|| normalize_service_tier(self.config.service_tier.as_deref()))
+        {
+            hints.push(format!("service_tier={service_tier}"));
+        }
         if hints.is_empty() {
             return messages;
         }
@@ -1882,6 +1972,10 @@ impl Gateway {
             branch: state.branch,
             personality: state.personality,
             home: state.home,
+            service_tier: state
+                .service_tier
+                .or_else(|| normalize_service_tier(self.config.service_tier.as_deref())),
+            tool_progress: state.tool_progress,
             verbose: state.verbose,
             yolo: state.yolo,
             reasoning: state.reasoning,
@@ -2054,14 +2148,19 @@ impl Gateway {
             .count();
 
         format!(
-            "🧭 Gateway status\n- model: {}\n- provider: {}\n- profile: {}\n- branch: {}\n- personality: {}\n- reasoning: {}\n- verbose: {}\n- yolo: {}\n- home: {}\n- messages in session: {}\n- running background tasks: {}\n- mcp generation: {}\n- input/output chars: {}/{}",
+            "🧭 Gateway status\n- model: {}\n- provider: {}\n- profile: {}\n- branch: {}\n- personality: {}\n- service tier: {}\n- reasoning: {}\n- verbose: {}\n- tool progress: {}\n- yolo: {}\n- home: {}\n- messages in session: {}\n- running background tasks: {}\n- mcp generation: {}\n- input/output chars: {}/{}",
             state.model.unwrap_or_else(|| "default".to_string()),
             state.provider.unwrap_or_else(|| "default".to_string()),
             state.profile.unwrap_or_else(|| "default".to_string()),
             state.branch.unwrap_or_else(|| "main".to_string()),
             state.personality.unwrap_or_else(|| "default".to_string()),
+            state
+                .service_tier
+                .or_else(|| normalize_service_tier(self.config.service_tier.as_deref()))
+                .unwrap_or_else(|| "default".to_string()),
             if state.reasoning { "ON" } else { "OFF" },
             if state.verbose { "ON" } else { "OFF" },
+            state.tool_progress.unwrap_or_else(|| "default".to_string()),
             if state.yolo { "ON" } else { "OFF" },
             state.home.unwrap_or_else(|| "(not set)".to_string()),
             messages.len(),
@@ -3905,6 +4004,16 @@ mod tests {
         };
         assert!(gw.route_message(&set_branch).await.is_ok());
 
+        let set_fast = IncomingMessage {
+            platform: "test".into(),
+            chat_id: "chat1".into(),
+            user_id: "user1".into(),
+            text: "/fast".into(),
+            message_id: None,
+            is_dm: true,
+        };
+        assert!(gw.route_message(&set_fast).await.is_ok());
+
         let normal = IncomingMessage {
             platform: "test".into(),
             chat_id: "chat1".into(),
@@ -3932,6 +4041,71 @@ mod tests {
         assert!(echoed.contains("provider=openai"));
         assert!(echoed.contains("profile=prod"));
         assert!(echoed.contains("branch=feature/parity"));
+        assert!(echoed.contains("service_tier=priority"));
+    }
+
+    #[tokio::test]
+    async fn gateway_verbose_command_is_config_gated_and_cycles_tool_progress() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(TestAdapter {
+            messages: sent.clone(),
+        });
+
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let mut dm_manager = DmManager::with_pair_behavior();
+        dm_manager.authorize_user("user1");
+        let gw = Gateway::new(session_mgr, dm_manager, GatewayConfig::default());
+        gw.register_adapter("telegram", adapter.clone()).await;
+
+        let verbose = IncomingMessage {
+            platform: "telegram".into(),
+            chat_id: "chat-verbose".into(),
+            user_id: "user1".into(),
+            text: "/verbose".into(),
+            message_id: None,
+            is_dm: true,
+        };
+        assert!(gw.route_message(&verbose).await.is_ok());
+        assert!(sent
+            .lock()
+            .unwrap()
+            .last()
+            .expect("disabled reply")
+            .1
+            .contains("tool_progress_command"));
+
+        let session_mgr = Arc::new(SessionManager::new(SessionConfig::default()));
+        let mut dm_manager = DmManager::with_pair_behavior();
+        dm_manager.authorize_user("user1");
+        let mut cfg = GatewayConfig::default();
+        cfg.display.tool_progress_command = true;
+        cfg.display.tool_progress = Some("all".to_string());
+        let gw = Gateway::new(session_mgr, dm_manager, cfg);
+        gw.register_adapter("telegram", adapter.clone()).await;
+
+        assert!(gw.route_message(&verbose).await.is_ok());
+        let first = sent
+            .lock()
+            .unwrap()
+            .last()
+            .expect("verbose reply")
+            .1
+            .clone();
+        assert!(first.contains("telegram"));
+        assert!(first.contains("VERBOSE"));
+
+        let session_key =
+            gw.session_manager
+                .compose_session_key("telegram", "chat-verbose", "user1");
+        let states = gw.runtime_state.read().await;
+        let state = states.get(&session_key).expect("runtime state");
+        assert_eq!(state.tool_progress.as_deref(), Some("verbose"));
+        assert!(state.verbose);
+        drop(states);
+
+        assert!(gw.route_message(&verbose).await.is_ok());
+        let second = sent.lock().unwrap().last().expect("off reply").1.clone();
+        assert!(second.contains("OFF"));
     }
 
     #[tokio::test]

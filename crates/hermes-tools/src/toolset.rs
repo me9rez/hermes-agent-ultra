@@ -1,4 +1,4 @@
-//! Toolset system (Requirement 5)
+//! Toolset system
 //!
 //! Manages named groups of tools (toolsets) with:
 //! - Predefined toolset definitions for all built-in tool groups
@@ -471,6 +471,10 @@ pub enum ToolsetError {
     #[error("Cycle detected in toolset resolution: {0}")]
     CycleDetected(String),
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

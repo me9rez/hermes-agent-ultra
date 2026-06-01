@@ -4,7 +4,9 @@
 //! defined in the `tools` module, connecting to real APIs, file systems,
 //! databases, and external services.
 
+pub mod agent_browser;
 pub mod browser;
+pub mod browser_snapshot_util;
 pub mod clarify;
 pub mod code_execution;
 pub mod cronjob;

@@ -6,6 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
+use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex as AsyncMutex;
@@ -15,8 +16,12 @@ use hermes_core::ToolError;
 
 use super::backend::{ActionResult, CaptureResult, ComputerUseBackend, UiElement};
 
+use base64::Engine as _;
+use uuid::Uuid;
+
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MCP_TIMEOUT: Duration = Duration::from_secs(20);
+const CLI_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 struct ActiveWindow {
@@ -34,6 +39,7 @@ struct WindowInfo {
     app_name: String,
     pid: i64,
     window_id: i64,
+    area: i64,
 }
 
 #[derive(Debug)]
@@ -89,13 +95,17 @@ impl CuaDriverBackend {
     async fn list_windows(&self) -> Result<Vec<WindowInfo>, ToolError> {
         let response =
             call_cua_driver_tool("list_windows", json!({"on_screen_only": true})).await?;
-        parse_windows_from_text(&response.text)
+        parse_windows_response(&response.text)
     }
 }
 
 #[async_trait]
 impl ComputerUseBackend for CuaDriverBackend {
     async fn capture(&self, mode: &str, app: Option<&str>) -> Result<CaptureResult, ToolError> {
+        if cfg!(target_os = "windows") && app.is_none() {
+            return capture_windows_virtual_desktop(mode).await;
+        }
+
         let mut windows = self.list_windows().await?;
         if windows.is_empty() {
             return Ok(CaptureResult {
@@ -118,10 +128,10 @@ impl ComputerUseBackend for CuaDriverBackend {
                 windows = filtered;
             }
         }
-        let target = windows[0].clone();
+        let target = select_capture_window(&windows);
         self.set_active(target.pid, target.window_id)?;
 
-        if mode == "vision" {
+        if mode == "vision" && !cfg!(target_os = "windows") {
             let response = call_cua_driver_tool(
                 "screenshot",
                 json!({"window_id": target.window_id, "format": "jpeg", "quality": 85}),
@@ -145,7 +155,11 @@ impl ComputerUseBackend for CuaDriverBackend {
 
         let response = call_cua_driver_tool(
             "get_window_state",
-            json!({"pid": target.pid, "window_id": target.window_id}),
+            json!({
+                "pid": target.pid,
+                "window_id": target.window_id,
+                "capture_mode": mode,
+            }),
         )
         .await?;
         let elements = parse_elements_from_tree(&response.text);
@@ -235,7 +249,7 @@ impl ComputerUseBackend for CuaDriverBackend {
         let (pid, _) = self.active()?;
         map_action(
             "type",
-            call_cua_driver_tool("type_text_chars", json!({"pid": pid, "text": text})).await,
+            call_cua_driver_tool("type_text", json!({"pid": pid, "text": text})).await,
         )
     }
 
@@ -289,6 +303,21 @@ impl ComputerUseBackend for CuaDriverBackend {
 
     async fn list_apps(&self) -> Result<Value, ToolError> {
         let response = call_cua_driver_tool("list_apps", json!({})).await?;
+        if let Ok(value) = serde_json::from_str::<Value>(&response.text) {
+            if let Some(apps) = value.get("apps").and_then(|v| v.as_array()) {
+                let mut out = Vec::new();
+                for app in apps {
+                    let name = app
+                        .get("name")
+                        .or_else(|| app.get("app_name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let pid = app.get("pid").and_then(|v| v.as_i64()).unwrap_or(0);
+                    out.push(json!({"name": name, "pid": pid}));
+                }
+                return Ok(json!({"apps": out, "count": out.len()}));
+            }
+        }
         let mut apps = Vec::new();
         let re = Regex::new(r"(.+?)\s+\(pid\s+(\d+)\)")
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
@@ -328,7 +357,14 @@ impl ComputerUseBackend for CuaDriverBackend {
 }
 
 pub fn cua_driver_binary_available() -> bool {
-    command_exists("cua-driver")
+    command_exists(cua_driver_cmd())
+}
+
+pub async fn ensure_cua_driver_daemon_running() -> Result<(), ToolError> {
+    if !cfg!(target_os = "windows") {
+        return Ok(());
+    }
+    ensure_windows_cua_daemon(false).await
 }
 
 fn command_exists(program: &str) -> bool {
@@ -418,6 +454,149 @@ fn parse_elements_from_tree(text: &str) -> Vec<UiElement> {
     out
 }
 
+fn select_capture_window(windows: &[WindowInfo]) -> WindowInfo {
+    const MIN_AREA: i64 = 10_000;
+    windows
+        .iter()
+        .filter(|w| w.area >= MIN_AREA)
+        .filter(|w| {
+            !w.app_name
+                .to_ascii_lowercase()
+                .contains("cua.agentcursoroverlay")
+        })
+        .max_by_key(|w| w.area)
+        .cloned()
+        .or_else(|| {
+            windows
+                .iter()
+                .filter(|w| w.area >= MIN_AREA)
+                .max_by_key(|w| w.area)
+                .cloned()
+        })
+        .unwrap_or_else(|| windows[0].clone())
+}
+
+async fn capture_windows_virtual_desktop(mode: &str) -> Result<CaptureResult, ToolError> {
+    ensure_windows_cua_daemon(false).await?;
+    if mode == "ax" {
+        return Ok(CaptureResult {
+            mode: mode.to_string(),
+            image_b64: None,
+            image_mime: None,
+            app: "Desktop".to_string(),
+            window_title: "Virtual Screen".to_string(),
+            elements: Vec::new(),
+        });
+    }
+
+    let path = std::env::temp_dir().join(format!("hermes-desktop-{}.png", Uuid::new_v4()));
+    capture_virtual_screen_to_path(&path).await?;
+    let bytes = fs::read(&path)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("read desktop screenshot: {e}")))?;
+    let _ = fs::remove_file(&path).await;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+
+    Ok(CaptureResult {
+        mode: mode.to_string(),
+        image_b64: Some(b64),
+        image_mime: Some("image/png".to_string()),
+        app: "Desktop".to_string(),
+        window_title: "Virtual Screen".to_string(),
+        elements: Vec::new(),
+    })
+}
+
+async fn capture_virtual_screen_to_path(path: &Path) -> Result<(), ToolError> {
+    let escaped = path.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "Add-Type -AssemblyName System.Drawing; \
+         Add-Type -AssemblyName System.Windows.Forms; \
+         $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; \
+         $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; \
+         $g=[System.Drawing.Graphics]::FromImage($bmp); \
+         $g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size); \
+         $bmp.Save('{escaped}',[System.Drawing.Imaging.ImageFormat]::Png); \
+         $g.Dispose(); $bmp.Dispose();"
+    );
+    let output = timeout(
+        CLI_TIMEOUT,
+        Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| ToolError::Timeout("desktop screenshot timeout".into()))?
+    .map_err(|e| ToolError::ExecutionFailed(format!("desktop screenshot: {e}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(ToolError::ExecutionFailed(format!(
+            "desktop screenshot failed: {}",
+            stderr.lines().next().unwrap_or("unknown error")
+        )))
+    }
+}
+
+fn cua_driver_cmd() -> &'static str {
+    static CMD: OnceLock<String> = OnceLock::new();
+    CMD.get_or_init(|| {
+        std::env::var("HERMES_CUA_DRIVER_CMD").unwrap_or_else(|_| "cua-driver".to_string())
+    })
+    .as_str()
+}
+
+fn windows_tool_alias(name: &str) -> &str {
+    match name {
+        "type_text_chars" => "type_text",
+        _ => name,
+    }
+}
+
+fn parse_windows_response(text: &str) -> Result<Vec<WindowInfo>, ToolError> {
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        if let Some(windows) = parse_windows_from_json(&value) {
+            if !windows.is_empty() {
+                return Ok(windows);
+            }
+        }
+    }
+    parse_windows_from_text(text)
+}
+
+fn parse_windows_from_json(value: &Value) -> Option<Vec<WindowInfo>> {
+    let rows = value
+        .get("_legacy_windows")
+        .or_else(|| value.get("windows"))
+        .and_then(|v| v.as_array())?;
+    let mut out = Vec::new();
+    for row in rows {
+        let window_id = row.get("window_id").and_then(|v| v.as_i64())?;
+        let pid = row.get("pid").and_then(|v| v.as_i64()).unwrap_or(0);
+        let title = row
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let app_name = row
+            .get("app_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(title)
+            .to_string();
+        let width = row.get("width").and_then(|v| v.as_i64()).unwrap_or(0);
+        let height = row.get("height").and_then(|v| v.as_i64()).unwrap_or(0);
+        out.push(WindowInfo {
+            app_name,
+            pid,
+            window_id,
+            area: width.saturating_mul(height),
+        });
+    }
+    Some(out)
+}
+
 fn parse_windows_from_text(text: &str) -> Result<Vec<WindowInfo>, ToolError> {
     let re = Regex::new(r#"^-\s+(.+?)\s+\(pid\s+(\d+)\)\s+.*\[window_id:\s+(\d+)\]"#)
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
@@ -438,6 +617,7 @@ fn parse_windows_from_text(text: &str) -> Result<Vec<WindowInfo>, ToolError> {
                 .get(3)
                 .and_then(|m| m.as_str().parse::<i64>().ok())
                 .unwrap_or(0),
+            area: 0,
         });
     }
     Ok(out)
@@ -455,9 +635,10 @@ async fn call_cua_driver_tool(name: &str, arguments: Value) -> Result<McpRespons
             "cua-driver not found. Install with `hermes computer-use install`.".to_string(),
         ));
     }
-    let mut guard = mcp_session_mutex()
-        .lock()
-        .await;
+    if cfg!(target_os = "windows") {
+        return call_cua_driver_cli_tool(name, arguments).await;
+    }
+    let mut guard = mcp_session_mutex().lock().await;
     ensure_mcp_session(&mut guard).await?;
     let session = guard
         .as_mut()
@@ -479,6 +660,210 @@ async fn call_cua_driver_tool(name: &str, arguments: Value) -> Result<McpRespons
             run_tool_call(session, name, arguments).await
         }
     }
+}
+
+async fn call_cua_driver_cli_tool(name: &str, arguments: Value) -> Result<McpResponse, ToolError> {
+    ensure_windows_cua_daemon(false).await?;
+    let tool = windows_tool_alias(name);
+    let args_json = if arguments.is_null() {
+        "{}".to_string()
+    } else {
+        serde_json::to_string(&arguments)
+            .map_err(|e| ToolError::ExecutionFailed(format!("serialize cua-driver args: {e}")))?
+    };
+
+    match run_cua_cli_call(tool, &args_json).await {
+        Ok(output) if output.status.success() => parse_windows_cli_response(tool, &output.stdout),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr.lines().next().unwrap_or("unknown error");
+            Err(ToolError::ExecutionFailed(format!(
+                "cua-driver call {tool} failed: {detail}"
+            )))
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, tool = %tool, "cua-driver call failed; retrying after daemon kick");
+            ensure_windows_cua_daemon(true).await?;
+            let output = run_cua_cli_call(tool, &args_json).await?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail = stderr.lines().next().unwrap_or("unknown error");
+                return Err(ToolError::ExecutionFailed(format!(
+                    "cua-driver call {tool} failed after retry: {detail}"
+                )));
+            }
+            parse_windows_cli_response(tool, &output.stdout)
+        }
+    }
+}
+
+async fn run_cua_cli_call(tool: &str, args_json: &str) -> Result<std::process::Output, ToolError> {
+    let mut child = Command::new(cua_driver_cmd())
+        .arg("call")
+        .arg(tool)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| ToolError::ExecutionFailed(format!("spawn cua-driver call {tool}: {e}")))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        timeout(CLI_TIMEOUT, async {
+            use tokio::io::AsyncWriteExt;
+            stdin.write_all(args_json.as_bytes()).await?;
+            Ok::<_, std::io::Error>(())
+        })
+        .await
+        .map_err(|_| ToolError::Timeout(format!("cua-driver call {tool} stdin timeout")))?
+        .map_err(|e| ToolError::ExecutionFailed(format!("cua-driver call {tool} stdin: {e}")))?;
+    }
+
+    timeout(CLI_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| ToolError::Timeout(format!("cua-driver call {tool} timeout")))?
+        .map_err(|e| ToolError::ExecutionFailed(format!("cua-driver call {tool}: {e}")))
+}
+
+fn parse_windows_cli_response(tool: &str, stdout: &[u8]) -> Result<McpResponse, ToolError> {
+    let value: Value = serde_json::from_slice(stdout).map_err(|e| {
+        ToolError::ExecutionFailed(format!(
+            "parse cua-driver {tool} json: {e}; output={}",
+            String::from_utf8_lossy(stdout)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        ))
+    })?;
+
+    if tool == "get_window_state" {
+        let tree = value
+            .get("tree_markdown")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let mut images = Vec::new();
+        if let Some(b64) = value.get("screenshot_png_b64").and_then(|v| v.as_str()) {
+            let mime = value
+                .get("screenshot_mime_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("image/png")
+                .to_string();
+            images.push(McpImage {
+                mime_type: Some(mime),
+                data: b64.to_string(),
+            });
+        }
+        return Ok(McpResponse {
+            text: tree,
+            images,
+            is_error: false,
+        });
+    }
+
+    Ok(McpResponse {
+        text: value.to_string(),
+        images: Vec::new(),
+        is_error: false,
+    })
+}
+
+async fn ensure_windows_cua_daemon(force_kick: bool) -> Result<(), ToolError> {
+    static READY: OnceLock<AsyncMutex<bool>> = OnceLock::new();
+    let ready = READY.get_or_init(|| AsyncMutex::new(false));
+    let mut guard = ready.lock().await;
+    if *guard && !force_kick && windows_daemon_running().await? {
+        return Ok(());
+    }
+
+    if !windows_daemon_running().await? {
+        ensure_windows_autostart_registered().await?;
+        tracing::info!("starting cua-driver desktop service");
+        let kick = Command::new(cua_driver_cmd())
+            .args(["autostart", "kick"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("start cua-driver service: {e}")))?;
+        if !kick.status.success() {
+            let stderr = String::from_utf8_lossy(&kick.stderr);
+            let stdout = String::from_utf8_lossy(&kick.stdout);
+            let detail = stderr
+                .lines()
+                .chain(stdout.lines())
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("unknown error");
+            return Err(ToolError::ExecutionFailed(format!(
+                "computer_use desktop service failed to start: {detail}"
+            )));
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    if !windows_daemon_running().await? {
+        return Err(ToolError::ExecutionFailed(
+            "computer_use desktop service is unavailable. Reinstall Computer Use from `hermes tools`."
+                .into(),
+        ));
+    }
+
+    *guard = true;
+    Ok(())
+}
+
+async fn ensure_windows_autostart_registered() -> Result<(), ToolError> {
+    let status = Command::new(cua_driver_cmd())
+        .args(["autostart", "status"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("cua-driver autostart status: {e}")))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+    if text.contains("registered") {
+        return Ok(());
+    }
+
+    tracing::info!("registering cua-driver logon autostart (one-time, no user action needed)");
+    let enable = Command::new(cua_driver_cmd())
+        .args(["autostart", "enable"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("cua-driver autostart enable: {e}")))?;
+    if !enable.status.success() {
+        let stderr = String::from_utf8_lossy(&enable.stderr);
+        tracing::warn!(
+            detail = %stderr.lines().next().unwrap_or("unknown"),
+            "cua-driver autostart enable failed; will still try kick"
+        );
+    }
+    Ok(())
+}
+
+async fn windows_daemon_running() -> Result<bool, ToolError> {
+    let status = timeout(
+        Duration::from_secs(5),
+        Command::new(cua_driver_cmd())
+            .arg("status")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| ToolError::Timeout("cua-driver status timeout".into()))?
+    .map_err(|e| ToolError::ExecutionFailed(format!("cua-driver status: {e}")))?;
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+    Ok(status.status.success() && combined.contains("daemon is running"))
 }
 
 fn mcp_session_mutex() -> &'static AsyncMutex<Option<McpSession>> {
@@ -503,7 +888,7 @@ async fn ensure_mcp_session(slot: &mut Option<McpSession>) -> Result<(), ToolErr
 }
 
 async fn start_mcp_session() -> Result<McpSession, ToolError> {
-    let mut child = Command::new("cua-driver")
+    let mut child = Command::new(cua_driver_cmd())
         .arg("mcp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

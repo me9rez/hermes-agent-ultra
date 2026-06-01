@@ -12,3 +12,4 @@ pub mod schema;
 pub mod tool;
 
 pub use tool::{ComputerUseHandler, check_computer_use_requirements};
+pub use cua_backend::ensure_cua_driver_daemon_running;

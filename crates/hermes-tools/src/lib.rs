@@ -69,7 +69,7 @@ pub use tools::browser::{
 };
 pub use tools::clarify::{ClarifyBackend, ClarifyHandler};
 pub use tools::code_execution::{CodeExecutionBackend, ExecuteCodeHandler};
-pub use tools::computer_use::{ComputerUseHandler, check_computer_use_requirements};
+pub use tools::computer_use::{ComputerUseHandler, check_computer_use_requirements, ensure_cua_driver_daemon_running};
 pub use tools::content_framework::{ContentNormalizeHandler, ContentPlanHandler};
 pub use tools::credential_files::CredentialFilesHandler;
 pub use tools::cronjob::{CronjobBackend, CronjobHandler};

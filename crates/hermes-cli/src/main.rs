@@ -2016,15 +2016,22 @@ async fn ensure_computer_use_runtime_ready() -> Result<(), AgentError> {
         return Ok(());
     }
 
+    if cfg!(windows) {
+        match hermes_tools::ensure_cua_driver_daemon_running().await {
+            Ok(()) => println!("  - Computer Use desktop service is ready."),
+            Err(err) => {
+                println!("  - Computer Use desktop service could not start: {err}");
+                println!("  - Try reinstalling via `hermes tools` → Computer Use.");
+            }
+        }
+    }
+
     let list_tools_ok = run_cua_driver_health_command(&["list-tools"]).await;
     let list_windows_ok = run_cua_driver_health_command(&["list_windows"]).await;
     if list_tools_ok && list_windows_ok {
         println!("  - cua-driver health check passed (list-tools + list_windows).");
     } else {
-        println!("  - cua-driver health check has warnings.");
-        println!("  - if list_windows is empty/fails over SSH, run:");
-        println!("      cua-driver autostart enable");
-        println!("      cua-driver autostart kick");
+        println!("  - cua-driver health check has warnings (Computer Use may still work).");
     }
     Ok(())
 }
@@ -2964,6 +2971,15 @@ async fn run_gateway(
                 skill_provider.clone(),
             )
             .await;
+            if hermes_tools::check_computer_use_requirements() {
+                match hermes_tools::ensure_cua_driver_daemon_running().await {
+                    Ok(()) => tracing::info!("Computer Use desktop service ready"),
+                    Err(err) => tracing::warn!(
+                        error = %err,
+                        "Computer Use desktop service not ready at gateway startup"
+                    ),
+                }
+            }
             let messaging_session = hermes_tools::tools::messaging::MessagingSessionContext::new();
             gateway
                 .set_messaging_session_context(messaging_session.clone())

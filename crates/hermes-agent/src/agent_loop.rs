@@ -6194,6 +6194,7 @@ impl AgentLoop {
             }
 
             total_turns += 1;
+            checkpoint_mgr.new_turn();
             iteration_budget.consume();
             tracing::debug!("Agent turn {}", total_turns);
 
@@ -7610,6 +7611,7 @@ impl AgentLoop {
             }
 
             total_turns += 1;
+            checkpoint_mgr.new_turn();
             iteration_budget.consume();
 
             // Housekeeping-only turns enable mute_post_response for the *current* turn's

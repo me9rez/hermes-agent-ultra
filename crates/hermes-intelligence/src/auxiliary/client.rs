@@ -728,6 +728,7 @@ mod tests {
                         total_tokens: 2,
                         estimated_cost: None,
                     }),
+                    ..Default::default()
                 }),
                 Outcome::Err(msg) => Err(AgentError::LlmApi(format!("{}: {}", self.label, msg))),
             }

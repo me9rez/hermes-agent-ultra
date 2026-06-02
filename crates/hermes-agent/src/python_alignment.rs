@@ -39,6 +39,131 @@ pub fn strip_system_messages_from_history(messages: &[Message]) -> Vec<Message> 
 /// Synthetic user nudge after a Codex intermediate ack (Python `run_agent.py`).
 pub const CODEX_CONTINUE_USER_MESSAGE: &str = "[System: Continue now. Execute the required tool calls and only send your final answer after completing the task.]";
 
+/// Re-export for continuation prompt branching (defined on [`hermes_core::LlmResponse`]).
+pub use hermes_core::PARTIAL_STREAM_STUB_ID;
+
+/// Heuristic: does visible assistant text look intentionally finished?
+///
+/// Python `AIAgent._has_natural_response_ending` (`run_agent.py`).
+pub fn has_natural_response_ending(content: &str) -> bool {
+    if content.is_empty() {
+        return false;
+    }
+    let stripped = content.trim_end();
+    if stripped.is_empty() {
+        return false;
+    }
+    if stripped.ends_with("```") {
+        return true;
+    }
+    if stripped.ends_with('^') {
+        return true;
+    }
+    let Some(last) = stripped.chars().next_back() else {
+        return false;
+    };
+    if matches!(
+        last,
+        '.' | '!' | '?' | ':' | ')' | '"' | '\'' | ']' | '}' | '。' | '！' | '？' | '：' | '）'
+            | '】' | '」' | '』' | '》' | '^'
+    ) {
+        return true;
+    }
+    if (last as u32) >= 0x1F300 {
+        return true;
+    }
+    false
+}
+
+/// Continuation user message after `finish_reason=length` (Python `conversation_loop._get_continuation_prompt`).
+pub fn get_continuation_prompt(is_partial_stub: bool, dropped_tools: Option<&[String]>) -> String {
+    if is_partial_stub {
+        if let Some(tools) = dropped_tools.filter(|t| !t.is_empty()) {
+            let tool_list = tools
+                .iter()
+                .take(3)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return format!(
+                "[System: Your previous tool call ({tool_list}) was too large and \
+the stream timed out before it could be delivered. Do NOT retry \
+the same tool call with the same large content. Instead, break the \
+content into multiple smaller tool calls (e.g. use multiple patch calls \
+or write smaller files). Each tool call's arguments must be under ~8K \
+tokens to avoid stream timeouts.]"
+            );
+        }
+        return "[System: The previous response was cut off by a network error mid-stream. \
+Continue exactly where you left off. Do not restart or repeat prior text. \
+Finish the answer directly.]"
+        .to_string();
+    }
+    "[System: Your previous response was truncated by the output length limit. \
+Continue exactly where you left off. Do not restart or repeat prior text. \
+Finish the answer directly.]"
+    .to_string()
+}
+
+pub fn continuation_prompt_for_response(response: &hermes_core::LlmResponse) -> String {
+    let is_partial = response.response_id.as_deref() == Some(PARTIAL_STREAM_STUB_ID);
+    get_continuation_prompt(is_partial, response.dropped_tool_names.as_deref())
+}
+
+/// Detect the narrow backend family affected by Ollama/GLM stop misreports.
+///
+/// Python `AIAgent._is_ollama_glm_backend` (`run_agent.py`).
+pub fn is_ollama_glm_backend(model: &str, provider: &str, base_url: &str) -> bool {
+    let model_lower = model.to_ascii_lowercase();
+    let provider_lower = provider.to_ascii_lowercase();
+    let base_url_lower = base_url.to_ascii_lowercase();
+    if !model_lower.contains("glm") && provider_lower != "zai" {
+        return false;
+    }
+    if base_url_lower.contains("ollama") || base_url_lower.contains(":11434") {
+        return true;
+    }
+    hermes_intelligence::is_local_endpoint(base_url)
+}
+
+/// Detect conservative stop→length misreports for Ollama-hosted GLM models.
+///
+/// Python `AIAgent._should_treat_stop_as_truncated` (`run_agent.py`).
+pub fn should_treat_stop_as_truncated(
+    finish_reason: Option<&str>,
+    assistant_content: Option<&str>,
+    history_includes_tool: bool,
+    api_mode: &str,
+    model: &str,
+    provider: &str,
+    base_url: Option<&str>,
+) -> bool {
+    if finish_reason != Some("stop") || api_mode != "chat_completions" {
+        return false;
+    }
+    let Some(base_url) = base_url.filter(|u| !u.is_empty()) else {
+        return false;
+    };
+    if !is_ollama_glm_backend(model, provider, base_url) {
+        return false;
+    }
+    if !history_includes_tool {
+        return false;
+    }
+    let Some(content) = assistant_content.filter(|c| !c.is_empty()) else {
+        return false;
+    };
+    let stripped = strip_think_blocks_for_ack(content);
+    let visible_text = stripped.trim();
+    if visible_text.is_empty() || visible_text.len() < 20 {
+        return false;
+    }
+    if !visible_text.contains(char::is_whitespace) {
+        return false;
+    }
+    !has_natural_response_ending(visible_text)
+}
+
 lazy_static::lazy_static! {
     /// Mirrors Python `_BUDGET_WARNING_RE` in `run_agent.py`.
     static ref BUDGET_WARNING_TEXT_RE: Regex = Regex::new(
@@ -319,5 +444,61 @@ mod tests {
         let user = "请检查当前目录并更新todo";
         let assistant = "已完成更新。两个 todo 项都已处理完毕。";
         assert!(!looks_like_codex_intermediate_ack(user, assistant, false));
+    }
+
+    #[test]
+    fn has_natural_response_ending_detects_punctuation_and_code_fence() {
+        assert!(has_natural_response_ending("All done."));
+        assert!(has_natural_response_ending("完成了。"));
+        assert!(has_natural_response_ending("```rust\nfn main() {}\n```"));
+        assert!(!has_natural_response_ending("Still writing"));
+        assert!(!has_natural_response_ending(""));
+    }
+
+    #[test]
+    fn length_continuation_prompt_branching_matches_python() {
+        assert!(get_continuation_prompt(true, None).contains("network error mid-stream"));
+        assert!(!get_continuation_prompt(true, None).contains("output length limit"));
+
+        let real = get_continuation_prompt(false, None);
+        assert!(real.contains("output length limit"));
+        assert!(!real.contains("network error"));
+
+        let dropped = get_continuation_prompt(true, Some(&["write_file".to_string()]));
+        assert!(dropped.contains("too large"));
+        assert!(dropped.contains("write_file"));
+        assert!(!dropped.contains("network error"));
+        assert!(!dropped.contains("output length limit"));
+    }
+
+    #[test]
+    fn should_treat_stop_as_truncated_requires_ollama_glm_and_unnatural_end() {
+        assert!(should_treat_stop_as_truncated(
+            Some("stop"),
+            Some("partial answer without ending"),
+            true,
+            "chat_completions",
+            "glm-4",
+            "openai",
+            Some("http://127.0.0.1:11434/v1"),
+        ));
+        assert!(!should_treat_stop_as_truncated(
+            Some("stop"),
+            Some("partial answer without ending"),
+            true,
+            "chat_completions",
+            "glm-4",
+            "openai",
+            Some("https://api.openai.com/v1"),
+        ));
+        assert!(!should_treat_stop_as_truncated(
+            Some("stop"),
+            Some("This is a complete answer."),
+            true,
+            "chat_completions",
+            "glm-4",
+            "openai",
+            Some("http://127.0.0.1:11434/v1"),
+        ));
     }
 }

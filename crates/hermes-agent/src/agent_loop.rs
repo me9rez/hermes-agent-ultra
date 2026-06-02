@@ -53,9 +53,10 @@ use crate::providers_extra::{
 };
 use crate::prompt_builder::TOOL_USE_ENFORCEMENT_MODELS;
 use crate::python_alignment::{
-    CODEX_CONTINUE_USER_MESSAGE, budget_pressure_text,
+    CODEX_CONTINUE_USER_MESSAGE, budget_pressure_text, continuation_prompt_for_response,
     inject_budget_pressure_into_last_tool_result, looks_like_codex_intermediate_ack,
-    sanitize_surrogates, strip_budget_warnings_from_messages, strip_think_blocks_for_ack,
+    sanitize_surrogates, should_treat_stop_as_truncated, strip_budget_warnings_from_messages,
+    strip_think_blocks_for_ack,
 };
 use crate::session_persistence::{SessionFlushCursor, SessionPersistence};
 use crate::skill_orchestrator::SkillOrchestrator;
@@ -278,7 +279,6 @@ const OBJECTIVE_DEEP_AUDIT_MIN_WORKSTREAMS: usize = 3;
 const FINALIZER_EVIDENCE_MAX_RETRIES: u32 = 2;
 const FINALIZER_OUTPUT_QUALITY_MAX_RETRIES: u32 = 2;
 const FINALIZER_ACTION_EXECUTION_MAX_RETRIES: u32 = 2;
-const CONTINUATION_USER_MESSAGE: &str = "[System: Your previous response was incomplete due to generation limits. Continue exactly where you left off. Do not restart or repeat prior text. Finish the response directly.]";
 
 // Python `AIAgent._MEMORY_REVIEW_PROMPT` / `_SKILL_REVIEW_PROMPT` / `_COMBINED_REVIEW_PROMPT` (0.14.0)
 const MEMORY_REVIEW_PROMPT: &str = "Review the conversation above and consider saving to memory if appropriate.\n\n\
@@ -5302,6 +5302,42 @@ impl AgentLoop {
         matches!(finish_reason, Some("length" | "pause_turn"))
     }
 
+    fn effective_finish_reason(
+        &self,
+        response: &hermes_core::LlmResponse,
+        assistant: &Message,
+        history_includes_tool: bool,
+        route: Option<&TurnRuntimeRoute>,
+    ) -> Option<String> {
+        let finish_reason = response.finish_reason.as_deref();
+        let active_model = self.active_model();
+        let (provider, model) = self.extract_provider_and_model(active_model.as_str());
+        let cfg = self.config();
+        let api_mode = route
+            .and_then(|rt| rt.api_mode.as_ref())
+            .unwrap_or(&cfg.api_mode);
+        let base_url = self.resolve_runtime_base_url(
+            provider.as_str(),
+            route.and_then(|rt| rt.base_url.as_deref()),
+        );
+        if should_treat_stop_as_truncated(
+            finish_reason,
+            assistant.content.as_deref(),
+            history_includes_tool,
+            Self::api_mode_as_hook_str(api_mode),
+            model,
+            provider.as_str(),
+            base_url.as_deref(),
+        ) {
+            self.emit_status(
+                "lifecycle",
+                "Treating suspicious Ollama/GLM stop response as truncated",
+            );
+            return Some("length".to_string());
+        }
+        response.finish_reason.clone()
+    }
+
     fn build_finalization_signals(
         &self,
         task_hint: &str,
@@ -6016,6 +6052,7 @@ impl AgentLoop {
                         usage: last_usage.clone(),
                         model: active_model.to_string(),
                         finish_reason: Some("interrupted".to_string()),
+                        ..Default::default()
                     }));
                 }
 
@@ -6153,6 +6190,7 @@ impl AgentLoop {
                 usage: last_usage,
                 model: active_model.to_string(),
                 finish_reason,
+                ..Default::default()
             }));
         }
 
@@ -6810,11 +6848,17 @@ impl AgentLoop {
             let tool_calls = if !parsed_tool_calls.is_empty() {
                 parsed_tool_calls
             } else {
+                let effective_finish_reason = self.effective_finish_reason(
+                    &response,
+                    &assistant_msg,
+                    history_includes_tool,
+                    turn_runtime_route.as_ref(),
+                );
                 let finalization_signals = self.build_finalization_signals(
                     &task_hint,
                     history_includes_tool,
                     &assistant_msg,
-                    response.finish_reason.as_deref(),
+                    effective_finish_reason.as_deref(),
                 );
                 tracing::debug!(
                     turn = total_turns,
@@ -6855,7 +6899,7 @@ impl AgentLoop {
                                 self.config().continuation_max_retries
                             ),
                         );
-                        ctx.add_message(Message::user(CONTINUATION_USER_MESSAGE));
+                        ctx.add_message(Message::user(&continuation_prompt_for_response(&response)));
                         continue;
                     }
                     premature_finalize_suspected_count =
@@ -8290,11 +8334,17 @@ impl AgentLoop {
                 .collect();
 
             if tool_calls.is_empty() {
+                let effective_finish_reason = self.effective_finish_reason(
+                    &response,
+                    &assistant_msg,
+                    history_includes_tool,
+                    turn_runtime_route.as_ref(),
+                );
                 let finalization_signals = self.build_finalization_signals(
                     &task_hint,
                     history_includes_tool,
                     &assistant_msg,
-                    response.finish_reason.as_deref(),
+                    effective_finish_reason.as_deref(),
                 );
                 tracing::debug!(
                     turn = total_turns,
@@ -8336,7 +8386,7 @@ impl AgentLoop {
                                 self.config().continuation_max_retries
                             ),
                         );
-                        ctx.add_message(Message::user(CONTINUATION_USER_MESSAGE));
+                        ctx.add_message(Message::user(&continuation_prompt_for_response(&response)));
                         continue;
                     }
                     premature_finalize_suspected_count =
@@ -12054,7 +12104,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -12119,7 +12170,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -12169,7 +12221,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -12218,7 +12271,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -12272,7 +12326,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -12339,7 +12394,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -12408,7 +12464,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -12490,7 +12547,8 @@ mod tests {
                     usage: None,
                     model: "ok".to_string(),
                     finish_reason: Some("stop".to_string()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -12652,6 +12710,7 @@ mod tests {
                     usage: None,
                     model: "chaos".to_string(),
                     finish_reason: Some("stop".to_string()),
+                    ..Default::default()
                 }),
                 "timeout" => Err(AgentError::LlmApi(
                     step.message
@@ -12848,7 +12907,8 @@ mod tests {
                     usage: None,
                     model: "ok".to_string(),
                     finish_reason: Some("stop".to_string()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -12920,6 +12980,7 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason,
+                    ..Default::default()
                 })
             }
 
@@ -12995,7 +13056,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -13080,6 +13142,7 @@ mod tests {
                         usage: None,
                         model: "dummy".into(),
                         finish_reason: Some("stop".into()),
+                        ..Default::default()
                     })
                 } else {
                     Ok(hermes_core::LlmResponse {
@@ -13087,6 +13150,7 @@ mod tests {
                         usage: None,
                         model: "dummy".into(),
                         finish_reason: Some("stop".into()),
+                        ..Default::default()
                     })
                 }
             }
@@ -13457,7 +13521,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -13519,7 +13584,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -13570,7 +13636,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -13621,7 +13688,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -13673,7 +13741,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -13725,7 +13794,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -13776,7 +13846,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -13822,7 +13893,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -13902,7 +13974,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14003,7 +14076,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14054,7 +14128,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14117,7 +14192,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14204,7 +14280,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14284,7 +14361,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14372,7 +14450,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14451,7 +14530,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14519,7 +14599,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14624,7 +14705,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14714,7 +14796,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14773,7 +14856,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14877,7 +14961,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -14942,7 +15027,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -15021,7 +15107,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -15100,7 +15187,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -15229,7 +15317,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
             fn chat_completion_stream(
                 &self,
@@ -15289,7 +15378,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
             fn chat_completion_stream(
                 &self,
@@ -15355,7 +15445,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
             fn chat_completion_stream(
                 &self,
@@ -15472,7 +15563,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
             fn chat_completion_stream(
                 &self,
@@ -15566,7 +15658,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
             fn chat_completion_stream(
                 &self,
@@ -15632,7 +15725,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
             fn chat_completion_stream(
                 &self,
@@ -15695,7 +15789,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
             fn chat_completion_stream(
                 &self,
@@ -15743,7 +15838,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
             fn chat_completion_stream(
                 &self,
@@ -15793,7 +15889,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
             fn chat_completion_stream(
                 &self,
@@ -15843,7 +15940,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
             fn chat_completion_stream(
                 &self,
@@ -15996,7 +16094,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(

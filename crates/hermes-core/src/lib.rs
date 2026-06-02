@@ -31,7 +31,7 @@ pub use types::{
     AgentResult, BudgetConfig, CacheControl, CacheType, CommandOutput, FunctionCall,
     FunctionCallDelta, LlmResponse, Message, MessageRole, ReasoningContent, ReasoningFormat, Skill,
     SkillMeta, StreamChunk, StreamDelta, ToolCall, ToolCallDelta, ToolErrorRecord, ToolResult,
-    UsageStats,
+    UsageStats, PARTIAL_STREAM_STUB_ID,
 };
 
 // Re-export tool schema types

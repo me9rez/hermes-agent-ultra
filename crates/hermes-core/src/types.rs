@@ -338,6 +338,28 @@ pub struct LlmResponse {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
+    /// Provider response id (e.g. OpenAI `chatcmpl-*`, or [`PARTIAL_STREAM_STUB_ID`] on stream failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    /// Tool names dropped when a stream dies mid tool-call (Python `_dropped_tool_names`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_tool_names: Option<Vec<String>>,
+}
+
+/// Stub id for a partial streaming response (Python `hermes_constants.PARTIAL_STREAM_STUB_ID`).
+pub const PARTIAL_STREAM_STUB_ID: &str = "partial-stream-stub";
+
+impl Default for LlmResponse {
+    fn default() -> Self {
+        Self {
+            message: Message::assistant(String::new()),
+            usage: None,
+            model: String::new(),
+            finish_reason: None,
+            response_id: None,
+            dropped_tool_names: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

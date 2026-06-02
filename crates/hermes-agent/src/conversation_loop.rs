@@ -362,7 +362,8 @@ mod tests {
                     usage: None,
                     model: "t".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(
@@ -427,7 +428,8 @@ mod tests {
                     usage: None,
                     model: "t".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
 
             fn chat_completion_stream(

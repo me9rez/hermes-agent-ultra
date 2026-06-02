@@ -39,6 +39,7 @@ impl LlmProvider for DummyProvider {
             usage: None,
             model: "dummy".into(),
             finish_reason: Some("stop".into()),
+        ..Default::default()
         })
     }
 

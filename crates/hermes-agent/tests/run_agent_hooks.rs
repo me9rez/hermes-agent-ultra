@@ -89,14 +89,16 @@ impl LlmProvider for ToolThenStopProvider {
                 usage: None,
                 model: "test".into(),
                 finish_reason: Some("tool_calls".into()),
-            })
+            
+                ..Default::default()})
         } else {
             Ok(LlmResponse {
                 message: Message::assistant("done"),
                 usage: None,
                 model: "test".into(),
                 finish_reason: Some("stop".into()),
-            })
+            ..Default::default()
+        })
         }
     }
 

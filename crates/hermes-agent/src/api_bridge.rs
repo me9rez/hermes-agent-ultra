@@ -256,6 +256,7 @@ impl CodexProvider {
             usage,
             model,
             finish_reason: stop_reason,
+            ..Default::default()
         })
     }
 }

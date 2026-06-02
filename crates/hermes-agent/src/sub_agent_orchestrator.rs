@@ -457,7 +457,8 @@ mod tests {
                 usage: None,
                 model: "noop".into(),
                 finish_reason: Some("stop".into()),
-            })
+            ..Default::default()
+        })
         }
         fn chat_completion_stream(
             &self,
@@ -492,7 +493,8 @@ mod tests {
                     usage: None,
                     model: "slow".into(),
                     finish_reason: Some("stop".into()),
-                })
+                ..Default::default()
+        })
             }
             fn chat_completion_stream(
                 &self,

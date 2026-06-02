@@ -1482,7 +1482,8 @@ fallback_providers:
                 usage: None,
                 model: "mock".to_string(),
                 finish_reason: Some("stop".to_string()),
-            })
+            ..Default::default()
+        })
         }
 
         fn chat_completion_stream(

@@ -39,6 +39,7 @@ impl LlmProvider for MinimalCronLlm {
             usage: None,
             model: model.unwrap_or("fallback").to_string(),
             finish_reason: Some("stop".into()),
+        ..Default::default()
         })
     }
 

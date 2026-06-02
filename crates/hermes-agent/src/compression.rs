@@ -1178,6 +1178,7 @@ mod tests {
                     total_tokens: 2,
                     estimated_cost: None,
                 }),
+                ..Default::default()
             })
         }
         fn chat_completion_stream(
@@ -1277,7 +1278,8 @@ mod tests {
                         total_tokens: 2,
                         estimated_cost: None,
                     }),
-                }),
+                
+                ..Default::default()}),
                 Err(err) => Err(err),
             }
         }

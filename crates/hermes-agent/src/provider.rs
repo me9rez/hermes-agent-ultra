@@ -1295,6 +1295,7 @@ impl AnthropicProvider {
             usage,
             model,
             finish_reason: stop_reason,
+            ..Default::default()
         })
     }
 }
@@ -2205,6 +2206,7 @@ fn parse_openai_response(json: &Value) -> Result<LlmResponse, AgentError> {
         usage,
         model,
         finish_reason,
+        ..Default::default()
     })
 }
 

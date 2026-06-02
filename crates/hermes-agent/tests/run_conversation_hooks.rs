@@ -81,6 +81,7 @@ impl LlmProvider for StopAssistantProvider {
             usage: None,
             model: "test".into(),
             finish_reason: Some("stop".into()),
+        ..Default::default()
         })
     }
 

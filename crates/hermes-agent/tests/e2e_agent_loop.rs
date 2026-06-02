@@ -41,7 +41,8 @@ impl LlmProvider for MockProvider {
                 usage: None,
                 model: "mock:model".to_string(),
                 finish_reason: Some("tool_calls".to_string()),
-            })
+            
+                ..Default::default()})
         } else {
             let saw_tool = messages
                 .iter()
@@ -55,7 +56,8 @@ impl LlmProvider for MockProvider {
                 usage: None,
                 model: "mock:model".to_string(),
                 finish_reason: Some("stop".to_string()),
-            })
+            
+                ..Default::default()})
         }
     }
 

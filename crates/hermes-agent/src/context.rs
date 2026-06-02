@@ -28,6 +28,16 @@ pub struct ContextManager {
     messages: Vec<Message>,
     /// Maximum total characters for the conversation (excluding system messages).
     max_context_chars: usize,
+    /// Running sum of `content.len()` for all messages (kept in sync on mutation).
+    total_message_chars: usize,
+}
+
+fn message_content_len(message: &Message) -> usize {
+    message.content.as_deref().map(str::len).unwrap_or(0)
+}
+
+fn sum_message_chars(messages: &[Message]) -> usize {
+    messages.iter().map(message_content_len).sum()
 }
 
 impl ContextManager {
@@ -36,6 +46,7 @@ impl ContextManager {
         Self {
             messages: Vec::new(),
             max_context_chars,
+            total_message_chars: 0,
         }
     }
 
@@ -53,11 +64,13 @@ impl ContextManager {
 
     /// Replace the full message list (e.g. after [`crate::compression::ContextCompressor`]).
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
+        self.total_message_chars = sum_message_chars(&messages);
         self.messages = messages;
     }
 
     /// Add a message to the conversation history.
     pub fn add_message(&mut self, message: Message) {
+        self.total_message_chars += message_content_len(&message);
         self.messages.push(message);
     }
 
@@ -130,19 +143,18 @@ impl ContextManager {
             let remove_idx = system_end;
             self.messages.remove(remove_idx);
         }
+        self.total_message_chars = sum_message_chars(&self.messages);
     }
 
     /// Reset the conversation history, clearing all messages.
     pub fn reset(&mut self) {
         self.messages.clear();
+        self.total_message_chars = 0;
     }
 
     /// Calculate the total character count of all message content.
     pub fn total_chars(&self) -> usize {
-        self.messages
-            .iter()
-            .map(|m| m.content.as_deref().map(|c| c.len()).unwrap_or(0))
-            .sum()
+        self.total_message_chars
     }
 
     /// Configured maximum context character budget (same units as [`Self::total_chars`]).
@@ -664,6 +676,23 @@ impl Default for SystemPromptBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_total_chars_incremental_matches_brute_force() {
+        let mut cm = ContextManager::new(10_000);
+        assert_eq!(cm.total_chars(), 0);
+        cm.add_message(Message::user("hello"));
+        cm.add_message(Message::assistant("world"));
+        assert_eq!(cm.total_chars(), 10);
+        cm.add_message(Message::system("sys"));
+        assert_eq!(cm.total_chars(), 13);
+        let mut replaced = cm.get_messages().to_vec();
+        replaced.push(Message::user("more"));
+        cm.replace_messages(replaced);
+        assert_eq!(cm.total_chars(), sum_message_chars(cm.get_messages()));
+        cm.reset();
+        assert_eq!(cm.total_chars(), 0);
+    }
 
     #[test]
     fn test_add_and_get_messages() {

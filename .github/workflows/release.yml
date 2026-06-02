@@ -75,6 +75,8 @@ jobs:
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
       - name: Build release binary
+        env:
+          AWS_LC_SYS_CMAKE_BUILDER: "1"
         run: cross build --release --target ${{ matrix.target }} -p hermes-cli
       - name: Package artifact (tar.gz)
         if: "!contains(matrix.artifact, '.zip')"

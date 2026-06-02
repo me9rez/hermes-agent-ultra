@@ -614,11 +614,8 @@ impl SystemPromptBuilder {
 
     /// Add current date/time and optional metadata.
     pub fn with_timestamp(mut self, model: Option<&str>, provider: Option<&str>) -> Self {
-        let now = chrono::Local::now();
-        let mut line = format!(
-            "Conversation started: {}",
-            now.format("%A, %B %d, %Y %I:%M %p")
-        );
+        let date_line = hermes_core::format_conversation_started_date();
+        let mut line = format!("Conversation started: {date_line}");
         if let Some(m) = model {
             line.push_str(&format!("\nModel: {m}"));
         }
@@ -796,6 +793,9 @@ mod tests {
         assert!(prompt.contains("Be concise."));
         assert!(prompt.contains("User likes Rust"));
         assert!(prompt.contains("gpt-4o"));
+        assert!(prompt.contains("Conversation started:"));
+        assert!(!prompt.contains(" AM"));
+        assert!(!prompt.contains(" PM"));
     }
 
     #[test]

@@ -126,6 +126,10 @@ pub struct GatewayConfig {
     /// Speech-to-text provider configuration (Python `stt` block).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stt: Option<SttConfig>,
+
+    /// IANA timezone for user-facing wall clock (e.g. `Asia/Shanghai`). Overridden by `HERMES_TIMEZONE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
 }
 
 impl Default for GatewayConfig {
@@ -158,6 +162,7 @@ impl Default for GatewayConfig {
             home_dir: None,
             tts: None,
             stt: None,
+            timezone: None,
         }
     }
 }

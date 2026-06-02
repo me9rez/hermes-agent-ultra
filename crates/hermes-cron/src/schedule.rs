@@ -1,7 +1,8 @@
 //! schedule parsing and next-run computation (`cron/jobs.py`).
 
-use chrono::{DateTime, Duration, FixedOffset, Offset, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use cron::Schedule;
+use hermes_core::{cron_wall_offset_at, ensure_aware_naive, ensure_aware_utc, now_utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
@@ -211,7 +212,7 @@ pub fn parse_schedule(schedule: &str) -> Result<ScheduleSpec, ScheduleParseError
     }
 
     if let Ok(minutes) = parse_duration(original) {
-        let run_at = Utc::now() + Duration::minutes(i64::from(minutes));
+        let run_at = now_utc() + Duration::minutes(i64::from(minutes));
         return Ok(ScheduleSpec::Once { run_at });
     }
 
@@ -263,15 +264,14 @@ pub fn parse_schedule_value(value: &serde_json::Value) -> Result<ScheduleSpec, S
 }
 
 fn parse_iso_timestamp(s: &str) -> Result<DateTime<Utc>, ScheduleParseError> {
-    let trimmed = s.trim().replace('Z', "+00:00");
-    if let Ok(dt) = DateTime::parse_from_rfc3339(&trimmed) {
-        return Ok(dt.with_timezone(&Utc));
+    let trimmed = s.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc3339(&trimmed.replace('Z', "+00:00")) {
+        return Ok(ensure_aware_utc(dt.with_timezone(&Utc)));
     }
-    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(&trimmed, "%Y-%m-%dT%H:%M:%S") {
-        return Ok(ndt.and_utc());
-    }
-    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(&trimmed, "%Y-%m-%d %H:%M:%S") {
-        return Ok(ndt.and_utc());
+    for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"] {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(trimmed, fmt) {
+            return Ok(ensure_aware_naive(ndt));
+        }
     }
     Err(ScheduleParseError(format!("Invalid timestamp '{s}'")))
 }
@@ -281,7 +281,7 @@ pub fn compute_next_run(
     spec: &ScheduleSpec,
     last_run_at: Option<DateTime<Utc>>,
 ) -> Option<DateTime<Utc>> {
-    let now = Utc::now();
+    let now = now_utc();
     match spec {
         ScheduleSpec::Once { run_at } => recoverable_oneshot_run_at(*run_at, now, last_run_at),
         ScheduleSpec::Interval { minutes } => {
@@ -322,7 +322,7 @@ pub fn compute_grace_seconds(spec: &ScheduleSpec) -> i64 {
             (period / 2).clamp(MIN_GRACE_SECONDS, MAX_GRACE_SECONDS)
         }
         ScheduleSpec::Cron { expr } => {
-            let now = Utc::now();
+            let now = now_utc();
             if let (Some(first), Some(second)) = (
                 parse_cron_next(expr, now),
                 parse_cron_next(expr, parse_cron_next(expr, now).unwrap_or(now)),
@@ -385,63 +385,12 @@ pub fn normalize_cron_expr(expr: &str) -> String {
     }
 }
 
-/// Get the cron timezone offset.
-///
-/// First checks `HERMES_CRON_TZ` env var (e.g. `+08:00`, `-5`).
-/// Falls back to the OS local timezone via `chrono::Local::now().offset()`.
-fn cron_timezone_offset() -> Option<FixedOffset> {
-    if let Some(offset) = std::env::var("HERMES_CRON_TZ")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .and_then(|raw| parse_offset(&raw))
-    {
-        return Some(offset);
-    }
-    // Auto-detect from OS local timezone
-    let local_offset = chrono::Local::now().offset().fix();
-    if local_offset.local_minus_utc() == 0 {
-        // UTC: effectively no timezone adjustment needed
-        return None;
-    }
-    Some(local_offset)
-}
-
-fn parse_offset(raw: &str) -> Option<FixedOffset> {
-    let trimmed = raw.trim();
-    // "+08:00", "-05:00"
-    if let Some(rest) = trimmed.strip_prefix('+') {
-        let parts: Vec<&str> = rest.splitn(2, ':').collect();
-        let hours: i32 = parts[0].parse().ok()?;
-        let mins: i32 = parts.get(1).unwrap_or(&"0").parse().ok()?;
-        return FixedOffset::east_opt(hours * 3600 + mins * 60);
-    }
-    if let Some(rest) = trimmed.strip_prefix('-') {
-        let parts: Vec<&str> = rest.splitn(2, ':').collect();
-        let hours: i32 = parts[0].parse().ok()?;
-        let mins: i32 = parts.get(1).unwrap_or(&"0").parse().ok()?;
-        return FixedOffset::west_opt(hours * 3600 + mins * 60);
-    }
-    // bare number like "8" (positive = east)
-    if let Ok(hours) = trimmed.parse::<i32>() {
-        if hours >= 0 {
-            return FixedOffset::east_opt(hours * 3600);
-        } else {
-            return FixedOffset::west_opt((-hours) * 3600);
-        }
-    }
-    None
-}
-
-/// Compute next cron match, optionally interpreting the expression in a local timezone.
-///
-/// When `HERMES_CRON_TZ` is set (e.g. `+08:00`), cron expressions like `0 19 * * *`
-/// are interpreted as local time (19:00 Beijing → 11:00 UTC).
+/// Compute next cron match, interpreting the expression in the Hermes wall timezone when configured.
 fn parse_cron_next(expr: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let normalized = normalize_cron_expr(expr);
     let schedule = normalized.parse::<Schedule>().ok()?;
 
-    if let Some(offset) = cron_timezone_offset() {
-        // Convert `after` to local time, find next cron match, convert back to UTC.
+    if let Some(offset) = cron_wall_offset_at(after) {
         let after_local = after.with_timezone(&offset);
         schedule
             .after(&after_local)
@@ -455,7 +404,7 @@ fn parse_cron_next(expr: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Timelike;
+    use chrono::{FixedOffset, Timelike};
 
     #[test]
     fn parse_every_2h() {
@@ -535,33 +484,6 @@ mod tests {
     #[test]
     fn invalid_schedule_rejected() {
         assert!(parse_schedule("not_a_schedule").is_err());
-    }
-
-    #[test]
-    fn parse_offset_positive() {
-        let offset = parse_offset("+08:00").expect("+08:00");
-        assert_eq!(offset, FixedOffset::east_opt(8 * 3600).unwrap());
-    }
-
-    #[test]
-    fn parse_offset_negative() {
-        let offset = parse_offset("-05:00").expect("-05:00");
-        assert_eq!(offset, FixedOffset::west_opt(5 * 3600).unwrap());
-    }
-
-    #[test]
-    fn parse_offset_bare_number() {
-        let offset = parse_offset("8").expect("8");
-        assert_eq!(offset, FixedOffset::east_opt(8 * 3600).unwrap());
-
-        let offset = parse_offset("-3").expect("-3");
-        assert_eq!(offset, FixedOffset::west_opt(3 * 3600).unwrap());
-    }
-
-    #[test]
-    fn parse_offset_invalid_returns_none() {
-        assert!(parse_offset("garbage").is_none());
-        assert!(parse_offset("").is_none());
     }
 
     #[test]

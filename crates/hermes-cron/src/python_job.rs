@@ -184,15 +184,22 @@ fn python_job_status(raw: &Value) -> JobStatus {
     JobStatus::Active
 }
 
+use hermes_core::{ensure_aware_naive, ensure_aware_utc};
+
 fn parse_time_field(v: Option<&Value>) -> Option<DateTime<Utc>> {
     let s = v?.as_str()?;
     chrono::DateTime::parse_from_rfc3339(&s.replace('Z', "+00:00"))
         .ok()
-        .map(|dt| dt.with_timezone(&Utc))
+        .map(|dt| ensure_aware_utc(dt.with_timezone(&Utc)))
         .or_else(|| {
-            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%z")
+            DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%z")
                 .ok()
-                .map(|dt| dt.and_utc())
+                .map(|dt| ensure_aware_utc(dt.with_timezone(&Utc)))
+        })
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                .ok()
+                .map(ensure_aware_naive)
         })
 }
 

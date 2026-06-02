@@ -54,7 +54,7 @@ pub use tool_dispatch_helpers::{
 
 // Re-export approval types
 pub use approval::{ApprovalDecision, ApprovalManager, check_approval};
-pub use code_execution_env::{SANDBOX_ALLOWED_TOOLS, scrub_child_env};
+pub use code_execution_env::{prepare_child_env, SANDBOX_ALLOWED_TOOLS, scrub_child_env};
 pub use code_execution_stubs::{RpcTransport, generate_hermes_tools_module};
 
 // Re-export credential guard

@@ -4,7 +4,7 @@
 |------|-----|
 | registry `id` | `code_execution_env` |
 | Python | `tools/code_execution_tool.py::_scrub_child_env` |
-| Rust | `crates/hermes-tools/src/code_execution_env.rs` |
+| Rust | `crates/hermes-tools/src/code_execution_env.rs` (`scrub_child_env` + `prepare_child_env`) |
 | Crate | `hermes-tools` |
 
 ## 验证

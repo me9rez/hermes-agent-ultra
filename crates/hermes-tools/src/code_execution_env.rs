@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use hermes_core::tz_for_child_env;
+
 pub const SANDBOX_ALLOWED_TOOLS: &[&str] = &[
     "web_search",
     "web_extract",
@@ -81,6 +83,20 @@ pub fn scrub_child_env(
     scrubbed
 }
 
+/// Scrub secrets then apply Hermes child timezone (`TZ` from configured IANA zone).
+pub fn prepare_child_env(
+    source_env: &BTreeMap<String, String>,
+    is_passthrough: impl Fn(&str) -> bool,
+    is_windows: bool,
+) -> BTreeMap<String, String> {
+    let mut scrubbed = scrub_child_env(source_env, is_passthrough, is_windows);
+    scrubbed.remove("HERMES_TIMEZONE");
+    if let Some(tz) = tz_for_child_env() {
+        scrubbed.insert("TZ".to_string(), tz);
+    }
+    scrubbed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +119,16 @@ mod tests {
         assert!(out.contains_key("PATH"));
         assert!(!out.contains_key("OPENAI_API_KEY"));
         assert!(!out.contains_key("MY_PASSWORD"));
+    }
+
+    #[test]
+    fn injects_tz_without_leaking_hermes_timezone() {
+        hermes_core::init_global_clock(Some("Asia/Kolkata"));
+        let src = env(&[("HERMES_TIMEZONE", "Asia/Kolkata"), ("PATH", "/bin")]);
+        let out = prepare_child_env(&src, |_| false, false);
+        assert_eq!(out.get("TZ").map(String::as_str), Some("Asia/Kolkata"));
+        assert!(!out.contains_key("HERMES_TIMEZONE"));
+        assert_eq!(out.get("PATH").map(String::as_str), Some("/bin"));
     }
 
     #[test]

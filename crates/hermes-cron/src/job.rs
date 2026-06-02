@@ -1,6 +1,7 @@
 //! Cron job definition and related types.
 
 use chrono::{DateTime, Utc};
+use hermes_core::now_utc;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::python_job::JobOrigin;
@@ -312,7 +313,7 @@ impl CronJob {
             .as_ref()
             .map(|s| s.display())
             .unwrap_or_else(|| schedule_str.clone());
-        let now = Utc::now();
+        let now = now_utc();
         let next_run = spec
             .as_ref()
             .and_then(|s| compute_next_run(s, None))

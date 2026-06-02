@@ -108,8 +108,10 @@ entry point is src/atlas/main.py. Always run `make lint` before
 committing.
 
 # Layer 9: Timestamp + session
-Current time: 2026-03-30T14:30:00-07:00
+Conversation started: Monday, March 30, 2026
 Session: abc123
+
+Note: the date line is session-stable (date only, no clock time). For the exact current wall clock, the agent must use tools (e.g. `terminal` + `date`), not this line.
 
 # Layer 10: Platform hint
 You are a CLI AI Agent. Try not to use markdown but simple text

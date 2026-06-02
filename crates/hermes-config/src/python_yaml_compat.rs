@@ -444,4 +444,18 @@ platform_toolsets:
         let cron = cfg.platform_toolsets.get("cron").expect("cron");
         assert_eq!(cron, &vec!["42".to_string()]);
     }
+
+    #[test]
+    fn root_timezone_roundtrips() {
+        let raw = r#"
+timezone: Asia/Shanghai
+"#;
+        let mut root: Value = serde_yaml::from_str(raw).unwrap();
+        let Value::Mapping(ref mut m) = root else {
+            panic!();
+        };
+        normalize_config_yaml_root(m);
+        let cfg: crate::config::GatewayConfig = serde_yaml::from_value(root).unwrap();
+        assert_eq!(cfg.timezone.as_deref(), Some("Asia/Shanghai"));
+    }
 }

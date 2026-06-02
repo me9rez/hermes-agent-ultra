@@ -51,6 +51,18 @@
 - **依赖**：改 `Cargo.toml` 前必须在根 `Cargo.toml` / workspace 中核对已有版本；禁止重复添加同名 crate。
 - 合并前消除**本次引入**的 clippy 警告（全仓 `-D warnings` 为目标）。
 
+## 时间 / 时区（Tier A vs Tier B）
+
+移植或新增代码时区分两类时钟（见 `crates/hermes-core/src/time.rs`，Python `hermes_time.py`）：
+
+| Tier | 用途 | API |
+|------|------|-----|
+| **A 用户墙钟** | system prompt 日期、cron 调度/到期、execute_code `TZ`、会话搜索展示 | `hermes_core::now()` / `now_utc()` / `ensure_aware_*` |
+| **B 内部 UTC** | session `last_active`、token 过期、telemetry、文件名/session id | `Utc::now()` |
+
+- System prompt 只注入 **date-only** 的 `Conversation started:`，不得放分钟级「当前时间」。
+- 配置：`HERMES_TIMEZONE` > `config.yaml` 的 `timezone` > 服务器本地；`HERMES_CRON_TZ` 已 deprecated。
+
 ## 防御性规则
 
 - **连续 3 次** `cargo build` 仍失败 → 向人类汇报完整错误与已尝试修改 → **暂停**。

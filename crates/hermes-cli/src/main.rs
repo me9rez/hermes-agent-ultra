@@ -55,6 +55,7 @@ use hermes_config::{
     save_config_yaml, state_dir, user_config_field_display, validate_config, ConfigError,
     GatewayConfig, PlatformConfig, UnauthorizedDmBehavior,
 };
+use hermes_core::init_global_clock;
 use hermes_core::AgentError;
 use hermes_core::PlatformAdapter;
 use hermes_core::MessageRole;
@@ -389,11 +390,14 @@ async fn run(cli: Cli) {
         tracing::warn!("Secret-vault hydration skipped: {}", err);
     }
     if let Ok(cfg) = load_config(cli.config_dir.as_deref()) {
+        init_global_clock(cfg.timezone.as_deref());
         let applied = hydrate_env_from_config(&cfg);
         tracing::trace!(
             applied_env_vars = applied,
             "Hydrated environment from config.yaml"
         );
+    } else {
+        init_global_clock(None);
     }
     let route_autotune_applied = apply_route_autotune_env_overrides(&cli);
     if !route_autotune_applied.is_empty() {

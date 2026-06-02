@@ -1,7 +1,8 @@
 //! Real session search backend using rusqlite with FTS5.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use hermes_core::{ensure_aware_naive, format_wall_datetime};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -235,25 +236,22 @@ impl SqliteSessionSearchBackend {
             return "unknown".to_string();
         };
 
-        let format_human =
-            |dt: DateTime<Local>| -> String { dt.format("%B %d, %Y at %I:%M %p").to_string() };
+        let format_human = format_wall_datetime;
 
         if let Ok(seconds) = raw.parse::<f64>() {
             let sec = seconds.trunc() as i64;
             let nanos = ((seconds.fract().abs()) * 1_000_000_000_f64).round() as u32;
             if let Some(dt_utc) = Utc.timestamp_opt(sec, nanos).single() {
-                return format_human(dt_utc.with_timezone(&Local));
+                return format_human(dt_utc);
             }
         }
 
         if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
-            return format_human(dt.with_timezone(&Local));
+            return format_human(dt.with_timezone(&Utc));
         }
 
         if let Ok(naive) = NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S") {
-            if let Some(local) = Local.from_local_datetime(&naive).single() {
-                return format_human(local);
-            }
+            return format_human(ensure_aware_naive(naive));
         }
 
         raw.to_string()

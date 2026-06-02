@@ -6,6 +6,7 @@
 pub mod errors;
 pub mod build_info;
 pub mod inbound;
+pub mod time;
 pub mod tool_call_parser;
 pub mod tool_schema;
 pub mod traits;
@@ -19,6 +20,11 @@ pub mod test_generators;
 // Re-export all error types
 pub use errors::{AgentError, ConfigError, GatewayError, ToolError};
 pub use build_info::startup_commit_info;
+pub use time::{
+    cron_wall_offset_at, ensure_aware_naive, ensure_aware_utc, format_conversation_started_date,
+    format_wall_datetime, init_global_clock, now, now_utc, reset_global_clock_cache,
+    timezone_name, tz_for_child_env, HermesClock,
+};
 
 // Re-export all core types
 pub use types::{

@@ -8,8 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::Utc;
-use hermes_core::{AgentResult, MessageRole};
+use hermes_core::{now_utc, AgentResult, MessageRole};
 use tokio::sync::{broadcast, Mutex, Notify};
 use tokio::time::{self, Duration};
 
@@ -258,7 +257,7 @@ impl CronScheduler {
                     }
                 }
 
-                let now = Utc::now();
+                let now = now_utc();
                 let mut guard = jobs.lock().await;
                 let mut tick_dirty = false;
                 for job in guard.values_mut() {
@@ -418,7 +417,7 @@ impl CronScheduler {
 
         // Compute next_run if not set
         if job.next_run.is_none() && job.status == JobStatus::Active {
-            job.next_run = job.compute_next_run(Utc::now());
+            job.next_run = job.compute_next_run(now_utc());
         }
 
         // Persist
@@ -520,7 +519,7 @@ impl CronScheduler {
         }
 
         job.status = JobStatus::Active;
-        job.next_run = job.compute_next_run(Utc::now());
+        job.next_run = job.compute_next_run(now_utc());
         drop(guard);
 
         // Persist the change
@@ -610,7 +609,7 @@ impl CronScheduler {
         {
             let mut guard = self.jobs.lock().await;
             if let Some(j) = guard.get_mut(id) {
-                j.last_run = Some(Utc::now());
+                j.last_run = Some(now_utc());
                 j.last_output = latest_assistant_output(&outcome.result)
                     .map(|s| truncate_chars(&s, MAX_STORED_OUTPUT_CHARS));
                 j.last_delivery_error = delivery_error;

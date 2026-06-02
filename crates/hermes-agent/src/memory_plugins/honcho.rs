@@ -360,7 +360,7 @@ impl HonchoMemoryPlugin {
             .map_err(|e| format!("Honcho response parse error: {e}; body={body_text}"))
     }
 
-    /// Sync entry point safe from tokio workers (uses `block_in_place` + async client).
+    /// Sync entry point safe from tokio workers (offloads blocking HTTP to a std thread).
     fn send_json(
         &self,
         config: &HonchoConfig,
@@ -369,30 +369,33 @@ impl HonchoMemoryPlugin {
         body: Option<&Value>,
         query: Option<&[(&str, String)]>,
     ) -> Result<Value, String> {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let http = self.http.clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
             let config = config.clone();
             let path = path.to_string();
             let body = body.cloned();
-            let query: Option<Vec<(String, String)>> = query.map(|items| {
+            let query_owned: Option<Vec<(String, String)>> = query.map(|items| {
                 items
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.clone()))
                     .collect()
             });
-            tokio::task::block_in_place(|| {
-                handle.block_on(async move {
-                    Self::send_json_async(
-                        &http,
-                        &config,
-                        method,
-                        &path,
-                        body.as_ref(),
-                        query.as_deref(),
-                    )
-                    .await
-                })
+            std::thread::spawn(move || {
+                let query_refs: Option<Vec<(&str, String)>> = query_owned.as_ref().map(|items| {
+                    items
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.clone()))
+                        .collect()
+                });
+                Self::send_json_blocking(
+                    &config,
+                    method,
+                    &path,
+                    body.as_ref(),
+                    query_refs.as_deref(),
+                )
             })
+            .join()
+            .map_err(|_| "Honcho request thread panicked".to_string())?
         } else {
             Self::send_json_blocking(config, method, path, body, query)
         }

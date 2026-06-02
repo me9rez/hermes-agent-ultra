@@ -256,20 +256,37 @@ impl MemoryManager {
 
     /// Collect prefetch context from all providers, wrap in memory-context fence.
     pub fn prefetch_all(&self, query: &str, session_id: &str) -> String {
-        let mut candidates: Vec<FusedMemoryCandidate> = Vec::new();
-        for provider in &self.providers {
-            let result = provider.prefetch(query, session_id);
-            if result.trim().is_empty() {
-                continue;
-            }
-            candidates.push(FusedMemoryCandidate {
-                provider: provider.name().to_string(),
-                content: result,
-            });
-        }
+        let query = query.to_string();
+        let session_id = session_id.to_string();
+        let mut candidates: Vec<FusedMemoryCandidate> = self
+            .providers
+            .iter()
+            .map(|provider| {
+                let provider = Arc::clone(provider);
+                let query = query.clone();
+                let session_id = session_id.clone();
+                std::thread::spawn(move || {
+                    let result = provider.prefetch(&query, &session_id);
+                    (provider.name().to_string(), result)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+            .filter_map(|(provider, result)| {
+                if result.trim().is_empty() {
+                    None
+                } else {
+                    Some(FusedMemoryCandidate {
+                        provider,
+                        content: result,
+                    })
+                }
+            })
+            .collect();
 
         if memory_graph_depth() > 1 {
-            let mut graph = graph_enrich_candidates(&candidates, query, memory_graph_depth());
+            let mut graph = graph_enrich_candidates(&candidates, &query, memory_graph_depth());
             candidates.append(&mut graph);
         }
 
@@ -278,7 +295,7 @@ impl MemoryManager {
         }
 
         let parts = if memory_fusion_enabled() {
-            fuse_memory_candidates(candidates, query)
+            fuse_memory_candidates(candidates, &query)
         } else {
             candidates
                 .into_iter()
@@ -903,6 +920,20 @@ mod tests {
         assert!(ctx.contains("<memory-context>"));
         assert!(ctx.contains("User likes Rust."));
         assert!(ctx.contains("</memory-context>"));
+    }
+
+    #[test]
+    fn test_prefetch_all_multiple_providers() {
+        let mut mm = MemoryManager::new();
+        mm.add_provider(Arc::new(
+            TestProvider::new("a").with_prefetch("Context A"),
+        ));
+        mm.add_provider(Arc::new(
+            TestProvider::new("b").with_prefetch("Context B"),
+        ));
+        let ctx = mm.prefetch_all("hello", "");
+        assert!(ctx.contains("Context A"));
+        assert!(ctx.contains("Context B"));
     }
 
     #[test]

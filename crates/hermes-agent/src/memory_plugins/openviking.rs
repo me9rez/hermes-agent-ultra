@@ -264,7 +264,9 @@ impl MemoryProviderPlugin for OpenVikingMemoryPlugin {
         }
         let h = viking_headers(&st);
         let url = format!("{}/api/v1/sessions/{}/commit", st.endpoint, st.session_id);
-        let _ = st.client.post(&url).headers(h).send();
+        std::thread::spawn(move || {
+            let _ = st.client.post(&url).headers(h).send();
+        });
     }
 
     fn get_tool_schemas(&self) -> Vec<Value> {

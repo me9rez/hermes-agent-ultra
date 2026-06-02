@@ -444,14 +444,28 @@ impl ContextCompressor {
         parts.join("\n\n")
     }
 
-    fn build_summary_prompt(&self, content_block: &str, summary_budget: u64) -> String {
+    fn build_summary_prompt(
+        &self,
+        content_block: &str,
+        summary_budget: u64,
+        memory_provider_hint: Option<&str>,
+    ) -> String {
+        let hint_block = memory_provider_hint
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(|h| {
+                format!(
+                    "MEMORY PROVIDER NOTES (preserve these facts in the summary):\n{h}\n\n"
+                )
+            })
+            .unwrap_or_default();
         if let Some(prev) = self.previous_summary.as_ref() {
             let prev = redact_sensitive_summary_text(prev);
             format!(
                 "You are updating a context compaction summary. A previous compaction produced the summary below. \
 New conversation turns have occurred since then and need to be incorporated.\n\n\
 PREVIOUS SUMMARY:\n{prev}\n\nNEW TURNS TO INCORPORATE:\n{content_block}\n\n\
-Update the summary using this exact structure. PRESERVE all existing information that is still relevant. \
+{hint_block}Update the summary using this exact structure. PRESERVE all existing information that is still relevant. \
 ADD new progress. Move items from \"In Progress\" to \"Done\" when completed. Remove information only if it is clearly obsolete.\n\n\
 {COMPACTION_TEMPLATE}\n\n\
 Target ~{summary_budget} tokens. Be specific — include file paths, command outputs, error messages, and concrete values rather than vague descriptions.\n\n\
@@ -460,7 +474,7 @@ Write only the summary body. Do not include any preamble or prefix."
         } else {
             format!(
                 "Create a structured handoff summary for a later assistant that will continue this conversation after earlier turns are compacted.\n\n\
-TURNS TO SUMMARIZE:\n{content_block}\n\nUse this exact structure:\n\n{COMPACTION_TEMPLATE}\n\n\
+TURNS TO SUMMARIZE:\n{content_block}\n\n{hint_block}Use this exact structure:\n\n{COMPACTION_TEMPLATE}\n\n\
 Target ~{summary_budget} tokens. Be specific — include file paths, command outputs, error messages, and concrete values rather than vague descriptions. \
 The goal is to prevent the next assistant from repeating work or losing important details.\n\n\
 Write only the summary body. Do not include any preamble or prefix."
@@ -477,6 +491,7 @@ Write only the summary body. Do not include any preamble or prefix."
     pub async fn generate_summary(
         &mut self,
         turns: &[Message],
+        memory_provider_hint: Option<&str>,
     ) -> Result<Option<String>, CompressionError> {
         self.last_summary_error = None;
         if let Some(deadline) = self.failure_cooldown_until {
@@ -489,7 +504,7 @@ Write only the summary body. Do not include any preamble or prefix."
 
         let budget = self.compute_summary_budget(turns);
         let block = self.serialize_for_summary(turns);
-        let prompt = self.build_summary_prompt(&block, budget);
+        let prompt = self.build_summary_prompt(&block, budget, memory_provider_hint);
 
         let mut retry_on_main_pending =
             self.config.summary_model_override.is_some() && !self.summary_model_fallen_back;
@@ -745,6 +760,7 @@ Write only the summary body. Do not include any preamble or prefix."
         &mut self,
         messages: Vec<Message>,
         current_tokens: Option<u64>,
+        memory_provider_hint: Option<&str>,
     ) -> Vec<Message> {
         self.last_summary_error = None;
         self.last_summary_dropped_count = 0;
@@ -807,7 +823,8 @@ Write only the summary body. Do not include any preamble or prefix."
         }
 
         // Phase 3: generate structured summary.
-        let summary_opt: Option<String> = match self.generate_summary(&turns_to_summarize).await {
+        let summary_opt: Option<String> =
+            match self.generate_summary(&turns_to_summarize, memory_provider_hint).await {
             Ok(s) => s,
             Err(err) => {
                 if !self.config.quiet_mode {
@@ -1457,6 +1474,19 @@ mod tests {
         assert!(block.len() < huge.len());
     }
 
+    #[test]
+    fn build_summary_prompt_includes_memory_provider_hint() {
+        let compressor =
+            ContextCompressor::new(quiet_config(), aux_with_provider(CannedSummaryProvider::new("x")));
+        let prompt = compressor.build_summary_prompt(
+            "user: deploy to prod-east",
+            800,
+            Some("Retain prod-east as active deployment target."),
+        );
+        assert!(prompt.contains("MEMORY PROVIDER NOTES"));
+        assert!(prompt.contains("prod-east as active deployment"));
+    }
+
     // ---------- generate_summary ----------
 
     #[tokio::test]
@@ -1466,13 +1496,13 @@ mod tests {
         let mut compressor = ContextCompressor::new(quiet_config(), aux);
 
         let turns = vec![msg(MessageRole::User, "first turn")];
-        let s1 = compressor.generate_summary(&turns).await.unwrap().unwrap();
+        let s1 = compressor.generate_summary(&turns, None).await.unwrap().unwrap();
         assert!(s1.starts_with(SUMMARY_PREFIX));
         assert!(s1.ends_with("Goal: build it."));
         assert_eq!(provider.call_count(), 1);
 
         // Second call should reuse the previous summary as context.
-        let s2 = compressor.generate_summary(&turns).await.unwrap().unwrap();
+        let s2 = compressor.generate_summary(&turns, None).await.unwrap().unwrap();
         assert!(s2.contains("Goal: build it."));
         assert_eq!(provider.call_count(), 2);
     }
@@ -1482,10 +1512,10 @@ mod tests {
         let aux = aux_with_provider(Arc::new(FailingProvider));
         let mut compressor = ContextCompressor::new(quiet_config(), aux);
         let turns = vec![msg(MessageRole::User, "x")];
-        let err = compressor.generate_summary(&turns).await.unwrap_err();
+        let err = compressor.generate_summary(&turns, None).await.unwrap_err();
         assert!(matches!(err, CompressionError::Auxiliary(_)));
         // Second call within cooldown window short-circuits.
-        let err2 = compressor.generate_summary(&turns).await.unwrap_err();
+        let err2 = compressor.generate_summary(&turns, None).await.unwrap_err();
         assert!(matches!(err2, CompressionError::CooldownActive(_)));
     }
 
@@ -1503,7 +1533,7 @@ mod tests {
         let mut compressor = ContextCompressor::new(cfg, aux);
         let turns = vec![msg(MessageRole::User, "x")];
 
-        let out = compressor.generate_summary(&turns).await.unwrap();
+        let out = compressor.generate_summary(&turns, None).await.unwrap();
         assert!(out.unwrap().contains("summary via main model"));
         assert_eq!(provider.call_count(), 2);
         assert_eq!(compressor.last_summary_error(), None);
@@ -1521,7 +1551,7 @@ mod tests {
         let mut compressor = ContextCompressor::new(quiet_config(), aux);
         let turns = vec![msg(MessageRole::User, "x")];
 
-        let err = compressor.generate_summary(&turns).await.unwrap_err();
+        let err = compressor.generate_summary(&turns, None).await.unwrap_err();
         assert!(matches!(err, CompressionError::Auxiliary(_)));
         assert_eq!(provider.call_count(), 1);
         assert!(compressor.last_summary_error().is_some());
@@ -1539,7 +1569,7 @@ mod tests {
         let mut compressor = ContextCompressor::new(cfg, aux);
         let turns = vec![msg(MessageRole::User, "x")];
 
-        let err = compressor.generate_summary(&turns).await.unwrap_err();
+        let err = compressor.generate_summary(&turns, None).await.unwrap_err();
         assert!(matches!(err, CompressionError::Auxiliary(_)));
         assert_eq!(provider.call_count(), 2);
         assert!(compressor.last_summary_error().is_some());
@@ -1651,7 +1681,7 @@ mod tests {
             msg(MessageRole::User, "a"),
             msg(MessageRole::Assistant, "b"),
         ];
-        let out = compressor.compress(messages.clone(), Some(50_000)).await;
+        let out = compressor.compress(messages.clone(), Some(50_000), None).await;
         assert_eq!(out.len(), messages.len());
         assert_eq!(provider.call_count(), 0);
     }
@@ -1690,7 +1720,7 @@ mod tests {
         }
 
         let original_len = messages.len();
-        let out = compressor.compress(messages, Some(80_000)).await;
+        let out = compressor.compress(messages, Some(80_000), None).await;
         assert!(out.len() < original_len, "compressed list should shrink");
         assert!(provider.call_count() >= 1, "auxiliary summariser invoked");
         assert!(
@@ -1726,7 +1756,7 @@ mod tests {
                 &format!("turn {i}: {}", "y".repeat(400)),
             ));
         }
-        let out = compressor.compress(messages, Some(60_000)).await;
+        let out = compressor.compress(messages, Some(60_000), None).await;
         let banner = out
             .iter()
             .find_map(|m| {

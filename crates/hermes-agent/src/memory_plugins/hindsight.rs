@@ -451,6 +451,23 @@ impl MemoryProviderPlugin for HindsightPlugin {
         });
     }
 
+    fn on_session_switch(
+        &self,
+        new_session_id: &str,
+        _parent_session_id: &str,
+        _reset: bool,
+        _reason: &str,
+    ) {
+        let new_id = new_session_id.trim();
+        if new_id.is_empty() {
+            return;
+        }
+        *self.session_id.lock().unwrap() = new_id.to_string();
+        self.prefetch_result.lock().unwrap().clear();
+        *self.turn_counter.lock().unwrap() = 0;
+        self.session_turns.lock().unwrap().clear();
+    }
+
     fn sync_turn(&self, user_content: &str, assistant_content: &str, session_id: &str) {
         let config = self.config.lock().unwrap();
         let config = match config.as_ref() {

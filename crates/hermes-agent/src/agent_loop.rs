@@ -3542,6 +3542,26 @@ impl AgentLoop {
         }
     }
 
+    /// Notify memory providers that `session_id` rotated (compression, `/new`, resume, branch).
+    pub fn memory_on_session_switch(
+        &self,
+        new_session_id: &str,
+        parent_session_id: &str,
+        reset: bool,
+        reason: &str,
+    ) {
+        if self.config().skip_memory {
+            return;
+        }
+        let Some(ref mm) = self.memory_manager else {
+            return;
+        };
+        let Ok(mm) = mm.lock() else {
+            return;
+        };
+        mm.on_session_switch(new_session_id, parent_session_id, reset, reason);
+    }
+
     fn memory_on_session_end(&self, messages: &[Message]) {
         self.interest_on_session_end(messages);
         if self.config().skip_memory {
@@ -4823,11 +4843,20 @@ impl AgentLoop {
         let pre_len = ctx.get_messages().len();
         let context_length = get_model_context_length(&self.active_model());
         let messages = ctx.get_messages().to_vec();
+        let memory_hint = self
+            .memory_pre_compress_note(&messages)
+            .filter(|n| !n.trim().is_empty());
         let estimated_tokens = estimate_messages_tokens(&messages);
         let compressed = {
             let mut compressor = self.context_compressor.lock().await;
             compressor.set_context_length(context_length);
-            compressor.compress(messages, Some(estimated_tokens)).await
+            compressor
+                .compress(
+                    messages,
+                    Some(estimated_tokens),
+                    memory_hint.as_deref(),
+                )
+                .await
         };
 
         let release_lock = || {
@@ -4853,6 +4882,7 @@ impl AgentLoop {
         if let Ok(mut cfg) = self.config_runtime.write() {
             cfg.session_id = Some(new_session_id.clone());
         }
+        self.memory_on_session_switch(&new_session_id, &old_session_id, false, "compression");
         self.reset_session_db_flush_cursor();
 
         if let Some(ref db) = sp {
@@ -4889,9 +4919,6 @@ impl AgentLoop {
         }
         let pct = (total_chars * 100) / max_c;
         tracing::info!("Context pressure at {}%, triggering compression", pct);
-        if let Some(note) = self.memory_pre_compress_note(ctx.get_messages()) {
-            ctx.add_message(Message::system(note));
-        }
         self.compress_context(ctx).await;
         let after_chars = ctx.total_chars();
         self.emit_compaction_contextlattice_checkpoint(total_chars, after_chars, max_c);

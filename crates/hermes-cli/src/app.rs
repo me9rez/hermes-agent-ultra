@@ -2306,7 +2306,14 @@ impl App {
 
     /// Create a new session, clearing all messages.
     pub fn new_session(&mut self) {
+        let old_session_id = self.session_id.clone();
         self.session_id = Uuid::new_v4().to_string();
+        self.agent.memory_on_session_switch(
+            &self.session_id,
+            &old_session_id,
+            true,
+            "new_session",
+        );
         self.messages.clear();
         self.ui_messages.clear();
         self.pending_image_hint = None;

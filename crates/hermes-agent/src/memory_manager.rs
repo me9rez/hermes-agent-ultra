@@ -86,6 +86,17 @@ pub trait MemoryProviderPlugin: Send + Sync {
         String::new()
     }
 
+    /// Refresh per-session caches when `session_id` rotates (`/new`, compression, `/branch`, …).
+    fn on_session_switch(
+        &self,
+        new_session_id: &str,
+        parent_session_id: &str,
+        reset: bool,
+        reason: &str,
+    ) {
+        let _ = (new_session_id, parent_session_id, reset, reason);
+    }
+
     fn on_memory_write(&self, action: &str, target: &str, content: &str) {
         let _ = (action, target, content);
     }
@@ -394,6 +405,23 @@ impl MemoryManager {
             })
             .collect();
         parts.join("\n\n")
+    }
+
+    /// Notify all providers that the active `session_id` rotated mid-process.
+    pub fn on_session_switch(
+        &self,
+        new_session_id: &str,
+        parent_session_id: &str,
+        reset: bool,
+        reason: &str,
+    ) {
+        let new_id = new_session_id.trim();
+        if new_id.is_empty() {
+            return;
+        }
+        for provider in &self.providers {
+            provider.on_session_switch(new_id, parent_session_id, reset, reason);
+        }
     }
 
     /// Notify external providers when the built-in memory tool writes.
@@ -822,6 +850,8 @@ fn fuse_memory_candidates(candidates: Vec<FusedMemoryCandidate>, query: &str) ->
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
 
     lazy_static::lazy_static! {
@@ -878,6 +908,83 @@ mod tests {
         fn handle_tool_call(&self, tool_name: &str, _args: &Value) -> String {
             serde_json::json!({"ok": tool_name}).to_string()
         }
+    }
+
+    struct SwitchTrackingProvider {
+        name: String,
+        switches: Arc<Mutex<Vec<(String, String, bool, String)>>>,
+    }
+
+    impl SwitchTrackingProvider {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                switches: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl MemoryProviderPlugin for SwitchTrackingProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn on_session_switch(
+            &self,
+            new_session_id: &str,
+            parent_session_id: &str,
+            reset: bool,
+            reason: &str,
+        ) {
+            self.switches.lock().unwrap().push((
+                new_session_id.to_string(),
+                parent_session_id.to_string(),
+                reset,
+                reason.to_string(),
+            ));
+        }
+    }
+
+    struct PreCompressProvider {
+        note: String,
+    }
+
+    impl MemoryProviderPlugin for PreCompressProvider {
+        fn name(&self) -> &str {
+            "precompress"
+        }
+
+        fn on_pre_compress(&self, _messages: &[Value]) -> String {
+            self.note.clone()
+        }
+    }
+
+    #[test]
+    fn test_on_session_switch_skips_empty_id() {
+        let mut mm = MemoryManager::new();
+        let tracker = Arc::new(SwitchTrackingProvider::new("t"));
+        let switches = Arc::clone(&tracker.switches);
+        mm.add_provider(tracker);
+        mm.on_session_switch("", "old", true, "new_session");
+        mm.on_session_switch("   ", "old", true, "new_session");
+        assert!(switches.lock().unwrap().is_empty());
+        mm.on_session_switch("new-sid", "old-sid", true, "new_session");
+        let recorded = switches.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "new-sid");
+        assert_eq!(recorded[0].1, "old-sid");
+        assert!(recorded[0].2);
+        assert_eq!(recorded[0].3, "new_session");
+    }
+
+    #[test]
+    fn test_on_pre_compress_merges_provider_notes() {
+        let mut mm = MemoryManager::new();
+        mm.add_provider(Arc::new(PreCompressProvider {
+            note: "Keep deployment target prod-east.".into(),
+        }));
+        let note = mm.on_pre_compress(&[serde_json::json!({"role":"user","content":"hi"})]);
+        assert!(note.contains("prod-east"));
     }
 
     #[test]

@@ -4545,12 +4545,11 @@ impl AgentLoop {
         if messages.is_empty() || !cfg.use_prompt_caching {
             return;
         }
-        let cache_ttl = cfg.cache_ttl.as_str();
-        let native = cfg.use_native_cache_layout;
-        let marked =
-            crate::prompt_caching::apply_anthropic_cache_control(messages, cache_ttl, native);
-        messages.clear();
-        messages.extend(marked);
+        crate::prompt_caching::apply_anthropic_cache_control_in_place(
+            messages,
+            cfg.cache_ttl.as_str(),
+            cfg.use_native_cache_layout,
+        );
     }
 
     /// Recompute prompt-cache policy from current route (Python `_anthropic_prompt_cache_policy`).

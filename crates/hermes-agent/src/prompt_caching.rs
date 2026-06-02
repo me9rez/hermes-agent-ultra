@@ -98,15 +98,14 @@ fn apply_cache_marker(msg: &mut Message, marker: &CacheControl, native_anthropic
     msg.cache_control = Some(marker.clone());
 }
 
-/// Apply `system_and_3` caching strategy (deep-copied messages).
-pub fn apply_anthropic_cache_control(
-    api_messages: &[Message],
+/// Apply `system_and_3` caching strategy in place (no extra message vector).
+pub fn apply_anthropic_cache_control_in_place(
+    messages: &mut [Message],
     cache_ttl: &str,
     native_anthropic: bool,
-) -> Vec<Message> {
-    let mut messages: Vec<Message> = api_messages.to_vec();
+) {
     if messages.is_empty() {
-        return messages;
+        return;
     }
 
     let marker = build_cache_marker(cache_ttl);
@@ -127,7 +126,16 @@ pub fn apply_anthropic_cache_control(
     for idx in non_sys.into_iter().rev().take(remaining) {
         apply_cache_marker(&mut messages[idx], &marker, native_anthropic);
     }
+}
 
+/// Apply `system_and_3` caching strategy (deep-copied messages).
+pub fn apply_anthropic_cache_control(
+    api_messages: &[Message],
+    cache_ttl: &str,
+    native_anthropic: bool,
+) -> Vec<Message> {
+    let mut messages: Vec<Message> = api_messages.to_vec();
+    apply_anthropic_cache_control_in_place(&mut messages, cache_ttl, native_anthropic);
     messages
 }
 
@@ -167,6 +175,29 @@ mod tests {
         assert_eq!(
             m.to_api_json(),
             serde_json::json!({"type": "ephemeral", "ttl": "1h"})
+        );
+    }
+
+    #[test]
+    fn in_place_matches_copy_path() {
+        let msgs = vec![
+            Message::system("sys"),
+            Message::user("u1"),
+            Message::assistant("a1"),
+            Message::user("u2"),
+        ];
+        let mut in_place = msgs.clone();
+        apply_anthropic_cache_control_in_place(&mut in_place, "5m", true);
+        let copied = apply_anthropic_cache_control(&msgs, "5m", true);
+        assert_eq!(
+            in_place
+                .iter()
+                .map(|m| m.cache_control.is_some())
+                .collect::<Vec<_>>(),
+            copied
+                .iter()
+                .map(|m| m.cache_control.is_some())
+                .collect::<Vec<_>>()
         );
     }
 

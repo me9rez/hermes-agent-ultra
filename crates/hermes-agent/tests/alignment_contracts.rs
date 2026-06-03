@@ -1,7 +1,7 @@
-//! Phase A — contract scenarios (see `python_alignment` module docs in `hermes-agent`).
+//! Phase A — contract scenarios (see `message_sanitization` module docs in `hermes-agent`).
 
 use hermes_agent::{
-    leading_system_prompt_for_persist, python_alignment, AgentConfig, AgentLoop, SessionFlushCursor,
+    leading_system_prompt_for_persist, message_sanitization, AgentConfig, AgentLoop, SessionFlushCursor,
     SessionPersistence,
 };
 use hermes_core::{AgentResult, Message};
@@ -59,7 +59,7 @@ fn strip_budget_tool_message_matches_python_fixture() {
         reasoning_content: None,
         cache_control: None,
     }];
-    python_alignment::strip_budget_warnings_from_messages(&mut messages);
+    message_sanitization::strip_budget_warnings_from_messages(&mut messages);
     let v: serde_json::Value = serde_json::from_str(messages[0].content.as_ref().unwrap()).unwrap();
     assert!(!v.as_object().unwrap().contains_key("_budget_warning"));
 }
@@ -91,7 +91,7 @@ fn phase_a5_strip_budget_plain_text_tail_matches_python_regex() {
         reasoning_content: None,
         cache_control: None,
     }];
-    python_alignment::strip_budget_warnings_from_messages(&mut messages);
+    message_sanitization::strip_budget_warnings_from_messages(&mut messages);
     assert_eq!(messages[0].content.as_deref(), Some("ok"));
 }
 
@@ -109,12 +109,12 @@ fn phase_a10_agent_result_serializes_populated_cost_and_interrupted() {
 
 #[test]
 fn codex_ack_heuristic_matches_workspace_user() {
-    assert!(python_alignment::looks_like_codex_intermediate_ack(
+    assert!(message_sanitization::looks_like_codex_intermediate_ack(
         "check files in src/",
         "I'll look into the repository and inspect the codebase for issues.",
         false,
     ));
-    assert!(!python_alignment::looks_like_codex_intermediate_ack(
+    assert!(!message_sanitization::looks_like_codex_intermediate_ack(
         "check files in src/",
         "I'll look into the repository and inspect the codebase for issues.",
         true,

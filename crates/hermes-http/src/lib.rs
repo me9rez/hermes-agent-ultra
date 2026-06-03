@@ -200,7 +200,7 @@ impl HttpServerState {
                         .map_err(|e| GatewayError::Platform(e.to_string()))?;
                     Ok(conv
                         .final_response
-                        .unwrap_or_else(|| extract_last_assistant_reply(&conv.messages)))
+                        .unwrap_or_else(|| extract_last_assistant_reply(conv.messages())))
                 })
             }))
             .await;
@@ -283,7 +283,7 @@ impl HttpServerState {
                         .map_err(|e| GatewayError::Platform(e.to_string()))?;
                     Ok(conv
                         .final_response
-                        .unwrap_or_else(|| extract_last_assistant_reply(&conv.messages)))
+                        .unwrap_or_else(|| extract_last_assistant_reply(conv.messages())))
                 })
             }))
             .await;

@@ -1,8 +1,17 @@
-//! Python `agent.conversation_loop.run_conversation` parity — single entry for one user turn.
+﻿//! Python `agent.conversation_loop.run_conversation` parity 鈥?single entry for one user turn.
 //!
-//! (`prepare_turn`): sanitize, append user, hydrate counters, message prelude.
-//! delegated to [`AgentLoop::run_prepared`] / [`AgentLoop::run_stream_prepared`].
-//! (`finalize_turn`): turn-level hooks, `ConversationResult` assembly, optional persist.
+//! **B segment** (`prepare_turn`): sanitize, append user, hydrate counters, message prelude.
+//! **C鈥揇 segment**: delegated to [`AgentLoop::run_prepared`] / [`AgentLoop::run_stream_prepared`].
+//! **E segment** (`finalize_turn`): turn-level hooks, [`ConversationResult`] assembly, optional persist.
+//!
+//! # Result types
+//!
+//! - [`AgentResult`] 鈥?output of the autonomous loop (`run` / `run_stream`): messages, turns,
+//!   usage, `api_calls`, `turn_exit_reason`, etc.
+//! - [`ConversationResult`] 鈥?Python `run_conversation` return dict: **owns** the loop result via
+//!   [`ConversationResult::loop_result`] and adds E-segment presentation (`final_response`,
+//!   `last_reasoning`, `completed`). Use accessors ([`ConversationResult::messages`],
+//!   [`ConversationResult::api_calls`]) instead of duplicating loop fields at the top level.
 
 use hermes_core::{AgentError, AgentResult, Message, MessageRole, StreamChunk, ToolSchema};
 
@@ -23,16 +32,55 @@ pub struct RunConversationParams {
     pub persist_session: bool,
 }
 
-/// Python `run_conversation` return dict (subset + full [`AgentResult`]).
+/// Python `run_conversation` return value.
+///
+/// Composes the C鈥揇 [`AgentResult`] with E-segment fields. Not a flat duplicate of the dict:
+/// loop mechanics live in [`Self::loop_result`]; presentation lives in the top-level optional fields.
 #[derive(Debug, Clone)]
 pub struct ConversationResult {
+    /// Autonomous loop output (messages, usage, `api_calls`, `turn_exit_reason`, 鈥?.
+    pub loop_result: AgentResult,
+    /// Last assistant visible text after turn-level hooks (Python `final_response`).
     pub final_response: Option<String>,
+    /// Reasoning from the current turn only (Python `last_reasoning`).
     pub last_reasoning: Option<String>,
-    pub messages: Vec<Message>,
+    /// `finished_naturally && !interrupted` (Python `completed`).
     pub completed: bool,
-    pub interrupted: bool,
-    pub pending_steer: Option<String>,
-    pub inner: AgentResult,
+}
+
+impl ConversationResult {
+    pub fn messages(&self) -> &[Message] {
+        &self.loop_result.messages
+    }
+
+    pub fn interrupted(&self) -> bool {
+        self.loop_result.interrupted
+    }
+
+    pub fn pending_steer(&self) -> Option<&str> {
+        self.loop_result.pending_steer.as_deref()
+    }
+
+    pub fn api_calls(&self) -> u32 {
+        self.loop_result.api_calls
+    }
+
+    pub fn turn_exit_reason(&self) -> &str {
+        &self.loop_result.turn_exit_reason
+    }
+
+    pub fn failed(&self) -> bool {
+        self.loop_result.failed
+    }
+
+    pub fn partial(&self) -> bool {
+        self.loop_result.partial
+    }
+
+    /// Consume into the loop result (for callers that only need [`AgentResult`]).
+    pub fn into_loop_result(self) -> AgentResult {
+        self.loop_result
+    }
 }
 
 /// Metadata carried from B segment through E segment.
@@ -55,7 +103,9 @@ pub struct PreparedTurn {
 /// Session storage includes the inbound user line; `run_conversation` appends it again in
 /// `prepare_turn`, so callers must pass history **without** the current turn's user message,
 /// or use this helper on the full session slice.
-pub fn split_messages_for_run_conversation(messages: &[Message]) -> Option<(Vec<Message>, String)> {
+pub fn split_messages_for_run_conversation(
+    messages: &[Message],
+) -> Option<(Vec<Message>, String)> {
     let messages = strip_system_messages_from_history(messages);
     let idx = messages.iter().rposition(|m| m.role == MessageRole::User)?;
     let user_message = messages[idx].content.clone().unwrap_or_default();
@@ -100,13 +150,13 @@ impl AgentLoop {
     ) -> Result<ConversationResult, AgentError> {
         let prepared = self.prepare_turn(&params).await?;
         let tools = params.tools;
-        let inner = if let Some(cb) = params.stream_callback {
+        let loop_result = if let Some(cb) = params.stream_callback {
             self.run_stream_prepared(prepared.messages.clone(), tools, Some(cb))
                 .await?
         } else {
             self.run_prepared(prepared.messages.clone(), tools).await?
         };
-        Ok(self.finalize_turn(inner, &prepared.meta))
+        Ok(self.finalize_turn(loop_result, &prepared.meta))
     }
 
     /// build message list and apply per-turn prelude.
@@ -164,14 +214,14 @@ impl AgentLoop {
     /// turn-level hooks + [`ConversationResult`] + optional session persist.
     pub(crate) fn finalize_turn(
         &self,
-        mut inner: AgentResult,
+        mut loop_result: AgentResult,
         meta: &TurnFinalizeMeta,
     ) -> ConversationResult {
-        let messages = inner.messages.clone();
+        let messages = loop_result.messages.clone();
         let mut final_response = extract_last_assistant_reply(&messages);
         let last_reasoning = extract_last_reasoning_current_turn(&messages);
-        let interrupted = inner.interrupted;
-        let completed = inner.finished_naturally && !interrupted;
+        let interrupted = loop_result.interrupted;
+        let completed = loop_result.finished_naturally && !interrupted;
 
         if let Some(ref mut text) = final_response {
             if !interrupted {
@@ -180,20 +230,17 @@ impl AgentLoop {
         }
 
         if meta.persist_session {
-            self.persist_turn_session(&messages, &inner);
+            self.persist_turn_session(&messages, &loop_result);
         }
 
-        inner.messages = messages.clone();
-        let inner = self.finalize_agent_result(inner);
+        loop_result.messages = messages;
+        let loop_result = self.finalize_agent_result(loop_result);
 
         ConversationResult {
-            final_response: final_response.clone(),
+            final_response,
             last_reasoning,
-            messages,
             completed,
-            interrupted,
-            pending_steer: inner.pending_steer.clone(),
-            inner,
+            loop_result,
         }
     }
 
@@ -261,7 +308,6 @@ impl AgentLoop {
         let Some(sp) = self.session_persistence() else {
             return;
         };
-        // Transcript: user/assistant/tool only — system belongs in `sessions.system_prompt`.
         let transcript = strip_system_messages_from_history(messages);
         let sys = leading_system_prompt_for_persist(messages);
         let platform = cfg.platform.as_deref();

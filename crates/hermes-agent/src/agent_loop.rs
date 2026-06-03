@@ -1,4 +1,4 @@
-//! Core agent loop engine.
+﻿//! Core agent loop engine.
 //!
 //! The `AgentLoop` orchestrates the autonomous agent cycle:
 //! 1. Send messages + tools to the LLM
@@ -2061,6 +2061,16 @@ fn governor_for_turn(
     }
 }
 
+/// Exit metadata for one `run` / `run_stream` invocation (maps to Python loop fields).
+struct LoopExit<'a> {
+    turn_exit_reason: &'a str,
+    api_calls: u32,
+    failed: bool,
+    partial: bool,
+    finished_naturally: bool,
+    interrupted: bool,
+}
+
 /// The main agent loop.
 ///
 /// Owns the configuration, a tool registry, and an LLM provider.
@@ -2257,33 +2267,87 @@ impl AgentLoop {
         session_cost_usd: f64,
         session_started_hooks_fired: bool,
         persist_user_idx: Option<usize>,
+        api_calls: u32,
     ) -> AgentResult {
         self.pending_steer.clear();
-        self.session_end_hooks(
+        self.turn_end_plugin_hooks(
             ctx.get_messages(),
             false,
             true,
             total_turns,
             session_started_hooks_fired,
         );
-        AgentResult {
-            messages: self.messages_for_persisted_result(ctx, persist_user_idx),
-            finished_naturally: false,
+        self.seal_loop_result(
+            ctx,
+            persist_user_idx,
+            LoopExit {
+                turn_exit_reason: "interrupted_by_user",
+                api_calls,
+                failed: false,
+                partial: false,
+                finished_naturally: false,
+                interrupted: true,
+            },
             total_turns,
-            tool_errors: tool_errors.to_vec(),
-            usage: accumulated_usage,
-            interrupted: true,
-            session_cost_usd: Some(session_cost_usd),
+            tool_errors,
+            accumulated_usage,
+            session_cost_usd,
             session_started_hooks_fired,
-            pending_steer: None,
-        }
+        )
     }
 
     pub(crate) fn finalize_agent_result(&self, mut result: AgentResult) -> AgentResult {
         if result.pending_steer.is_none() {
             result.pending_steer = self.pending_steer.drain();
         }
+        if result.turn_exit_reason.is_empty() || result.turn_exit_reason == "unknown" {
+            result.turn_exit_reason = if result.interrupted {
+                "interrupted_by_user".to_string()
+            } else if result.partial {
+                "invalid_tool_calls".to_string()
+            } else if !result.finished_naturally {
+                format!(
+                    "max_iterations_reached({}/{})",
+                    result.api_calls.max(result.total_turns),
+                    self.config().max_turns
+                )
+            } else {
+                "text_response".to_string()
+            };
+        }
+        if result.api_calls == 0 && result.total_turns > 0 {
+            result.api_calls = result.total_turns;
+        }
         result
+    }
+
+    /// Pack loop state into [`AgentResult`] (C–D segment return).
+    fn seal_loop_result(
+        &self,
+        ctx: &ContextManager,
+        persist_user_idx: Option<usize>,
+        exit: LoopExit<'_>,
+        total_turns: u32,
+        tool_errors: &[hermes_core::ToolErrorRecord],
+        accumulated_usage: Option<UsageStats>,
+        session_cost_usd: f64,
+        session_started_hooks_fired: bool,
+    ) -> AgentResult {
+        self.finalize_agent_result(AgentResult {
+            messages: self.messages_for_persisted_result(ctx, persist_user_idx),
+            finished_naturally: exit.finished_naturally,
+            total_turns,
+            tool_errors: tool_errors.to_vec(),
+            usage: accumulated_usage,
+            interrupted: exit.interrupted,
+            session_cost_usd: Some(session_cost_usd),
+            session_started_hooks_fired,
+            pending_steer: None,
+            api_calls: exit.api_calls,
+            turn_exit_reason: exit.turn_exit_reason.to_string(),
+            failed: exit.failed,
+            partial: exit.partial,
+        })
     }
 
     /// Inject mid-run user guidance without interrupting (Python `AIAgent.steer`).
@@ -3562,7 +3626,30 @@ impl AgentLoop {
         let _results = self.invoke_hook(HookType::OnSessionEnd, &hook_ctx);
     }
 
-    fn session_end_hooks(
+    /// Per-turn plugin hook only (Python `run_conversation` end).
+    ///
+    /// Memory provider `on_session_end` is **not** invoked here — see Python
+    /// `conversation_loop.py` note at ~4584. Use [`Self::session_end_hooks`] on
+    /// real session teardown (gateway expiry, CLI `/reset`).
+    fn turn_end_plugin_hooks(
+        &self,
+        messages: &[Message],
+        completed: bool,
+        interrupted: bool,
+        total_turns: u32,
+        session_started_hooks_fired: bool,
+    ) {
+        let _ = messages;
+        self.plugin_on_session_end(
+            completed,
+            interrupted,
+            total_turns,
+            session_started_hooks_fired,
+        );
+    }
+
+    /// Full session teardown: memory providers + plugin `on_session_end`.
+    pub fn session_end_hooks(
         &self,
         messages: &[Message],
         completed: bool,
@@ -6463,6 +6550,7 @@ impl AgentLoop {
                     session_cost_usd,
                     session_started_hooks_fired,
                     persist_user_idx,
+                    api_call_count,
                 ));
             }
 
@@ -6476,7 +6564,7 @@ impl AgentLoop {
                     if let Some(msg) = summary_msg {
                         ctx.add_message(msg);
                     }
-                    self.session_end_hooks(
+                    self.turn_end_plugin_hooks(
                         ctx.get_messages(),
                         false,
                         false,
@@ -6491,17 +6579,23 @@ impl AgentLoop {
                             "session_cost_usd": session_cost_usd,
                         }),
                     );
-                    return Ok(self.finalize_agent_result(AgentResult {
-                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                        finished_naturally: false,
+                    return Ok(self.seal_loop_result(
+                        &ctx,
+                        persist_user_idx,
+                        LoopExit {
+                            turn_exit_reason: "max_iterations_reached",
+                            api_calls: api_call_count,
+                            failed: false,
+                            partial: false,
+                            finished_naturally: false,
+                            interrupted: false,
+                        },
                         total_turns,
-                        tool_errors,
-                        usage: accumulated_usage,
-                        interrupted: false,
-                        session_cost_usd: Some(session_cost_usd),
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
                         session_started_hooks_fired,
-                        pending_steer: None,
-                    }));
+                    ));
                 }
             }
 
@@ -6636,6 +6730,7 @@ impl AgentLoop {
                         session_cost_usd,
                         session_started_hooks_fired,
                         persist_user_idx,
+                        api_call_count,
                     ));
                 }
                 let r = match self
@@ -6658,6 +6753,7 @@ impl AgentLoop {
                             session_cost_usd,
                             session_started_hooks_fired,
                             persist_user_idx,
+                            api_call_count,
                         ));
                     }
                     Err(e) => {
@@ -6802,24 +6898,30 @@ impl AgentLoop {
                         "Cost guard tripped: session spend ${:.4} exceeded max_cost_usd ${:.4}. Stopping loop.",
                         session_cost_usd, limit
                     )));
-                    self.session_end_hooks(
+                    self.turn_end_plugin_hooks(
                         ctx.get_messages(),
                         false,
                         false,
                         total_turns,
                         session_started_hooks_fired,
                     );
-                    return Ok(self.finalize_agent_result(AgentResult {
-                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                        finished_naturally: false,
+                    return Ok(self.seal_loop_result(
+                        &ctx,
+                        persist_user_idx,
+                        LoopExit {
+                            turn_exit_reason: "max_iterations_reached",
+                            api_calls: api_call_count,
+                            failed: false,
+                            partial: false,
+                            finished_naturally: false,
+                            interrupted: false,
+                        },
                         total_turns,
-                        tool_errors,
-                        usage: accumulated_usage,
-                        interrupted: false,
-                        session_cost_usd: Some(session_cost_usd),
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
                         session_started_hooks_fired,
-                        pending_steer: None,
-                    }));
+                    ));
                 }
             }
 
@@ -7098,7 +7200,7 @@ impl AgentLoop {
                 let (u, a) = extract_last_user_assistant(ctx.get_messages());
                 self.memory_sync(&u, &a, session_id);
                 self.spawn_background_review(total_turns, &ctx, review_memory_at_end);
-                self.session_end_hooks(
+                self.turn_end_plugin_hooks(
                     ctx.get_messages(),
                     true,
                     false,
@@ -7116,17 +7218,23 @@ impl AgentLoop {
                         "premature_finalize_suspected_count": premature_finalize_suspected_count,
                     }),
                 );
-                return Ok(self.finalize_agent_result(AgentResult {
-                    messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                    finished_naturally: true,
+                return Ok(self.seal_loop_result(
+                    &ctx,
+                    persist_user_idx,
+                    LoopExit {
+                        turn_exit_reason: "text_response",
+                        api_calls: api_call_count,
+                        failed: false,
+                        partial: false,
+                        finished_naturally: true,
+                        interrupted: false,
+                    },
                     total_turns,
-                    tool_errors,
-                    usage: accumulated_usage,
-                    interrupted: false,
-                    session_cost_usd: Some(session_cost_usd),
+                    &tool_errors,
+                    accumulated_usage,
+                    session_cost_usd,
                     session_started_hooks_fired,
-                    pending_steer: None,
-                }));
+                ));
             }
 
             codex_ack_continuations = 0;
@@ -7186,24 +7294,30 @@ impl AgentLoop {
                         self.config().invalid_tool_call_max_retries,
                         invalid_tool_calls[0]
                     )));
-                    self.session_end_hooks(
+                    self.turn_end_plugin_hooks(
                         ctx.get_messages(),
                         false,
                         false,
                         total_turns,
                         session_started_hooks_fired,
                     );
-                    return Ok(self.finalize_agent_result(AgentResult {
-                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                        finished_naturally: false,
+                    return Ok(self.seal_loop_result(
+                        &ctx,
+                        persist_user_idx,
+                        LoopExit {
+                            turn_exit_reason: "invalid_tool_calls",
+                            api_calls: api_call_count,
+                            failed: false,
+                            partial: true,
+                            finished_naturally: false,
+                            interrupted: false,
+                        },
                         total_turns,
-                        tool_errors,
-                        usage: accumulated_usage,
-                        interrupted: false,
-                        session_cost_usd: Some(session_cost_usd),
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
                         session_started_hooks_fired,
-                        pending_steer: None,
-                    }));
+                    ));
                 }
                 for tc in &tool_calls {
                     let content = if self.tool_registry.get(&tc.function.name).is_none() {
@@ -7346,6 +7460,7 @@ impl AgentLoop {
                     session_cost_usd,
                     session_started_hooks_fired,
                     persist_user_idx,
+                    api_call_count,
                 ));
             }
             let tool_start = Instant::now();
@@ -7367,17 +7482,23 @@ impl AgentLoop {
                         ctx.add_message(Message::assistant(format!(
                             "[Tool guardrail halt] {reason}"
                         )));
-                        return Ok(self.finalize_agent_result(AgentResult {
-                            messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                            finished_naturally: true,
+                        return Ok(self.seal_loop_result(
+                            &ctx,
+                            persist_user_idx,
+                            LoopExit {
+                                turn_exit_reason: "guardrail_halt",
+                                api_calls: api_call_count,
+                                failed: false,
+                                partial: false,
+                                finished_naturally: true,
+                                interrupted: false,
+                            },
                             total_turns,
-                            tool_errors,
-                            usage: accumulated_usage,
-                            interrupted: false,
-                            session_cost_usd: Some(session_cost_usd),
+                            &tool_errors,
+                            accumulated_usage,
+                            session_cost_usd,
                             session_started_hooks_fired,
-                            pending_steer: None,
-                        }));
+                        ));
                     }
                     crate::tool_guardrails::GuardrailDecision::Block(reason) => {
                         tracing::warn!(tool = %tc.function.name, %reason, "tool guardrail block");
@@ -7578,24 +7699,30 @@ impl AgentLoop {
                 {
                     ctx.add_message(summary);
                 }
-                self.session_end_hooks(
+                self.turn_end_plugin_hooks(
                     ctx.get_messages(),
                     false,
                     false,
                     total_turns,
                     session_started_hooks_fired,
                 );
-                return Ok(self.finalize_agent_result(AgentResult {
-                    messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                    finished_naturally: false,
+                return Ok(self.seal_loop_result(
+                    &ctx,
+                    persist_user_idx,
+                    LoopExit {
+                        turn_exit_reason: "tool_loop_guard",
+                        api_calls: api_call_count,
+                        failed: false,
+                        partial: false,
+                        finished_naturally: false,
+                        interrupted: false,
+                    },
                     total_turns,
-                    tool_errors,
-                    usage: accumulated_usage,
-                    interrupted: false,
-                    session_cost_usd: Some(session_cost_usd),
+                    &tool_errors,
+                    accumulated_usage,
+                    session_cost_usd,
                     session_started_hooks_fired,
-                    pending_steer: None,
-                }));
+                ));
             }
             if execute_code_refund {
                 iteration_budget.refund(1);
@@ -7893,6 +8020,7 @@ impl AgentLoop {
                     session_cost_usd,
                     session_started_hooks_fired,
                     persist_user_idx,
+                    api_call_count,
                 ));
             }
 
@@ -7906,7 +8034,7 @@ impl AgentLoop {
                     if let Some(msg) = summary_msg {
                         ctx.add_message(msg);
                     }
-                    self.session_end_hooks(
+                    self.turn_end_plugin_hooks(
                         ctx.get_messages(),
                         false,
                         false,
@@ -7921,17 +8049,23 @@ impl AgentLoop {
                             "session_cost_usd": session_cost_usd,
                         }),
                     );
-                    return Ok(self.finalize_agent_result(AgentResult {
-                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                        finished_naturally: false,
+                    return Ok(self.seal_loop_result(
+                        &ctx,
+                        persist_user_idx,
+                        LoopExit {
+                            turn_exit_reason: "max_iterations_reached",
+                            api_calls: api_call_count,
+                            failed: false,
+                            partial: false,
+                            finished_naturally: false,
+                            interrupted: false,
+                        },
                         total_turns,
-                        tool_errors,
-                        usage: accumulated_usage,
-                        interrupted: false,
-                        session_cost_usd: Some(session_cost_usd),
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
                         session_started_hooks_fired,
-                        pending_steer: None,
-                    }));
+                    ));
                 }
             }
 
@@ -8067,6 +8201,7 @@ impl AgentLoop {
                         session_cost_usd,
                         session_started_hooks_fired,
                         persist_user_idx,
+                        api_call_count,
                     ));
                 }
                 let r = if inner_attempt == 0 {
@@ -8104,6 +8239,7 @@ impl AgentLoop {
                                 session_cost_usd,
                                 session_started_hooks_fired,
                                 persist_user_idx,
+                                api_call_count,
                             ));
                         }
                         Err(e) => {
@@ -8138,6 +8274,7 @@ impl AgentLoop {
                                 session_cost_usd,
                                 session_started_hooks_fired,
                                 persist_user_idx,
+                                api_call_count,
                             ));
                         }
                         Err(e) => {
@@ -8283,7 +8420,7 @@ impl AgentLoop {
                         "Cost guard tripped: session spend ${:.4} exceeded max_cost_usd ${:.4}. Stopping loop.",
                         session_cost_usd, limit
                     )));
-                    self.session_end_hooks(
+                    self.turn_end_plugin_hooks(
                         ctx.get_messages(),
                         false,
                         false,
@@ -8298,17 +8435,23 @@ impl AgentLoop {
                             "session_cost_usd": session_cost_usd,
                         }),
                     );
-                    return Ok(self.finalize_agent_result(AgentResult {
-                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                        finished_naturally: false,
+                    return Ok(self.seal_loop_result(
+                        &ctx,
+                        persist_user_idx,
+                        LoopExit {
+                            turn_exit_reason: "max_iterations_reached",
+                            api_calls: api_call_count,
+                            failed: false,
+                            partial: false,
+                            finished_naturally: false,
+                            interrupted: false,
+                        },
                         total_turns,
-                        tool_errors,
-                        usage: accumulated_usage,
-                        interrupted: false,
-                        session_cost_usd: Some(session_cost_usd),
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
                         session_started_hooks_fired,
-                        pending_steer: None,
-                    }));
+                    ));
                 }
             }
 
@@ -8573,7 +8716,7 @@ impl AgentLoop {
                 let (u, a) = extract_last_user_assistant(ctx.get_messages());
                 self.memory_sync(&u, &a, session_id);
                 self.spawn_background_review(total_turns, &ctx, review_memory_at_end);
-                self.session_end_hooks(
+                self.turn_end_plugin_hooks(
                     ctx.get_messages(),
                     true,
                     false,
@@ -8605,17 +8748,23 @@ impl AgentLoop {
                         usage: None,
                     });
                 }
-                return Ok(self.finalize_agent_result(AgentResult {
-                    messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                    finished_naturally: true,
+                return Ok(self.seal_loop_result(
+                    &ctx,
+                    persist_user_idx,
+                    LoopExit {
+                        turn_exit_reason: "text_response",
+                        api_calls: api_call_count,
+                        failed: false,
+                        partial: false,
+                        finished_naturally: true,
+                        interrupted: false,
+                    },
                     total_turns,
-                    tool_errors,
-                    usage: accumulated_usage,
-                    interrupted: false,
-                    session_cost_usd: Some(session_cost_usd),
+                    &tool_errors,
+                    accumulated_usage,
+                    session_cost_usd,
                     session_started_hooks_fired,
-                    pending_steer: None,
-                }));
+                ));
             }
 
             codex_ack_continuations = 0;
@@ -8698,24 +8847,30 @@ impl AgentLoop {
                         self.config().invalid_tool_call_max_retries,
                         invalid_tool_calls[0]
                     )));
-                    self.session_end_hooks(
+                    self.turn_end_plugin_hooks(
                         ctx.get_messages(),
                         false,
                         false,
                         total_turns,
                         session_started_hooks_fired,
                     );
-                    return Ok(self.finalize_agent_result(AgentResult {
-                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                        finished_naturally: false,
+                    return Ok(self.seal_loop_result(
+                        &ctx,
+                        persist_user_idx,
+                        LoopExit {
+                            turn_exit_reason: "invalid_tool_calls",
+                            api_calls: api_call_count,
+                            failed: false,
+                            partial: true,
+                            finished_naturally: false,
+                            interrupted: false,
+                        },
                         total_turns,
-                        tool_errors,
-                        usage: accumulated_usage,
-                        interrupted: false,
-                        session_cost_usd: Some(session_cost_usd),
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
                         session_started_hooks_fired,
-                        pending_steer: None,
-                    }));
+                    ));
                 }
                 for tc in &tool_calls {
                     let content = if self.tool_registry.get(&tc.function.name).is_none() {
@@ -8851,6 +9006,7 @@ impl AgentLoop {
                     session_cost_usd,
                     session_started_hooks_fired,
                     persist_user_idx,
+                    api_call_count,
                 ));
             }
 
@@ -8862,17 +9018,23 @@ impl AgentLoop {
                         ctx.add_message(Message::assistant(format!(
                             "[Tool guardrail halt] {reason}"
                         )));
-                        return Ok(self.finalize_agent_result(AgentResult {
-                            messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                            finished_naturally: true,
+                        return Ok(self.seal_loop_result(
+                            &ctx,
+                            persist_user_idx,
+                            LoopExit {
+                                turn_exit_reason: "guardrail_halt",
+                                api_calls: api_call_count,
+                                failed: false,
+                                partial: false,
+                                finished_naturally: true,
+                                interrupted: false,
+                            },
                             total_turns,
-                            tool_errors,
-                            usage: accumulated_usage,
-                            interrupted: false,
-                            session_cost_usd: Some(session_cost_usd),
+                            &tool_errors,
+                            accumulated_usage,
+                            session_cost_usd,
                             session_started_hooks_fired,
-                            pending_steer: None,
-                        }));
+                        ));
                     }
                     crate::tool_guardrails::GuardrailDecision::Block(reason) => {
                         tracing::warn!(tool = %tc.function.name, %reason, "tool guardrail block");
@@ -9095,24 +9257,30 @@ impl AgentLoop {
                         usage: None,
                     });
                 }
-                self.session_end_hooks(
+                self.turn_end_plugin_hooks(
                     ctx.get_messages(),
                     false,
                     false,
                     total_turns,
                     session_started_hooks_fired,
                 );
-                return Ok(self.finalize_agent_result(AgentResult {
-                    messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                    finished_naturally: false,
+                return Ok(self.seal_loop_result(
+                    &ctx,
+                    persist_user_idx,
+                    LoopExit {
+                        turn_exit_reason: "tool_loop_guard",
+                        api_calls: api_call_count,
+                        failed: false,
+                        partial: false,
+                        finished_naturally: false,
+                        interrupted: false,
+                    },
                     total_turns,
-                    tool_errors,
-                    usage: accumulated_usage,
-                    interrupted: false,
-                    session_cost_usd: Some(session_cost_usd),
+                    &tool_errors,
+                    accumulated_usage,
+                    session_cost_usd,
                     session_started_hooks_fired,
-                    pending_steer: None,
-                }));
+                ));
             }
             if execute_code_refund {
                 iteration_budget.refund(1);

@@ -161,9 +161,10 @@ async fn run_conversation_sets_task_id_and_single_user_turn() {
     assert_eq!(agent.current_task_id().as_deref(), Some("turn-task"));
     assert!(conv.completed);
     assert_eq!(conv.final_response.as_deref(), Some("hello back"));
-    assert!(conv.completed);
+    assert!(conv.api_calls() >= 1, "Python api_calls");
+    assert_eq!(conv.turn_exit_reason(), "text_response");
     let user_msgs: Vec<_> = conv
-        .messages
+        .messages()
         .iter()
         .filter(|m| m.role == MessageRole::User)
         .collect();
@@ -186,7 +187,7 @@ async fn run_conversation_drains_pending_steer_into_result() {
         })
         .await
         .expect("run_conversation");
-    assert_eq!(conv.pending_steer.as_deref(), Some("focus on tests"));
+    assert_eq!(conv.pending_steer(), Some("focus on tests"));
 }
 
 #[tokio::test]

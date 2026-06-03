@@ -2539,7 +2539,7 @@ impl App {
                     persist_session: false,
                 })
                 .await?;
-            Ok(conv.inner)
+            Ok(conv.into_loop_result())
         } else {
             let conv = self
                 .agent
@@ -2553,7 +2553,7 @@ impl App {
                     persist_session: false,
                 })
                 .await?;
-            Ok(conv.inner)
+            Ok(conv.into_loop_result())
         }
     }
 

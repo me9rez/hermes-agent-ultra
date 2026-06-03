@@ -281,7 +281,11 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
-/// Final result of an agent run.
+fn default_turn_exit_unknown() -> String {
+    "unknown".to_string()
+}
+
+/// Final result of an agent run (C–D segment: `AgentLoop::run` / `run_stream`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct AgentResult {
     pub messages: Vec<Message>,
@@ -303,6 +307,18 @@ pub struct AgentResult {
     /// Steer text that could not be injected into a tool result (Python `pending_steer`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_steer: Option<String>,
+    /// LLM HTTP attempts this loop (Python `api_calls` / `api_call_count`).
+    #[serde(default)]
+    pub api_calls: u32,
+    /// Diagnostic: why the tool loop ended (Python `turn_exit_reason`).
+    #[serde(default = "default_turn_exit_unknown")]
+    pub turn_exit_reason: String,
+    /// Hard failure before a usable assistant reply (Python `failed`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub failed: bool,
+    /// Stopped on invalid tool calls without a final answer (Python `partial`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub partial: bool,
 }
 
 // ---------------------------------------------------------------------------

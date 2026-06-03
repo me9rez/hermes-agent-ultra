@@ -19159,7 +19159,7 @@ pub async fn handle_cli_chat(
                 })
                 .await
             {
-                Ok(conv) => conv.inner,
+                Ok(conv) => conv.into_loop_result(),
                 Err(err) => {
                     if query_mode_model_not_found(&err) {
                         if let Some((next_model, close)) =
@@ -24767,7 +24767,7 @@ impl hermes_acp::AcpPromptExecutor for CliAcpPromptExecutor {
             })
             .await
             .map_err(|e| e.to_string())?;
-        let result = conv.inner;
+        let result = conv.into_loop_result();
         let response_text = result
             .messages
             .iter()

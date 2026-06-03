@@ -239,7 +239,8 @@ pub(crate) async fn gateway_handle_message_non_streaming(
         .map_err(|e| GatewayError::Platform(e.to_string()))?;
     Ok(conv
         .final_response
-        .unwrap_or_else(|| extract_last_assistant_reply(&conv.messages)))
+        .clone()
+        .unwrap_or_else(|| extract_last_assistant_reply(conv.messages())))
 }
 
 pub(crate) async fn gateway_handle_message_streaming(
@@ -467,5 +468,6 @@ pub(crate) async fn gateway_handle_message_streaming(
         .map_err(|e| GatewayError::Platform(e.to_string()))?;
     Ok(conv
         .final_response
-        .unwrap_or_else(|| extract_last_assistant_reply(&conv.messages)))
+        .clone()
+        .unwrap_or_else(|| extract_last_assistant_reply(conv.messages())))
 }

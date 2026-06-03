@@ -5808,7 +5808,7 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                                                             },
                                                         )
                                                         .await
-                                                        .map(|c| c.inner)
+                                                        .map(|c| c.into_loop_result())
                                                 } else {
                                                     agent
                                                         .run_conversation(
@@ -5823,7 +5823,7 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                                                             },
                                                         )
                                                         .await
-                                                        .map(|c| c.inner)
+                                                        .map(|c| c.into_loop_result())
                                                 };
                                                 let _ = stream_tx.send(Event::AgentRunComplete {
                                                     result: result.map_err(|e| e.to_string()),

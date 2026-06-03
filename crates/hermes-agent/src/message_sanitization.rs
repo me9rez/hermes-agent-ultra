@@ -175,6 +175,51 @@ pub fn build_partial_stream_stub_response(
     }
 }
 
+/// Minimum runtime context for reliable Hermes tool use (Python `MINIMUM_CONTEXT_LENGTH`).
+pub const MINIMUM_CONTEXT_LENGTH: u32 = 64_000;
+
+/// Return a user-facing error when Ollama is loaded with too little context.
+///
+/// Python `conversation_loop._ollama_context_limit_error`.
+pub fn ollama_context_limit_error(
+    ollama_num_ctx: Option<u32>,
+    has_tools: bool,
+    request_tokens: u32,
+    model: &str,
+    provider: &str,
+    base_url: &str,
+    tool_count: usize,
+    session_id: Option<&str>,
+) -> Option<String> {
+    if !has_tools {
+        return None;
+    }
+    let runtime_ctx = ollama_num_ctx?;
+    if runtime_ctx == 0 || runtime_ctx >= MINIMUM_CONTEXT_LENGTH {
+        return None;
+    }
+    tracing::warn!(
+        model = %model,
+        provider = %provider,
+        base_url = %base_url,
+        runtime_context = runtime_ctx,
+        minimum_context = MINIMUM_CONTEXT_LENGTH,
+        estimated_request_tokens = request_tokens,
+        tool_count = tool_count,
+        session = session_id.unwrap_or("none"),
+        "Ollama runtime context too small for Hermes tool use"
+    );
+    Some(format!(
+        "Ollama loaded `{model}` with only {runtime_ctx} tokens of runtime \
+         context, but Hermes needs at least {min_ctx} tokens for reliable tool use.\n\n\
+         Increase the Ollama context for this model and restart/reload the model before trying again. \
+         A known-good starting point is 65,536 tokens. In Hermes config, set `model.ollama_num_ctx: 65536` \
+         (and `model.context_length: 65536` if you also override the displayed model context). \
+         If you manage the model through an Ollama Modelfile, set `PARAMETER num_ctx 65536` there instead.",
+        min_ctx = MINIMUM_CONTEXT_LENGTH
+    ))
+}
+
 /// Detect the narrow backend family affected by Ollama/GLM stop misreports.
 ///
 /// Python `AIAgent._is_ollama_glm_backend` (`run_agent.py`).

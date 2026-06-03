@@ -5,53 +5,53 @@
 //! model finishes naturally or the turn budget is exhausted.
 
 pub mod agent_loop;
+pub mod api_bridge;
 pub mod api_message_oracle;
 pub mod api_messages;
-pub mod conversation_loop;
-pub mod api_bridge;
 pub mod auxiliary_builder;
-pub mod inbound_prepare;
-pub mod tools_wiring;
-pub mod vision_adapter;
 pub mod budget;
 pub mod code_index;
 pub mod compression;
 pub mod context;
 pub mod context_files;
 pub mod context_references;
+pub mod conversation_loop;
 pub mod copilot_acp;
 pub mod credential_pool;
 pub mod credential_pool_recovery;
 pub mod fallback;
+pub mod file_mutation_tracker;
 pub mod honcho_provider;
+pub mod inbound_prepare;
 pub mod interrupt;
+pub mod iteration_budget;
 pub mod lsp_context;
 pub mod memory_manager;
 pub mod memory_plugins;
-pub mod user_interest;
+pub mod message_sanitization;
 pub mod oauth;
 pub mod plugins;
-pub mod shell_hooks;
-pub mod steer;
-pub mod iteration_budget;
-pub mod tool_guardrails;
-pub mod file_mutation_tracker;
-pub mod stream_scrubber;
-pub mod vision_message_prepare;
 mod prompt_builder;
-mod system_prompt;
 pub mod prompt_caching;
 pub mod provider;
 mod provider_serialize_cache;
 pub mod providers_extra;
-pub mod python_alignment;
 pub mod rate_limit;
 pub mod reasoning;
 pub mod session_persistence;
+pub mod shell_hooks;
 pub mod skill_orchestrator;
 pub mod smart_model_routing;
+pub mod steer;
+pub mod stream_scrubber;
 pub mod sub_agent_orchestrator;
 pub mod subdirectory_hints;
+mod system_prompt;
+pub mod tool_guardrails;
+pub mod tools_wiring;
+pub mod user_interest;
+pub mod vision_adapter;
+pub mod vision_message_prepare;
 
 // Re-export primary agent types
 pub use agent_loop::{
@@ -59,15 +59,16 @@ pub use agent_loop::{
     ErrorClass, RetryConfig, SmartModelRoutingConfig, ToolRegistry, TurnMetrics,
 };
 pub use conversation_loop::{
-    extract_last_assistant_reply, split_messages_for_run_conversation, ConversationResult,
-    RunConversationParams,
+    ConversationResult, RunConversationParams, extract_last_assistant_reply,
+    split_messages_for_run_conversation,
 };
 
 // Re-export context management
 pub use compression::summarize_messages_with_llm;
 pub use context::{
-    builtin_personality_descriptions, builtin_personality_names, load_context_files, load_soul_md,
-    load_soul_md_from, switch_personality, ContextManager, SystemPromptBuilder,
+    ContextManager, SystemPromptBuilder, builtin_personality_descriptions,
+    builtin_personality_names, load_context_files, load_soul_md, load_soul_md_from,
+    switch_personality,
 };
 
 // Re-export budget enforcement
@@ -75,25 +76,27 @@ pub use budget::{check_aggregate_budget, enforce_budget, truncate_result};
 
 // Re-export LLM providers
 pub use api_bridge::CodexProvider;
+pub use api_message_oracle::{
+    assert_dual_run_eq, assert_messages_oracle_eq, canonical_messages_json,
+};
 pub use auxiliary_builder::{
-    build_auxiliary_client, build_default_auxiliary_client, AuxiliaryBuildParams,
-    AuxiliaryWiringSummary,
+    AuxiliaryBuildParams, AuxiliaryWiringSummary, build_auxiliary_client,
+    build_default_auxiliary_client,
 };
 pub use inbound_prepare::AgentInboundPreparer;
-pub use tools_wiring::{
-    register_builtin_tools as register_agent_builtin_tools,
-    register_builtin_tools_with_voice as register_agent_builtin_tools_with_voice,
-};
-pub use vision_adapter::AuxiliaryVisionAdapter;
 pub use prompt_caching::{
     anthropic_prompt_cache_policy, apply_anthropic_cache_control, build_cache_marker,
     record_prompt_cache_telemetry,
 };
 pub use provider::{AnthropicProvider, GenericProvider, OpenAiProvider, OpenRouterProvider};
-pub use api_message_oracle::{assert_dual_run_eq, assert_messages_oracle_eq, canonical_messages_json};
 pub use providers_extra::{
     CopilotProvider, KimiProvider, MiniMaxProvider, NousProvider, QwenProvider,
 };
+pub use tools_wiring::{
+    register_builtin_tools as register_agent_builtin_tools,
+    register_builtin_tools_with_voice as register_agent_builtin_tools_with_voice,
+};
+pub use vision_adapter::AuxiliaryVisionAdapter;
 
 // Re-export rate limiting, credential pool, and fallback chain
 pub use credential_pool::CredentialPool;
@@ -110,12 +113,12 @@ pub use steer::{PendingSteer, STEER_GUIDANCE_MARKER};
 
 // Re-export memory manager
 pub use memory_manager::{
-    build_memory_context_block, sanitize_context, MemoryManager, MemoryProviderPlugin,
+    MemoryManager, MemoryProviderPlugin, build_memory_context_block, sanitize_context,
 };
 pub use user_interest::{
+    ExtractOptions, InterestMemoryPlugin, InterestStore, InterestTopic, TopicStatus,
     extract_signals_from_text, filter_persistable_signals, is_rejected_poi_topic,
-    load_interest_snapshot, ExtractOptions, InterestMemoryPlugin, InterestStore, InterestTopic,
-    TopicStatus,
+    load_interest_snapshot,
 };
 
 // Re-export plugin system
@@ -126,31 +129,31 @@ pub use shell_hooks::set_process_accept_hooks;
 pub use skill_orchestrator::SkillOrchestrator;
 
 // Re-export session persistence
-pub use python_alignment::strip_system_messages_from_history;
 pub use session_persistence::{
-    leading_system_prompt_for_persist, SessionFlushCursor, SessionPersistence,
+    SessionFlushCursor, SessionPersistence, leading_system_prompt_for_persist,
 };
 
 // Re-export context files
 pub use code_index::{CodeIndex, CodeIndexConfig, IndexStats, ReferenceHit, SymbolInfo};
 pub use context_files::{load_hermes_context_files, load_workspace_context, scan_context_content};
 pub use context_references::{
-    parse_context_references, preprocess_context_references_async, ContextReference,
-    ContextReferenceResult,
+    ContextReference, ContextReferenceResult, parse_context_references,
+    preprocess_context_references_async,
 };
-pub use lsp_context::{build_lsp_context_note, LspContextConfig};
+pub use lsp_context::{LspContextConfig, build_lsp_context_note};
 
 // Re-export subdirectory hints
-pub use subdirectory_hints::{generate_project_hints, SubdirectoryHintTracker};
+pub use subdirectory_hints::{SubdirectoryHintTracker, generate_project_hints};
 
 // Python `run_agent.py` alignment helpers (budget strip/inject, surrogate sanitize)
-pub use python_alignment::{
-    budget_pressure_text, build_partial_stream_stub_response, continuation_prompt_for_response,
+pub use message_sanitization::{
+    CODEX_CONTINUE_USER_MESSAGE, PARTIAL_STREAM_STUB_ID, budget_pressure_text,
+    build_partial_stream_stub_response, continuation_prompt_for_response,
     format_partial_stream_tool_call_warning, get_continuation_prompt, has_natural_response_ending,
     inject_budget_pressure_into_last_tool_result, looks_like_codex_intermediate_ack,
     partial_stream_dropped_tool_names, sanitize_surrogates, should_treat_stop_as_truncated,
-    strip_budget_warnings_from_messages, strip_think_blocks_for_ack, CODEX_CONTINUE_USER_MESSAGE,
-    PARTIAL_STREAM_STUB_ID,
+    strip_budget_warnings_from_messages, strip_system_messages_from_history,
+    strip_think_blocks_for_ack,
 };
 
 // Re-export sub-agent orchestrator

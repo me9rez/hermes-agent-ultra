@@ -4,12 +4,13 @@
 //! **C–D segment**: delegated to [`AgentLoop::run_prepared`] / [`AgentLoop::run_stream_prepared`].
 //! **E segment** (`finalize_turn`): turn-level hooks, `ConversationResult` assembly, optional persist.
 
-
 use hermes_core::{AgentError, AgentResult, Message, MessageRole, StreamChunk, ToolSchema};
 
 use crate::agent_loop::AgentLoop;
+use crate::message_sanitization::{
+    sanitize_surrogates, strip_budget_warnings_from_messages, strip_system_messages_from_history,
+};
 use crate::plugins::{HookResult, HookType};
-use crate::python_alignment::{sanitize_surrogates, strip_system_messages_from_history};
 use crate::session_persistence::leading_system_prompt_for_persist;
 
 /// Inputs for one `run_conversation` call (Python `run_conversation` kwargs).
@@ -56,17 +57,10 @@ pub struct PreparedTurn {
 /// Session storage includes the inbound user line; `run_conversation` appends it again in
 /// `prepare_turn`, so callers must pass history **without** the current turn's user message,
 /// or use this helper on the full session slice.
-pub fn split_messages_for_run_conversation(
-    messages: &[Message],
-) -> Option<(Vec<Message>, String)> {
+pub fn split_messages_for_run_conversation(messages: &[Message]) -> Option<(Vec<Message>, String)> {
     let messages = strip_system_messages_from_history(messages);
-    let idx = messages
-        .iter()
-        .rposition(|m| m.role == MessageRole::User)?;
-    let user_message = messages[idx]
-        .content
-        .clone()
-        .unwrap_or_default();
+    let idx = messages.iter().rposition(|m| m.role == MessageRole::User)?;
+    let user_message = messages[idx].content.clone().unwrap_or_default();
     let mut history = messages;
     history.remove(idx);
     Some((history, user_message))
@@ -76,9 +70,7 @@ pub fn split_messages_for_run_conversation(
 pub fn extract_last_assistant_reply(messages: &[Message]) -> Option<String> {
     messages.iter().rev().find_map(|m| {
         if m.role == MessageRole::Assistant {
-            m.content
-                .clone()
-                .filter(|c| !c.trim().is_empty())
+            m.content.clone().filter(|c| !c.trim().is_empty())
         } else {
             None
         }
@@ -119,7 +111,7 @@ impl AgentLoop {
         Ok(self.finalize_turn(inner, &prepared.meta))
     }
 
-    /// B segment: build message list and apply per-turn prelude.
+    /// build message list and apply per-turn prelude.
     pub(crate) async fn prepare_turn(
         &self,
         params: &RunConversationParams,
@@ -153,8 +145,7 @@ impl AgentLoop {
             *slot = Some(task_id.clone());
         }
 
-        let conversation_history =
-            strip_system_messages_from_history(&params.conversation_history);
+        let conversation_history = strip_system_messages_from_history(&params.conversation_history);
         self.hydrate_memory_nudge_counters_from_history(&conversation_history);
 
         let mut messages: Vec<Message> = conversation_history;
@@ -172,7 +163,20 @@ impl AgentLoop {
         })
     }
 
-    /// E segment: turn-level hooks + [`ConversationResult`] + optional session persist.
+    /// Per-turn message prelude (sanitize, budget strip, @file expansion, restore primary).
+    pub(crate) async fn apply_turn_message_prelude(&self, messages: &mut Vec<Message>) {
+        for msg in messages.iter_mut() {
+            if let Some(ref mut c) = msg.content {
+                *c = sanitize_surrogates(c).into_owned();
+            }
+        }
+        strip_budget_warnings_from_messages(messages);
+        self.preprocess_user_message_context_references(messages)
+            .await;
+        self.restore_primary_runtime_at_turn_start();
+    }
+
+    /// turn-level hooks + [`ConversationResult`] + optional session persist.
     pub(crate) fn finalize_turn(
         &self,
         mut inner: AgentResult,
@@ -301,10 +305,7 @@ impl AgentLoop {
 
     /// Active task id for this turn (Python `agent._current_task_id`).
     pub fn current_task_id(&self) -> Option<String> {
-        self.current_task_id
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
+        self.current_task_id.lock().ok().and_then(|g| g.clone())
     }
 }
 
@@ -341,8 +342,8 @@ mod tests {
     #[tokio::test]
     async fn prepare_turn_appends_user_and_sets_task_id() {
         use crate::agent_loop::AgentConfig;
-        use futures::StreamExt;
         use crate::agent_loop::ToolRegistry;
+        use futures::StreamExt;
         use std::sync::Arc;
 
         struct StopProvider;
@@ -362,8 +363,8 @@ mod tests {
                     usage: None,
                     model: "t".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -374,10 +375,8 @@ mod tests {
                 _temperature: Option<f64>,
                 _model: Option<&str>,
                 _extra_body: Option<&serde_json::Value>,
-            ) -> futures::stream::BoxStream<
-                'static,
-                Result<hermes_core::StreamChunk, AgentError>,
-            > {
+            ) -> futures::stream::BoxStream<'static, Result<hermes_core::StreamChunk, AgentError>>
+            {
                 futures::stream::empty().boxed()
             }
         }
@@ -407,8 +406,8 @@ mod tests {
     #[test]
     fn hydrate_memory_nudge_from_history() {
         use crate::agent_loop::AgentConfig;
-        use futures::StreamExt;
         use crate::agent_loop::ToolRegistry;
+        use futures::StreamExt;
         use std::sync::Arc;
 
         struct StopProvider;
@@ -428,8 +427,8 @@ mod tests {
                     usage: None,
                     model: "t".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -440,10 +439,8 @@ mod tests {
                 _temperature: Option<f64>,
                 _model: Option<&str>,
                 _extra_body: Option<&serde_json::Value>,
-            ) -> futures::stream::BoxStream<
-                'static,
-                Result<hermes_core::StreamChunk, AgentError>,
-            > {
+            ) -> futures::stream::BoxStream<'static, Result<hermes_core::StreamChunk, AgentError>>
+            {
                 futures::stream::empty().boxed()
             }
         }

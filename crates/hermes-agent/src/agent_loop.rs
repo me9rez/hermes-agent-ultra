@@ -46,19 +46,18 @@ use crate::fallback::TurnFallbackState;
 use crate::interrupt::InterruptController;
 use crate::lsp_context::{LspContextConfig, build_lsp_context_note};
 use crate::memory_manager::MemoryManager;
+use crate::message_sanitization::{
+    CODEX_CONTINUE_USER_MESSAGE, budget_pressure_text, build_partial_stream_stub_response,
+    continuation_prompt_for_response, format_partial_stream_tool_call_warning,
+    inject_budget_pressure_into_last_tool_result, looks_like_codex_intermediate_ack,
+    partial_stream_dropped_tool_names, partial_stream_tool_calls_in_flight,
+    should_treat_stop_as_truncated, strip_think_blocks_for_ack,
+};
 use crate::plugins::{HookResult, HookType, PluginManager};
+use crate::prompt_builder::TOOL_USE_ENFORCEMENT_MODELS;
 use crate::provider::{AnthropicProvider, GenericProvider, OpenAiProvider, OpenRouterProvider};
 use crate::providers_extra::{
     CopilotProvider, KimiProvider, MiniMaxProvider, NousProvider, QwenProvider,
-};
-use crate::prompt_builder::TOOL_USE_ENFORCEMENT_MODELS;
-use crate::python_alignment::{
-    build_partial_stream_stub_response, continuation_prompt_for_response,
-    format_partial_stream_tool_call_warning, partial_stream_dropped_tool_names,
-    partial_stream_tool_calls_in_flight, CODEX_CONTINUE_USER_MESSAGE, budget_pressure_text,
-    inject_budget_pressure_into_last_tool_result, looks_like_codex_intermediate_ack,
-    sanitize_surrogates, should_treat_stop_as_truncated, strip_budget_warnings_from_messages,
-    strip_think_blocks_for_ack,
 };
 use crate::session_persistence::{SessionFlushCursor, SessionPersistence};
 use crate::skill_orchestrator::SkillOrchestrator;
@@ -69,8 +68,7 @@ use crate::smart_model_routing::{
 };
 use crate::steer::PendingSteer;
 use crate::system_prompt::{
-    BACKEND_PROBE_COMMAND, format_probe_output, platform_hint_for,
-    probe_remote_backend_cached,
+    BACKEND_PROBE_COMMAND, format_probe_output, platform_hint_for, probe_remote_backend_cached,
 };
 use crate::user_interest::{
     InterestStore, ingest_user_message, is_poi_synthetic_user_text, spawn_session_end_ingest,
@@ -1765,9 +1763,12 @@ fn tool_progress_interval_ms() -> u64 {
 
 fn format_tool_progress_message(turn: u32, tool_names: &[String], pulse: u32) -> String {
     let joined = tool_names.join(", ");
-    let webish = tool_names
-        .iter()
-        .any(|name| matches!(name.as_str(), "web_search" | "web_extract" | "browser_navigate"));
+    let webish = tool_names.iter().any(|name| {
+        matches!(
+            name.as_str(),
+            "web_search" | "web_extract" | "browser_navigate"
+        )
+    });
     let base = if webish {
         format!("处理中：正在检索网络数据（第 {turn} 步，工具 {joined}）")
     } else if tool_names.len() > 1 {
@@ -1791,9 +1792,7 @@ fn summarize_tool_failure_for_user(tool_name: &str, error: &str) -> Option<Strin
     let err = error.to_ascii_lowercase();
     match tool_name {
         "web_extract"
-            if err.contains("403")
-                || err.contains("401")
-                || err.contains("blocks automated") =>
+            if err.contains("403") || err.contains("401") || err.contains("blocks automated") =>
         {
             Some("处理中：该网页拒绝自动抓取，正在尝试浏览器打开…".to_string())
         }
@@ -1807,9 +1806,7 @@ fn summarize_tool_failure_for_user(tool_name: &str, error: &str) -> Option<Strin
         "browser_navigate" if err.contains("did not become ready") => {
             Some("处理中：浏览器启动较慢，仍在等待…".to_string())
         }
-        "web_search"
-            if err.contains("timed out") || err.contains("failed after trying") =>
-        {
+        "web_search" if err.contains("timed out") || err.contains("failed after trying") => {
             Some("处理中：网络搜索较慢，正在尝试其他搜索引擎…".to_string())
         }
         _ => None,
@@ -1895,8 +1892,8 @@ fn apply_web_tool_budget(
             kept.push(tc);
             continue;
         }
-        let search_cap_hit = tc.function.name == "web_search"
-            && web_search_calls_used >= max_search_calls;
+        let search_cap_hit =
+            tc.function.name == "web_search" && web_search_calls_used >= max_search_calls;
         let block = blocked_by_errors || remaining == 0 || search_cap_hit;
         if block {
             let reason = if search_cap_hit {
@@ -1915,10 +1912,7 @@ fn apply_web_tool_budget(
                     turn, tc.function.name, web_tool_calls_used
                 )
             };
-            blocked_results.push((
-                tc.function.name.clone(),
-                ToolResult::err(tc.id, reason),
-            ));
+            blocked_results.push((tc.function.name.clone(), ToolResult::err(tc.id, reason)));
             continue;
         }
         remaining = remaining.saturating_sub(1);
@@ -2241,7 +2235,8 @@ pub struct AgentLoop {
     /// Reused SQLite persistence handle for this agent (Python `SessionDB._conn` parity).
     shared_session_persistence: std::sync::OnceLock<Arc<SessionPersistence>>,
     /// Per-turn cache of assembled API messages (LLM retry fast path).
-    turn_api_messages_cache: Mutex<Option<(crate::api_messages::ApiMessagesCacheKey, Arc<[Message]>)>>,
+    turn_api_messages_cache:
+        Mutex<Option<(crate::api_messages::ApiMessagesCacheKey, Arc<[Message]>)>>,
     /// Per-turn cache for OpenAI-compat provider message/tool JSON serialization.
     provider_serialize_cache: Arc<crate::provider_serialize_cache::ProviderSerializeCache>,
 }
@@ -2683,7 +2678,9 @@ impl AgentLoop {
             context_compressor,
             shared_session_persistence: std::sync::OnceLock::new(),
             turn_api_messages_cache: Mutex::new(None),
-            provider_serialize_cache: Arc::new(crate::provider_serialize_cache::ProviderSerializeCache::new()),
+            provider_serialize_cache: Arc::new(
+                crate::provider_serialize_cache::ProviderSerializeCache::new(),
+            ),
         }
     }
 
@@ -2715,11 +2712,17 @@ impl AgentLoop {
         self.provider_serialize_cache.invalidate();
     }
 
-    fn runtime_generic_provider(&self, provider: crate::provider::GenericProvider) -> crate::provider::GenericProvider {
+    fn runtime_generic_provider(
+        &self,
+        provider: crate::provider::GenericProvider,
+    ) -> crate::provider::GenericProvider {
         provider.with_serialize_cache(Arc::clone(&self.provider_serialize_cache))
     }
 
-    fn api_messages_cache_key(&self, ctx: &ContextManager) -> crate::api_messages::ApiMessagesCacheKey {
+    fn api_messages_cache_key(
+        &self,
+        ctx: &ContextManager,
+    ) -> crate::api_messages::ApiMessagesCacheKey {
         let prefetch = self
             .turn_ext_prefetch_cache
             .lock()
@@ -2836,10 +2839,7 @@ impl AgentLoop {
     }
 
     #[doc(hidden)]
-    pub fn oracle_candidate_messages_for_api_call(
-        &self,
-        ctx: &mut ContextManager,
-    ) -> Vec<Message> {
+    pub fn oracle_candidate_messages_for_api_call(&self, ctx: &mut ContextManager) -> Vec<Message> {
         self.build_turn_api_messages(ctx).to_vec()
     }
 
@@ -2979,7 +2979,9 @@ impl AgentLoop {
             context_compressor,
             shared_session_persistence: std::sync::OnceLock::new(),
             turn_api_messages_cache: Mutex::new(None),
-            provider_serialize_cache: Arc::new(crate::provider_serialize_cache::ProviderSerializeCache::new()),
+            provider_serialize_cache: Arc::new(
+                crate::provider_serialize_cache::ProviderSerializeCache::new(),
+            ),
         }
     }
 
@@ -4728,11 +4730,9 @@ impl AgentLoop {
             "stepfun" => {
                 let url =
                     base_url.unwrap_or_else(|| "https://api.stepfun.ai/step_plan/v1".to_string());
-                Arc::new(self.runtime_generic_provider(GenericProvider::new(
-                    url,
-                    &api_key,
-                    model_name,
-                )))
+                Arc::new(
+                    self.runtime_generic_provider(GenericProvider::new(url, &api_key, model_name)),
+                )
             }
             "nous" => {
                 let mut p = NousProvider::new(&api_key)
@@ -4758,7 +4758,8 @@ impl AgentLoop {
                     .unwrap_or_else(|_| "us-east-1".into());
                 let url = base_url
                     .unwrap_or_else(|| format!("https://bedrock-runtime.{region}.amazonaws.com"));
-                let mut g = self.runtime_generic_provider(GenericProvider::new(url, &api_key, model_name));
+                let mut g =
+                    self.runtime_generic_provider(GenericProvider::new(url, &api_key, model_name));
                 if let Some(pool) = credential_pool {
                     g = g.with_credential_pool(pool.clone());
                 }
@@ -4766,7 +4767,8 @@ impl AgentLoop {
             }
             _ => {
                 let url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-                let mut g = self.runtime_generic_provider(GenericProvider::new(url, &api_key, model_name));
+                let mut g =
+                    self.runtime_generic_provider(GenericProvider::new(url, &api_key, model_name));
                 if let Some(pool) = credential_pool {
                     g = g.with_credential_pool(pool.clone());
                 }
@@ -4835,8 +4837,11 @@ impl AgentLoop {
             .and_then(|m| m.content.as_deref())
             .unwrap_or("");
         let tool_schemas = self.tool_registry.schemas();
-        let estimated =
-            estimate_request_tokens_for_compression(ctx.get_messages(), system_prompt, &tool_schemas);
+        let estimated = estimate_request_tokens_for_compression(
+            ctx.get_messages(),
+            system_prompt,
+            &tool_schemas,
+        );
         self.context_compressor
             .lock()
             .await
@@ -4889,11 +4894,7 @@ impl AgentLoop {
             let mut compressor = self.context_compressor.lock().await;
             compressor.set_context_length(context_length);
             compressor
-                .compress(
-                    messages,
-                    Some(estimated_tokens),
-                    memory_hint.as_deref(),
-                )
+                .compress(messages, Some(estimated_tokens), memory_hint.as_deref())
                 .await
         };
 
@@ -5190,8 +5191,7 @@ impl AgentLoop {
             else {
                 continue;
             };
-            if let Some(msg) = summarize_tool_failure_for_user(&tc.function.name, &result.content)
-            {
+            if let Some(msg) = summarize_tool_failure_for_user(&tc.function.name, &result.content) {
                 self.emit_status("tool_failure", &msg);
             }
         }
@@ -6111,7 +6111,8 @@ impl AgentLoop {
                 let chunk = match chunk_result {
                     Ok(chunk) => chunk,
                     Err(err) => {
-                        let partial_tool_in_flight = partial_stream_tool_calls_in_flight(&tool_calls);
+                        let partial_tool_in_flight =
+                            partial_stream_tool_calls_in_flight(&tool_calls);
                         let should_retry_for_partial_tool = deltas_were_sent
                             && partial_tool_in_flight
                             && is_transient_stream_error(&err)
@@ -6269,19 +6270,6 @@ impl AgentLoop {
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-    }
-
-    /// Per-turn message prelude (sanitize, budget strip, @file expansion, restore primary).
-    pub(crate) async fn apply_turn_message_prelude(&self, messages: &mut Vec<Message>) {
-        for msg in messages.iter_mut() {
-            if let Some(ref mut c) = msg.content {
-                *c = sanitize_surrogates(c).into_owned();
-            }
-        }
-        strip_budget_warnings_from_messages(messages);
-        self.preprocess_user_message_context_references(messages)
-            .await;
-        self.restore_primary_runtime_at_turn_start();
     }
 
     pub(crate) async fn preprocess_user_message_context_references(
@@ -6958,7 +6946,9 @@ impl AgentLoop {
                                 self.config().continuation_max_retries
                             ),
                         );
-                        ctx.add_message(Message::user(&continuation_prompt_for_response(&response)));
+                        ctx.add_message(Message::user(&continuation_prompt_for_response(
+                            &response,
+                        )));
                         continue;
                     }
                     premature_finalize_suspected_count =
@@ -8445,7 +8435,9 @@ impl AgentLoop {
                                 self.config().continuation_max_retries
                             ),
                         );
-                        ctx.add_message(Message::user(&continuation_prompt_for_response(&response)));
+                        ctx.add_message(Message::user(&continuation_prompt_for_response(
+                            &response,
+                        )));
                         continue;
                     }
                     premature_finalize_suspected_count =
@@ -11942,15 +11934,9 @@ mod tests {
 
     #[test]
     fn tool_enforcement_prompt_gate_matches_python_model_patterns() {
-        assert!(should_inject_tool_enforcement_for_model(
-            "openai:gpt-5"
-        ));
-        assert!(should_inject_tool_enforcement_for_model(
-            "xai:grok-4-fast"
-        ));
-        assert!(should_inject_tool_enforcement_for_model(
-            "zhipu:glm-4.5"
-        ));
+        assert!(should_inject_tool_enforcement_for_model("openai:gpt-5"));
+        assert!(should_inject_tool_enforcement_for_model("xai:grok-4-fast"));
+        assert!(should_inject_tool_enforcement_for_model("zhipu:glm-4.5"));
         assert!(!should_inject_tool_enforcement_for_model(
             "anthropic:claude-3-7-sonnet"
         ));
@@ -12163,8 +12149,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -12229,8 +12215,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -12280,8 +12266,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -12303,10 +12289,7 @@ mod tests {
             Arc::new(DummyProvider),
         );
         agent.set_runtime_session_id("session-abc");
-        assert_eq!(
-            agent.runtime_session_id().as_deref(),
-            Some("session-abc")
-        );
+        assert_eq!(agent.runtime_session_id().as_deref(), Some("session-abc"));
     }
 
     #[tokio::test]
@@ -12330,8 +12313,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -12385,8 +12368,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -12453,8 +12436,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -12523,8 +12506,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -12606,8 +12589,8 @@ mod tests {
                     usage: None,
                     model: "ok".to_string(),
                     finish_reason: Some("stop".to_string()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -12966,8 +12949,8 @@ mod tests {
                     usage: None,
                     model: "ok".to_string(),
                     finish_reason: Some("stop".to_string()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -13115,8 +13098,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -13510,11 +13493,12 @@ mod tests {
             Some(hermes_core::PARTIAL_STREAM_STUB_ID)
         );
         assert_eq!(resp.finish_reason.as_deref(), Some("length"));
-        assert!(resp
-            .message
-            .tool_calls
-            .as_ref()
-            .map_or(true, |calls| calls.is_empty()));
+        assert!(
+            resp.message
+                .tool_calls
+                .as_ref()
+                .map_or(true, |calls| calls.is_empty())
+        );
         assert_eq!(
             resp.dropped_tool_names.as_deref(),
             Some(["write_file".to_string()].as_slice())
@@ -13528,9 +13512,12 @@ mod tests {
             text.to_lowercase()
                 .contains("connection dropped mid tool-call; reconnecting")
         }));
-        assert!(seen.lock().expect("seen lock").iter().any(|text| {
-            text.contains("Stream stalled mid tool-call")
-        }));
+        assert!(
+            seen.lock()
+                .expect("seen lock")
+                .iter()
+                .any(|text| { text.contains("Stream stalled mid tool-call") })
+        );
     }
 
     #[tokio::test]
@@ -13609,8 +13596,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -13672,8 +13659,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -13724,8 +13711,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -13776,8 +13763,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -13829,8 +13816,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -13882,8 +13869,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -13903,7 +13890,11 @@ mod tests {
             task_completion_guidance: false,
             ..AgentConfig::default()
         };
-        let agent = AgentLoop::new(config, Arc::new(ToolRegistry::new()), Arc::new(DummyProvider));
+        let agent = AgentLoop::new(
+            config,
+            Arc::new(ToolRegistry::new()),
+            Arc::new(DummyProvider),
+        );
         let tools = vec![ToolSchema::new(
             "terminal",
             "Execute commands",
@@ -13934,8 +13925,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -13981,8 +13972,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14062,8 +14053,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14164,8 +14155,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14216,8 +14207,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14280,8 +14271,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14368,8 +14359,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14449,8 +14440,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14538,8 +14529,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14618,8 +14609,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14687,8 +14678,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14793,8 +14784,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14884,8 +14875,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -14944,8 +14935,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -15049,8 +15040,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -15115,8 +15106,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -15195,8 +15186,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -15275,8 +15266,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(
@@ -15405,8 +15396,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
             fn chat_completion_stream(
                 &self,
@@ -15466,8 +15457,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
             fn chat_completion_stream(
                 &self,
@@ -15533,8 +15524,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
             fn chat_completion_stream(
                 &self,
@@ -15651,8 +15642,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
             fn chat_completion_stream(
                 &self,
@@ -15746,8 +15737,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
             fn chat_completion_stream(
                 &self,
@@ -15813,8 +15804,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
             fn chat_completion_stream(
                 &self,
@@ -15877,8 +15868,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
             fn chat_completion_stream(
                 &self,
@@ -15926,8 +15917,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
             fn chat_completion_stream(
                 &self,
@@ -15977,8 +15968,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
             fn chat_completion_stream(
                 &self,
@@ -16028,8 +16019,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
             fn chat_completion_stream(
                 &self,
@@ -16182,8 +16173,8 @@ mod tests {
                     usage: None,
                     model: "dummy".into(),
                     finish_reason: Some("stop".into()),
-                ..Default::default()
-        })
+                    ..Default::default()
+                })
             }
 
             fn chat_completion_stream(

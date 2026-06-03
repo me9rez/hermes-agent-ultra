@@ -1,7 +1,5 @@
 //! Python `run_agent.py`,`run_conversation.py` alignment helpers (budget pressure, history hygiene).
 //!
-//! # Phase A — contract scenarios (mirrors Python tests)
-//!
 //! 1. **New session**: empty `stored_system_prompt`, fresh `build_system_prompt`, `on_session_start` may fire.
 //! 2. **Continue session**: `stored_system_prompt` from SQLite matches prior turn — stable Anthropic prefix cache.
 //! 3. **Budget caution (70%)**: `_get_budget_warning` returns `[BUDGET: ...]` injected into last tool JSON as `_budget_warning`.
@@ -64,8 +62,24 @@ pub fn has_natural_response_ending(content: &str) -> bool {
     };
     if matches!(
         last,
-        '.' | '!' | '?' | ':' | ')' | '"' | '\'' | ']' | '}' | '。' | '！' | '？' | '：' | '）'
-            | '】' | '」' | '』' | '》' | '^'
+        '.' | '!'
+            | '?'
+            | ':'
+            | ')'
+            | '"'
+            | '\''
+            | ']'
+            | '}'
+            | '。'
+            | '！'
+            | '？'
+            | '：'
+            | '）'
+            | '】'
+            | '」'
+            | '』'
+            | '》'
+            | '^'
     ) {
         return true;
     }
@@ -97,12 +111,12 @@ tokens to avoid stream timeouts.]"
         return "[System: The previous response was cut off by a network error mid-stream. \
 Continue exactly where you left off. Do not restart or repeat prior text. \
 Finish the answer directly.]"
-        .to_string();
+            .to_string();
     }
     "[System: Your previous response was truncated by the output length limit. \
 Continue exactly where you left off. Do not restart or repeat prior text. \
 Finish the answer directly.]"
-    .to_string()
+        .to_string()
 }
 
 pub fn continuation_prompt_for_response(response: &hermes_core::LlmResponse) -> String {
@@ -555,14 +569,15 @@ mod tests {
 
     #[test]
     fn partial_stream_stub_response_matches_python_contract() {
-        let resp = build_partial_stream_stub_response(
-            "test/model",
-            "The first half of ",
-            None,
-        );
+        let resp = build_partial_stream_stub_response("test/model", "The first half of ", None);
         assert_eq!(resp.response_id.as_deref(), Some(PARTIAL_STREAM_STUB_ID));
         assert_eq!(resp.finish_reason.as_deref(), Some("length"));
-        assert!(resp.message.tool_calls.as_ref().map_or(true, |v| v.is_empty()));
+        assert!(
+            resp.message
+                .tool_calls
+                .as_ref()
+                .map_or(true, |v| v.is_empty())
+        );
         assert_eq!(
             continuation_prompt_for_response(&resp),
             get_continuation_prompt(true, None)

@@ -188,6 +188,8 @@ jobs:
         env:
           MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
         run: |
+          cp scripts/install.sh dist/
+          cp Formula/hermes-agent-ultra.rb dist/
           pip install modelscope
           python3 scripts/upload-modelscope-release.py \
             --repo flowy2025/agent \

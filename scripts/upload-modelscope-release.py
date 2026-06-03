@@ -7,7 +7,13 @@ import sys
 from pathlib import Path
 
 
-ALLOWED_PATTERNS = ["hermes-*.tar.gz", "hermes-*.zip", "checksums.sha256"]
+ALLOWED_PATTERNS = [
+    "hermes-*.tar.gz",
+    "hermes-*.zip",
+    "checksums.sha256",
+    "install.sh",
+    "hermes-agent-ultra.rb",
+]
 
 
 def collect_artifacts(dist_dir: Path) -> list[Path]:

@@ -1,22 +1,57 @@
-﻿//! Python `agent.conversation_loop.run_conversation` parity 鈥?single entry for one user turn.
+﻿//! Python `agent.conversation_loop.run_conversation` parity ? single entry for one user turn.
 //!
-//! **B segment** (`prepare_turn`): sanitize, append user, hydrate counters, message prelude.
-//! **C鈥揇 segment**: delegated to [`AgentLoop::run_prepared`] / [`AgentLoop::run_stream_prepared`].
-//! **E segment** (`finalize_turn`): turn-level hooks, [`ConversationResult`] assembly, optional persist.
+//! (`prepare_turn`): sanitize, append user, hydrate counters, message prelude.
+//! one [`AgentLoop::run_with_message_prelude`] (`run` / `run_stream` / `run_*_prepared` wrappers).
+//! (`finalize_turn`): turn-level hooks, [`ConversationResult`] assembly, optional persist.
 //!
 //! # Result types
 //!
-//! - [`AgentResult`] 鈥?output of the autonomous loop (`run` / `run_stream`): messages, turns,
+//! - [`AgentResult`] ??output of the autonomous loop (`run` / `run_stream`): messages, turns,
 //!   usage, `api_calls`, `turn_exit_reason`, etc.
-//! - [`ConversationResult`] 鈥?Python `run_conversation` return dict: **owns** the loop result via
+//! - [`ConversationResult`] ??Python `run_conversation` return dict: **owns** the loop result via
 //!   [`ConversationResult::loop_result`] and adds E-segment presentation (`final_response`,
 //!   `last_reasoning`, `completed`). Use accessors ([`ConversationResult::messages`],
 //!   [`ConversationResult::api_calls`]) instead of duplicating loop fields at the top level.
 
-use hermes_core::{AgentError, AgentResult, Message, MessageRole, StreamChunk, ToolSchema};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
-use crate::agent_loop::AgentLoop;
-use crate::message_sanitization::{sanitize_surrogates, strip_system_messages_from_history};
+use hermes_core::{
+    AgentError, AgentResult, LlmResponse, Message, MessageRole, StreamChunk, ToolCall, ToolSchema,
+    UsageStats,
+};
+use serde_json::Value;
+
+use crate::agent_loop::{
+    AgentLoop, LoopExit, OBJECTIVE_DEEP_AUDIT_MAX_RETRIES, OBJECTIVE_GUARD_MAX_RETRIES,
+    ReplayRecorder, RepoReviewBudgetState, StreamCollectOutcome, ToolProgressWatchdog,
+    TurnRuntimeRoute, apply_repo_review_discovery_budget_policy,
+    apply_repo_review_tool_profile_narrowing, apply_web_tool_budget,
+    contextlattice_connect_system_hint, contextlattice_intelligence_system_hint,
+    detect_contextlattice_connect_intent, effective_max_turns, estimate_usage_cost_usd,
+    exploratory_problem_solving_system_hint, extract_last_user_assistant,
+    finalizer_action_execution_requires_retry, finalizer_claim_requires_evidence_retry,
+    finalizer_output_quality_requires_retry, governor_for_turn, governor_runtime_state,
+    governor_window_size, is_budgeted_web_tool, latest_user_content, merge_usage,
+    objective_guard_policy, objective_guard_retry_prompt, objective_guard_satisfied,
+    objective_mode_system_hint, push_window_f64, push_window_u64,
+    should_apply_turn_reliability_guard, should_trip_tool_loop_guard,
+    update_repo_review_budget_state_from_results, web_tool_budget_max_consecutive_errors,
+    web_tool_budget_user_notice,
+};
+use crate::budget;
+use crate::context::ContextManager;
+use crate::message_sanitization::{
+    CODEX_CONTINUE_USER_MESSAGE, budget_pressure_text, build_partial_stream_stub_response,
+    continuation_prompt_for_response, format_partial_stream_tool_call_warning,
+    inject_budget_pressure_into_last_tool_result, looks_like_codex_intermediate_ack,
+    partial_stream_dropped_tool_names, partial_stream_tool_calls_in_flight, sanitize_surrogates,
+    should_treat_stop_as_truncated, strip_budget_warnings_from_messages,
+    strip_system_messages_from_history, strip_think_blocks_for_ack,
+};
 use crate::plugins::{HookResult, HookType};
 use crate::session_persistence::leading_system_prompt_for_persist;
 
@@ -34,11 +69,11 @@ pub struct RunConversationParams {
 
 /// Python `run_conversation` return value.
 ///
-/// Composes the C鈥揇 [`AgentResult`] with E-segment fields. Not a flat duplicate of the dict:
+/// Composes the C?D [`AgentResult`] with E-segment fields. Not a flat duplicate of the dict:
 /// loop mechanics live in [`Self::loop_result`]; presentation lives in the top-level optional fields.
 #[derive(Debug, Clone)]
 pub struct ConversationResult {
-    /// Autonomous loop output (messages, usage, `api_calls`, `turn_exit_reason`, 鈥?.
+    /// Autonomous loop output (messages, usage, `api_calls`, `turn_exit_reason`, ??.
     pub loop_result: AgentResult,
     /// Last assistant visible text after turn-level hooks (Python `final_response`).
     pub final_response: Option<String>,
@@ -103,9 +138,7 @@ pub struct PreparedTurn {
 /// Session storage includes the inbound user line; `run_conversation` appends it again in
 /// `prepare_turn`, so callers must pass history **without** the current turn's user message,
 /// or use this helper on the full session slice.
-pub fn split_messages_for_run_conversation(
-    messages: &[Message],
-) -> Option<(Vec<Message>, String)> {
+pub fn split_messages_for_run_conversation(messages: &[Message]) -> Option<(Vec<Message>, String)> {
     let messages = strip_system_messages_from_history(messages);
     let idx = messages.iter().rposition(|m| m.role == MessageRole::User)?;
     let user_message = messages[idx].content.clone().unwrap_or_default();
@@ -150,12 +183,10 @@ impl AgentLoop {
     ) -> Result<ConversationResult, AgentError> {
         let prepared = self.prepare_turn(&params).await?;
         let tools = params.tools;
-        let loop_result = if let Some(cb) = params.stream_callback {
-            self.run_stream_prepared(prepared.messages.clone(), tools, Some(cb))
-                .await?
-        } else {
-            self.run_prepared(prepared.messages.clone(), tools).await?
-        };
+        let stream_callback = params.stream_callback;
+        let loop_result = self
+            .run_with_message_prelude(prepared.messages.clone(), tools, stream_callback, true)
+            .await?;
         Ok(self.finalize_turn(loop_result, &prepared.meta))
     }
 
@@ -350,6 +381,1706 @@ impl AgentLoop {
     /// Active task id for this turn (Python `agent._current_task_id`).
     pub fn current_task_id(&self) -> Option<String> {
         self.current_task_id.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Returns `(prompt, restored_from_storage)` using session-level cache when warm.
+    pub(crate) fn active_cached_system_prompt(
+        &self,
+        task_hint: &str,
+        tool_schemas: &[ToolSchema],
+    ) -> (String, bool) {
+        if let Ok(guard) = self.cached_system_prompt.lock() {
+            if let Some(ref cached) = *guard {
+                if !cached.trim().is_empty() {
+                    return (cached.clone(), true);
+                }
+            }
+        }
+        let (prompt, restored) = self.resolve_initial_system_prompt(task_hint, tool_schemas);
+        if let Ok(mut guard) = self.cached_system_prompt.lock() {
+            *guard = Some(prompt.clone());
+        }
+        (prompt, restored)
+    }
+
+    /// Returns `(prompt, restored_from_storage)` - restored prompts skip fresh `build_system_prompt`.
+    pub(crate) fn resolve_initial_system_prompt(
+        &self,
+        task_hint: &str,
+        tool_schemas: &[ToolSchema],
+    ) -> (String, bool) {
+        if let Some(ref s) = self.config().stored_system_prompt {
+            let t = s.trim();
+            if !t.is_empty() {
+                return (s.clone(), true);
+            }
+        }
+        (
+            self.build_system_prompt(task_hint, tool_schemas, &self.active_model()),
+            false,
+        )
+    }
+
+    /// Run the autonomous loop with non-streaming LLM transport.
+    ///
+    /// Same core loop as [`Self::run_stream`] with `on_chunk: None` (Python `_use_streaming = False`).
+    pub async fn run(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolSchema>>,
+    ) -> Result<AgentResult, AgentError> {
+        self.run_with_message_prelude(messages, tools, None, false).await
+    }
+
+    /// Like [`Self::run`] after [`crate::conversation_loop::AgentLoop::prepare_turn`] applied the message prelude.
+    pub(crate) async fn run_prepared(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolSchema>>,
+    ) -> Result<AgentResult, AgentError> {
+        self.run_with_message_prelude(messages, tools, None, true).await
+    }
+
+
+
+    /// Run the same loop as [`Self::run`], streaming the first LLM attempt per turn when `on_chunk` is set.
+    ///
+    /// Retries after empty/thinking recovery use non-stream transport (Python parity).
+    pub async fn run_stream(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolSchema>>,
+        on_chunk: Option<Box<dyn Fn(StreamChunk) + Send + Sync>>,
+    ) -> Result<AgentResult, AgentError> {
+        self.run_with_message_prelude(messages, tools, on_chunk, false)
+            .await
+    }
+
+    /// Like [`Self::run_stream`] after B-segment [`crate::conversation_loop`] prelude.
+    pub(crate) async fn run_stream_prepared(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolSchema>>,
+        on_chunk: Option<Box<dyn Fn(StreamChunk) + Send + Sync>>,
+    ) -> Result<AgentResult, AgentError> {
+        self.run_with_message_prelude(messages, tools, on_chunk, true)
+            .await
+    }
+
+
+    #[inline]
+    fn emit_stream_chunk(
+        emit: Option<&(dyn Fn(StreamChunk) + Send + Sync)>,
+        chunk: StreamChunk,
+    ) {
+        if let Some(f) = emit {
+            f(chunk);
+        }
+    }
+
+    async fn run_with_message_prelude(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolSchema>>,
+        on_chunk: Option<Box<dyn Fn(StreamChunk) + Send + Sync>>,
+        skip_message_prelude: bool,
+    ) -> Result<AgentResult, AgentError> {
+        // Python `_has_stream_consumers` (UI) vs `_use_streaming` (transport) ? see `use_streaming_llm_transport`.
+        let ui_streaming = on_chunk.is_some();
+        let stream_mute = ui_streaming.then(|| Arc::new(AtomicBool::new(false)));
+        let stream_needs_break = ui_streaming.then(|| Arc::new(AtomicBool::new(false)));
+        let stream_chunk_sink: Box<dyn Fn(StreamChunk) + Send + Sync> = if let Some(raw_emit) = on_chunk {
+            let stream_mute = stream_mute.clone().expect("streaming");
+            let break_for_emit = stream_needs_break.clone().expect("streaming");
+            Box::new(move |chunk: StreamChunk| {
+                let StreamChunk {
+                    delta,
+                    finish_reason,
+                    usage,
+                } = chunk;
+                if let Some(delta_val) = delta {
+                    if let Some(content) = delta_val.content.clone() {
+                        if stream_mute.load(Ordering::Acquire) {
+                            return;
+                        }
+                        let mut out = content;
+                        if break_for_emit.swap(false, Ordering::AcqRel) {
+                            out = format!("\n\n{}", out);
+                        }
+                        raw_emit(StreamChunk {
+                            delta: Some(hermes_core::StreamDelta {
+                                content: Some(out),
+                                tool_calls: delta_val.tool_calls,
+                                extra: delta_val.extra,
+                            }),
+                            finish_reason,
+                            usage,
+                        });
+                        return;
+                    }
+                    raw_emit(StreamChunk {
+                        delta: Some(delta_val),
+                        finish_reason,
+                        usage,
+                    });
+                    return;
+                }
+                raw_emit(StreamChunk {
+                    delta: None,
+                    finish_reason,
+                    usage,
+                });
+            })
+        } else {
+            Box::new(|_| ())
+        };
+
+        let mut ctx = ContextManager::for_model(self.active_model().as_str());
+        let mut tool_errors: Vec<hermes_core::ToolErrorRecord> = Vec::new();
+        let session_id_owned = self.config().session_id.clone().unwrap_or_default();
+        let session_id = session_id_owned.as_str();
+        let mut messages = messages;
+        if !skip_message_prelude {
+            self.apply_turn_message_prelude(&mut messages).await;
+        }
+
+        let task_hint = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, hermes_core::MessageRole::User))
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default();
+
+        // Determine which tools to expose
+        let tool_schemas: Arc<[ToolSchema]> = match tools {
+            Some(v) => Arc::from(v),
+            None => self.tool_registry.schemas(),
+        };
+        // Build and inject system prompt (or reuse session-level cache for prefix stability)
+        let (system_content, restored_system) =
+            self.resolve_initial_system_prompt(&task_hint, &tool_schemas);
+        ctx.add_message(Message::system(&system_content));
+
+        let mut session_started_hooks_fired = false;
+        if !restored_system {
+            let hook_ctx = serde_json::json!({
+                "session_id": self.config().session_id,
+                "model": self.active_model(),
+            });
+            let _results = self.invoke_hook(HookType::OnSessionStart, &hook_ctx);
+            self.inject_hook_context(&_results, &mut ctx);
+            session_started_hooks_fired = true;
+        }
+
+        // Add initial messages
+        for msg in messages {
+            ctx.add_message(msg);
+        }
+        self.interest_sync_user_messages(ctx.get_messages());
+        self.hydrate_todo_store(&ctx);
+        if let Some(hint) = contextlattice_connect_system_hint(ctx.get_messages()) {
+            ctx.add_message(Message::system(hint));
+        }
+        if let Some(hint) = exploratory_problem_solving_system_hint(ctx.get_messages()) {
+            ctx.add_message(Message::system(hint));
+        }
+        if let Some(hint) = objective_mode_system_hint(ctx.get_messages()) {
+            ctx.add_message(Message::system(hint));
+        }
+        if let Some(hint) =
+            contextlattice_intelligence_system_hint(ctx.get_messages(), &tool_schemas)
+        {
+            ctx.add_message(Message::system(hint));
+        }
+
+        let persist_user_idx = if self.config().persist_user_message.is_some() {
+            ctx.get_messages()
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.role == MessageRole::User)
+                .last()
+                .map(|(i, _)| i)
+        } else {
+            None
+        };
+        let mut codex_ack_continuations: u32 = 0;
+
+        let mut review_memory_at_end = false;
+        if self.config().memory_nudge_interval > 0
+            && self.tool_registry.names().iter().any(|n| n == "memory")
+        {
+            if let Ok(mut c) = self.evolution_counters.lock() {
+                c.turns_since_memory = c.turns_since_memory.saturating_add(1);
+                if c.turns_since_memory >= self.config().memory_nudge_interval {
+                    review_memory_at_end = true;
+                    c.turns_since_memory = 0;
+                }
+            }
+        }
+        let mut api_call_count: u32 = 0;
+
+        // Memory prefetch
+        let first_user = ctx
+            .get_messages()
+            .iter()
+            .filter(|m| matches!(m.role, hermes_core::MessageRole::User))
+            .last()
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default();
+        let mem_ctx_raw = self.memory_prefetch(&first_user, session_id);
+        self.set_turn_ext_prefetch_cache(mem_ctx_raw);
+
+        if self.config().preflight_context_compress {
+            self.preflight_context_compress_with_status(&mut ctx).await;
+        }
+        let replay = ReplayRecorder::for_session(&self.config(), session_id);
+        let max_turns_limit = effective_max_turns(self.config().max_turns);
+        replay.record(
+            "session_start",
+            serde_json::json!({
+                "session_id": session_id,
+                "mode": if self.use_streaming_llm_transport(ui_streaming, 0, None) {
+                    "stream"
+                } else {
+                    "run"
+                },
+                "model": self.active_model(),
+                "max_turns": self.config().max_turns,
+                "max_turns_effective": max_turns_limit,
+                "max_turns_unlimited": max_turns_limit.is_none(),
+            }),
+        );
+
+        let mut total_turns: u32 = 0;
+        let mut _total_api_time_ms: u64 = 0;
+        let mut _total_tool_time_ms: u64 = 0;
+        let mut accumulated_usage: Option<UsageStats> = None;
+        let mut session_cost_usd: f64 = 0.0;
+        let mut cost_warned = false;
+        let mut forced_runtime_route: Option<TurnRuntimeRoute> = None;
+        let mut last_checkpoint_messages: Option<Vec<Message>> = None;
+        let mut invalid_tool_retries: u32 = 0;
+        let mut invalid_json_retries: u32 = 0;
+        let mut truncated_tool_call_retries: u32 = 0;
+        let mut continuation_retries: u32 = 0;
+        let mut last_content_with_tools: Option<String> = None;
+        let mut continuation_trigger_count: u32 = 0;
+        let mut ack_trigger_count: u32 = 0;
+        let mut premature_finalize_suspected_count: u32 = 0;
+        let mut context_pressure_warned_at: f64 = 0.0;
+        let mut context_pressure_last_warn_at: Option<Instant> = None;
+        let mut context_pressure_last_warn_percent: f64 = 0.0;
+        let mut governor_llm_latency_window: VecDeque<u64> = VecDeque::new();
+        let mut governor_tool_error_window: VecDeque<f64> = VecDeque::new();
+        let mut governor_consecutive_error_turns: u32 = 0;
+        let mut web_tool_calls_used: u32 = 0;
+        let mut web_search_calls_used: u32 = 0;
+        let mut web_tool_consecutive_error_turns: u32 = 0;
+        let mut repo_review_budget_state = RepoReviewBudgetState::default();
+        let mut objective_guard_retries: u32 = 0;
+        let mut finalizer_evidence_retries: u32 = 0;
+        let mut finalizer_output_quality_retries: u32 = 0;
+        let mut finalizer_action_execution_retries: u32 = 0;
+        let governor_window_limit = governor_window_size();
+        let budget_cap = max_turns_limit.unwrap_or(self.config().max_turns);
+        let mut iteration_budget = crate::iteration_budget::IterationBudget::new(budget_cap);
+        let mut tool_guardrails = crate::tool_guardrails::ToolGuardrailController::new();
+        let mut file_mutation = crate::file_mutation_tracker::FileMutationTracker::new(
+            self.config().checkpoints_enabled,
+        );
+        let mut stream_scrubber = if self.use_streaming_llm_transport(ui_streaming, 0, None) {
+            Some(crate::stream_scrubber::ThinkBlockScrubber::new())
+        } else {
+            None
+        };
+        let mut checkpoint_mgr = hermes_tools::CheckpointManager::new(
+            self.config().checkpoints_enabled,
+            self.config().hermes_home.as_deref().map(Path::new),
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        );
+
+        loop {
+            if let Some(scrubber) = stream_scrubber.as_mut() {
+                scrubber.reset();
+            }
+            if self.interrupt.take_interrupt_graceful().is_some() {
+                return Ok(self.graceful_interrupt_result(
+                    &ctx,
+                    total_turns,
+                    &tool_errors,
+                    accumulated_usage.clone(),
+                    session_cost_usd,
+                    session_started_hooks_fired,
+                    persist_user_idx,
+                    api_call_count,
+                ));
+            }
+
+            if let Some(max_turns) = max_turns_limit {
+                if iteration_budget.exhausted() || total_turns >= max_turns {
+                    tracing::warn!(
+                        "Max turns ({}) exceeded, requesting final summary",
+                        max_turns
+                    );
+                    let summary_msg = self.handle_max_iterations(&mut ctx).await?;
+                    if let Some(msg) = summary_msg {
+                        ctx.add_message(msg);
+                    }
+                    self.turn_end_plugin_hooks(
+                        ctx.get_messages(),
+                        false,
+                        false,
+                        total_turns,
+                        session_started_hooks_fired,
+                    );
+                    replay.record(
+                        "session_end",
+                        serde_json::json!({
+                            "reason": "max_turns",
+                            "total_turns": total_turns,
+                            "session_cost_usd": session_cost_usd,
+                        }),
+                    );
+                    return Ok(self.seal_loop_result(
+                        &ctx,
+                        persist_user_idx,
+                        LoopExit {
+                            turn_exit_reason: "max_iterations_reached",
+                            api_calls: api_call_count,
+                            failed: false,
+                            partial: false,
+                            finished_naturally: false,
+                            interrupted: false,
+                        },
+                        total_turns,
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
+                        session_started_hooks_fired,
+                    ));
+                }
+            }
+
+            total_turns += 1;
+            checkpoint_mgr.new_turn();
+            iteration_budget.consume();
+            tracing::debug!("Agent turn {}", total_turns);
+
+            // Housekeeping-only turns enable mute_post_response for the *current* turn's
+            // pre-tool narration. Reset each turn so the next LLM stream (especially the
+            // final natural-language reply) is delivered to gateway native streaming.
+            if let Some(mute) = stream_mute.as_ref() {
+                mute.store(false, Ordering::Release);
+            }
+
+            // Refresh oauth-backed runtime credentials before routing/provider selection.
+            self.refresh_oauth_store_tokens_if_needed().await;
+
+            // Skill nudge counter ? Python `run_agent.py`: increment at the start of each inner API iteration.
+            if self.config().skill_creation_nudge_interval > 0
+                && self
+                    .tool_registry
+                    .names()
+                    .iter()
+                    .any(|n| n == "skill_manage")
+            {
+                if let Ok(mut c) = self.evolution_counters.lock() {
+                    c.iters_since_skill = c.iters_since_skill.saturating_add(1);
+                }
+            }
+
+            self.memory_on_turn_start(total_turns, "");
+
+            if self.config().checkpoint_interval_turns > 0
+                && (total_turns - 1) % self.config().checkpoint_interval_turns == 0
+            {
+                last_checkpoint_messages = Some(ctx.get_messages().to_vec());
+            }
+
+            // Notify memory + plugins of new turn
+            self.memory_on_turn_start(total_turns, "");
+
+            // Memory sync at flush interval
+            if total_turns % self.config().memory_flush_interval == 0 && total_turns > 0 {
+                let msgs = ctx.get_messages();
+                let (u, a) = extract_last_user_assistant(msgs);
+                self.memory_sync(&u, &a, session_id);
+            }
+
+            // --- Pre-LLM hook ---
+            let turn_runtime_route = forced_runtime_route
+                .clone()
+                .or_else(|| self.resolve_smart_runtime_route(ctx.get_messages()));
+            let turn_default_model = self.active_model();
+            let active_model = turn_runtime_route
+                .as_ref()
+                .map(|r| r.model.as_str())
+                .unwrap_or(turn_default_model.as_str());
+            let turn_governor_runtime = governor_runtime_state(
+                &governor_llm_latency_window,
+                &governor_tool_error_window,
+                governor_consecutive_error_turns,
+            );
+            let llm_governor =
+                governor_for_turn(&self.config(), &ctx, 0, Some(&turn_governor_runtime));
+            if forced_runtime_route.is_none()
+                && should_apply_turn_reliability_guard(
+                    &turn_governor_runtime,
+                    &llm_governor,
+                    governor_llm_latency_window.len(),
+                )
+            {
+                if let Some(model) = self
+                    .resolve_reliability_degrade_model(active_model, turn_runtime_route.as_ref())
+                {
+                    tracing::info!(
+                        turn = total_turns,
+                        model = %model,
+                        consecutive_error_turns = turn_governor_runtime.consecutive_error_turns,
+                        avg_llm_latency_ms = ?turn_governor_runtime.avg_llm_latency_ms,
+                        "reliability guard switching runtime route after degradation"
+                    );
+                    forced_runtime_route = Some(self.turn_route_reliability_guard(model.clone()));
+                    ctx.add_message(Message::system(format!(
+                            "Reliability guard: runtime degradation detected. Switching next turns to `{}`.",
+                            model
+                        )));
+                }
+            }
+            tracing::debug!(
+                turn = total_turns,
+                model = active_model,
+                governor_pressure = llm_governor.pressure,
+                governor_max_tokens = ?llm_governor.max_tokens,
+                governor_avg_latency_ms = ?turn_governor_runtime.avg_llm_latency_ms,
+                governor_avg_tool_error_rate = turn_governor_runtime.avg_tool_error_rate,
+                governor_consecutive_error_turns = turn_governor_runtime.consecutive_error_turns,
+                "turn governor snapshot"
+            );
+            replay.record(
+                "turn_start",
+                serde_json::json!({
+                    "turn": total_turns,
+                    "model": active_model,
+                    "pressure": llm_governor.pressure,
+                    "max_tokens": llm_governor.max_tokens,
+                    "latency_degraded": llm_governor.latency_degraded,
+                    "error_degraded": llm_governor.error_degraded,
+                    "avg_llm_latency_ms": turn_governor_runtime.avg_llm_latency_ms,
+                    "avg_tool_error_rate": turn_governor_runtime.avg_tool_error_rate,
+                    "consecutive_error_turns": turn_governor_runtime.consecutive_error_turns,
+                }),
+            );
+            let hook_ctx = serde_json::json!({"turn": total_turns, "model": active_model});
+            let pre_results = self.invoke_hook(HookType::PreLlmCall, &hook_ctx);
+            self.inject_hook_context(&pre_results, &mut ctx);
+
+            // --- Streaming first attempt + semantic empty/thinking recovery as `run()` (retries use non-stream) ---
+            let api_start = Instant::now();
+            let mut inner_empty = 0u32;
+            let mut inner_thinking = 0u32;
+            let mut turn_usage_acc: Option<UsageStats> = None;
+            let mut inner_attempt: u32 = 0;
+            let mut response = loop {
+                if self.interrupt.take_interrupt_graceful().is_some() {
+                    return Ok(self.graceful_interrupt_result(
+                        &ctx,
+                        total_turns,
+                        &tool_errors,
+                        accumulated_usage.clone(),
+                        session_cost_usd,
+                        session_started_hooks_fired,
+                        persist_user_idx,
+                        api_call_count,
+                    ));
+                }
+                let r = if self.use_streaming_llm_transport(
+                    ui_streaming,
+                    inner_attempt,
+                    turn_runtime_route.as_ref(),
+                ) {
+                    match self
+                        .collect_stream_llm_response(
+                            &mut ctx,
+                            &tool_schemas,
+                            turn_runtime_route.as_ref(),
+                            active_model,
+                            llm_governor.max_tokens,
+                            stream_chunk_sink.as_ref(),
+                            &mut api_call_count,
+                            stream_scrubber.as_mut(),
+                        )
+                        .await
+                    {
+                        Ok(StreamCollectOutcome::Complete(resp)) => resp,
+                        Ok(StreamCollectOutcome::Interrupted(partial)) => {
+                            if let Some(ref u) = partial.usage {
+                                accumulated_usage = Some(merge_usage(accumulated_usage.clone(), u));
+                                if let Some(cost) = estimate_usage_cost_usd(
+                                    u,
+                                    partial.model.as_str(),
+                                    &self.config(),
+                                ) {
+                                    session_cost_usd += cost;
+                                }
+                            }
+                            ctx.add_message(partial.message);
+                            return Ok(self.graceful_interrupt_result(
+                                &ctx,
+                                total_turns,
+                                &tool_errors,
+                                accumulated_usage.clone(),
+                                session_cost_usd,
+                                session_started_hooks_fired,
+                                persist_user_idx,
+                                api_call_count,
+                            ));
+                        }
+                        Err(e) => {
+                            let api_elapsed = api_start.elapsed().as_millis() as u64;
+                            self.update_route_learning(
+                                turn_runtime_route.as_ref(),
+                                Some(active_model),
+                                api_elapsed,
+                                false,
+                            );
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    match self
+                        .call_llm_with_retry(
+                            &mut ctx,
+                            &tool_schemas,
+                            turn_runtime_route.as_ref(),
+                            llm_governor.max_tokens,
+                            &mut api_call_count,
+                        )
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(AgentError::Interrupted { .. }) => {
+                            return Ok(self.graceful_interrupt_result(
+                                &ctx,
+                                total_turns,
+                                &tool_errors,
+                                accumulated_usage.clone(),
+                                session_cost_usd,
+                                session_started_hooks_fired,
+                                persist_user_idx,
+                                api_call_count,
+                            ));
+                        }
+                        Err(e) => {
+                            let api_elapsed = api_start.elapsed().as_millis() as u64;
+                            self.update_route_learning(
+                                turn_runtime_route.as_ref(),
+                                Some(active_model),
+                                api_elapsed,
+                                false,
+                            );
+                            return Err(e);
+                        }
+                    }
+                };
+                inner_attempt = inner_attempt.saturating_add(1);
+
+                if let Some(ref u) = r.usage {
+                    turn_usage_acc = Some(merge_usage(turn_usage_acc, u));
+                }
+
+                let has_tools = r
+                    .message
+                    .tool_calls
+                    .as_ref()
+                    .map_or(false, |tc| !tc.is_empty());
+                if has_tools {
+                    break r;
+                }
+                if Self::assistant_visible_text(&r.message) {
+                    break r;
+                }
+                if Self::assistant_has_reasoning(&r.message)
+                    && inner_thinking < self.config().thinking_prefill_max_retries
+                {
+                    inner_thinking += 1;
+                    self.handle_reasoning_only_prefill(
+                        &r.message,
+                        inner_thinking,
+                        self.config().thinking_prefill_max_retries,
+                    );
+                    ctx.add_message(r.message.clone());
+                    continue;
+                }
+                // Accept explicit stop/end-turn responses even when assistant text is empty.
+                // Anthropic can return this shape after trivial tool side-effects.
+                if !Self::assistant_has_reasoning(&r.message)
+                    && r.finish_reason.as_deref() == Some("stop")
+                {
+                    break r;
+                }
+                if !Self::assistant_has_reasoning(&r.message)
+                    && inner_empty < self.config().empty_content_max_retries
+                {
+                    inner_empty += 1;
+                    tracing::warn!(
+                        "empty assistant response (stream path) - retrying ({}/{})",
+                        inner_empty,
+                        self.config().empty_content_max_retries
+                    );
+                    self.emit_status(
+                        "lifecycle",
+                        &format!(
+                            "Empty assistant response - retrying ({}/{})",
+                            inner_empty,
+                            self.config().empty_content_max_retries
+                        ),
+                    );
+                    continue;
+                }
+                break r;
+            };
+            Self::upgrade_finish_reason_for_truncated_tool_args(&mut response);
+            let _api_elapsed_ms = api_start.elapsed().as_millis() as u64;
+            _total_api_time_ms += _api_elapsed_ms;
+            self.update_route_learning(
+                turn_runtime_route.as_ref(),
+                Some(response.model.as_str()),
+                _api_elapsed_ms,
+                true,
+            );
+            push_window_u64(
+                &mut governor_llm_latency_window,
+                _api_elapsed_ms,
+                governor_window_limit,
+            );
+            replay.record(
+                    "llm_response",
+                    serde_json::json!({
+                        "turn": total_turns,
+                        "model": response.model,
+                        "finish_reason": response.finish_reason,
+                        "api_time_ms": _api_elapsed_ms,
+                        "tool_call_count": response.message.tool_calls.as_ref().map(|v| v.len()).unwrap_or(0),
+                        "has_visible_text": Self::assistant_visible_text(&response.message),
+                        "route_learning": self.route_learning_snapshot(
+                            turn_runtime_route.as_ref(),
+                            Some(response.model.as_str()),
+                        ),
+                    }),
+                );
+
+            // --- Post-LLM hook ---
+            let post_ctx = serde_json::json!({
+                "turn": total_turns,
+                "api_time_ms": _api_elapsed_ms,
+                "has_tool_calls": response.message.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty()),
+            });
+            let post_results = self.invoke_hook(HookType::PostLlmCall, &post_ctx);
+            self.inject_hook_context(&post_results, &mut ctx);
+            self.apply_hook_output_transforms(&post_results, &mut response.message.content);
+            self.apply_transform_llm_output_hooks(&mut response.message.content);
+
+            // Accumulate usage (merged across semantic-retried sub-calls)
+            if let Some(ref usage) = turn_usage_acc {
+                accumulated_usage = Some(merge_usage(accumulated_usage, usage));
+                if let Some(cost) =
+                    estimate_usage_cost_usd(usage, response.model.as_str(), &self.config())
+                {
+                    session_cost_usd += cost;
+                }
+            }
+
+            if let Some(limit) = self.config().max_cost_usd {
+                if !cost_warned
+                    && session_cost_usd >= limit * self.config().cost_guard_degrade_at_ratio
+                {
+                    cost_warned = true;
+                    if forced_runtime_route.is_none() {
+                        if let Some(model) = self.resolve_cost_degrade_model() {
+                            forced_runtime_route = Some(self.turn_route_cost_guard(model.clone()));
+                            ctx.add_message(Message::system(format!(
+                                    "Cost guard: session spend is now ${:.4}/${:.4}. Switching to cheaper model `{}`.",
+                                    session_cost_usd, limit, model
+                                )));
+                        } else {
+                            ctx.add_message(Message::system(format!(
+                                "Cost guard warning: session spend is now ${:.4}/${:.4}.",
+                                session_cost_usd, limit
+                            )));
+                        }
+                    }
+                }
+                if session_cost_usd >= limit {
+                    ctx.add_message(Message::system(format!(
+                            "Cost guard tripped: session spend ${:.4} exceeded max_cost_usd ${:.4}. Stopping loop.",
+                            session_cost_usd, limit
+                        )));
+                    self.turn_end_plugin_hooks(
+                        ctx.get_messages(),
+                        false,
+                        false,
+                        total_turns,
+                        session_started_hooks_fired,
+                    );
+                    replay.record(
+                        "session_end",
+                        serde_json::json!({
+                            "reason": "cost_guard",
+                            "total_turns": total_turns,
+                            "session_cost_usd": session_cost_usd,
+                        }),
+                    );
+                    return Ok(self.seal_loop_result(
+                        &ctx,
+                        persist_user_idx,
+                        LoopExit {
+                            turn_exit_reason: "max_iterations_reached",
+                            api_calls: api_call_count,
+                            failed: false,
+                            partial: false,
+                            finished_naturally: false,
+                            interrupted: false,
+                        },
+                        total_turns,
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
+                        session_started_hooks_fired,
+                    ));
+                }
+            }
+
+            let history_includes_tool = ctx
+                .get_messages()
+                .iter()
+                .any(|m| m.role == MessageRole::Tool);
+            let (assistant_msg, parsed_tool_calls, parsed_textual_tool_calls) =
+                Self::coerce_textual_tool_calls(response.message.clone());
+            if parsed_textual_tool_calls {
+                self.emit_status(
+                        "lifecycle",
+                        "Parsed textual tool-call markup from assistant output; executing parsed calls.",
+                    );
+            }
+            ctx.add_message(assistant_msg.clone());
+            if assistant_msg
+                .tool_calls
+                .as_ref()
+                .map_or(false, |v| !v.is_empty())
+                && Self::assistant_visible_text_after_think_blocks(&assistant_msg)
+            {
+                last_content_with_tools = assistant_msg
+                    .content
+                    .as_deref()
+                    .map(strip_think_blocks_for_ack)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            }
+            if response.finish_reason.as_deref() == Some("length")
+                && assistant_msg
+                    .tool_calls
+                    .as_ref()
+                    .map_or(false, |calls| !calls.is_empty())
+                && truncated_tool_call_retries < self.config().truncated_tool_call_max_retries
+            {
+                truncated_tool_call_retries = truncated_tool_call_retries.saturating_add(1);
+                self.emit_status(
+                    "lifecycle",
+                    &format!(
+                        "Truncated tool arguments - retrying ({}/{})",
+                        truncated_tool_call_retries,
+                        self.config().truncated_tool_call_max_retries
+                    ),
+                );
+                let _ = ctx.get_messages_mut().pop();
+                continue;
+            }
+            truncated_tool_call_retries = 0;
+
+            if let Some(ref cb) = self.callbacks.on_step_complete {
+                cb(total_turns);
+            }
+
+            // If no tool calls, the agent is done
+            let tool_calls: Vec<ToolCall> = parsed_tool_calls
+                .into_iter()
+                .filter(|tc| !tc.function.name.is_empty())
+                .collect();
+
+            if tool_calls.is_empty() {
+                let effective_finish_reason = self.effective_finish_reason(
+                    &response,
+                    &assistant_msg,
+                    history_includes_tool,
+                    turn_runtime_route.as_ref(),
+                );
+                let finalization_signals = self.build_finalization_signals(
+                    &task_hint,
+                    history_includes_tool,
+                    &assistant_msg,
+                    effective_finish_reason.as_deref(),
+                );
+                tracing::debug!(
+                    turn = total_turns,
+                    finish_reason = ?finalization_signals.finish_reason,
+                    has_tool_calls = finalization_signals.has_tool_calls,
+                    has_visible_text = finalization_signals.has_visible_text,
+                    has_visible_text_after_think = finalization_signals.has_visible_text_after_think,
+                    has_reasoning = finalization_signals.has_reasoning,
+                    continuation_required = finalization_signals.continuation_required,
+                    ack_detected = finalization_signals.ack_detected,
+                    final_gate_passed = finalization_signals.final_gate_passed(),
+                    "finalization gate evaluation (stream)"
+                );
+                replay.record(
+                        "final_gate",
+                        serde_json::json!({
+                            "turn": total_turns,
+                            "stream": true,
+                            "finish_reason": finalization_signals.finish_reason,
+                            "has_tool_calls": finalization_signals.has_tool_calls,
+                            "has_visible_text": finalization_signals.has_visible_text,
+                            "has_visible_text_after_think": finalization_signals.has_visible_text_after_think,
+                            "has_reasoning": finalization_signals.has_reasoning,
+                            "continuation_required": finalization_signals.continuation_required,
+                            "ack_detected": finalization_signals.ack_detected,
+                            "final_gate_passed": finalization_signals.final_gate_passed(),
+                        }),
+                    );
+                if finalization_signals.continuation_required {
+                    if continuation_retries < self.config().continuation_max_retries {
+                        continuation_retries = continuation_retries.saturating_add(1);
+                        continuation_trigger_count = continuation_trigger_count.saturating_add(1);
+                        self.emit_status(
+                                "lifecycle",
+                                &format!(
+                                    "Assistant response incomplete ({:?}) - requesting continuation ({}/{})",
+                                    response.finish_reason,
+                                    continuation_retries,
+                                    self.config().continuation_max_retries
+                                ),
+                            );
+                        ctx.add_message(Message::user(&continuation_prompt_for_response(
+                            &response,
+                        )));
+                        continue;
+                    }
+                    premature_finalize_suspected_count =
+                        premature_finalize_suspected_count.saturating_add(1);
+                    self.emit_status(
+                            "lifecycle",
+                            &format!(
+                                "Continuation retries exhausted ({}) - finalizing with best effort output",
+                                self.config().continuation_max_retries
+                            ),
+                        );
+                } else {
+                    continuation_retries = 0;
+                }
+                if finalization_signals.ack_detected {
+                    if !tool_schemas.is_empty()
+                        && codex_ack_continuations < self.config().ack_continuation_max_retries
+                    {
+                        codex_ack_continuations = codex_ack_continuations.saturating_add(1);
+                        ack_trigger_count = ack_trigger_count.saturating_add(1);
+                        self.emit_status(
+                            "lifecycle",
+                            &format!(
+                                "Detected intermediate ack - requesting continuation ({}/{})",
+                                codex_ack_continuations,
+                                self.config().ack_continuation_max_retries
+                            ),
+                        );
+                        ctx.add_message(Message::user(CODEX_CONTINUE_USER_MESSAGE));
+                        continue;
+                    }
+                    premature_finalize_suspected_count =
+                        premature_finalize_suspected_count.saturating_add(1);
+                }
+                if !Self::assistant_visible_text_after_think_blocks(&assistant_msg) {
+                    if let Some(fallback) = last_content_with_tools.take() {
+                        if let Some(last) = ctx.get_messages_mut().last_mut() {
+                            if last.role == MessageRole::Assistant {
+                                last.content = Some(fallback);
+                            }
+                        }
+                    }
+                }
+                if finalizer_claim_requires_evidence_retry(
+                    ctx.get_messages(),
+                    assistant_msg.content.as_deref().unwrap_or_default(),
+                    finalizer_evidence_retries,
+                ) {
+                    finalizer_evidence_retries = finalizer_evidence_retries.saturating_add(1);
+                    ctx.add_message(Message::system(
+                            "[SYSTEM] Finalizer evidence contract: include explicit evidence lines and confidence calibration.\n\
+                             Required format:\n\
+                             - confidence=<high|medium|low>\n\
+                             - file=<absolute-or-repo-path>\n\
+                             - cmd=<verification command or exact probe>\n\
+                             If evidence is missing, state `objective_state=unproven` and blockers.",
+                        ));
+                    ctx.add_message(Message::user(
+                        "Re-issue the final response with explicit evidence + confidence now.",
+                    ));
+                    continue;
+                }
+                if finalizer_output_quality_requires_retry(
+                    assistant_msg.content.as_deref().unwrap_or_default(),
+                    finalizer_output_quality_retries,
+                ) {
+                    finalizer_output_quality_retries =
+                        finalizer_output_quality_retries.saturating_add(1);
+                    self.emit_status(
+                        "lifecycle",
+                        "Detected templated/duplicated output; forcing concrete unique rewrite.",
+                    );
+                    ctx.add_message(Message::system(
+                            "[SYSTEM] Output quality contract: do not use placeholders or template filler.\n\
+                             Requirements:\n\
+                             - no unresolved placeholders (`[URL](URL)`, `(URL)`, `pack of authors`, `<insert...>`)\n\
+                             - no repeated list items or duplicated paragraphs\n\
+                             - provide concrete, unique, user-relevant items only; if unknown, mark as `UNPROVEN` instead of fabricating.",
+                        ));
+                    ctx.add_message(Message::user(
+                            "Re-issue the response now with concrete unique items and zero placeholders.",
+                        ));
+                    continue;
+                }
+                if finalizer_action_execution_requires_retry(
+                    ctx.get_messages(),
+                    assistant_msg.content.as_deref().unwrap_or_default(),
+                    finalizer_action_execution_retries,
+                ) {
+                    finalizer_action_execution_retries =
+                        finalizer_action_execution_retries.saturating_add(1);
+                    self.emit_status(
+                        "lifecycle",
+                        "Detected intent narration without execution evidence; forcing action run.",
+                    );
+                    ctx.add_message(Message::system(
+                            "[SYSTEM] Execution contract: this request requires concrete execution now.\n\
+                             Requirements:\n\
+                             - run the relevant tool calls in this turn (do not only describe intent)\n\
+                             - if blocked, output `BLOCKED:` with exact command/tool error and next probe\n\
+                             - include at least one evidence line (`cmd=...` or `file=...`) in the final response.",
+                        ));
+                    ctx.add_message(Message::user(
+                            "Execute now. Do not narrate intent; return concrete evidence or explicit BLOCKED state.",
+                        ));
+                    continue;
+                }
+                finalizer_evidence_retries = 0;
+                finalizer_output_quality_retries = 0;
+                finalizer_action_execution_retries = 0;
+                let (objective_guard_active, requires_analytics, deep_audit_required) =
+                    objective_guard_policy(ctx.get_messages());
+                if objective_guard_active {
+                    let assistant_text = assistant_msg.content.as_deref().unwrap_or_default();
+                    let max_guard_retries = if deep_audit_required {
+                        OBJECTIVE_DEEP_AUDIT_MAX_RETRIES
+                    } else {
+                        OBJECTIVE_GUARD_MAX_RETRIES
+                    };
+                    if !objective_guard_satisfied(
+                        assistant_text,
+                        requires_analytics,
+                        deep_audit_required,
+                    ) && objective_guard_retries < max_guard_retries
+                    {
+                        objective_guard_retries = objective_guard_retries.saturating_add(1);
+                        ctx.add_message(Message::system(objective_guard_retry_prompt(
+                            requires_analytics,
+                            deep_audit_required,
+                        )));
+                        ctx.add_message(Message::user(
+                            "Re-issue the final response with required verified sections now.",
+                        ));
+                        continue;
+                    }
+                }
+                tracing::debug!("No tool calls in response, finishing naturally");
+                if file_mutation.has_failures() {
+                    let footer = file_mutation.format_advisory_footer();
+                    for msg in ctx.get_messages_mut().iter_mut().rev() {
+                        if matches!(msg.role, MessageRole::Assistant) {
+                            if let Some(content) = msg.content.as_mut() {
+                                content.push_str(&footer);
+                            }
+                            break;
+                        }
+                    }
+                }
+                if let Err(err) = self.append_objective_runtime_ledger(
+                    ctx.get_messages(),
+                    assistant_msg.content.as_deref().unwrap_or_default(),
+                    total_turns,
+                ) {
+                    self.emit_status(
+                        "lifecycle",
+                        &format!("Objective runtime ledger append skipped: {}", err),
+                    );
+                }
+
+                // Final memory sync
+                let (u, a) = extract_last_user_assistant(ctx.get_messages());
+                self.memory_sync(&u, &a, session_id);
+                self.spawn_background_review(total_turns, &ctx, review_memory_at_end);
+                self.turn_end_plugin_hooks(
+                    ctx.get_messages(),
+                    true,
+                    false,
+                    total_turns,
+                    session_started_hooks_fired,
+                );
+                replay.record(
+                    "session_end",
+                    serde_json::json!({
+                        "reason": "finished_naturally",
+                        "total_turns": total_turns,
+                        "session_cost_usd": session_cost_usd,
+                        "continuation_trigger_count": continuation_trigger_count,
+                        "ack_trigger_count": ack_trigger_count,
+                        "premature_finalize_suspected_count": premature_finalize_suspected_count,
+                    }),
+                );
+                if stream_mute.as_ref().is_some_and(|m| m.swap(false, Ordering::AcqRel)) {
+                    Self::emit_stream_chunk(Some(stream_chunk_sink.as_ref()), StreamChunk {
+                        delta: Some(hermes_core::StreamDelta {
+                            content: None,
+                            tool_calls: None,
+                            extra: Some(serde_json::json!({
+                                "control": "mute_post_response",
+                                "enabled": false
+                            })),
+                        }),
+                        finish_reason: None,
+                        usage: None,
+                    });
+                }
+                return Ok(self.seal_loop_result(
+                    &ctx,
+                    persist_user_idx,
+                    LoopExit {
+                        turn_exit_reason: "text_response",
+                        api_calls: api_call_count,
+                        failed: false,
+                        partial: false,
+                        finished_naturally: true,
+                        interrupted: false,
+                    },
+                    total_turns,
+                    &tool_errors,
+                    accumulated_usage,
+                    session_cost_usd,
+                    session_started_hooks_fired,
+                ));
+            }
+
+            codex_ack_continuations = 0;
+
+            // Deduplicate tool calls
+            let mut tool_calls = Self::deduplicate_tool_calls(&tool_calls);
+            for tc in &mut tool_calls {
+                self.repair_tool_call(tc);
+                self.hydrate_session_search_args(tc);
+            }
+            if let Some(note) =
+                apply_repo_review_tool_profile_narrowing(&mut tool_calls, ctx.get_messages())
+            {
+                self.emit_status("lifecycle", "Applied repo-review tool profile narrowing.");
+                ctx.add_message(Message::system(note));
+            }
+            if let Some(note) = apply_repo_review_discovery_budget_policy(
+                &mut tool_calls,
+                ctx.get_messages(),
+                &mut repo_review_budget_state,
+            ) {
+                self.emit_status("lifecycle", "Applied repo-review discovery budget policy.");
+                ctx.add_message(Message::system(note));
+            }
+            if tool_calls.is_empty() {
+                ctx.add_message(Message::system(
+                        "[SYSTEM] Tool profile/budget policy filtered this turn's calls. Propose refined, scoped code-inspection calls next.",
+                    ));
+                continue;
+            }
+            let all_housekeeping = tool_calls.iter().all(|tc| {
+                matches!(
+                    tc.function.name.as_str(),
+                    "memory" | "todo" | "skill_manage" | "session_search"
+                )
+            });
+            let should_mute_post =
+                all_housekeeping && Self::assistant_visible_text_after_think_blocks(&assistant_msg);
+            let was_muted = stream_mute
+                .as_ref()
+                .map(|m| m.swap(should_mute_post, Ordering::AcqRel))
+                .unwrap_or(false);
+            if was_muted != should_mute_post {
+                Self::emit_stream_chunk(Some(stream_chunk_sink.as_ref()), StreamChunk {
+                    delta: Some(hermes_core::StreamDelta {
+                        content: None,
+                        tool_calls: None,
+                        extra: Some(serde_json::json!({
+                            "control": "mute_post_response",
+                            "enabled": should_mute_post
+                        })),
+                    }),
+                    finish_reason: None,
+                    usage: None,
+                });
+            }
+
+            let invalid_tool_calls: Vec<String> = tool_calls
+                .iter()
+                .filter(|tc| self.tool_registry.get(&tc.function.name).is_none())
+                .map(|tc| tc.function.name.clone())
+                .collect();
+            if !invalid_tool_calls.is_empty() {
+                invalid_tool_retries = invalid_tool_retries.saturating_add(1);
+                self.emit_status(
+                    "lifecycle",
+                    &format!(
+                        "Invalid tool call detected - retrying ({}/{})",
+                        invalid_tool_retries,
+                        self.config().invalid_tool_call_max_retries
+                    ),
+                );
+                let available = self.tool_registry.names().join(", ");
+                if invalid_tool_retries >= self.config().invalid_tool_call_max_retries {
+                    self.emit_status(
+                        "lifecycle",
+                        &format!(
+                            "Max invalid tool retries reached ({})",
+                            self.config().invalid_tool_call_max_retries
+                        ),
+                    );
+                    ctx.add_message(Message::system(format!(
+                        "Max invalid tool retries reached ({}). Last invalid tool: {}",
+                        self.config().invalid_tool_call_max_retries,
+                        invalid_tool_calls[0]
+                    )));
+                    self.turn_end_plugin_hooks(
+                        ctx.get_messages(),
+                        false,
+                        false,
+                        total_turns,
+                        session_started_hooks_fired,
+                    );
+                    return Ok(self.seal_loop_result(
+                        &ctx,
+                        persist_user_idx,
+                        LoopExit {
+                            turn_exit_reason: "invalid_tool_calls",
+                            api_calls: api_call_count,
+                            failed: false,
+                            partial: true,
+                            finished_naturally: false,
+                            interrupted: false,
+                        },
+                        total_turns,
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
+                        session_started_hooks_fired,
+                    ));
+                }
+                for tc in &tool_calls {
+                    let content = if self.tool_registry.get(&tc.function.name).is_none() {
+                        format!(
+                            "Tool '{}' does not exist. Available tools: {}",
+                            tc.function.name, available
+                        )
+                    } else {
+                        "Skipped: another tool call in this turn used an invalid name. Please retry this tool call.".to_string()
+                    };
+                    ctx.add_message(Message::tool_result(tc.id.clone(), content));
+                }
+                continue;
+            }
+            invalid_tool_retries = 0;
+
+            let mut invalid_json_args: Vec<(String, String)> = Vec::new();
+            for tc in &mut tool_calls {
+                if let Err(e) = Self::normalize_tool_call_arguments(tc) {
+                    invalid_json_args.push((tc.function.name.clone(), e));
+                }
+            }
+            if !invalid_json_args.is_empty() {
+                invalid_json_retries = invalid_json_retries.saturating_add(1);
+                if invalid_json_retries < self.config().invalid_tool_json_max_retries {
+                    self.emit_status(
+                        "lifecycle",
+                        &format!(
+                            "Invalid tool JSON arguments - retrying ({}/{})",
+                            invalid_json_retries,
+                            self.config().invalid_tool_json_max_retries
+                        ),
+                    );
+                    let _ = ctx.get_messages_mut().pop();
+                    continue;
+                }
+                self.emit_status(
+                    "lifecycle",
+                    &format!(
+                        "Max invalid JSON retries reached ({}); returning tool errors",
+                        self.config().invalid_tool_json_max_retries
+                    ),
+                );
+                invalid_json_retries = 0;
+                for tc in &tool_calls {
+                    let content = if let Some((_, err)) = invalid_json_args
+                        .iter()
+                        .find(|(name, _)| name == &tc.function.name)
+                    {
+                        format!(
+                            "Error: Invalid JSON arguments. {}. For tools with no required parameters, use an empty object: {{}}. Please retry with valid JSON.",
+                            err
+                        )
+                    } else {
+                        "Skipped: other tool call in this response had invalid JSON.".to_string()
+                    };
+                    ctx.add_message(Message::tool_result(tc.id.clone(), content));
+                }
+                continue;
+            }
+            invalid_json_retries = 0;
+            for tc in &tool_calls {
+                if let Ok(mut c) = self.evolution_counters.lock() {
+                    match tc.function.name.as_str() {
+                        "memory" => c.turns_since_memory = 0,
+                        "skill_manage" => c.iters_since_skill = 0,
+                        _ => {}
+                    }
+                }
+            }
+
+            // Cap concurrent delegate_task calls
+            self.cap_delegates(&mut tool_calls);
+            let deferred_web_budget_results = apply_web_tool_budget(
+                &mut tool_calls,
+                web_tool_calls_used,
+                web_search_calls_used,
+                web_tool_consecutive_error_turns,
+                total_turns,
+            );
+            if !deferred_web_budget_results.is_empty() {
+                let blocked_by_errors =
+                    web_tool_consecutive_error_turns >= web_tool_budget_max_consecutive_errors();
+                for (tool_name, _) in &deferred_web_budget_results {
+                    self.emit_status(
+                        "tool_failure",
+                        &web_tool_budget_user_notice(tool_name, blocked_by_errors),
+                    );
+                }
+            }
+            let contextlattice_connect_intent =
+                detect_contextlattice_connect_intent(ctx.get_messages());
+            if tool_calls.is_empty() {
+                for (_, result) in deferred_web_budget_results {
+                    ctx.add_message(Message::tool_result(&result.tool_call_id, &result.content));
+                }
+                continue;
+            }
+
+            // Pre-tool hooks + callbacks
+            let tool_names_for_log: Vec<&str> = tool_calls
+                .iter()
+                .map(|tc| tc.function.name.as_str())
+                .collect();
+            tracing::debug!(
+                turn = total_turns,
+                tool_count = tool_calls.len(),
+                tools = ?tool_names_for_log,
+                streaming = true,
+                "agent tool batch start"
+            );
+            for tc in &tool_calls {
+                let tc_ctx = serde_json::json!({"tool": &tc.function.name, "turn": total_turns});
+                self.invoke_hook(HookType::PreToolCall, &tc_ctx);
+                if let Some(ref cb) = self.callbacks.on_tool_start {
+                    let args: Value =
+                        serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
+                    cb(&tc.function.name, &args);
+                }
+            }
+
+            // --- Execute tool calls in parallel ---
+            if self.interrupt.take_interrupt_graceful().is_some() {
+                return Ok(self.graceful_interrupt_result(
+                    &ctx,
+                    total_turns,
+                    &tool_errors,
+                    accumulated_usage.clone(),
+                    session_cost_usd,
+                    session_started_hooks_fired,
+                    persist_user_idx,
+                    api_call_count,
+                ));
+            }
+
+            let tool_start = Instant::now();
+            let tool_governor = governor_for_turn(
+                &self.config(),
+                &ctx,
+                tool_calls.len(),
+                Some(&turn_governor_runtime),
+            );
+            let parent_budget_remaining_usd = self
+                .config()
+                .max_cost_usd
+                .map(|limit| (limit - session_cost_usd).max(0.0));
+
+            for tc in &tool_calls {
+                let args: Value =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
+                match tool_guardrails.before_call(&tc.function.name, &args) {
+                    crate::tool_guardrails::GuardrailDecision::Halt(reason) => {
+                        ctx.add_message(Message::assistant(format!(
+                            "[Tool guardrail halt] {reason}"
+                        )));
+                        return Ok(self.seal_loop_result(
+                            &ctx,
+                            persist_user_idx,
+                            LoopExit {
+                                turn_exit_reason: "guardrail_halt",
+                                api_calls: api_call_count,
+                                failed: false,
+                                partial: false,
+                                finished_naturally: true,
+                                interrupted: false,
+                            },
+                            total_turns,
+                            &tool_errors,
+                            accumulated_usage,
+                            session_cost_usd,
+                            session_started_hooks_fired,
+                        ));
+                    }
+                    crate::tool_guardrails::GuardrailDecision::Block(reason) => {
+                        tracing::warn!(tool = %tc.function.name, %reason, "tool guardrail block");
+                    }
+                    crate::tool_guardrails::GuardrailDecision::Allow => {}
+                }
+            }
+            let tool_start = Instant::now();
+            let tool_progress_names: Vec<String> = tool_calls
+                .iter()
+                .map(|tc| tc.function.name.clone())
+                .collect();
+            let _tool_progress = ToolProgressWatchdog::start(
+                self.callbacks.status_callback.clone(),
+                total_turns,
+                tool_progress_names,
+            );
+            let mut results = self
+                .execute_tool_calls(
+                    &tool_calls,
+                    total_turns,
+                    governor_for_turn(
+                        &self.config(),
+                        &ctx,
+                        tool_calls.len(),
+                        Some(&turn_governor_runtime),
+                    )
+                    .tool_concurrency,
+                    contextlattice_connect_intent,
+                    self.config()
+                        .max_cost_usd
+                        .map(|limit| (limit - session_cost_usd).max(0.0)),
+                    &mut tool_errors,
+                    Some(&mut checkpoint_mgr),
+                    latest_user_content(ctx.get_messages()).map(str::to_string),
+                )
+                .await;
+            if !deferred_web_budget_results.is_empty() {
+                results.extend(
+                    deferred_web_budget_results
+                        .into_iter()
+                        .map(|(_, result)| result),
+                );
+            }
+            let tool_elapsed = tool_start.elapsed().as_millis() as u64;
+            _total_tool_time_ms += tool_elapsed;
+            let turn_tool_error_count = results.iter().filter(|r| r.is_error).count() as u32;
+            let mut web_turn_calls: u32 = 0;
+            let mut web_turn_errors: u32 = 0;
+            for tc in &tool_calls {
+                if !is_budgeted_web_tool(&tc.function.name) {
+                    continue;
+                }
+                web_turn_calls = web_turn_calls.saturating_add(1);
+                if results
+                    .iter()
+                    .any(|r| r.tool_call_id == tc.id && r.is_error)
+                {
+                    web_turn_errors = web_turn_errors.saturating_add(1);
+                }
+            }
+            if web_turn_calls > 0 {
+                web_tool_calls_used = web_tool_calls_used.saturating_add(web_turn_calls);
+                if web_turn_errors == web_turn_calls {
+                    web_tool_consecutive_error_turns =
+                        web_tool_consecutive_error_turns.saturating_add(1);
+                } else {
+                    web_tool_consecutive_error_turns = 0;
+                }
+            }
+            for tc in &tool_calls {
+                if tc.function.name == "web_search" {
+                    web_search_calls_used = web_search_calls_used.saturating_add(1);
+                }
+            }
+            tracing::info!(
+                turn = total_turns,
+                tool_count = tool_calls.len(),
+                result_count = results.len(),
+                errors = turn_tool_error_count,
+                elapsed_ms = tool_elapsed,
+                streaming = true,
+                "agent tool batch finished"
+            );
+            self.emit_tool_failure_notices(&tool_calls, &results);
+            let turn_tool_error_rate = if results.is_empty() {
+                0.0
+            } else {
+                turn_tool_error_count as f64 / results.len() as f64
+            };
+            push_window_f64(
+                &mut governor_tool_error_window,
+                turn_tool_error_rate,
+                governor_window_limit,
+            );
+            if turn_tool_error_count > 0 {
+                governor_consecutive_error_turns =
+                    governor_consecutive_error_turns.saturating_add(1);
+            } else {
+                governor_consecutive_error_turns = 0;
+            }
+            replay.record(
+                "tool_batch",
+                serde_json::json!({
+                    "turn": total_turns,
+                    "tool_count": tool_calls.len(),
+                    "tool_concurrency": governor_for_turn(
+                        &self.config(),
+                        &ctx,
+                        tool_calls.len(),
+                        Some(&turn_governor_runtime),
+                    )
+                    .tool_concurrency,
+                    "errors": turn_tool_error_count,
+                    "error_rate": turn_tool_error_rate,
+                }),
+            );
+            update_repo_review_budget_state_from_results(
+                &mut repo_review_budget_state,
+                ctx.get_messages(),
+                &results,
+            );
+            if self.config().rollback_on_tool_error_threshold > 0
+                && turn_tool_error_count >= self.config().rollback_on_tool_error_threshold
+            {
+                if let Some(snapshot) = last_checkpoint_messages.clone() {
+                    *ctx.get_messages_mut() = snapshot;
+                    let _ = checkpoint_mgr.restore_latest();
+                    ctx.add_message(Message::system(format!(
+                            "Auto-rollback: {} tool call(s) failed in one turn. Restored latest checkpoint and continuing.",
+                            turn_tool_error_count
+                        )));
+                    continue;
+                }
+            }
+
+            // Post-tool hooks + callbacks
+            for res in &results {
+                let Some(tc) = tool_calls.iter().find(|tc| tc.id == res.tool_call_id) else {
+                    continue;
+                };
+                let tc_ctx = serde_json::json!({"tool": &tc.function.name, "is_error": res.is_error, "turn": total_turns});
+                self.invoke_hook(HookType::PostToolCall, &tc_ctx);
+                if let Some(ref cb) = self.callbacks.on_tool_complete {
+                    cb(&tc.function.name, &res.content);
+                }
+            }
+
+            for (tc, res) in tool_calls.iter().zip(results.iter()) {
+                let args: Value =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
+                tool_guardrails.after_call(&tc.function.name, res.is_error, &res.content);
+                file_mutation.record_tool_result(
+                    &tc.function.name,
+                    &args,
+                    &res.content,
+                    res.is_error,
+                );
+            }
+
+            self.notify_memory_writes(&tool_calls, &results);
+            self.notify_delegations(&tool_calls, &results);
+
+            // Enforce budget on tool results
+            budget::enforce_budget(&mut results, &self.config().budget);
+
+            if !results.is_empty() {
+                let w = budget_pressure_text(
+                    total_turns,
+                    self.config().max_turns,
+                    self.config().budget_caution_threshold,
+                    self.config().budget_warning_threshold,
+                    self.config().budget_pressure_enabled,
+                );
+                if let Some(ref text) = w {
+                    tracing::info!("{}", text);
+                }
+                inject_budget_pressure_into_last_tool_result(&mut results, w.as_deref());
+            }
+            let lsp_note = self.lsp_context_note(&tool_calls, &results);
+
+            let execute_code_refund = !tool_calls.is_empty()
+                && tool_calls
+                    .iter()
+                    .all(|tc| tc.function.name == "execute_code")
+                && !results.iter().any(|r| r.is_error);
+
+            let num_tool_msgs = results.len();
+            for result in results {
+                replay.record(
+                    "tool_result",
+                    serde_json::json!({
+                        "turn": total_turns,
+                        "tool_call_id": result.tool_call_id,
+                        "is_error": result.is_error,
+                        "content_preview": result.content.chars().take(240).collect::<String>(),
+                    }),
+                );
+                ctx.add_message(Message::tool_result(&result.tool_call_id, &result.content));
+            }
+            self.pending_steer
+                .apply_to_tool_results(ctx.get_messages_mut(), num_tool_msgs);
+            if let Some(note) = lsp_note {
+                ctx.add_message(Message::system(note));
+            }
+            if should_trip_tool_loop_guard(
+                governor_consecutive_error_turns,
+                tool_calls.len(),
+                turn_tool_error_count,
+            ) {
+                let guard_message = format!(
+                    "Tool-loop guard tripped after {} consecutive error turn(s); latest turn failed {}/{} tool call(s).",
+                    governor_consecutive_error_turns,
+                    turn_tool_error_count,
+                    tool_calls.len()
+                );
+                self.emit_status("lifecycle", &guard_message);
+                replay.record(
+                    "tool_loop_guard",
+                    serde_json::json!({
+                        "turn": total_turns,
+                        "consecutive_error_turns": governor_consecutive_error_turns,
+                        "failed_calls": turn_tool_error_count,
+                        "total_calls": tool_calls.len(),
+                    }),
+                );
+                if let Some(summary) = self
+                    .handle_tool_loop_guard_summary(
+                        &mut ctx,
+                        governor_consecutive_error_turns,
+                        turn_tool_error_count,
+                        tool_calls.len(),
+                    )
+                    .await?
+                {
+                    ctx.add_message(summary);
+                }
+                if stream_mute.as_ref().is_some_and(|m| m.swap(false, Ordering::AcqRel)) {
+                    Self::emit_stream_chunk(Some(stream_chunk_sink.as_ref()), StreamChunk {
+                        delta: Some(hermes_core::StreamDelta {
+                            content: None,
+                            tool_calls: None,
+                            extra: Some(serde_json::json!({
+                                "control": "mute_post_response",
+                                "enabled": false
+                            })),
+                        }),
+                        finish_reason: None,
+                        usage: None,
+                    });
+                }
+                self.turn_end_plugin_hooks(
+                    ctx.get_messages(),
+                    false,
+                    false,
+                    total_turns,
+                    session_started_hooks_fired,
+                );
+                return Ok(self.seal_loop_result(
+                    &ctx,
+                    persist_user_idx,
+                    LoopExit {
+                        turn_exit_reason: "tool_loop_guard",
+                        api_calls: api_call_count,
+                        failed: false,
+                        partial: false,
+                        finished_naturally: false,
+                        interrupted: false,
+                    },
+                    total_turns,
+                    &tool_errors,
+                    accumulated_usage,
+                    session_cost_usd,
+                    session_started_hooks_fired,
+                ));
+            }
+            if execute_code_refund {
+                iteration_budget.refund(1);
+                total_turns = total_turns.saturating_sub(1);
+            }
+            if let Some(brk) = stream_needs_break.as_ref() {
+                brk.store(true, Ordering::Release);
+            }
+            Self::emit_stream_chunk(Some(stream_chunk_sink.as_ref()), StreamChunk {
+                delta: Some(hermes_core::StreamDelta {
+                    content: None,
+                    tool_calls: None,
+                    extra: Some(serde_json::json!({"control": "stream_break"})),
+                }),
+                finish_reason: None,
+                usage: None,
+            });
+            self.emit_background_review_metrics(total_turns, &ctx);
+
+            let total_chars = ctx.total_chars();
+            let threshold = ((ctx.max_context_chars().max(1) as f64) * 0.8) as usize;
+            if threshold > 0 {
+                let progress = total_chars as f64 / threshold as f64;
+                let tier = if progress >= 0.95 {
+                    0.95
+                } else if progress >= 0.85 {
+                    0.85
+                } else {
+                    0.0
+                };
+                if Self::should_emit_context_pressure_warning(
+                    progress,
+                    tier,
+                    &mut context_pressure_warned_at,
+                    &mut context_pressure_last_warn_at,
+                    &mut context_pressure_last_warn_percent,
+                ) {
+                    tracing::warn!(
+                        "Context pressure {:.0}% of compaction threshold ({} / {})",
+                        progress * 100.0,
+                        total_chars,
+                        threshold
+                    );
+                }
+            }
+
+            self.auto_compress_if_over_threshold(&mut ctx).await;
+        }
     }
 }
 

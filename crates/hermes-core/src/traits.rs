@@ -34,6 +34,12 @@ pub trait LlmProvider: Send + Sync {
         model: Option<&str>,
         extra_body: Option<&serde_json::Value>,
     ) -> BoxStream<'static, Result<StreamChunk, AgentError>>;
+
+    /// When true, the conversation loop uses non-streaming LLM transport even for health checks
+    /// (Python `unittest.mock.Mock` client parity in tests).
+    fn prefers_non_streaming_transport(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -6,17 +6,17 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use hermes_agent::interrupt::InterruptController;
 use hermes_agent::{
+    AgentConfig, AgentLoop,
     agent_loop::ToolRegistry,
     plugins::{HookResult, HookType, Plugin, PluginContext, PluginManager, PluginMeta},
-    AgentConfig, AgentLoop,
 };
-use hermes_agent::interrupt::InterruptController;
-use tokio_stream::wrappers::ReceiverStream;
 use hermes_core::{
     AgentError, FunctionCall, JsonSchema, LlmResponse, Message, MessageRole, StreamChunk,
     StreamDelta, ToolCall, ToolSchema, UsageStats,
 };
+use tokio_stream::wrappers::ReceiverStream;
 
 // --- shared test helpers ----------------------------------------------------
 
@@ -60,14 +60,22 @@ impl Plugin for CountingHookPlugin {
     fn register(&self, ctx: &mut PluginContext) {
         let counter = self.counter.clone();
         let label = self.label;
-        ctx.on(self.hook, Arc::new(move |_ctx_val: &serde_json::Value| {
-            counter.push(label);
-            HookResult::Ok
-        }));
+        ctx.on(
+            self.hook,
+            Arc::new(move |_ctx_val: &serde_json::Value| {
+                counter.push(label);
+                HookResult::Ok
+            }),
+        );
     }
 }
 
-fn register_hook(counter: &HookCounter, pm: &mut PluginManager, hook: HookType, label: &'static str) {
+fn register_hook(
+    counter: &HookCounter,
+    pm: &mut PluginManager,
+    hook: HookType,
+    label: &'static str,
+) {
     pm.register(Arc::new(CountingHookPlugin {
         hook,
         counter: counter.clone(),
@@ -93,7 +101,7 @@ impl hermes_core::LlmProvider for StopAssistantProvider {
             usage: None,
             model: "test".into(),
             finish_reason: Some("stop".into()),
-        ..Default::default()
+            ..Default::default()
         })
     }
 
@@ -173,16 +181,17 @@ impl hermes_core::LlmProvider for ToolThenStopProvider {
                 usage: None,
                 model: "test".into(),
                 finish_reason: Some("tool_calls".into()),
-            
-                ..Default::default()})
+
+                ..Default::default()
+            })
         } else {
             Ok(LlmResponse {
                 message: Message::assistant("final"),
                 usage: None,
                 model: "test".into(),
                 finish_reason: Some("stop".into()),
-            ..Default::default()
-        })
+                ..Default::default()
+            })
         }
     }
 
@@ -217,14 +226,17 @@ fn last_tool_budget_text(messages: &[Message]) -> Option<String> {
     None
 }
 
-// --- Phase A-1: new session -------------------------------------------------
-
 #[tokio::test]
-async fn phase_a1_new_session_fires_on_session_start() {
+async fn new_session_fires_on_session_start() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let counter = HookCounter(events.clone());
     let mut pm = PluginManager::new();
-    register_hook(&counter, &mut pm, HookType::OnSessionStart, "on_session_start");
+    register_hook(
+        &counter,
+        &mut pm,
+        HookType::OnSessionStart,
+        "on_session_start",
+    );
 
     let cfg = AgentConfig {
         stored_system_prompt: None,
@@ -250,14 +262,17 @@ async fn phase_a1_new_session_fires_on_session_start() {
     );
 }
 
-// --- Phase A-2: continue session --------------------------------------------
-
 #[tokio::test]
-async fn phase_a2_continue_session_skips_on_session_start() {
+async fn continue_session_skips_on_session_start() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let counter = HookCounter(events.clone());
     let mut pm = PluginManager::new();
-    register_hook(&counter, &mut pm, HookType::OnSessionStart, "on_session_start");
+    register_hook(
+        &counter,
+        &mut pm,
+        HookType::OnSessionStart,
+        "on_session_start",
+    );
 
     const STORED: &str = "STORED_SYSTEM_PROMPT_FOR_PHASE_A2";
     let cfg = AgentConfig {
@@ -290,10 +305,8 @@ async fn phase_a2_continue_session_skips_on_session_start() {
     assert_eq!(system, Some(STORED));
 }
 
-// --- Phase A-3 / A-4: budget pressure tiers ---------------------------------
-
 #[tokio::test]
-async fn phase_a3_budget_caution_injected_at_seventy_percent() {
+async fn budget_caution_injected_at_seventy_percent() {
     let provider = Arc::new(ToolThenStopProvider::new(7));
     let cfg = AgentConfig {
         max_turns: 10,
@@ -312,7 +325,7 @@ async fn phase_a3_budget_caution_injected_at_seventy_percent() {
 }
 
 #[tokio::test]
-async fn phase_a4_budget_warning_injected_at_ninety_percent() {
+async fn budget_warning_injected_at_ninety_percent() {
     let provider = Arc::new(ToolThenStopProvider::new(9));
     let cfg = AgentConfig {
         max_turns: 10,
@@ -328,8 +341,6 @@ async fn phase_a4_budget_warning_injected_at_ninety_percent() {
         .expect("expected budget pressure on a tool result");
     assert!(w.contains("BUDGET WARNING"), "{w}");
 }
-
-// --- Phase A-7: empty LLM retry ---------------------------------------------
 
 struct EmptyThenOkProvider {
     calls: AtomicUsize,
@@ -353,16 +364,16 @@ impl hermes_core::LlmProvider for EmptyThenOkProvider {
                 usage: None,
                 model: "test".into(),
                 finish_reason: None,
-            ..Default::default()
-        })
+                ..Default::default()
+            })
         } else {
             Ok(LlmResponse {
                 message: Message::assistant("ok"),
                 usage: None,
                 model: "test".into(),
                 finish_reason: Some("stop".into()),
-            ..Default::default()
-        })
+                ..Default::default()
+            })
         }
     }
 
@@ -380,7 +391,7 @@ impl hermes_core::LlmProvider for EmptyThenOkProvider {
 }
 
 #[tokio::test]
-async fn phase_a7_empty_llm_retry_without_appending_empty_assistant() {
+async fn empty_llm_retry_without_appending_empty_assistant() {
     let provider = Arc::new(EmptyThenOkProvider {
         calls: AtomicUsize::new(0),
     });
@@ -400,8 +411,6 @@ async fn phase_a7_empty_llm_retry_without_appending_empty_assistant() {
     assert_eq!(empty_assistants.count(), 0);
 }
 
-// --- Phase A-8: streaming interrupt -----------------------------------------
-
 struct SlowStreamProvider;
 
 #[async_trait]
@@ -420,7 +429,7 @@ impl hermes_core::LlmProvider for SlowStreamProvider {
             usage: None,
             model: "test".into(),
             finish_reason: Some("stop".into()),
-        ..Default::default()
+            ..Default::default()
         })
     }
 
@@ -462,7 +471,7 @@ impl hermes_core::LlmProvider for SlowStreamProvider {
 }
 
 #[tokio::test]
-async fn phase_a8_stream_interrupt_forwards_deltas_and_stops() {
+async fn stream_interrupt_forwards_deltas_and_stops() {
     let interrupt = InterruptController::new();
     let interrupt_handle = interrupt.clone();
     let cfg = AgentConfig {
@@ -504,8 +513,6 @@ async fn phase_a8_stream_interrupt_forwards_deltas_and_stops() {
     assert!(!parts.is_empty(), "expected stream deltas before interrupt");
 }
 
-// --- Phase A-10: AgentResult cost + interrupted -----------------------------
-
 struct CostedStopProvider;
 
 #[async_trait]
@@ -529,8 +536,9 @@ impl hermes_core::LlmProvider for CostedStopProvider {
             }),
             model: "test".into(),
             finish_reason: Some("stop".into()),
-        
-                ..Default::default()})
+
+            ..Default::default()
+        })
     }
 
     fn chat_completion_stream(
@@ -547,7 +555,7 @@ impl hermes_core::LlmProvider for CostedStopProvider {
 }
 
 #[tokio::test]
-async fn phase_a10_agent_result_populates_session_cost_usd() {
+async fn agent_result_populates_session_cost_usd() {
     let cfg = AgentConfig {
         max_turns: 1,
         ..AgentConfig::default()
@@ -563,7 +571,7 @@ async fn phase_a10_agent_result_populates_session_cost_usd() {
 }
 
 #[tokio::test]
-async fn phase_a10_agent_result_sets_interrupted_on_graceful_interrupt() {
+async fn agent_result_sets_interrupted_on_graceful_interrupt() {
     let interrupt = InterruptController::new();
     interrupt.interrupt(None);
     let cfg = AgentConfig {
@@ -580,10 +588,8 @@ async fn phase_a10_agent_result_sets_interrupted_on_graceful_interrupt() {
     assert!(result.interrupted);
 }
 
-// --- Phase A-13: steer pre-API inject during run ----------------------------
-
 #[tokio::test]
-async fn phase_a13_steer_pre_api_injects_into_last_tool_during_run() {
+async fn steer_pre_api_injects_into_last_tool_during_run() {
     let provider = Arc::new(ToolThenStopProvider::new(1));
     let cfg = AgentConfig {
         max_turns: 3,
@@ -597,9 +603,9 @@ async fn phase_a13_steer_pre_api_injects_into_last_tool_during_run() {
     let msgs = &result.unwrap().messages;
     let tool_with_guidance = msgs.iter().find(|m| {
         m.role == MessageRole::Tool
-            && m.content
-                .as_deref()
-                .is_some_and(|c| c.contains("User guidance:") && c.contains("focus on error handling"))
+            && m.content.as_deref().is_some_and(|c| {
+                c.contains("User guidance:") && c.contains("focus on error handling")
+            })
     });
     assert!(
         tool_with_guidance.is_some(),

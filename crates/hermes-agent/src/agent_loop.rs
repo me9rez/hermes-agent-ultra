@@ -32,7 +32,6 @@ use hermes_core::{
 
 use crate::api_bridge::CodexProvider;
 use crate::auxiliary_builder::{AuxiliaryBuildParams, build_auxiliary_client};
-use crate::budget;
 use crate::code_index::CodeIndex;
 use crate::compression::{
     CompressorConfig, ContextCompressor, estimate_messages_tokens,
@@ -50,8 +49,8 @@ use crate::message_sanitization::{
     CODEX_CONTINUE_USER_MESSAGE, budget_pressure_text, build_partial_stream_stub_response,
     continuation_prompt_for_response, format_partial_stream_tool_call_warning,
     inject_budget_pressure_into_last_tool_result, looks_like_codex_intermediate_ack,
-    partial_stream_dropped_tool_names, partial_stream_tool_calls_in_flight,
-    sanitize_surrogates, should_treat_stop_as_truncated, strip_budget_warnings_from_messages,
+    partial_stream_dropped_tool_names, partial_stream_tool_calls_in_flight, sanitize_surrogates,
+    should_treat_stop_as_truncated, strip_budget_warnings_from_messages,
     strip_think_blocks_for_ack,
 };
 use crate::plugins::{HookResult, HookType, PluginManager};
@@ -75,8 +74,6 @@ use crate::user_interest::{
     InterestStore, SessionPoiBuffer, ingest_user_message, is_poi_synthetic_user_text,
     spawn_session_end_ingest,
 };
-pub(crate) use crate::web_tool_budget::looks_like_tool_error_output;
-use crate::web_research::WebResearchController;
 use hermes_intelligence::auxiliary::AuxiliaryClient;
 
 // ---------------------------------------------------------------------------
@@ -274,8 +271,8 @@ const SESSION_OBJECTIVE_PREFIX: &str = "[SESSION_OBJECTIVE] ";
 const OBJECTIVE_PATCH_TAG: &str = "PATCH_VERIFIED:";
 const OBJECTIVE_ANALYTICS_TAG: &str = "ANALYTICS_VERIFIED:";
 const OBJECTIVE_DEEP_AUDIT_TAG: &str = "DEEP_AUDIT_VERIFIED:";
-const OBJECTIVE_GUARD_MAX_RETRIES: u32 = 2;
-const OBJECTIVE_DEEP_AUDIT_MAX_RETRIES: u32 = 4;
+pub(crate) const OBJECTIVE_GUARD_MAX_RETRIES: u32 = 2;
+pub(crate) const OBJECTIVE_DEEP_AUDIT_MAX_RETRIES: u32 = 4;
 const OBJECTIVE_DEEP_AUDIT_MIN_PATCH_ITEMS: usize = 2;
 const OBJECTIVE_DEEP_AUDIT_MIN_UNIQUE_FILES: usize = 5;
 const OBJECTIVE_DEEP_AUDIT_MIN_UNIQUE_COMMANDS: usize = 3;
@@ -844,10 +841,6 @@ pub struct AgentConfig {
     /// Maximum character budget for injected LSP context block.
     #[serde(default = "default_lsp_context_max_chars")]
     pub lsp_context_max_chars: usize,
-
-    /// Adaptive web research planner/evaluator and per-message tool budgets.
-    #[serde(default)]
-    pub web_research: hermes_config::WebResearchConfig,
 }
 
 fn default_max_turns() -> u32 {
@@ -866,7 +859,7 @@ fn unlimited_turns_enabled() -> bool {
         .unwrap_or(false)
 }
 
-fn effective_max_turns(config_max_turns: u32) -> Option<u32> {
+pub(crate) fn effective_max_turns(config_max_turns: u32) -> Option<u32> {
     if unlimited_turns_enabled() || config_max_turns == 0 {
         None
     } else {
@@ -1080,7 +1073,6 @@ impl Default for AgentConfig {
             code_index_max_symbols: default_code_index_max_symbols(),
             lsp_context_enabled: default_lsp_context_enabled(),
             lsp_context_max_chars: default_lsp_context_max_chars(),
-            web_research: hermes_config::WebResearchConfig::default(),
         }
     }
 }
@@ -1102,18 +1094,18 @@ pub struct TurnMetrics {
 }
 
 #[derive(Debug, Clone)]
-struct FinalizationSignals {
-    finish_reason: Option<String>,
-    has_tool_calls: bool,
-    has_visible_text: bool,
-    has_visible_text_after_think: bool,
-    has_reasoning: bool,
-    continuation_required: bool,
-    ack_detected: bool,
+pub(crate) struct FinalizationSignals {
+    pub(crate) finish_reason: Option<String>,
+    pub(crate) has_tool_calls: bool,
+    pub(crate) has_visible_text: bool,
+    pub(crate) has_visible_text_after_think: bool,
+    pub(crate) has_reasoning: bool,
+    pub(crate) continuation_required: bool,
+    pub(crate) ack_detected: bool,
 }
 
 impl FinalizationSignals {
-    fn final_gate_passed(&self) -> bool {
+    pub(crate) fn final_gate_passed(&self) -> bool {
         !self.has_tool_calls && !self.continuation_required && !self.ack_detected
     }
 }
@@ -1299,6 +1291,25 @@ fn preferred_tool_payload_fallback_model(provider_hint: &str, model_name: &str) 
     Some("nousresearch/hermes-4-70b".to_string())
 }
 
+fn is_stream_not_supported_error(err: &AgentError) -> bool {
+    let msg = match err {
+        AgentError::LlmApi(m)
+        | AgentError::Gateway(m)
+        | AgentError::Io(m)
+        | AgentError::Config(m) => m.as_str(),
+        AgentError::AuthFailed(m) => m.as_str(),
+        _ => return false,
+    };
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("stream") && lower.contains("not supported")
+}
+
+fn is_copilot_acp_transport(provider: &str, base_url: &str) -> bool {
+    let p = provider.trim().to_ascii_lowercase();
+    let u = base_url.trim().to_ascii_lowercase();
+    p == "copilot-acp" || u.starts_with("acp://copilot") || u.starts_with("acp+tcp://")
+}
+
 fn is_transient_stream_error(err: &AgentError) -> bool {
     fn has_transient_phrase(msg: &str) -> bool {
         let lower = msg.to_lowercase();
@@ -1357,33 +1368,33 @@ fn rand_u64_range(min: u64, max: u64) -> u64 {
 }
 
 /// Result of collecting one streaming completion (may end with user interrupt).
-enum StreamCollectOutcome {
+pub(crate) enum StreamCollectOutcome {
     Complete(LlmResponse),
     Interrupted(LlmResponse),
 }
 
 #[derive(Debug, Clone, Copy)]
-struct TurnGovernor {
-    max_tokens: Option<u32>,
-    tool_concurrency: usize,
-    pressure: f64,
-    latency_degraded: bool,
-    error_degraded: bool,
+pub(crate) struct TurnGovernor {
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) tool_concurrency: usize,
+    pub(crate) pressure: f64,
+    pub(crate) latency_degraded: bool,
+    pub(crate) error_degraded: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct GovernorRuntimeState {
-    avg_llm_latency_ms: Option<f64>,
-    avg_tool_error_rate: f64,
-    consecutive_error_turns: u32,
+pub(crate) struct GovernorRuntimeState {
+    pub(crate) avg_llm_latency_ms: Option<f64>,
+    pub(crate) avg_tool_error_rate: f64,
+    pub(crate) consecutive_error_turns: u32,
 }
 
 #[derive(Debug, Clone, Default)]
-struct RepoReviewBudgetState {
-    last_discovery_signature: Option<String>,
-    repeat_streak: u32,
-    low_signal_streak: u32,
-    last_signal_score: f64,
+pub(crate) struct RepoReviewBudgetState {
+    pub(crate) last_discovery_signature: Option<String>,
+    pub(crate) repeat_streak: u32,
+    pub(crate) low_signal_streak: u32,
+    pub(crate) last_signal_score: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1403,7 +1414,7 @@ struct RouteLearningState {
 }
 
 #[derive(Debug, Clone)]
-struct ReplayRecorder {
+pub(crate) struct ReplayRecorder {
     path: Option<PathBuf>,
     state: Option<Arc<Mutex<ReplayState>>>,
 }
@@ -1416,7 +1427,7 @@ struct ReplayState {
 }
 
 impl ReplayRecorder {
-    fn for_session(config: &AgentConfig, session_id: &str) -> Self {
+    pub(crate) fn for_session(config: &AgentConfig, session_id: &str) -> Self {
         let enabled = std::env::var("HERMES_REPLAY_ENABLED")
             .map(|v| {
                 matches!(
@@ -1475,7 +1486,7 @@ impl ReplayRecorder {
         }
     }
 
-    fn record(&self, event: &str, payload: Value) {
+    pub(crate) fn record(&self, event: &str, payload: Value) {
         let Some(path) = self.path.as_ref() else {
             return;
         };
@@ -1615,7 +1626,7 @@ fn governor_tool_concurrency_base() -> usize {
         .unwrap_or(8)
 }
 
-fn governor_window_size() -> usize {
+pub(crate) fn governor_window_size() -> usize {
     std::env::var("HERMES_PERF_GOV_WINDOW")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
@@ -1682,7 +1693,7 @@ fn governor_tool_loop_guard_min_failed_calls() -> u32 {
         .unwrap_or(1)
 }
 
-fn should_trip_tool_loop_guard(
+pub(crate) fn should_trip_tool_loop_guard(
     consecutive_error_turns: u32,
     turn_tool_count: usize,
     turn_tool_error_count: u32,
@@ -1700,6 +1711,47 @@ fn should_trip_tool_loop_guard(
         return false;
     }
     consecutive_error_turns >= governor_tool_loop_guard_max_consecutive_error_turns()
+}
+
+fn web_tool_budget_max_calls() -> u32 {
+    std::env::var("HERMES_WEB_TOOL_BUDGET_MAX_CALLS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(3)
+}
+
+fn web_search_budget_max_calls() -> u32 {
+    std::env::var("HERMES_WEB_SEARCH_BUDGET_MAX_CALLS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(2)
+}
+
+pub(crate) fn web_tool_budget_max_consecutive_errors() -> u32 {
+    std::env::var("HERMES_WEB_TOOL_BUDGET_MAX_CONSECUTIVE_ERRORS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(2)
+}
+
+pub(crate) fn is_budgeted_web_tool(name: &str) -> bool {
+    matches!(name, "web_search" | "web_extract" | "browser_navigate")
+}
+
+pub(crate) fn web_tool_budget_user_notice(tool_name: &str, blocked_by_errors: bool) -> String {
+    match tool_name {
+        "web_search" => "网络检索次数已达上限，将基于已有信息直接回复。".to_string(),
+        "web_extract" | "browser_navigate" if blocked_by_errors => {
+            "网页读取多次失败，将基于已有信息直接回复。".to_string()
+        }
+        "web_extract" | "browser_navigate" => {
+            "网页抓取次数已达上限，将基于已有信息直接回复。".to_string()
+        }
+        _ => format!("工具 {tool_name} 调用受限，将基于已有信息直接回复。"),
+    }
 }
 
 fn tool_progress_enabled() -> bool {
@@ -1781,13 +1833,13 @@ fn summarize_tool_failure_for_user(tool_name: &str, error: &str) -> Option<Strin
     }
 }
 
-struct ToolProgressWatchdog {
+pub(crate) struct ToolProgressWatchdog {
     handle: Option<tokio::task::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
 }
 
 impl ToolProgressWatchdog {
-    fn start(
+    pub(crate) fn start(
         status_callback: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
         turn: u32,
         tool_names: Vec<String>,
@@ -1839,6 +1891,85 @@ impl Drop for ToolProgressWatchdog {
             handle.abort();
         }
     }
+}
+
+pub(crate) fn apply_web_tool_budget(
+    tool_calls: &mut Vec<ToolCall>,
+    web_tool_calls_used: u32,
+    web_search_calls_used: u32,
+    consecutive_web_error_turns: u32,
+    turn: u32,
+) -> Vec<(String, ToolResult)> {
+    let mut blocked_results: Vec<(String, ToolResult)> = Vec::new();
+    let max_calls = web_tool_budget_max_calls();
+    let max_search_calls = web_search_budget_max_calls();
+    let max_consecutive_errors = web_tool_budget_max_consecutive_errors();
+    let mut remaining = max_calls.saturating_sub(web_tool_calls_used);
+    let blocked_by_errors = consecutive_web_error_turns >= max_consecutive_errors;
+    let mut kept: Vec<ToolCall> = Vec::with_capacity(tool_calls.len());
+    for tc in tool_calls.drain(..) {
+        if !is_budgeted_web_tool(&tc.function.name) {
+            kept.push(tc);
+            continue;
+        }
+        let search_cap_hit =
+            tc.function.name == "web_search" && web_search_calls_used >= max_search_calls;
+        let block = blocked_by_errors || remaining == 0 || search_cap_hit;
+        if block {
+            let reason = if search_cap_hit {
+                format!(
+                    "Web search budget exceeded on turn {}: blocked '{}' after {} web_search call(s).",
+                    turn, tc.function.name, web_search_calls_used
+                )
+            } else if blocked_by_errors {
+                format!(
+                    "Web tool budget guard tripped on turn {}: blocked '{}' after {} consecutive web-tool error turn(s).",
+                    turn, tc.function.name, consecutive_web_error_turns
+                )
+            } else {
+                format!(
+                    "Web tool budget exceeded on turn {}: blocked '{}' after {} web-tool call(s).",
+                    turn, tc.function.name, web_tool_calls_used
+                )
+            };
+            blocked_results.push((tc.function.name.clone(), ToolResult::err(tc.id, reason)));
+            continue;
+        }
+        remaining = remaining.saturating_sub(1);
+        kept.push(tc);
+    }
+    *tool_calls = kept;
+    blocked_results
+}
+
+fn looks_like_tool_error_output(output: &str) -> bool {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(obj) = value.as_object() {
+            if let Some(err) = obj.get("error") {
+                if !err.is_null() {
+                    return true;
+                }
+            }
+            if let Some(success) = obj.get("success").and_then(|v| v.as_bool()) {
+                if !success {
+                    return true;
+                }
+            }
+            if let Some(status) = obj.get("status").and_then(|v| v.as_str()) {
+                if status.eq_ignore_ascii_case("error") || status.eq_ignore_ascii_case("failed") {
+                    return true;
+                }
+            }
+        }
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("error:")
+        || lower.contains("invalid tool parameters")
+        || lower.contains("missing '")
 }
 
 fn smart_routing_learning_enabled() -> bool {
@@ -1922,14 +2053,14 @@ fn route_learning_state_path(config: &AgentConfig) -> PathBuf {
         .join("route-learning.json")
 }
 
-fn push_window_u64(window: &mut VecDeque<u64>, value: u64, limit: usize) {
+pub(crate) fn push_window_u64(window: &mut VecDeque<u64>, value: u64, limit: usize) {
     window.push_back(value);
     while window.len() > limit {
         let _ = window.pop_front();
     }
 }
 
-fn push_window_f64(window: &mut VecDeque<f64>, value: f64, limit: usize) {
+pub(crate) fn push_window_f64(window: &mut VecDeque<f64>, value: f64, limit: usize) {
     window.push_back(value);
     while window.len() > limit {
         let _ = window.pop_front();
@@ -1950,7 +2081,7 @@ fn avg_f64(window: &VecDeque<f64>) -> f64 {
     window.iter().copied().sum::<f64>() / window.len() as f64
 }
 
-fn governor_runtime_state(
+pub(crate) fn governor_runtime_state(
     llm_latency_window: &VecDeque<u64>,
     tool_error_window: &VecDeque<f64>,
     consecutive_error_turns: u32,
@@ -1966,7 +2097,7 @@ fn governor_runtime_state(
 ///
 /// Tool-error degradation needs sustained failures (`consecutive_error_turns >= 2`).
 /// Latency degradation needs multiple samples so one slow LLM call cannot hop providers.
-fn should_apply_turn_reliability_guard(
+pub(crate) fn should_apply_turn_reliability_guard(
     runtime: &GovernorRuntimeState,
     llm_governor: &TurnGovernor,
     llm_latency_window_len: usize,
@@ -1985,7 +2116,7 @@ fn should_apply_turn_reliability_guard(
             .unwrap_or(false)
 }
 
-fn governor_for_turn(
+pub(crate) fn governor_for_turn(
     config: &AgentConfig,
     ctx: &ContextManager,
     requested_tools: usize,
@@ -2062,13 +2193,13 @@ fn governor_for_turn(
 }
 
 /// Exit metadata for one `run` / `run_stream` invocation (maps to Python loop fields).
-struct LoopExit<'a> {
-    turn_exit_reason: &'a str,
-    api_calls: u32,
-    failed: bool,
-    partial: bool,
-    finished_naturally: bool,
-    interrupted: bool,
+pub(crate) struct LoopExit<'a> {
+    pub(crate) turn_exit_reason: &'a str,
+    pub(crate) api_calls: u32,
+    pub(crate) failed: bool,
+    pub(crate) partial: bool,
+    pub(crate) finished_naturally: bool,
+    pub(crate) interrupted: bool,
 }
 
 /// The main agent loop.
@@ -2122,13 +2253,13 @@ pub struct AgentLoop {
     /// (avoids `block_in_place` + `block_on` from inside `JoinSet` tasks on the gateway).
     async_tool_dispatch: Option<AsyncToolDispatch>,
     /// Mid-run `/steer` queue (Python `_pending_steer`).
-    pending_steer: PendingSteer,
+    pub(crate) pending_steer: PendingSteer,
     /// Active turn task id (Python `_current_task_id`).
     pub(crate) current_task_id: Arc<Mutex<Option<String>>>,
     /// Python `AIAgent._last_flushed_db_idx` — incremental SQLite session writes.
     pub(crate) session_db_flush: Arc<Mutex<SessionFlushCursor>>,
     /// Python `_cached_system_prompt` — built once per session, invalidated on compression.
-    cached_system_prompt: Arc<Mutex<Option<String>>>,
+    pub(crate) cached_system_prompt: Arc<Mutex<Option<String>>>,
     /// Python `_ext_prefetch_cache` — fetched once per turn, injected at API-call time only.
     turn_ext_prefetch_cache: Arc<Mutex<String>>,
     /// Python `agent.context_compressor.ContextCompressor` (LLM summary + boundary alignment).
@@ -2140,6 +2271,8 @@ pub struct AgentLoop {
         Mutex<Option<(crate::api_messages::ApiMessagesCacheKey, Arc<[Message]>)>>,
     /// Per-turn cache for OpenAI-compat provider message/tool JSON serialization.
     provider_serialize_cache: Arc<crate::provider_serialize_cache::ProviderSerializeCache>,
+    /// Python `_disable_streaming` — set after "stream not supported" for the rest of the session.
+    disable_streaming: Arc<AtomicBool>,
 }
 
 /// Async tool execution hook (gateway: `hermes_tools::ToolRegistry::dispatch_async`).
@@ -2154,20 +2287,20 @@ pub type AsyncToolDispatch = Arc<
 >;
 
 #[derive(Debug, Clone)]
-struct TurnRuntimeRoute {
-    model: String,
-    provider: Option<String>,
-    base_url: Option<String>,
-    api_key_env: Option<String>,
-    api_mode: Option<ApiMode>,
-    command: Option<String>,
-    args: Vec<String>,
-    credential_pool: Option<Arc<CredentialPool>>,
+pub(crate) struct TurnRuntimeRoute {
+    pub(crate) model: String,
+    pub(crate) provider: Option<String>,
+    pub(crate) base_url: Option<String>,
+    pub(crate) api_key_env: Option<String>,
+    pub(crate) api_mode: Option<ApiMode>,
+    pub(crate) command: Option<String>,
+    pub(crate) args: Vec<String>,
+    pub(crate) credential_pool: Option<Arc<CredentialPool>>,
     /// When true (default), merge with [`AgentLoop::primary_credential_pool`] if route pool is unset.
-    credential_pool_fallback: bool,
-    route_label: Option<String>,
-    routing_reason: Option<String>,
-    signature: TurnRouteSignature,
+    pub(crate) credential_pool_fallback: bool,
+    pub(crate) route_label: Option<String>,
+    pub(crate) routing_reason: Option<String>,
+    pub(crate) signature: TurnRouteSignature,
 }
 
 fn runtime_llm_providers_map(
@@ -2258,7 +2391,7 @@ impl AgentLoop {
         msgs
     }
 
-    fn graceful_interrupt_result(
+    pub(crate) fn graceful_interrupt_result(
         &self,
         ctx: &ContextManager,
         total_turns: u32,
@@ -2322,7 +2455,7 @@ impl AgentLoop {
     }
 
     /// Pack loop state into [`AgentResult`] (C–D segment return).
-    fn seal_loop_result(
+    pub(crate) fn seal_loop_result(
         &self,
         ctx: &ContextManager,
         persist_user_idx: Option<usize>,
@@ -2637,6 +2770,7 @@ impl AgentLoop {
             provider_serialize_cache: Arc::new(
                 crate::provider_serialize_cache::ProviderSerializeCache::new(),
             ),
+            disable_streaming: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -2654,7 +2788,7 @@ impl AgentLoop {
         }
     }
 
-    fn set_turn_ext_prefetch_cache(&self, prefetch: String) {
+    pub(crate) fn set_turn_ext_prefetch_cache(&self, prefetch: String) {
         if let Ok(mut guard) = self.turn_ext_prefetch_cache.lock() {
             *guard = prefetch;
         }
@@ -2837,26 +2971,6 @@ impl AgentLoop {
         format!("{}_{}", now, &suffix[..6.min(suffix.len())])
     }
 
-    /// Returns `(prompt, restored_from_storage)` using session-level cache when warm.
-    fn active_cached_system_prompt(
-        &self,
-        task_hint: &str,
-        tool_schemas: &[ToolSchema],
-    ) -> (String, bool) {
-        if let Ok(guard) = self.cached_system_prompt.lock() {
-            if let Some(ref cached) = *guard {
-                if !cached.trim().is_empty() {
-                    return (cached.clone(), true);
-                }
-            }
-        }
-        let (prompt, restored) = self.resolve_initial_system_prompt(task_hint, tool_schemas);
-        if let Ok(mut guard) = self.cached_system_prompt.lock() {
-            *guard = Some(prompt.clone());
-        }
-        (prompt, restored)
-    }
-
     fn patch_leading_system_message(messages: &mut Vec<Message>, prompt: &str) {
         if messages
             .first()
@@ -2939,6 +3053,7 @@ impl AgentLoop {
             provider_serialize_cache: Arc::new(
                 crate::provider_serialize_cache::ProviderSerializeCache::new(),
             ),
+            disable_streaming: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -3138,7 +3253,7 @@ impl AgentLoop {
         Vec::new()
     }
 
-    fn inject_hook_context(&self, results: &[HookResult], ctx: &mut ContextManager) {
+    pub(crate) fn inject_hook_context(&self, results: &[HookResult], ctx: &mut ContextManager) {
         for r in results {
             if let HookResult::InjectContext(text) = r {
                 let trimmed = text.trim();
@@ -3160,7 +3275,7 @@ impl AgentLoop {
         }
     }
 
-    fn apply_hook_output_transforms(&self, results: &[HookResult], content: &mut Option<String>) {
+    pub(crate) fn apply_hook_output_transforms(&self, results: &[HookResult], content: &mut Option<String>) {
         let mut current = content.clone().unwrap_or_default();
         let mut changed = false;
         for r in results {
@@ -3174,7 +3289,7 @@ impl AgentLoop {
         }
     }
 
-    fn apply_transform_llm_output_hooks(&self, content: &mut Option<String>) {
+    pub(crate) fn apply_transform_llm_output_hooks(&self, content: &mut Option<String>) {
         let hook_ctx = serde_json::json!({
             "content": content.clone().unwrap_or_default(),
         });
@@ -3249,7 +3364,7 @@ impl AgentLoop {
         }
     }
 
-    fn interest_sync_user_messages(&self, messages: &[Message]) {
+    pub(crate) fn interest_sync_user_messages(&self, messages: &[Message]) {
         if !self.config().interest.enabled || !self.config().interest.uses_rules() {
             return;
         }
@@ -3343,7 +3458,7 @@ impl AgentLoop {
         );
     }
 
-    fn memory_prefetch(&self, query: &str, session_id: &str) -> String {
+    pub(crate) fn memory_prefetch(&self, query: &str, session_id: &str) -> String {
         let mut parts = Vec::new();
         let interest = self.interest_prefetch_block(query);
         if !interest.is_empty() {
@@ -3363,7 +3478,7 @@ impl AgentLoop {
         parts.join("\n\n")
     }
 
-    fn memory_sync(&self, user: &str, assistant: &str, session_id: &str) {
+    pub(crate) fn memory_sync(&self, user: &str, assistant: &str, session_id: &str) {
         if self.config().skip_memory {
             return;
         }
@@ -3414,7 +3529,7 @@ impl AgentLoop {
         Some((action, target, content))
     }
 
-    fn notify_memory_writes(&self, tool_calls: &[ToolCall], results: &[ToolResult]) {
+    pub(crate) fn notify_memory_writes(&self, tool_calls: &[ToolCall], results: &[ToolResult]) {
         if self.config().skip_memory {
             return;
         }
@@ -3468,7 +3583,7 @@ impl AgentLoop {
         Some((task, sub_agent_id))
     }
 
-    fn notify_delegations(&self, tool_calls: &[ToolCall], results: &[ToolResult]) {
+    pub(crate) fn notify_delegations(&self, tool_calls: &[ToolCall], results: &[ToolResult]) {
         if self.config().skip_memory {
             return;
         }
@@ -3490,7 +3605,7 @@ impl AgentLoop {
         }
     }
 
-    fn memory_on_turn_start(&self, turn: u32, message: &str) {
+    pub(crate) fn memory_on_turn_start(&self, turn: u32, message: &str) {
         if let Some(ref mm) = self.memory_manager {
             if let Ok(mut mm) = mm.lock() {
                 mm.on_turn_start(turn, message);
@@ -3631,7 +3746,7 @@ impl AgentLoop {
     /// Memory provider `on_session_end` is **not** invoked here — see Python
     /// `conversation_loop.py` note at ~4584. Use [`Self::session_end_hooks`] on
     /// real session teardown (gateway expiry, CLI `/reset`).
-    fn turn_end_plugin_hooks(
+    pub(crate) fn turn_end_plugin_hooks(
         &self,
         messages: &[Message],
         completed: bool,
@@ -3808,7 +3923,7 @@ impl AgentLoop {
         }
     }
 
-    fn lsp_context_note(&self, tool_calls: &[ToolCall], results: &[ToolResult]) -> Option<String> {
+    pub(crate) fn lsp_context_note(&self, tool_calls: &[ToolCall], results: &[ToolResult]) -> Option<String> {
         if !self.lsp_context.enabled {
             return None;
         }
@@ -4210,7 +4325,7 @@ impl AgentLoop {
         Some(cred.access_token.clone())
     }
 
-    async fn refresh_oauth_store_tokens_if_needed(&self) {
+    pub(crate) async fn refresh_oauth_store_tokens_if_needed(&self) {
         // Keep this list explicit so behavior is deterministic and parity-scoped.
         self.refresh_single_oauth_store_token_if_needed("openai")
             .await;
@@ -4517,7 +4632,7 @@ impl AgentLoop {
         Ok(())
     }
 
-    fn append_objective_runtime_ledger(
+    pub(crate) fn append_objective_runtime_ledger(
         &self,
         messages: &[Message],
         assistant_text: &str,
@@ -4814,24 +4929,6 @@ impl AgentLoop {
         }
     }
 
-    /// Returns `(prompt, restored_from_storage)` - restored prompts skip fresh `build_system_prompt`.
-    fn resolve_initial_system_prompt(
-        &self,
-        task_hint: &str,
-        tool_schemas: &[ToolSchema],
-    ) -> (String, bool) {
-        if let Some(ref s) = self.config().stored_system_prompt {
-            let t = s.trim();
-            if !t.is_empty() {
-                return (s.clone(), true);
-            }
-        }
-        (
-            self.build_system_prompt(task_hint, tool_schemas, &self.active_model()),
-            false,
-        )
-    }
-
     async fn context_compression_should_run(&self, ctx: &ContextManager) -> bool {
         let total_chars = ctx.total_chars();
         let max_c = ctx.max_context_chars().max(1);
@@ -4857,7 +4954,7 @@ impl AgentLoop {
             .should_compress(Some(estimated))
     }
 
-    /// Run Python-parity context compression on `ctx` (auxiliary LLM summary + tool-pair sanitiser).
+    /// Run context compression on `ctx` (auxiliary LLM summary + tool-pair sanitiser).
     /// Returns `true` when messages were actually compressed and session rotation occurred.
     async fn compress_context(&self, ctx: &mut ContextManager) -> bool {
         let task_hint = ctx
@@ -4959,7 +5056,7 @@ impl AgentLoop {
     }
 
     /// Compress when char budget or model token threshold is exceeded (Python auto-compaction).
-    async fn auto_compress_if_over_threshold(&self, ctx: &mut ContextManager) {
+    pub(crate) async fn auto_compress_if_over_threshold(&self, ctx: &mut ContextManager) {
         let total_chars = ctx.total_chars();
         let max_c = ctx.max_context_chars().max(1);
         if !self.context_compression_should_run(ctx).await {
@@ -5103,7 +5200,7 @@ impl AgentLoop {
     }
 
     /// Emit explicit preflight compression status before first LLM call.
-    async fn preflight_context_compress_with_status(&self, ctx: &mut ContextManager) {
+    pub(crate) async fn preflight_context_compress_with_status(&self, ctx: &mut ContextManager) {
         let model = self.active_model();
         let model_tokens = get_model_context_length(model.as_str());
         let max_c = ctx.max_context_chars().max(1);
@@ -5183,7 +5280,7 @@ impl AgentLoop {
         }
     }
 
-    fn emit_status(&self, event_type: &str, message: &str) {
+    pub(crate) fn emit_status(&self, event_type: &str, message: &str) {
         if self.config().quiet_mode {
             return;
         }
@@ -5192,7 +5289,7 @@ impl AgentLoop {
         }
     }
 
-    fn emit_tool_failure_notices(&self, tool_calls: &[ToolCall], results: &[ToolResult]) {
+    pub(crate) fn emit_tool_failure_notices(&self, tool_calls: &[ToolCall], results: &[ToolResult]) {
         for tc in tool_calls {
             let Some(result) = results
                 .iter()
@@ -5223,7 +5320,7 @@ impl AgentLoop {
     }
 
     /// DeepSeek / thinking models may return structured reasoning before visible content.
-    fn handle_reasoning_only_prefill(&self, message: &Message, attempt: u32, max_attempts: u32) {
+    pub(crate) fn handle_reasoning_only_prefill(&self, message: &Message, attempt: u32, max_attempts: u32) {
         self.emit_reasoning_from_message(message);
         tracing::debug!(
             "reasoning-only assistant response; prefill continuation ({}/{})",
@@ -5232,7 +5329,7 @@ impl AgentLoop {
         );
     }
 
-    fn should_emit_context_pressure_warning(
+    pub(crate) fn should_emit_context_pressure_warning(
         progress_ratio: f64,
         tier: f64,
         warned_tier: &mut f64,
@@ -5264,7 +5361,7 @@ impl AgentLoop {
         false
     }
 
-    fn assistant_visible_text(m: &Message) -> bool {
+    pub(crate) fn assistant_visible_text(m: &Message) -> bool {
         m.content
             .as_deref()
             .map(str::trim)
@@ -5272,14 +5369,14 @@ impl AgentLoop {
             .unwrap_or(false)
     }
 
-    fn assistant_visible_text_after_think_blocks(m: &Message) -> bool {
+    pub(crate) fn assistant_visible_text_after_think_blocks(m: &Message) -> bool {
         let Some(content) = m.content.as_deref() else {
             return false;
         };
         !strip_think_blocks_for_ack(content).trim().is_empty()
     }
 
-    fn coerce_textual_tool_calls(mut m: Message) -> (Message, Vec<ToolCall>, bool) {
+    pub(crate) fn coerce_textual_tool_calls(mut m: Message) -> (Message, Vec<ToolCall>, bool) {
         let declared = m.tool_calls.clone().unwrap_or_default();
         if !declared.is_empty() {
             return (m, declared, false);
@@ -5301,7 +5398,7 @@ impl AgentLoop {
         (m, parsed_calls, true)
     }
 
-    fn assistant_has_reasoning(m: &Message) -> bool {
+    pub(crate) fn assistant_has_reasoning(m: &Message) -> bool {
         m.reasoning_content
             .as_deref()
             .map(str::trim)
@@ -5309,36 +5406,11 @@ impl AgentLoop {
             .unwrap_or(false)
     }
 
-    fn finish_reason_requires_continuation(
-        finish_reason: Option<&str>,
-        has_executable_tool_calls: bool,
-    ) -> bool {
-        match finish_reason {
-            Some("length" | "pause_turn") => true,
-            // Provider ended with tool_calls but nothing executable in this turn — do not finalize.
-            Some("tool_calls") if !has_executable_tool_calls => true,
-            _ => false,
-        }
+    fn finish_reason_requires_continuation(finish_reason: Option<&str>) -> bool {
+        matches!(finish_reason, Some("length" | "pause_turn"))
     }
 
-    /// Prefer textual parses; otherwise use structured provider `tool_calls`.
-    fn resolve_turn_tool_calls(parsed_tool_calls: Vec<ToolCall>, assistant_msg: &Message) -> Vec<ToolCall> {
-        if !parsed_tool_calls.is_empty() {
-            return parsed_tool_calls
-                .into_iter()
-                .filter(|tc| !tc.function.name.is_empty())
-                .collect();
-        }
-        assistant_msg
-            .tool_calls
-            .clone()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|tc| !tc.function.name.is_empty())
-            .collect()
-    }
-
-    fn effective_finish_reason(
+    pub(crate) fn effective_finish_reason(
         &self,
         response: &hermes_core::LlmResponse,
         assistant: &Message,
@@ -5374,22 +5446,18 @@ impl AgentLoop {
         response.finish_reason.clone()
     }
 
-    fn build_finalization_signals(
+    pub(crate) fn build_finalization_signals(
         &self,
         task_hint: &str,
         history_includes_tool: bool,
         message: &Message,
         finish_reason: Option<&str>,
-        resolved_tool_calls: &[ToolCall],
     ) -> FinalizationSignals {
-        let has_tool_calls = !resolved_tool_calls.is_empty()
-            || message.tool_calls.as_ref().map_or(false, |v| !v.is_empty());
+        let has_tool_calls = message.tool_calls.as_ref().map_or(false, |v| !v.is_empty());
         let has_visible_text = Self::assistant_visible_text(message);
         let has_visible_text_after_think = Self::assistant_visible_text_after_think_blocks(message);
         let has_reasoning = Self::assistant_has_reasoning(message);
-        let has_executable_tool_calls = !resolved_tool_calls.is_empty();
-        let continuation_required =
-            Self::finish_reason_requires_continuation(finish_reason, has_executable_tool_calls);
+        let continuation_required = Self::finish_reason_requires_continuation(finish_reason);
         let ack_detected = !has_tool_calls
             && !continuation_required
             && !history_includes_tool
@@ -5410,7 +5478,7 @@ impl AgentLoop {
         }
     }
 
-    fn normalize_tool_call_arguments(tc: &mut ToolCall) -> Result<(), String> {
+    pub(crate) fn normalize_tool_call_arguments(tc: &mut ToolCall) -> Result<(), String> {
         let trimmed = tc.function.arguments.trim();
         if trimmed.is_empty() {
             tc.function.arguments = "{}".to_string();
@@ -5426,7 +5494,7 @@ impl AgentLoop {
         !trimmed.is_empty() && serde_json::from_str::<Value>(trimmed).is_err()
     }
 
-    fn upgrade_finish_reason_for_truncated_tool_args(response: &mut LlmResponse) {
+    pub(crate) fn upgrade_finish_reason_for_truncated_tool_args(response: &mut LlmResponse) {
         let truncated = response
             .message
             .tool_calls
@@ -5469,7 +5537,7 @@ impl AgentLoop {
 
     // -- Retry-aware LLM call ---------------------------------------------
 
-    fn call_llm_with_retry<'a>(
+    pub(crate) fn call_llm_with_retry<'a>(
         &'a self,
         ctx: &'a mut ContextManager,
         tool_schemas: &'a [ToolSchema],
@@ -6027,7 +6095,7 @@ impl AgentLoop {
     }
 
     /// Collect one streaming completion into [`LlmResponse`] (first attempt in `run_stream` D-step).
-    async fn collect_stream_llm_response(
+    pub(crate) async fn collect_stream_llm_response(
         &self,
         ctx: &mut ContextManager,
         tool_schemas: &[ToolSchema],
@@ -6208,6 +6276,7 @@ impl AgentLoop {
                                 &err,
                             ));
                         }
+                        self.note_stream_not_supported(&err);
                         return Err(err);
                     }
                 };
@@ -6310,19 +6379,6 @@ impl AgentLoop {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
-    /// Per-turn message prelude (sanitize, budget strip, @file expansion, restore primary).
-    pub(crate) async fn apply_turn_message_prelude(&self, messages: &mut Vec<Message>) {
-        for msg in messages.iter_mut() {
-            if let Some(ref mut c) = msg.content {
-                *c = sanitize_surrogates(c).into_owned();
-            }
-        }
-        strip_budget_warnings_from_messages(messages);
-        self.preprocess_user_message_context_references(messages)
-            .await;
-        self.restore_primary_runtime_at_turn_start();
-    }
-
     pub(crate) async fn preprocess_user_message_context_references(
         &self,
         messages: &mut [Message],
@@ -6345,2988 +6401,17 @@ impl AgentLoop {
         }
     }
 
-    /// Run the agent loop (non-streaming).
-    ///
-    /// Sends the initial messages to the LLM, then iteratively:
-    /// - Executes any tool calls the LLM makes
-    /// - Feeds results back as tool messages
-    /// - Stops when the LLM responds without tool calls, or max turns exceeded
-    pub async fn run(
-        &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolSchema>>,
-    ) -> Result<AgentResult, AgentError> {
-        self.run_with_message_prelude(messages, tools, false).await
-    }
-
-    /// Like [`Self::run`] after [`crate::conversation_loop::AgentLoop::prepare_turn`] applied the message prelude.
-    pub(crate) async fn run_prepared(
-        &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolSchema>>,
-    ) -> Result<AgentResult, AgentError> {
-        self.run_with_message_prelude(messages, tools, true).await
-    }
-
-    async fn run_with_message_prelude(
-        &self,
-        mut messages: Vec<Message>,
-        tools: Option<Vec<ToolSchema>>,
-        skip_message_prelude: bool,
-    ) -> Result<AgentResult, AgentError> {
-        let mut ctx = ContextManager::for_model(self.active_model().as_str());
-        let mut tool_errors: Vec<hermes_core::ToolErrorRecord> = Vec::new();
-        let session_id_owned = self.config().session_id.clone().unwrap_or_default();
-        let session_id = session_id_owned.as_str();
-        if !skip_message_prelude {
-            self.apply_turn_message_prelude(&mut messages).await;
-        }
-
-        let task_hint = messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.role, hermes_core::MessageRole::User))
-            .and_then(|m| m.content.clone())
-            .unwrap_or_default();
-
-        // Determine which tools to expose
-        let tool_schemas: Arc<[ToolSchema]> = match tools {
-            Some(v) => Arc::from(v),
-            None => self.tool_registry.schemas(),
-        };
-
-        // Build and inject system prompt (or reuse session-level cache for prefix stability)
-        let (system_content, restored_system) =
-            self.active_cached_system_prompt(&task_hint, &tool_schemas);
-        ctx.add_message(Message::system(&system_content));
-
-        let mut session_started_hooks_fired = false;
-        if !restored_system {
-            let hook_ctx = serde_json::json!({
-                "session_id": self.config().session_id,
-                "model": self.active_model(),
-            });
-            let _results = self.invoke_hook(HookType::OnSessionStart, &hook_ctx);
-            self.inject_hook_context(&_results, &mut ctx);
-            session_started_hooks_fired = true;
-        }
-
-        // Add initial messages
-        for msg in messages {
-            ctx.add_message(msg);
-        }
-        self.interest_sync_user_messages(ctx.get_messages());
-        self.hydrate_todo_store(&ctx);
-        if let Some(hint) = contextlattice_connect_system_hint(ctx.get_messages()) {
-            ctx.add_message(Message::system(hint));
-        }
-        if let Some(hint) = exploratory_problem_solving_system_hint(ctx.get_messages()) {
-            ctx.add_message(Message::system(hint));
-        }
-        if let Some(hint) = objective_mode_system_hint(ctx.get_messages()) {
-            ctx.add_message(Message::system(hint));
-        }
-        if let Some(hint) =
-            contextlattice_intelligence_system_hint(ctx.get_messages(), &tool_schemas)
-        {
-            ctx.add_message(Message::system(hint));
-        }
-
-        let persist_user_idx = if self.config().persist_user_message.is_some() {
-            ctx.get_messages()
-                .iter()
-                .enumerate()
-                .filter(|(_, m)| m.role == MessageRole::User)
-                .last()
-                .map(|(i, _)| i)
-        } else {
-            None
-        };
-        let mut codex_ack_continuations: u32 = 0;
-
-        let mut review_memory_at_end = false;
-        if self.config().memory_nudge_interval > 0
-            && self.tool_registry.names().iter().any(|n| n == "memory")
-        {
-            if let Ok(mut c) = self.evolution_counters.lock() {
-                c.turns_since_memory = c.turns_since_memory.saturating_add(1);
-                if c.turns_since_memory >= self.config().memory_nudge_interval {
-                    review_memory_at_end = true;
-                    c.turns_since_memory = 0;
-                }
+    /// Per-turn message prelude (sanitize, budget strip, @file expansion, restore primary).
+    pub(crate) async fn apply_turn_message_prelude(&self, messages: &mut Vec<Message>) {
+        for msg in messages.iter_mut() {
+            if let Some(ref mut c) = msg.content {
+                *c = sanitize_surrogates(c).into_owned();
             }
         }
-        let mut api_call_count: u32 = 0;
-
-        // Memory prefetch for first user message
-        let first_user = ctx
-            .get_messages()
-            .iter()
-            .filter(|m| matches!(m.role, hermes_core::MessageRole::User))
-            .last()
-            .and_then(|m| m.content.clone())
-            .unwrap_or_default();
-        let mem_ctx_raw = self.memory_prefetch(&first_user, session_id);
-        self.set_turn_ext_prefetch_cache(mem_ctx_raw);
-
-        if self.config().preflight_context_compress {
-            self.preflight_context_compress_with_status(&mut ctx).await;
-        }
-        let replay = ReplayRecorder::for_session(&self.config(), session_id);
-        let max_turns_limit = effective_max_turns(self.config().max_turns);
-        replay.record(
-            "session_start",
-            serde_json::json!({
-                "session_id": session_id,
-                "mode": "run",
-                "model": self.active_model(),
-                "max_turns": self.config().max_turns,
-                "max_turns_effective": max_turns_limit,
-                "max_turns_unlimited": max_turns_limit.is_none(),
-            }),
-        );
-
-        let mut total_turns: u32 = 0;
-        let mut _total_api_time_ms: u64 = 0;
-        let mut _total_tool_time_ms: u64 = 0;
-        let mut accumulated_usage: Option<UsageStats> = None;
-        let mut session_cost_usd: f64 = 0.0;
-        let mut cost_warned = false;
-        let mut forced_runtime_route: Option<TurnRuntimeRoute> = None;
-        let mut last_checkpoint_messages: Option<Vec<Message>> = None;
-        let mut invalid_tool_retries: u32 = 0;
-        let mut invalid_json_retries: u32 = 0;
-        let mut truncated_tool_call_retries: u32 = 0;
-        let mut continuation_retries: u32 = 0;
-        let mut last_content_with_tools: Option<String> = None;
-        let mut continuation_trigger_count: u32 = 0;
-        let mut ack_trigger_count: u32 = 0;
-        let mut premature_finalize_suspected_count: u32 = 0;
-        let mut context_pressure_warned_at: f64 = 0.0;
-        let mut context_pressure_last_warn_at: Option<Instant> = None;
-        let mut context_pressure_last_warn_percent: f64 = 0.0;
-        let mut governor_llm_latency_window: VecDeque<u64> = VecDeque::new();
-        let mut governor_tool_error_window: VecDeque<f64> = VecDeque::new();
-        let mut governor_consecutive_error_turns: u32 = 0;
-        let mut web_research_ctrl =
-            WebResearchController::new(self.config().web_research.clone());
-        let web_research_auxiliary = if self.config().web_research.enabled
-            && (self.config().web_research.planner_enabled
-                || self.config().web_research.evaluator_enabled)
-        {
-            Some(build_auxiliary_arc_for_config(&self.config()))
-        } else {
-            None
-        };
-        let mut active_tool_schemas: Arc<[ToolSchema]> = Arc::clone(&tool_schemas);
-        let mut web_finalize_hint_injected = false;
-        let mut repo_review_budget_state = RepoReviewBudgetState::default();
-        let mut objective_guard_retries: u32 = 0;
-        let mut finalizer_evidence_retries: u32 = 0;
-        let mut finalizer_output_quality_retries: u32 = 0;
-        let mut finalizer_action_execution_retries: u32 = 0;
-        let governor_window_limit = governor_window_size();
-        let budget_cap = max_turns_limit.unwrap_or(self.config().max_turns);
-        let mut iteration_budget = crate::iteration_budget::IterationBudget::new(budget_cap);
-        let mut tool_guardrails = crate::tool_guardrails::ToolGuardrailController::new();
-        let mut file_mutation = crate::file_mutation_tracker::FileMutationTracker::new(
-            self.config().checkpoints_enabled,
-        );
-        let mut stream_scrubber = crate::stream_scrubber::ThinkBlockScrubber::new();
-        let mut checkpoint_mgr = hermes_tools::CheckpointManager::new(
-            self.config().checkpoints_enabled,
-            self.config().hermes_home.as_deref().map(Path::new),
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        );
-
-        loop {
-            stream_scrubber.reset();
-            if self.interrupt.take_interrupt_graceful().is_some() {
-                return Ok(self.graceful_interrupt_result(
-                    &ctx,
-                    total_turns,
-                    &tool_errors,
-                    accumulated_usage.clone(),
-                    session_cost_usd,
-                    session_started_hooks_fired,
-                    persist_user_idx,
-                    api_call_count,
-                ));
-            }
-
-            if let Some(max_turns) = max_turns_limit {
-                if iteration_budget.exhausted() || total_turns >= max_turns {
-                    tracing::warn!(
-                        "Max turns ({}) exceeded, requesting final summary",
-                        max_turns
-                    );
-                    let summary_msg = self.handle_max_iterations(&mut ctx).await?;
-                    if let Some(msg) = summary_msg {
-                        ctx.add_message(msg);
-                    }
-                    self.turn_end_plugin_hooks(
-                        ctx.get_messages(),
-                        false,
-                        false,
-                        total_turns,
-                        session_started_hooks_fired,
-                    );
-                    replay.record(
-                        "session_end",
-                        serde_json::json!({
-                            "reason": "max_turns",
-                            "total_turns": total_turns,
-                            "session_cost_usd": session_cost_usd,
-                        }),
-                    );
-                    return Ok(self.seal_loop_result(
-                        &ctx,
-                        persist_user_idx,
-                        LoopExit {
-                            turn_exit_reason: "max_iterations_reached",
-                            api_calls: api_call_count,
-                            failed: false,
-                            partial: false,
-                            finished_naturally: false,
-                            interrupted: false,
-                        },
-                        total_turns,
-                        &tool_errors,
-                        accumulated_usage,
-                        session_cost_usd,
-                        session_started_hooks_fired,
-                    ));
-                }
-            }
-
-            total_turns += 1;
-            checkpoint_mgr.new_turn();
-            iteration_budget.consume();
-            tracing::debug!("Agent turn {}", total_turns);
-
-            // Refresh oauth-backed runtime credentials before routing/provider selection.
-            self.refresh_oauth_store_tokens_if_needed().await;
-
-            // Skill nudge counter — Python `run_agent.py`: increment at the start of each inner API iteration.
-            if self.config().skill_creation_nudge_interval > 0
-                && self
-                    .tool_registry
-                    .names()
-                    .iter()
-                    .any(|n| n == "skill_manage")
-            {
-                if let Ok(mut c) = self.evolution_counters.lock() {
-                    c.iters_since_skill = c.iters_since_skill.saturating_add(1);
-                }
-            }
-
-            if self.config().checkpoint_interval_turns > 0
-                && (total_turns - 1) % self.config().checkpoint_interval_turns == 0
-            {
-                last_checkpoint_messages = Some(ctx.get_messages().to_vec());
-            }
-
-            // Notify memory + plugins of new turn
-            self.memory_on_turn_start(total_turns, "");
-
-            // Memory sync at flush interval
-            if total_turns % self.config().memory_flush_interval == 0 && total_turns > 0 {
-                let msgs = ctx.get_messages();
-                let (u, a) = extract_last_user_assistant(msgs);
-                self.memory_sync(&u, &a, session_id);
-            }
-
-            // --- Pre-LLM hook ---
-            let turn_runtime_route = forced_runtime_route
-                .clone()
-                .or_else(|| self.resolve_smart_runtime_route(ctx.get_messages()));
-            let turn_default_model = self.active_model();
-            let active_model = turn_runtime_route
-                .as_ref()
-                .map(|r| r.model.as_str())
-                .unwrap_or(turn_default_model.as_str());
-            let turn_governor_runtime = governor_runtime_state(
-                &governor_llm_latency_window,
-                &governor_tool_error_window,
-                governor_consecutive_error_turns,
-            );
-            let llm_governor =
-                governor_for_turn(&self.config(), &ctx, 0, Some(&turn_governor_runtime));
-            if forced_runtime_route.is_none()
-                && should_apply_turn_reliability_guard(
-                    &turn_governor_runtime,
-                    &llm_governor,
-                    governor_llm_latency_window.len(),
-                )
-            {
-                if let Some(model) = self
-                    .resolve_reliability_degrade_model(active_model, turn_runtime_route.as_ref())
-                {
-                    tracing::info!(
-                        turn = total_turns,
-                        model = %model,
-                        consecutive_error_turns = turn_governor_runtime.consecutive_error_turns,
-                        avg_llm_latency_ms = ?turn_governor_runtime.avg_llm_latency_ms,
-                        "reliability guard switching runtime route after degradation"
-                    );
-                    forced_runtime_route = Some(self.turn_route_reliability_guard(model.clone()));
-                    ctx.add_message(Message::system(format!(
-                        "Reliability guard: runtime degradation detected. Switching next turns to `{}`.",
-                        model
-                    )));
-                }
-            }
-            tracing::debug!(
-                turn = total_turns,
-                model = active_model,
-                governor_pressure = llm_governor.pressure,
-                governor_max_tokens = ?llm_governor.max_tokens,
-                governor_avg_latency_ms = ?turn_governor_runtime.avg_llm_latency_ms,
-                governor_avg_tool_error_rate = turn_governor_runtime.avg_tool_error_rate,
-                governor_consecutive_error_turns = turn_governor_runtime.consecutive_error_turns,
-                "turn governor snapshot"
-            );
-            replay.record(
-                "turn_start",
-                serde_json::json!({
-                    "turn": total_turns,
-                    "model": active_model,
-                    "pressure": llm_governor.pressure,
-                    "max_tokens": llm_governor.max_tokens,
-                    "latency_degraded": llm_governor.latency_degraded,
-                    "error_degraded": llm_governor.error_degraded,
-                    "avg_llm_latency_ms": turn_governor_runtime.avg_llm_latency_ms,
-                    "avg_tool_error_rate": turn_governor_runtime.avg_tool_error_rate,
-                    "consecutive_error_turns": turn_governor_runtime.consecutive_error_turns,
-                }),
-            );
-            let hook_ctx = serde_json::json!({"turn": total_turns, "model": active_model});
-            let pre_results = self.invoke_hook(HookType::PreLlmCall, &hook_ctx);
-            self.inject_hook_context(&pre_results, &mut ctx);
-
-            if web_research_ctrl.force_finalize() {
-                active_tool_schemas =
-                    Arc::from(web_research_ctrl.filter_tool_schemas(tool_schemas.as_ref()));
-                if !web_finalize_hint_injected {
-                    if let Some(hint) = web_research_ctrl.finalization_system_hint() {
-                        ctx.add_message(Message::system(hint));
-                        web_finalize_hint_injected = true;
-                    }
-                }
-            }
-
-            // --- LLM API call with transport retry + semantic empty/thinking recovery (Python parity) ---
-            let api_start = Instant::now();
-            let mut inner_empty = 0u32;
-            let mut inner_thinking = 0u32;
-            let mut turn_usage_acc: Option<UsageStats> = None;
-            let mut response = loop {
-                if self.interrupt.take_interrupt_graceful().is_some() {
-                    return Ok(self.graceful_interrupt_result(
-                        &ctx,
-                        total_turns,
-                        &tool_errors,
-                        accumulated_usage.clone(),
-                        session_cost_usd,
-                        session_started_hooks_fired,
-                        persist_user_idx,
-                        api_call_count,
-                    ));
-                }
-                let r = match self
-                    .call_llm_with_retry(
-                        &mut ctx,
-                        active_tool_schemas.as_ref(),
-                        turn_runtime_route.as_ref(),
-                        llm_governor.max_tokens,
-                        &mut api_call_count,
-                    )
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(AgentError::Interrupted { .. }) => {
-                        return Ok(self.graceful_interrupt_result(
-                            &ctx,
-                            total_turns,
-                            &tool_errors,
-                            accumulated_usage.clone(),
-                            session_cost_usd,
-                            session_started_hooks_fired,
-                            persist_user_idx,
-                            api_call_count,
-                        ));
-                    }
-                    Err(e) => {
-                        let api_elapsed = api_start.elapsed().as_millis() as u64;
-                        self.update_route_learning(
-                            turn_runtime_route.as_ref(),
-                            Some(active_model),
-                            api_elapsed,
-                            false,
-                        );
-                        return Err(e);
-                    }
-                };
-                if let Some(ref u) = r.usage {
-                    turn_usage_acc = Some(merge_usage(turn_usage_acc, u));
-                }
-
-                let has_tools = r
-                    .message
-                    .tool_calls
-                    .as_ref()
-                    .map_or(false, |tc| !tc.is_empty());
-                if has_tools {
-                    break r;
-                }
-                if Self::assistant_visible_text(&r.message) {
-                    break r;
-                }
-                if Self::assistant_has_reasoning(&r.message)
-                    && inner_thinking < self.config().thinking_prefill_max_retries
-                {
-                    inner_thinking += 1;
-                    self.handle_reasoning_only_prefill(
-                        &r.message,
-                        inner_thinking,
-                        self.config().thinking_prefill_max_retries,
-                    );
-                    ctx.add_message(r.message.clone());
-                    continue;
-                }
-                // Accept explicit stop/end-turn responses even when assistant text is empty.
-                // Anthropic can return this shape after trivial tool side-effects.
-                if !Self::assistant_has_reasoning(&r.message)
-                    && r.finish_reason.as_deref() == Some("stop")
-                {
-                    break r;
-                }
-                if !Self::assistant_has_reasoning(&r.message)
-                    && inner_empty < self.config().empty_content_max_retries
-                {
-                    inner_empty += 1;
-                    tracing::warn!(
-                        "empty assistant response - retrying ({}/{})",
-                        inner_empty,
-                        self.config().empty_content_max_retries
-                    );
-                    self.emit_status(
-                        "lifecycle",
-                        &format!(
-                            "Empty assistant response - retrying ({}/{})",
-                            inner_empty,
-                            self.config().empty_content_max_retries
-                        ),
-                    );
-                    continue;
-                }
-                break r;
-            };
-            Self::upgrade_finish_reason_for_truncated_tool_args(&mut response);
-            let api_elapsed = api_start.elapsed().as_millis() as u64;
-            _total_api_time_ms += api_elapsed;
-            self.update_route_learning(
-                turn_runtime_route.as_ref(),
-                Some(response.model.as_str()),
-                api_elapsed,
-                true,
-            );
-            push_window_u64(
-                &mut governor_llm_latency_window,
-                api_elapsed,
-                governor_window_limit,
-            );
-            replay.record(
-                "llm_response",
-                serde_json::json!({
-                    "turn": total_turns,
-                    "model": response.model,
-                    "finish_reason": response.finish_reason,
-                    "api_time_ms": api_elapsed,
-                    "tool_call_count": response.message.tool_calls.as_ref().map(|v| v.len()).unwrap_or(0),
-                    "has_visible_text": Self::assistant_visible_text(&response.message),
-                    "route_learning": self.route_learning_snapshot(
-                        turn_runtime_route.as_ref(),
-                        Some(response.model.as_str()),
-                    ),
-                }),
-            );
-
-            // --- Post-LLM hook ---
-            let post_ctx = serde_json::json!({
-                "turn": total_turns,
-                "api_time_ms": api_elapsed,
-                "has_tool_calls": response.message.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty()),
-            });
-            let post_results = self.invoke_hook(HookType::PostLlmCall, &post_ctx);
-            self.inject_hook_context(&post_results, &mut ctx);
-            self.apply_hook_output_transforms(&post_results, &mut response.message.content);
-            self.apply_transform_llm_output_hooks(&mut response.message.content);
-
-            // Accumulate usage (merged across semantic-retried sub-calls)
-            if let Some(ref usage) = turn_usage_acc {
-                accumulated_usage = Some(merge_usage(accumulated_usage, usage));
-                if let Some(cost) =
-                    estimate_usage_cost_usd(usage, response.model.as_str(), &self.config())
-                {
-                    session_cost_usd += cost;
-                }
-            }
-
-            if let Some(limit) = self.config().max_cost_usd {
-                if !cost_warned
-                    && session_cost_usd >= limit * self.config().cost_guard_degrade_at_ratio
-                {
-                    cost_warned = true;
-                    if forced_runtime_route.is_none() {
-                        if let Some(model) = self.resolve_cost_degrade_model() {
-                            forced_runtime_route = Some(self.turn_route_cost_guard(model.clone()));
-                            ctx.add_message(Message::system(format!(
-                                "Cost guard: session spend is now ${:.4}/${:.4}. Switching to cheaper model `{}`.",
-                                session_cost_usd, limit, model
-                            )));
-                        } else {
-                            ctx.add_message(Message::system(format!(
-                                "Cost guard warning: session spend is now ${:.4}/${:.4}.",
-                                session_cost_usd, limit
-                            )));
-                        }
-                    }
-                }
-                if session_cost_usd >= limit {
-                    ctx.add_message(Message::system(format!(
-                        "Cost guard tripped: session spend ${:.4} exceeded max_cost_usd ${:.4}. Stopping loop.",
-                        session_cost_usd, limit
-                    )));
-                    self.turn_end_plugin_hooks(
-                        ctx.get_messages(),
-                        false,
-                        false,
-                        total_turns,
-                        session_started_hooks_fired,
-                    );
-                    return Ok(self.seal_loop_result(
-                        &ctx,
-                        persist_user_idx,
-                        LoopExit {
-                            turn_exit_reason: "max_iterations_reached",
-                            api_calls: api_call_count,
-                            failed: false,
-                            partial: false,
-                            finished_naturally: false,
-                            interrupted: false,
-                        },
-                        total_turns,
-                        &tool_errors,
-                        accumulated_usage,
-                        session_cost_usd,
-                        session_started_hooks_fired,
-                    ));
-                }
-            }
-
-            let history_includes_tool = ctx
-                .get_messages()
-                .iter()
-                .any(|m| m.role == MessageRole::Tool);
-            let (assistant_msg, parsed_tool_calls, parsed_textual_tool_calls) =
-                Self::coerce_textual_tool_calls(response.message.clone());
-            if parsed_textual_tool_calls {
-                self.emit_status(
-                    "lifecycle",
-                    "Parsed textual tool-call markup from assistant output; executing parsed calls.",
-                );
-            }
-            ctx.add_message(assistant_msg.clone());
-            web_research_ctrl.note_assistant_draft(assistant_msg.content.as_deref());
-            if assistant_msg
-                .tool_calls
-                .as_ref()
-                .map_or(false, |v| !v.is_empty())
-                && Self::assistant_visible_text_after_think_blocks(&assistant_msg)
-            {
-                last_content_with_tools = assistant_msg
-                    .content
-                    .as_deref()
-                    .map(strip_think_blocks_for_ack)
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-            }
-            if response.finish_reason.as_deref() == Some("length")
-                && assistant_msg
-                    .tool_calls
-                    .as_ref()
-                    .map_or(false, |calls| !calls.is_empty())
-                && truncated_tool_call_retries < self.config().truncated_tool_call_max_retries
-            {
-                truncated_tool_call_retries = truncated_tool_call_retries.saturating_add(1);
-                self.emit_status(
-                    "lifecycle",
-                    &format!(
-                        "Truncated tool arguments - retrying ({}/{})",
-                        truncated_tool_call_retries,
-                        self.config().truncated_tool_call_max_retries
-                    ),
-                );
-                let _ = ctx.get_messages_mut().pop();
-                continue;
-            }
-            truncated_tool_call_retries = 0;
-
-            // Step complete callback
-            if let Some(ref cb) = self.callbacks.on_step_complete {
-                cb(total_turns);
-            }
-
-            let tool_calls =
-                Self::resolve_turn_tool_calls(parsed_tool_calls, &assistant_msg);
-
-            // If no tool calls, the agent is done
-            if tool_calls.is_empty() {
-                let effective_finish_reason = self.effective_finish_reason(
-                    &response,
-                    &assistant_msg,
-                    history_includes_tool,
-                    turn_runtime_route.as_ref(),
-                );
-                let finalization_signals = self.build_finalization_signals(
-                    &task_hint,
-                    history_includes_tool,
-                    &assistant_msg,
-                    effective_finish_reason.as_deref(),
-                    &tool_calls,
-                );
-                tracing::debug!(
-                    turn = total_turns,
-                    finish_reason = ?finalization_signals.finish_reason,
-                    has_tool_calls = finalization_signals.has_tool_calls,
-                    has_visible_text = finalization_signals.has_visible_text,
-                    has_visible_text_after_think = finalization_signals.has_visible_text_after_think,
-                    has_reasoning = finalization_signals.has_reasoning,
-                    continuation_required = finalization_signals.continuation_required,
-                    ack_detected = finalization_signals.ack_detected,
-                    final_gate_passed = finalization_signals.final_gate_passed(),
-                    "finalization gate evaluation"
-                );
-                replay.record(
-                    "final_gate",
-                    serde_json::json!({
-                        "turn": total_turns,
-                        "finish_reason": finalization_signals.finish_reason,
-                        "has_tool_calls": finalization_signals.has_tool_calls,
-                        "has_visible_text": finalization_signals.has_visible_text,
-                        "has_visible_text_after_think": finalization_signals.has_visible_text_after_think,
-                        "has_reasoning": finalization_signals.has_reasoning,
-                        "continuation_required": finalization_signals.continuation_required,
-                        "ack_detected": finalization_signals.ack_detected,
-                        "final_gate_passed": finalization_signals.final_gate_passed(),
-                    }),
-                );
-                if finalization_signals.continuation_required {
-                    if continuation_retries < self.config().continuation_max_retries {
-                        continuation_retries = continuation_retries.saturating_add(1);
-                        continuation_trigger_count = continuation_trigger_count.saturating_add(1);
-                        self.emit_status(
-                            "lifecycle",
-                            &format!(
-                                "Assistant response incomplete ({:?}) - requesting continuation ({}/{})",
-                                response.finish_reason,
-                                continuation_retries,
-                                self.config().continuation_max_retries
-                            ),
-                        );
-                        ctx.add_message(Message::user(&continuation_prompt_for_response(
-                            &response,
-                        )));
-                        continue;
-                    }
-                    premature_finalize_suspected_count =
-                        premature_finalize_suspected_count.saturating_add(1);
-                    self.emit_status(
-                        "lifecycle",
-                        &format!(
-                            "Continuation retries exhausted ({}) - finalizing with best effort output",
-                            self.config().continuation_max_retries
-                        ),
-                    );
-                } else {
-                    continuation_retries = 0;
-                }
-                if finalization_signals.ack_detected {
-                    if !tool_schemas.is_empty()
-                        && codex_ack_continuations < self.config().ack_continuation_max_retries
-                    {
-                        codex_ack_continuations = codex_ack_continuations.saturating_add(1);
-                        ack_trigger_count = ack_trigger_count.saturating_add(1);
-                        self.emit_status(
-                            "lifecycle",
-                            &format!(
-                                "Detected intermediate ack - requesting continuation ({}/{})",
-                                codex_ack_continuations,
-                                self.config().ack_continuation_max_retries
-                            ),
-                        );
-                        ctx.add_message(Message::user(CODEX_CONTINUE_USER_MESSAGE));
-                        continue;
-                    }
-                    premature_finalize_suspected_count =
-                        premature_finalize_suspected_count.saturating_add(1);
-                }
-                if !Self::assistant_visible_text_after_think_blocks(&assistant_msg) {
-                    if let Some(fallback) = last_content_with_tools.take() {
-                        if let Some(last) = ctx.get_messages_mut().last_mut() {
-                            if last.role == MessageRole::Assistant {
-                                last.content = Some(fallback);
-                            }
-                        }
-                    }
-                }
-                if finalizer_claim_requires_evidence_retry(
-                    ctx.get_messages(),
-                    assistant_msg.content.as_deref().unwrap_or_default(),
-                    finalizer_evidence_retries,
-                ) {
-                    finalizer_evidence_retries = finalizer_evidence_retries.saturating_add(1);
-                    ctx.add_message(Message::system(
-                        "[SYSTEM] Finalizer evidence contract: include explicit evidence lines and confidence calibration.\n\
-                         Required format:\n\
-                         - confidence=<high|medium|low>\n\
-                         - file=<absolute-or-repo-path>\n\
-                         - cmd=<verification command or exact probe>\n\
-                         If evidence is missing, state `objective_state=unproven` and blockers.",
-                    ));
-                    ctx.add_message(Message::user(
-                        "Re-issue the final response with explicit evidence + confidence now.",
-                    ));
-                    continue;
-                }
-                if finalizer_output_quality_requires_retry(
-                    assistant_msg.content.as_deref().unwrap_or_default(),
-                    finalizer_output_quality_retries,
-                ) {
-                    finalizer_output_quality_retries =
-                        finalizer_output_quality_retries.saturating_add(1);
-                    self.emit_status(
-                        "lifecycle",
-                        "Detected templated/duplicated output; forcing concrete unique rewrite.",
-                    );
-                    ctx.add_message(Message::system(
-                        "[SYSTEM] Output quality contract: do not use placeholders or template filler.\n\
-                         Requirements:\n\
-                         - no unresolved placeholders (`[URL](URL)`, `(URL)`, `pack of authors`, `<insert...>`)\n\
-                         - no repeated list items or duplicated paragraphs\n\
-                         - provide concrete, unique, user-relevant items only; if unknown, mark as `UNPROVEN` instead of fabricating.",
-                    ));
-                    ctx.add_message(Message::user(
-                        "Re-issue the response now with concrete unique items and zero placeholders.",
-                    ));
-                    continue;
-                }
-                if finalizer_action_execution_requires_retry(
-                    ctx.get_messages(),
-                    assistant_msg.content.as_deref().unwrap_or_default(),
-                    finalizer_action_execution_retries,
-                ) {
-                    finalizer_action_execution_retries =
-                        finalizer_action_execution_retries.saturating_add(1);
-                    self.emit_status(
-                        "lifecycle",
-                        "Detected intent narration without execution evidence; forcing action run.",
-                    );
-                    ctx.add_message(Message::system(
-                        "[SYSTEM] Execution contract: this request requires concrete execution now.\n\
-                         Requirements:\n\
-                         - run the relevant tool calls in this turn (do not only describe intent)\n\
-                         - if blocked, output `BLOCKED:` with exact command/tool error and next probe\n\
-                         - include at least one evidence line (`cmd=...` or `file=...`) in the final response.",
-                    ));
-                    ctx.add_message(Message::user(
-                        "Execute now. Do not narrate intent; return concrete evidence or explicit BLOCKED state.",
-                    ));
-                    continue;
-                }
-                finalizer_evidence_retries = 0;
-                finalizer_output_quality_retries = 0;
-                finalizer_action_execution_retries = 0;
-                let (objective_guard_active, requires_analytics, deep_audit_required) =
-                    objective_guard_policy(ctx.get_messages());
-                if objective_guard_active {
-                    let assistant_text = assistant_msg.content.as_deref().unwrap_or_default();
-                    let max_guard_retries = if deep_audit_required {
-                        OBJECTIVE_DEEP_AUDIT_MAX_RETRIES
-                    } else {
-                        OBJECTIVE_GUARD_MAX_RETRIES
-                    };
-                    if !objective_guard_satisfied(
-                        assistant_text,
-                        requires_analytics,
-                        deep_audit_required,
-                    ) && objective_guard_retries < max_guard_retries
-                    {
-                        objective_guard_retries = objective_guard_retries.saturating_add(1);
-                        ctx.add_message(Message::system(objective_guard_retry_prompt(
-                            requires_analytics,
-                            deep_audit_required,
-                        )));
-                        ctx.add_message(Message::user(
-                            "Re-issue the final response with required verified sections now.",
-                        ));
-                        continue;
-                    }
-                }
-                tracing::debug!("No tool calls in response, finishing naturally");
-                if file_mutation.has_failures() {
-                    let footer = file_mutation.format_advisory_footer();
-                    for msg in ctx.get_messages_mut().iter_mut().rev() {
-                        if matches!(msg.role, MessageRole::Assistant) {
-                            if let Some(content) = msg.content.as_mut() {
-                                content.push_str(&footer);
-                            }
-                            break;
-                        }
-                    }
-                }
-                if let Err(err) = self.append_objective_runtime_ledger(
-                    ctx.get_messages(),
-                    assistant_msg.content.as_deref().unwrap_or_default(),
-                    total_turns,
-                ) {
-                    self.emit_status(
-                        "lifecycle",
-                        &format!("Objective runtime ledger append skipped: {}", err),
-                    );
-                }
-                // Final memory sync
-                let (u, a) = extract_last_user_assistant(ctx.get_messages());
-                self.memory_sync(&u, &a, session_id);
-                self.spawn_background_review(total_turns, &ctx, review_memory_at_end);
-                self.turn_end_plugin_hooks(
-                    ctx.get_messages(),
-                    true,
-                    false,
-                    total_turns,
-                    session_started_hooks_fired,
-                );
-                replay.record(
-                    "session_end",
-                    serde_json::json!({
-                        "reason": "finished_naturally",
-                        "total_turns": total_turns,
-                        "session_cost_usd": session_cost_usd,
-                        "continuation_trigger_count": continuation_trigger_count,
-                        "ack_trigger_count": ack_trigger_count,
-                        "premature_finalize_suspected_count": premature_finalize_suspected_count,
-                    }),
-                );
-                return Ok(self.seal_loop_result(
-                    &ctx,
-                    persist_user_idx,
-                    LoopExit {
-                        turn_exit_reason: "text_response",
-                        api_calls: api_call_count,
-                        failed: false,
-                        partial: false,
-                        finished_naturally: true,
-                        interrupted: false,
-                    },
-                    total_turns,
-                    &tool_errors,
-                    accumulated_usage,
-                    session_cost_usd,
-                    session_started_hooks_fired,
-                ));
-            }
-
-            codex_ack_continuations = 0;
-
-            // Deduplicate tool calls
-            let mut tool_calls = Self::deduplicate_tool_calls(&tool_calls);
-            for tc in &mut tool_calls {
-                self.repair_tool_call(tc);
-                self.hydrate_session_search_args(tc);
-            }
-            if let Some(note) =
-                apply_repo_review_tool_profile_narrowing(&mut tool_calls, ctx.get_messages())
-            {
-                self.emit_status("lifecycle", "Applied repo-review tool profile narrowing.");
-                ctx.add_message(Message::system(note));
-            }
-            if let Some(note) = apply_repo_review_discovery_budget_policy(
-                &mut tool_calls,
-                ctx.get_messages(),
-                &mut repo_review_budget_state,
-            ) {
-                self.emit_status("lifecycle", "Applied repo-review discovery budget policy.");
-                ctx.add_message(Message::system(note));
-            }
-            if tool_calls.is_empty() {
-                ctx.add_message(Message::system(
-                    "[SYSTEM] Tool profile/budget policy filtered this turn's calls. Propose refined, scoped code-inspection calls next.",
-                ));
-                continue;
-            }
-            let invalid_tool_calls: Vec<String> = tool_calls
-                .iter()
-                .filter(|tc| self.tool_registry.get(&tc.function.name).is_none())
-                .map(|tc| tc.function.name.clone())
-                .collect();
-            if !invalid_tool_calls.is_empty() {
-                invalid_tool_retries = invalid_tool_retries.saturating_add(1);
-                self.emit_status(
-                    "lifecycle",
-                    &format!(
-                        "Invalid tool call detected - retrying ({}/{})",
-                        invalid_tool_retries,
-                        self.config().invalid_tool_call_max_retries
-                    ),
-                );
-                let available = self.tool_registry.names().join(", ");
-                if invalid_tool_retries >= self.config().invalid_tool_call_max_retries {
-                    self.emit_status(
-                        "lifecycle",
-                        &format!(
-                            "Max invalid tool retries reached ({})",
-                            self.config().invalid_tool_call_max_retries
-                        ),
-                    );
-                    ctx.add_message(Message::system(format!(
-                        "Max invalid tool retries reached ({}). Last invalid tool: {}",
-                        self.config().invalid_tool_call_max_retries,
-                        invalid_tool_calls[0]
-                    )));
-                    self.turn_end_plugin_hooks(
-                        ctx.get_messages(),
-                        false,
-                        false,
-                        total_turns,
-                        session_started_hooks_fired,
-                    );
-                    return Ok(self.seal_loop_result(
-                        &ctx,
-                        persist_user_idx,
-                        LoopExit {
-                            turn_exit_reason: "invalid_tool_calls",
-                            api_calls: api_call_count,
-                            failed: false,
-                            partial: true,
-                            finished_naturally: false,
-                            interrupted: false,
-                        },
-                        total_turns,
-                        &tool_errors,
-                        accumulated_usage,
-                        session_cost_usd,
-                        session_started_hooks_fired,
-                    ));
-                }
-                for tc in &tool_calls {
-                    let content = if self.tool_registry.get(&tc.function.name).is_none() {
-                        format!(
-                            "Tool '{}' does not exist. Available tools: {}",
-                            tc.function.name, available
-                        )
-                    } else {
-                        "Skipped: another tool call in this turn used an invalid name. Please retry this tool call.".to_string()
-                    };
-                    ctx.add_message(Message::tool_result(tc.id.clone(), content));
-                }
-                continue;
-            }
-            invalid_tool_retries = 0;
-
-            let mut invalid_json_args: Vec<(String, String)> = Vec::new();
-            for tc in &mut tool_calls {
-                if let Err(e) = Self::normalize_tool_call_arguments(tc) {
-                    invalid_json_args.push((tc.function.name.clone(), e));
-                }
-            }
-            if !invalid_json_args.is_empty() {
-                invalid_json_retries = invalid_json_retries.saturating_add(1);
-                if invalid_json_retries < self.config().invalid_tool_json_max_retries {
-                    self.emit_status(
-                        "lifecycle",
-                        &format!(
-                            "Invalid tool JSON arguments - retrying ({}/{})",
-                            invalid_json_retries,
-                            self.config().invalid_tool_json_max_retries
-                        ),
-                    );
-                    let _ = ctx.get_messages_mut().pop();
-                    continue;
-                }
-                self.emit_status(
-                    "lifecycle",
-                    &format!(
-                        "Max invalid JSON retries reached ({}); returning tool errors",
-                        self.config().invalid_tool_json_max_retries
-                    ),
-                );
-                invalid_json_retries = 0;
-                for tc in &tool_calls {
-                    let content = if let Some((_, err)) = invalid_json_args
-                        .iter()
-                        .find(|(name, _)| name == &tc.function.name)
-                    {
-                        format!(
-                            "Error: Invalid JSON arguments. {}. For tools with no required parameters, use an empty object: {{}}. Please retry with valid JSON.",
-                            err
-                        )
-                    } else {
-                        "Skipped: other tool call in this response had invalid JSON.".to_string()
-                    };
-                    ctx.add_message(Message::tool_result(tc.id.clone(), content));
-                }
-                continue;
-            }
-            invalid_json_retries = 0;
-
-            for tc in &tool_calls {
-                if let Ok(mut c) = self.evolution_counters.lock() {
-                    match tc.function.name.as_str() {
-                        "memory" => c.turns_since_memory = 0,
-                        "skill_manage" => c.iters_since_skill = 0,
-                        _ => {}
-                    }
-                }
-            }
-
-            // Cap concurrent delegate_task calls
-            self.cap_delegates(&mut tool_calls);
-            if WebResearchController::tool_calls_include_web(&tool_calls) {
-                web_research_ctrl
-                    .ensure_plan_on_first_web(
-                        web_research_auxiliary.as_ref(),
-                        &task_hint,
-                        &tool_calls,
-                    )
-                    .await;
-            }
-            let (deferred_web_results, web_user_notices) = web_research_ctrl
-                .gate_web_batch(
-                    web_research_auxiliary.as_ref(),
-                    ctx.get_messages(),
-                    &mut tool_calls,
-                    total_turns,
-                )
-                .await;
-            for notice in web_user_notices {
-                self.emit_status("tool_failure", &notice);
-            }
-            if web_research_ctrl.force_finalize() || web_research_ctrl.planner_invoked() {
-                active_tool_schemas =
-                    Arc::from(web_research_ctrl.filter_tool_schemas(tool_schemas.as_ref()));
-            }
-            let contextlattice_connect_intent =
-                detect_contextlattice_connect_intent(ctx.get_messages());
-            if tool_calls.is_empty() {
-                for (_, result) in deferred_web_results {
-                    ctx.add_message(Message::tool_result(&result.tool_call_id, &result.content));
-                }
-                continue;
-            }
-
-            // --- Pre-tool hook ---
-            let tool_names_for_log: Vec<&str> = tool_calls
-                .iter()
-                .map(|tc| tc.function.name.as_str())
-                .collect();
-            tracing::debug!(
-                turn = total_turns,
-                tool_count = tool_calls.len(),
-                tools = ?tool_names_for_log,
-                "agent tool batch start"
-            );
-            for tc in &tool_calls {
-                let tc_ctx = serde_json::json!({
-                    "tool": &tc.function.name,
-                    "turn": total_turns,
-                });
-                self.invoke_hook(HookType::PreToolCall, &tc_ctx);
-
-                if let Some(ref cb) = self.callbacks.on_tool_start {
-                    let args: Value =
-                        serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
-                    cb(&tc.function.name, &args);
-                }
-            }
-
-            // --- Execute tool calls in parallel ---
-            if self.interrupt.take_interrupt_graceful().is_some() {
-                return Ok(self.graceful_interrupt_result(
-                    &ctx,
-                    total_turns,
-                    &tool_errors,
-                    accumulated_usage.clone(),
-                    session_cost_usd,
-                    session_started_hooks_fired,
-                    persist_user_idx,
-                    api_call_count,
-                ));
-            }
-            let tool_start = Instant::now();
-            let tool_governor = governor_for_turn(
-                &self.config(),
-                &ctx,
-                tool_calls.len(),
-                Some(&turn_governor_runtime),
-            );
-            let parent_budget_remaining_usd = self
-                .config()
-                .max_cost_usd
-                .map(|limit| (limit - session_cost_usd).max(0.0));
-            for tc in &tool_calls {
-                let args: Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
-                match tool_guardrails.before_call(&tc.function.name, &args) {
-                    crate::tool_guardrails::GuardrailDecision::Halt(reason) => {
-                        ctx.add_message(Message::assistant(format!(
-                            "[Tool guardrail halt] {reason}"
-                        )));
-                        return Ok(self.seal_loop_result(
-                            &ctx,
-                            persist_user_idx,
-                            LoopExit {
-                                turn_exit_reason: "guardrail_halt",
-                                api_calls: api_call_count,
-                                failed: false,
-                                partial: false,
-                                finished_naturally: true,
-                                interrupted: false,
-                            },
-                            total_turns,
-                            &tool_errors,
-                            accumulated_usage,
-                            session_cost_usd,
-                            session_started_hooks_fired,
-                        ));
-                    }
-                    crate::tool_guardrails::GuardrailDecision::Block(reason) => {
-                        tracing::warn!(tool = %tc.function.name, %reason, "tool guardrail block");
-                    }
-                    crate::tool_guardrails::GuardrailDecision::Allow => {}
-                }
-            }
-            let tool_progress_names: Vec<String> = tool_calls
-                .iter()
-                .map(|tc| tc.function.name.clone())
-                .collect();
-            let _tool_progress = ToolProgressWatchdog::start(
-                self.callbacks.status_callback.clone(),
-                total_turns,
-                tool_progress_names,
-            );
-            let mut results = self
-                .execute_tool_calls(
-                    &tool_calls,
-                    total_turns,
-                    tool_governor.tool_concurrency,
-                    contextlattice_connect_intent,
-                    parent_budget_remaining_usd,
-                    &mut tool_errors,
-                    Some(&mut checkpoint_mgr),
-                    latest_user_content(ctx.get_messages()).map(str::to_string),
-                )
-                .await;
-            if !deferred_web_results.is_empty() {
-                results.extend(deferred_web_results.into_iter().map(|(_, result)| result));
-            }
-            let tool_elapsed = tool_start.elapsed().as_millis() as u64;
-            _total_tool_time_ms += tool_elapsed;
-            let turn_tool_error_count = results.iter().filter(|r| r.is_error).count() as u32;
-            if web_research_ctrl.record_results(&tool_calls, &results) {
-                active_tool_schemas =
-                    Arc::from(web_research_ctrl.filter_tool_schemas(tool_schemas.as_ref()));
-            }
-            tracing::info!(
-                turn = total_turns,
-                tool_count = tool_calls.len(),
-                result_count = results.len(),
-                errors = turn_tool_error_count,
-                elapsed_ms = tool_elapsed,
-                "agent tool batch finished"
-            );
-            self.emit_tool_failure_notices(&tool_calls, &results);
-            let turn_tool_error_rate = if results.is_empty() {
-                0.0
-            } else {
-                turn_tool_error_count as f64 / results.len() as f64
-            };
-            push_window_f64(
-                &mut governor_tool_error_window,
-                turn_tool_error_rate,
-                governor_window_limit,
-            );
-            if turn_tool_error_count > 0 {
-                governor_consecutive_error_turns =
-                    governor_consecutive_error_turns.saturating_add(1);
-            } else {
-                governor_consecutive_error_turns = 0;
-            }
-            replay.record(
-                "tool_batch",
-                serde_json::json!({
-                    "turn": total_turns,
-                    "tool_count": tool_calls.len(),
-                    "tool_concurrency": tool_governor.tool_concurrency,
-                    "tool_time_ms": tool_elapsed,
-                    "errors": turn_tool_error_count,
-                    "error_rate": turn_tool_error_rate,
-                }),
-            );
-            update_repo_review_budget_state_from_results(
-                &mut repo_review_budget_state,
-                ctx.get_messages(),
-                &results,
-            );
-            if self.config().rollback_on_tool_error_threshold > 0
-                && turn_tool_error_count >= self.config().rollback_on_tool_error_threshold
-            {
-                if let Some(snapshot) = last_checkpoint_messages.clone() {
-                    *ctx.get_messages_mut() = snapshot;
-                    let _ = checkpoint_mgr.restore_latest();
-                    ctx.add_message(Message::system(format!(
-                        "Auto-rollback: {} tool call(s) failed in one turn. Restored latest checkpoint and continuing.",
-                        turn_tool_error_count
-                    )));
-                    continue;
-                }
-            }
-
-            // --- Post-tool hook ---
-            for res in &results {
-                let Some(tc) = tool_calls.iter().find(|tc| tc.id == res.tool_call_id) else {
-                    continue;
-                };
-                let tc_ctx = serde_json::json!({
-                    "tool": &tc.function.name,
-                    "is_error": res.is_error,
-                    "turn": total_turns,
-                });
-                self.invoke_hook(HookType::PostToolCall, &tc_ctx);
-
-                if let Some(ref cb) = self.callbacks.on_tool_complete {
-                    cb(&tc.function.name, &res.content);
-                }
-            }
-
-            for (tc, res) in tool_calls.iter().zip(results.iter()) {
-                let args: Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
-                tool_guardrails.after_call(&tc.function.name, res.is_error, &res.content);
-                file_mutation.record_tool_result(
-                    &tc.function.name,
-                    &args,
-                    &res.content,
-                    res.is_error,
-                );
-            }
-
-            self.notify_memory_writes(&tool_calls, &results);
-            self.notify_delegations(&tool_calls, &results);
-
-            // Enforce budget on tool results
-            let mut results = results;
-            budget::enforce_budget(&mut results, &self.config().budget);
-
-            if !results.is_empty() {
-                let w = budget_pressure_text(
-                    total_turns,
-                    self.config().max_turns,
-                    self.config().budget_caution_threshold,
-                    self.config().budget_warning_threshold,
-                    self.config().budget_pressure_enabled,
-                );
-                if let Some(ref text) = w {
-                    tracing::info!("{}", text);
-                }
-                inject_budget_pressure_into_last_tool_result(&mut results, w.as_deref());
-            }
-            let lsp_note = self.lsp_context_note(&tool_calls, &results);
-
-            let execute_code_refund = !tool_calls.is_empty()
-                && tool_calls
-                    .iter()
-                    .all(|tc| tc.function.name == "execute_code")
-                && !results.iter().any(|r| r.is_error);
-
-            let num_tool_msgs = results.len();
-            for result in results {
-                replay.record(
-                    "tool_result",
-                    serde_json::json!({
-                        "turn": total_turns,
-                        "tool_call_id": result.tool_call_id,
-                        "is_error": result.is_error,
-                        "content_preview": result.content.chars().take(240).collect::<String>(),
-                    }),
-                );
-                ctx.add_message(Message::tool_result(&result.tool_call_id, &result.content));
-            }
-            self.pending_steer
-                .apply_to_tool_results(ctx.get_messages_mut(), num_tool_msgs);
-            if let Some(note) = lsp_note {
-                ctx.add_message(Message::system(note));
-            }
-            if should_trip_tool_loop_guard(
-                governor_consecutive_error_turns,
-                tool_calls.len(),
-                turn_tool_error_count,
-            ) {
-                let guard_message = format!(
-                    "Tool-loop guard tripped after {} consecutive error turn(s); latest turn failed {}/{} tool call(s).",
-                    governor_consecutive_error_turns,
-                    turn_tool_error_count,
-                    tool_calls.len()
-                );
-                self.emit_status("lifecycle", &guard_message);
-                replay.record(
-                    "tool_loop_guard",
-                    serde_json::json!({
-                        "turn": total_turns,
-                        "consecutive_error_turns": governor_consecutive_error_turns,
-                        "failed_calls": turn_tool_error_count,
-                        "total_calls": tool_calls.len(),
-                    }),
-                );
-                if let Some(summary) = self
-                    .handle_tool_loop_guard_summary(
-                        &mut ctx,
-                        governor_consecutive_error_turns,
-                        turn_tool_error_count,
-                        tool_calls.len(),
-                    )
-                    .await?
-                {
-                    ctx.add_message(summary);
-                }
-                self.turn_end_plugin_hooks(
-                    ctx.get_messages(),
-                    false,
-                    false,
-                    total_turns,
-                    session_started_hooks_fired,
-                );
-                return Ok(self.seal_loop_result(
-                    &ctx,
-                    persist_user_idx,
-                    LoopExit {
-                        turn_exit_reason: "tool_loop_guard",
-                        api_calls: api_call_count,
-                        failed: false,
-                        partial: false,
-                        finished_naturally: false,
-                        interrupted: false,
-                    },
-                    total_turns,
-                    &tool_errors,
-                    accumulated_usage,
-                    session_cost_usd,
-                    session_started_hooks_fired,
-                ));
-            }
-            if execute_code_refund {
-                iteration_budget.refund(1);
-                total_turns = total_turns.saturating_sub(1);
-            }
-            self.emit_background_review_metrics(total_turns, &ctx);
-
-            let total_chars = ctx.total_chars();
-            let threshold = ((ctx.max_context_chars().max(1) as f64) * 0.8) as usize;
-            if threshold > 0 {
-                let progress = total_chars as f64 / threshold as f64;
-                let tier = if progress >= 0.95 {
-                    0.95
-                } else if progress >= 0.85 {
-                    0.85
-                } else {
-                    0.0
-                };
-                if Self::should_emit_context_pressure_warning(
-                    progress,
-                    tier,
-                    &mut context_pressure_warned_at,
-                    &mut context_pressure_last_warn_at,
-                    &mut context_pressure_last_warn_percent,
-                ) {
-                    tracing::warn!(
-                        "Context pressure {:.0}% of compaction threshold ({} / {})",
-                        progress * 100.0,
-                        total_chars,
-                        threshold
-                    );
-                }
-            }
-
-            self.auto_compress_if_over_threshold(&mut ctx).await;
-        }
-    }
-
-    /// Run the agent loop with streaming.
-    ///
-    /// Uses the LLM provider's streaming API and invokes `on_chunk` for each
-    /// incremental delta. The stream is collected into a complete response
-    /// before tool execution proceeds.
-    pub async fn run_stream(
-        &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolSchema>>,
-        on_chunk: Option<Box<dyn Fn(StreamChunk) + Send + Sync>>,
-    ) -> Result<AgentResult, AgentError> {
-        self.run_stream_with_message_prelude(messages, tools, on_chunk, false)
-            .await
-    }
-
-    /// Like [`Self::run_stream`] after B-segment [`crate::conversation_loop`] prelude.
-    pub(crate) async fn run_stream_prepared(
-        &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolSchema>>,
-        on_chunk: Option<Box<dyn Fn(StreamChunk) + Send + Sync>>,
-    ) -> Result<AgentResult, AgentError> {
-        self.run_stream_with_message_prelude(messages, tools, on_chunk, true)
-            .await
-    }
-
-    async fn run_stream_with_message_prelude(
-        &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolSchema>>,
-        on_chunk: Option<Box<dyn Fn(StreamChunk) + Send + Sync>>,
-        skip_message_prelude: bool,
-    ) -> Result<AgentResult, AgentError> {
-        let on_chunk = match on_chunk {
-            Some(cb) => cb,
-            None => {
-                return self
-                    .run_with_message_prelude(messages, tools, skip_message_prelude)
-                    .await;
-            }
-        };
-        let stream_mute = Arc::new(AtomicBool::new(false));
-        let stream_needs_break = Arc::new(AtomicBool::new(false));
-        let raw_emit = on_chunk;
-        let mute_for_emit = stream_mute.clone();
-        let break_for_emit = stream_needs_break.clone();
-        let on_chunk: Box<dyn Fn(StreamChunk) + Send + Sync> =
-            Box::new(move |chunk: StreamChunk| {
-                let StreamChunk {
-                    delta,
-                    finish_reason,
-                    usage,
-                } = chunk;
-                if let Some(delta_val) = delta {
-                    if let Some(content) = delta_val.content.clone() {
-                        if mute_for_emit.load(Ordering::Acquire) {
-                            return;
-                        }
-                        let mut out = content;
-                        if break_for_emit.swap(false, Ordering::AcqRel) {
-                            out = format!("\n\n{}", out);
-                        }
-                        raw_emit(StreamChunk {
-                            delta: Some(hermes_core::StreamDelta {
-                                content: Some(out),
-                                tool_calls: delta_val.tool_calls,
-                                extra: delta_val.extra,
-                            }),
-                            finish_reason,
-                            usage,
-                        });
-                        return;
-                    }
-                    raw_emit(StreamChunk {
-                        delta: Some(delta_val),
-                        finish_reason,
-                        usage,
-                    });
-                    return;
-                }
-                raw_emit(StreamChunk {
-                    delta: None,
-                    finish_reason,
-                    usage,
-                });
-            });
-
-        let mut ctx = ContextManager::for_model(self.active_model().as_str());
-        let mut tool_errors: Vec<hermes_core::ToolErrorRecord> = Vec::new();
-        let session_id_owned = self.config().session_id.clone().unwrap_or_default();
-        let session_id = session_id_owned.as_str();
-        let mut messages = messages;
-        if !skip_message_prelude {
-            self.apply_turn_message_prelude(&mut messages).await;
-        }
-
-        let task_hint = messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.role, hermes_core::MessageRole::User))
-            .and_then(|m| m.content.clone())
-            .unwrap_or_default();
-
-        let tool_schemas: Arc<[ToolSchema]> = match tools {
-            Some(v) => Arc::from(v),
-            None => self.tool_registry.schemas(),
-        };
-        let (system_content, restored_system) =
-            self.resolve_initial_system_prompt(&task_hint, &tool_schemas);
-        ctx.add_message(Message::system(&system_content));
-
-        let mut session_started_hooks_fired = false;
-        if !restored_system {
-            let hook_ctx = serde_json::json!({
-                "session_id": self.config().session_id,
-                "model": self.active_model(),
-            });
-            let _results = self.invoke_hook(HookType::OnSessionStart, &hook_ctx);
-            self.inject_hook_context(&_results, &mut ctx);
-            session_started_hooks_fired = true;
-        }
-
-        for msg in messages {
-            ctx.add_message(msg);
-        }
-        self.interest_sync_user_messages(ctx.get_messages());
-        self.hydrate_todo_store(&ctx);
-        if let Some(hint) = contextlattice_connect_system_hint(ctx.get_messages()) {
-            ctx.add_message(Message::system(hint));
-        }
-        if let Some(hint) = exploratory_problem_solving_system_hint(ctx.get_messages()) {
-            ctx.add_message(Message::system(hint));
-        }
-        if let Some(hint) = objective_mode_system_hint(ctx.get_messages()) {
-            ctx.add_message(Message::system(hint));
-        }
-        if let Some(hint) =
-            contextlattice_intelligence_system_hint(ctx.get_messages(), &tool_schemas)
-        {
-            ctx.add_message(Message::system(hint));
-        }
-
-        let persist_user_idx = if self.config().persist_user_message.is_some() {
-            ctx.get_messages()
-                .iter()
-                .enumerate()
-                .filter(|(_, m)| m.role == MessageRole::User)
-                .last()
-                .map(|(i, _)| i)
-        } else {
-            None
-        };
-        let mut codex_ack_continuations: u32 = 0;
-
-        let mut review_memory_at_end = false;
-        if self.config().memory_nudge_interval > 0
-            && self.tool_registry.names().iter().any(|n| n == "memory")
-        {
-            if let Ok(mut c) = self.evolution_counters.lock() {
-                c.turns_since_memory = c.turns_since_memory.saturating_add(1);
-                if c.turns_since_memory >= self.config().memory_nudge_interval {
-                    review_memory_at_end = true;
-                    c.turns_since_memory = 0;
-                }
-            }
-        }
-        let mut api_call_count: u32 = 0;
-
-        // Memory prefetch
-        let first_user = ctx
-            .get_messages()
-            .iter()
-            .filter(|m| matches!(m.role, hermes_core::MessageRole::User))
-            .last()
-            .and_then(|m| m.content.clone())
-            .unwrap_or_default();
-        let mem_ctx_raw = self.memory_prefetch(&first_user, session_id);
-        self.set_turn_ext_prefetch_cache(mem_ctx_raw);
-
-        if self.config().preflight_context_compress {
-            self.preflight_context_compress_with_status(&mut ctx).await;
-        }
-        let replay = ReplayRecorder::for_session(&self.config(), session_id);
-        let max_turns_limit = effective_max_turns(self.config().max_turns);
-        replay.record(
-            "session_start",
-            serde_json::json!({
-                "session_id": session_id,
-                "mode": "stream",
-                "model": self.active_model(),
-                "max_turns": self.config().max_turns,
-                "max_turns_effective": max_turns_limit,
-                "max_turns_unlimited": max_turns_limit.is_none(),
-            }),
-        );
-
-        let mut total_turns: u32 = 0;
-        let mut _total_tool_time_ms: u64 = 0;
-        let mut accumulated_usage: Option<UsageStats> = None;
-        let mut session_cost_usd: f64 = 0.0;
-        let mut cost_warned = false;
-        let mut forced_runtime_route: Option<TurnRuntimeRoute> = None;
-        let mut last_checkpoint_messages: Option<Vec<Message>> = None;
-        let mut invalid_tool_retries: u32 = 0;
-        let mut invalid_json_retries: u32 = 0;
-        let mut truncated_tool_call_retries: u32 = 0;
-        let mut continuation_retries: u32 = 0;
-        let mut last_content_with_tools: Option<String> = None;
-        let mut continuation_trigger_count: u32 = 0;
-        let mut ack_trigger_count: u32 = 0;
-        let mut premature_finalize_suspected_count: u32 = 0;
-        let mut context_pressure_warned_at: f64 = 0.0;
-        let mut context_pressure_last_warn_at: Option<Instant> = None;
-        let mut context_pressure_last_warn_percent: f64 = 0.0;
-        let mut governor_llm_latency_window: VecDeque<u64> = VecDeque::new();
-        let mut governor_tool_error_window: VecDeque<f64> = VecDeque::new();
-        let mut governor_consecutive_error_turns: u32 = 0;
-        let mut web_research_ctrl =
-            WebResearchController::new(self.config().web_research.clone());
-        let web_research_auxiliary = if self.config().web_research.enabled
-            && (self.config().web_research.planner_enabled
-                || self.config().web_research.evaluator_enabled)
-        {
-            Some(build_auxiliary_arc_for_config(&self.config()))
-        } else {
-            None
-        };
-        let mut active_tool_schemas: Arc<[ToolSchema]> = Arc::clone(&tool_schemas);
-        let mut web_finalize_hint_injected = false;
-        let mut repo_review_budget_state = RepoReviewBudgetState::default();
-        let mut objective_guard_retries: u32 = 0;
-        let mut finalizer_evidence_retries: u32 = 0;
-        let mut finalizer_output_quality_retries: u32 = 0;
-        let mut finalizer_action_execution_retries: u32 = 0;
-        let governor_window_limit = governor_window_size();
-        let budget_cap = max_turns_limit.unwrap_or(self.config().max_turns);
-        let mut iteration_budget = crate::iteration_budget::IterationBudget::new(budget_cap);
-        let mut tool_guardrails = crate::tool_guardrails::ToolGuardrailController::new();
-        let mut file_mutation = crate::file_mutation_tracker::FileMutationTracker::new(
-            self.config().checkpoints_enabled,
-        );
-        let mut stream_scrubber = crate::stream_scrubber::ThinkBlockScrubber::new();
-        let mut checkpoint_mgr = hermes_tools::CheckpointManager::new(
-            self.config().checkpoints_enabled,
-            self.config().hermes_home.as_deref().map(Path::new),
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        );
-
-        loop {
-            stream_scrubber.reset();
-            if self.interrupt.take_interrupt_graceful().is_some() {
-                return Ok(self.graceful_interrupt_result(
-                    &ctx,
-                    total_turns,
-                    &tool_errors,
-                    accumulated_usage.clone(),
-                    session_cost_usd,
-                    session_started_hooks_fired,
-                    persist_user_idx,
-                    api_call_count,
-                ));
-            }
-
-            if let Some(max_turns) = max_turns_limit {
-                if iteration_budget.exhausted() || total_turns >= max_turns {
-                    tracing::warn!(
-                        "Max turns ({}) exceeded, requesting final summary",
-                        max_turns
-                    );
-                    let summary_msg = self.handle_max_iterations(&mut ctx).await?;
-                    if let Some(msg) = summary_msg {
-                        ctx.add_message(msg);
-                    }
-                    self.turn_end_plugin_hooks(
-                        ctx.get_messages(),
-                        false,
-                        false,
-                        total_turns,
-                        session_started_hooks_fired,
-                    );
-                    replay.record(
-                        "session_end",
-                        serde_json::json!({
-                            "reason": "max_turns",
-                            "total_turns": total_turns,
-                            "session_cost_usd": session_cost_usd,
-                        }),
-                    );
-                    return Ok(self.seal_loop_result(
-                        &ctx,
-                        persist_user_idx,
-                        LoopExit {
-                            turn_exit_reason: "max_iterations_reached",
-                            api_calls: api_call_count,
-                            failed: false,
-                            partial: false,
-                            finished_naturally: false,
-                            interrupted: false,
-                        },
-                        total_turns,
-                        &tool_errors,
-                        accumulated_usage,
-                        session_cost_usd,
-                        session_started_hooks_fired,
-                    ));
-                }
-            }
-
-            total_turns += 1;
-            checkpoint_mgr.new_turn();
-            iteration_budget.consume();
-
-            // Housekeeping-only turns enable mute_post_response for the *current* turn's
-            // pre-tool narration. Reset each turn so the next LLM stream (especially the
-            // final natural-language reply) is delivered to gateway native streaming.
-            stream_mute.store(false, Ordering::Release);
-
-            // Refresh oauth-backed runtime credentials before routing/provider selection.
-            self.refresh_oauth_store_tokens_if_needed().await;
-
-            if self.config().skill_creation_nudge_interval > 0
-                && self
-                    .tool_registry
-                    .names()
-                    .iter()
-                    .any(|n| n == "skill_manage")
-            {
-                if let Ok(mut c) = self.evolution_counters.lock() {
-                    c.iters_since_skill = c.iters_since_skill.saturating_add(1);
-                }
-            }
-
-            self.memory_on_turn_start(total_turns, "");
-
-            if self.config().checkpoint_interval_turns > 0
-                && (total_turns - 1) % self.config().checkpoint_interval_turns == 0
-            {
-                last_checkpoint_messages = Some(ctx.get_messages().to_vec());
-            }
-
-            if total_turns % self.config().memory_flush_interval == 0 && total_turns > 0 {
-                let (u, a) = extract_last_user_assistant(ctx.get_messages());
-                self.memory_sync(&u, &a, session_id);
-            }
-
-            // Pre-LLM hook
-            let turn_runtime_route = forced_runtime_route
-                .clone()
-                .or_else(|| self.resolve_smart_runtime_route(ctx.get_messages()));
-            let turn_default_model = self.active_model();
-            let active_model = turn_runtime_route
-                .as_ref()
-                .map(|r| r.model.as_str())
-                .unwrap_or(turn_default_model.as_str());
-            let turn_governor_runtime = governor_runtime_state(
-                &governor_llm_latency_window,
-                &governor_tool_error_window,
-                governor_consecutive_error_turns,
-            );
-            let llm_governor =
-                governor_for_turn(&self.config(), &ctx, 0, Some(&turn_governor_runtime));
-            if forced_runtime_route.is_none()
-                && should_apply_turn_reliability_guard(
-                    &turn_governor_runtime,
-                    &llm_governor,
-                    governor_llm_latency_window.len(),
-                )
-            {
-                if let Some(model) = self
-                    .resolve_reliability_degrade_model(active_model, turn_runtime_route.as_ref())
-                {
-                    tracing::info!(
-                        turn = total_turns,
-                        model = %model,
-                        consecutive_error_turns = turn_governor_runtime.consecutive_error_turns,
-                        avg_llm_latency_ms = ?turn_governor_runtime.avg_llm_latency_ms,
-                        "reliability guard switching runtime route after degradation"
-                    );
-                    forced_runtime_route = Some(self.turn_route_reliability_guard(model.clone()));
-                    ctx.add_message(Message::system(format!(
-                        "Reliability guard: runtime degradation detected. Switching next turns to `{}`.",
-                        model
-                    )));
-                }
-            }
-            tracing::debug!(
-                turn = total_turns,
-                model = active_model,
-                governor_pressure = llm_governor.pressure,
-                governor_max_tokens = ?llm_governor.max_tokens,
-                governor_avg_latency_ms = ?turn_governor_runtime.avg_llm_latency_ms,
-                governor_avg_tool_error_rate = turn_governor_runtime.avg_tool_error_rate,
-                governor_consecutive_error_turns = turn_governor_runtime.consecutive_error_turns,
-                "turn governor snapshot"
-            );
-            replay.record(
-                "turn_start",
-                serde_json::json!({
-                    "turn": total_turns,
-                    "model": active_model,
-                    "pressure": llm_governor.pressure,
-                    "max_tokens": llm_governor.max_tokens,
-                    "latency_degraded": llm_governor.latency_degraded,
-                    "error_degraded": llm_governor.error_degraded,
-                    "avg_llm_latency_ms": turn_governor_runtime.avg_llm_latency_ms,
-                    "avg_tool_error_rate": turn_governor_runtime.avg_tool_error_rate,
-                    "consecutive_error_turns": turn_governor_runtime.consecutive_error_turns,
-                }),
-            );
-            let hook_ctx = serde_json::json!({"turn": total_turns, "model": active_model});
-            let pre_results = self.invoke_hook(HookType::PreLlmCall, &hook_ctx);
-            self.inject_hook_context(&pre_results, &mut ctx);
-
-            if web_research_ctrl.force_finalize() {
-                active_tool_schemas =
-                    Arc::from(web_research_ctrl.filter_tool_schemas(tool_schemas.as_ref()));
-                if !web_finalize_hint_injected {
-                    if let Some(hint) = web_research_ctrl.finalization_system_hint() {
-                        ctx.add_message(Message::system(hint));
-                        web_finalize_hint_injected = true;
-                    }
-                }
-            }
-
-            // --- Streaming first attempt + same D-step semantic recovery as `run()` (retries use non-stream) ---
-            let api_start = Instant::now();
-            let mut inner_empty = 0u32;
-            let mut inner_thinking = 0u32;
-            let mut turn_usage_acc: Option<UsageStats> = None;
-            let mut inner_attempt: u32 = 0;
-            let mut response = loop {
-                if self.interrupt.take_interrupt_graceful().is_some() {
-                    return Ok(self.graceful_interrupt_result(
-                        &ctx,
-                        total_turns,
-                        &tool_errors,
-                        accumulated_usage.clone(),
-                        session_cost_usd,
-                        session_started_hooks_fired,
-                        persist_user_idx,
-                        api_call_count,
-                    ));
-                }
-                let r = if inner_attempt == 0 {
-                    match self
-                        .collect_stream_llm_response(
-                            &mut ctx,
-                            active_tool_schemas.as_ref(),
-                            turn_runtime_route.as_ref(),
-                            active_model,
-                            llm_governor.max_tokens,
-                            &*on_chunk,
-                            &mut api_call_count,
-                            Some(&mut stream_scrubber),
-                        )
-                        .await
-                    {
-                        Ok(StreamCollectOutcome::Complete(resp)) => resp,
-                        Ok(StreamCollectOutcome::Interrupted(partial)) => {
-                            if let Some(ref u) = partial.usage {
-                                accumulated_usage = Some(merge_usage(accumulated_usage.clone(), u));
-                                if let Some(cost) = estimate_usage_cost_usd(
-                                    u,
-                                    partial.model.as_str(),
-                                    &self.config(),
-                                ) {
-                                    session_cost_usd += cost;
-                                }
-                            }
-                            ctx.add_message(partial.message);
-                            return Ok(self.graceful_interrupt_result(
-                                &ctx,
-                                total_turns,
-                                &tool_errors,
-                                accumulated_usage.clone(),
-                                session_cost_usd,
-                                session_started_hooks_fired,
-                                persist_user_idx,
-                                api_call_count,
-                            ));
-                        }
-                        Err(e) => {
-                            let api_elapsed = api_start.elapsed().as_millis() as u64;
-                            self.update_route_learning(
-                                turn_runtime_route.as_ref(),
-                                Some(active_model),
-                                api_elapsed,
-                                false,
-                            );
-                            return Err(e);
-                        }
-                    }
-                } else {
-                    match self
-                        .call_llm_with_retry(
-                            &mut ctx,
-                            active_tool_schemas.as_ref(),
-                            turn_runtime_route.as_ref(),
-                            llm_governor.max_tokens,
-                            &mut api_call_count,
-                        )
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(AgentError::Interrupted { .. }) => {
-                            return Ok(self.graceful_interrupt_result(
-                                &ctx,
-                                total_turns,
-                                &tool_errors,
-                                accumulated_usage.clone(),
-                                session_cost_usd,
-                                session_started_hooks_fired,
-                                persist_user_idx,
-                                api_call_count,
-                            ));
-                        }
-                        Err(e) => {
-                            let api_elapsed = api_start.elapsed().as_millis() as u64;
-                            self.update_route_learning(
-                                turn_runtime_route.as_ref(),
-                                Some(active_model),
-                                api_elapsed,
-                                false,
-                            );
-                            return Err(e);
-                        }
-                    }
-                };
-                inner_attempt = inner_attempt.saturating_add(1);
-
-                if let Some(ref u) = r.usage {
-                    turn_usage_acc = Some(merge_usage(turn_usage_acc, u));
-                }
-
-                let has_tools = r
-                    .message
-                    .tool_calls
-                    .as_ref()
-                    .map_or(false, |tc| !tc.is_empty());
-                if has_tools {
-                    break r;
-                }
-                if Self::assistant_visible_text(&r.message) {
-                    break r;
-                }
-                if Self::assistant_has_reasoning(&r.message)
-                    && inner_thinking < self.config().thinking_prefill_max_retries
-                {
-                    inner_thinking += 1;
-                    self.handle_reasoning_only_prefill(
-                        &r.message,
-                        inner_thinking,
-                        self.config().thinking_prefill_max_retries,
-                    );
-                    ctx.add_message(r.message.clone());
-                    continue;
-                }
-                // Accept explicit stop/end-turn responses even when assistant text is empty.
-                // Anthropic can return this shape after trivial tool side-effects.
-                if !Self::assistant_has_reasoning(&r.message)
-                    && r.finish_reason.as_deref() == Some("stop")
-                {
-                    break r;
-                }
-                if !Self::assistant_has_reasoning(&r.message)
-                    && inner_empty < self.config().empty_content_max_retries
-                {
-                    inner_empty += 1;
-                    tracing::warn!(
-                        "empty assistant response (stream path) - retrying ({}/{})",
-                        inner_empty,
-                        self.config().empty_content_max_retries
-                    );
-                    self.emit_status(
-                        "lifecycle",
-                        &format!(
-                            "Empty assistant response - retrying ({}/{})",
-                            inner_empty,
-                            self.config().empty_content_max_retries
-                        ),
-                    );
-                    continue;
-                }
-                break r;
-            };
-            Self::upgrade_finish_reason_for_truncated_tool_args(&mut response);
-            let _api_elapsed_ms = api_start.elapsed().as_millis() as u64;
-            self.update_route_learning(
-                turn_runtime_route.as_ref(),
-                Some(response.model.as_str()),
-                _api_elapsed_ms,
-                true,
-            );
-            push_window_u64(
-                &mut governor_llm_latency_window,
-                _api_elapsed_ms,
-                governor_window_limit,
-            );
-            replay.record(
-                "llm_response",
-                serde_json::json!({
-                    "turn": total_turns,
-                    "model": response.model,
-                    "finish_reason": response.finish_reason,
-                    "api_time_ms": _api_elapsed_ms,
-                    "tool_call_count": response.message.tool_calls.as_ref().map(|v| v.len()).unwrap_or(0),
-                    "has_visible_text": Self::assistant_visible_text(&response.message),
-                    "route_learning": self.route_learning_snapshot(
-                        turn_runtime_route.as_ref(),
-                        Some(response.model.as_str()),
-                    ),
-                }),
-            );
-
-            // --- Post-LLM hook ---
-            let post_ctx = serde_json::json!({
-                "turn": total_turns,
-                "api_time_ms": _api_elapsed_ms,
-                "has_tool_calls": response.message.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty()),
-            });
-            let post_results = self.invoke_hook(HookType::PostLlmCall, &post_ctx);
-            self.inject_hook_context(&post_results, &mut ctx);
-            self.apply_hook_output_transforms(&post_results, &mut response.message.content);
-            self.apply_transform_llm_output_hooks(&mut response.message.content);
-
-            if let Some(ref usage) = turn_usage_acc {
-                accumulated_usage = Some(merge_usage(accumulated_usage, usage));
-                if let Some(cost) =
-                    estimate_usage_cost_usd(usage, response.model.as_str(), &self.config())
-                {
-                    session_cost_usd += cost;
-                }
-            }
-
-            if let Some(limit) = self.config().max_cost_usd {
-                if !cost_warned
-                    && session_cost_usd >= limit * self.config().cost_guard_degrade_at_ratio
-                {
-                    cost_warned = true;
-                    if forced_runtime_route.is_none() {
-                        if let Some(model) = self.resolve_cost_degrade_model() {
-                            forced_runtime_route = Some(self.turn_route_cost_guard(model.clone()));
-                            ctx.add_message(Message::system(format!(
-                                "Cost guard: session spend is now ${:.4}/${:.4}. Switching to cheaper model `{}`.",
-                                session_cost_usd, limit, model
-                            )));
-                        } else {
-                            ctx.add_message(Message::system(format!(
-                                "Cost guard warning: session spend is now ${:.4}/${:.4}.",
-                                session_cost_usd, limit
-                            )));
-                        }
-                    }
-                }
-                if session_cost_usd >= limit {
-                    ctx.add_message(Message::system(format!(
-                        "Cost guard tripped: session spend ${:.4} exceeded max_cost_usd ${:.4}. Stopping loop.",
-                        session_cost_usd, limit
-                    )));
-                    self.turn_end_plugin_hooks(
-                        ctx.get_messages(),
-                        false,
-                        false,
-                        total_turns,
-                        session_started_hooks_fired,
-                    );
-                    replay.record(
-                        "session_end",
-                        serde_json::json!({
-                            "reason": "cost_guard",
-                            "total_turns": total_turns,
-                            "session_cost_usd": session_cost_usd,
-                        }),
-                    );
-                    return Ok(self.seal_loop_result(
-                        &ctx,
-                        persist_user_idx,
-                        LoopExit {
-                            turn_exit_reason: "max_iterations_reached",
-                            api_calls: api_call_count,
-                            failed: false,
-                            partial: false,
-                            finished_naturally: false,
-                            interrupted: false,
-                        },
-                        total_turns,
-                        &tool_errors,
-                        accumulated_usage,
-                        session_cost_usd,
-                        session_started_hooks_fired,
-                    ));
-                }
-            }
-
-            let history_includes_tool = ctx
-                .get_messages()
-                .iter()
-                .any(|m| m.role == MessageRole::Tool);
-            let (assistant_msg, parsed_tool_calls, parsed_textual_tool_calls) =
-                Self::coerce_textual_tool_calls(response.message.clone());
-            if parsed_textual_tool_calls {
-                self.emit_status(
-                    "lifecycle",
-                    "Parsed textual tool-call markup from assistant output; executing parsed calls.",
-                );
-            }
-            ctx.add_message(assistant_msg.clone());
-            web_research_ctrl.note_assistant_draft(assistant_msg.content.as_deref());
-            if assistant_msg
-                .tool_calls
-                .as_ref()
-                .map_or(false, |v| !v.is_empty())
-                && Self::assistant_visible_text_after_think_blocks(&assistant_msg)
-            {
-                last_content_with_tools = assistant_msg
-                    .content
-                    .as_deref()
-                    .map(strip_think_blocks_for_ack)
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-            }
-            if response.finish_reason.as_deref() == Some("length")
-                && assistant_msg
-                    .tool_calls
-                    .as_ref()
-                    .map_or(false, |calls| !calls.is_empty())
-                && truncated_tool_call_retries < self.config().truncated_tool_call_max_retries
-            {
-                truncated_tool_call_retries = truncated_tool_call_retries.saturating_add(1);
-                self.emit_status(
-                    "lifecycle",
-                    &format!(
-                        "Truncated tool arguments - retrying ({}/{})",
-                        truncated_tool_call_retries,
-                        self.config().truncated_tool_call_max_retries
-                    ),
-                );
-                let _ = ctx.get_messages_mut().pop();
-                continue;
-            }
-            truncated_tool_call_retries = 0;
-
-            if let Some(ref cb) = self.callbacks.on_step_complete {
-                cb(total_turns);
-            }
-
-            let tool_calls =
-                Self::resolve_turn_tool_calls(parsed_tool_calls, &assistant_msg);
-
-            if tool_calls.is_empty() {
-                let effective_finish_reason = self.effective_finish_reason(
-                    &response,
-                    &assistant_msg,
-                    history_includes_tool,
-                    turn_runtime_route.as_ref(),
-                );
-                let finalization_signals = self.build_finalization_signals(
-                    &task_hint,
-                    history_includes_tool,
-                    &assistant_msg,
-                    effective_finish_reason.as_deref(),
-                    &tool_calls,
-                );
-                tracing::debug!(
-                    turn = total_turns,
-                    finish_reason = ?finalization_signals.finish_reason,
-                    has_tool_calls = finalization_signals.has_tool_calls,
-                    has_visible_text = finalization_signals.has_visible_text,
-                    has_visible_text_after_think = finalization_signals.has_visible_text_after_think,
-                    has_reasoning = finalization_signals.has_reasoning,
-                    continuation_required = finalization_signals.continuation_required,
-                    ack_detected = finalization_signals.ack_detected,
-                    final_gate_passed = finalization_signals.final_gate_passed(),
-                    "finalization gate evaluation (stream)"
-                );
-                replay.record(
-                    "final_gate",
-                    serde_json::json!({
-                        "turn": total_turns,
-                        "stream": true,
-                        "finish_reason": finalization_signals.finish_reason,
-                        "has_tool_calls": finalization_signals.has_tool_calls,
-                        "has_visible_text": finalization_signals.has_visible_text,
-                        "has_visible_text_after_think": finalization_signals.has_visible_text_after_think,
-                        "has_reasoning": finalization_signals.has_reasoning,
-                        "continuation_required": finalization_signals.continuation_required,
-                        "ack_detected": finalization_signals.ack_detected,
-                        "final_gate_passed": finalization_signals.final_gate_passed(),
-                    }),
-                );
-                if finalization_signals.continuation_required {
-                    if continuation_retries < self.config().continuation_max_retries {
-                        continuation_retries = continuation_retries.saturating_add(1);
-                        continuation_trigger_count = continuation_trigger_count.saturating_add(1);
-                        self.emit_status(
-                            "lifecycle",
-                            &format!(
-                                "Assistant response incomplete ({:?}) - requesting continuation ({}/{})",
-                                response.finish_reason,
-                                continuation_retries,
-                                self.config().continuation_max_retries
-                            ),
-                        );
-                        ctx.add_message(Message::user(&continuation_prompt_for_response(
-                            &response,
-                        )));
-                        continue;
-                    }
-                    premature_finalize_suspected_count =
-                        premature_finalize_suspected_count.saturating_add(1);
-                    self.emit_status(
-                        "lifecycle",
-                        &format!(
-                            "Continuation retries exhausted ({}) - finalizing with best effort output",
-                            self.config().continuation_max_retries
-                        ),
-                    );
-                } else {
-                    continuation_retries = 0;
-                }
-                if finalization_signals.ack_detected {
-                    if !tool_schemas.is_empty()
-                        && codex_ack_continuations < self.config().ack_continuation_max_retries
-                    {
-                        codex_ack_continuations = codex_ack_continuations.saturating_add(1);
-                        ack_trigger_count = ack_trigger_count.saturating_add(1);
-                        self.emit_status(
-                            "lifecycle",
-                            &format!(
-                                "Detected intermediate ack - requesting continuation ({}/{})",
-                                codex_ack_continuations,
-                                self.config().ack_continuation_max_retries
-                            ),
-                        );
-                        ctx.add_message(Message::user(CODEX_CONTINUE_USER_MESSAGE));
-                        continue;
-                    }
-                    premature_finalize_suspected_count =
-                        premature_finalize_suspected_count.saturating_add(1);
-                }
-                if !Self::assistant_visible_text_after_think_blocks(&assistant_msg) {
-                    if let Some(fallback) = last_content_with_tools.take() {
-                        if let Some(last) = ctx.get_messages_mut().last_mut() {
-                            if last.role == MessageRole::Assistant {
-                                last.content = Some(fallback);
-                            }
-                        }
-                    }
-                }
-                if finalizer_claim_requires_evidence_retry(
-                    ctx.get_messages(),
-                    assistant_msg.content.as_deref().unwrap_or_default(),
-                    finalizer_evidence_retries,
-                ) {
-                    finalizer_evidence_retries = finalizer_evidence_retries.saturating_add(1);
-                    ctx.add_message(Message::system(
-                        "[SYSTEM] Finalizer evidence contract: include explicit evidence lines and confidence calibration.\n\
-                         Required format:\n\
-                         - confidence=<high|medium|low>\n\
-                         - file=<absolute-or-repo-path>\n\
-                         - cmd=<verification command or exact probe>\n\
-                         If evidence is missing, state `objective_state=unproven` and blockers.",
-                    ));
-                    ctx.add_message(Message::user(
-                        "Re-issue the final response with explicit evidence + confidence now.",
-                    ));
-                    continue;
-                }
-                if finalizer_output_quality_requires_retry(
-                    assistant_msg.content.as_deref().unwrap_or_default(),
-                    finalizer_output_quality_retries,
-                ) {
-                    finalizer_output_quality_retries =
-                        finalizer_output_quality_retries.saturating_add(1);
-                    self.emit_status(
-                        "lifecycle",
-                        "Detected templated/duplicated output; forcing concrete unique rewrite.",
-                    );
-                    ctx.add_message(Message::system(
-                        "[SYSTEM] Output quality contract: do not use placeholders or template filler.\n\
-                         Requirements:\n\
-                         - no unresolved placeholders (`[URL](URL)`, `(URL)`, `pack of authors`, `<insert...>`)\n\
-                         - no repeated list items or duplicated paragraphs\n\
-                         - provide concrete, unique, user-relevant items only; if unknown, mark as `UNPROVEN` instead of fabricating.",
-                    ));
-                    ctx.add_message(Message::user(
-                        "Re-issue the response now with concrete unique items and zero placeholders.",
-                    ));
-                    continue;
-                }
-                if finalizer_action_execution_requires_retry(
-                    ctx.get_messages(),
-                    assistant_msg.content.as_deref().unwrap_or_default(),
-                    finalizer_action_execution_retries,
-                ) {
-                    finalizer_action_execution_retries =
-                        finalizer_action_execution_retries.saturating_add(1);
-                    self.emit_status(
-                        "lifecycle",
-                        "Detected intent narration without execution evidence; forcing action run.",
-                    );
-                    ctx.add_message(Message::system(
-                        "[SYSTEM] Execution contract: this request requires concrete execution now.\n\
-                         Requirements:\n\
-                         - run the relevant tool calls in this turn (do not only describe intent)\n\
-                         - if blocked, output `BLOCKED:` with exact command/tool error and next probe\n\
-                         - include at least one evidence line (`cmd=...` or `file=...`) in the final response.",
-                    ));
-                    ctx.add_message(Message::user(
-                        "Execute now. Do not narrate intent; return concrete evidence or explicit BLOCKED state.",
-                    ));
-                    continue;
-                }
-                finalizer_evidence_retries = 0;
-                finalizer_output_quality_retries = 0;
-                finalizer_action_execution_retries = 0;
-                let (objective_guard_active, requires_analytics, deep_audit_required) =
-                    objective_guard_policy(ctx.get_messages());
-                if objective_guard_active {
-                    let assistant_text = assistant_msg.content.as_deref().unwrap_or_default();
-                    let max_guard_retries = if deep_audit_required {
-                        OBJECTIVE_DEEP_AUDIT_MAX_RETRIES
-                    } else {
-                        OBJECTIVE_GUARD_MAX_RETRIES
-                    };
-                    if !objective_guard_satisfied(
-                        assistant_text,
-                        requires_analytics,
-                        deep_audit_required,
-                    ) && objective_guard_retries < max_guard_retries
-                    {
-                        objective_guard_retries = objective_guard_retries.saturating_add(1);
-                        ctx.add_message(Message::system(objective_guard_retry_prompt(
-                            requires_analytics,
-                            deep_audit_required,
-                        )));
-                        ctx.add_message(Message::user(
-                            "Re-issue the final response with required verified sections now.",
-                        ));
-                        continue;
-                    }
-                }
-                if let Err(err) = self.append_objective_runtime_ledger(
-                    ctx.get_messages(),
-                    assistant_msg.content.as_deref().unwrap_or_default(),
-                    total_turns,
-                ) {
-                    self.emit_status(
-                        "lifecycle",
-                        &format!("Objective runtime ledger append skipped: {}", err),
-                    );
-                }
-                let (u, a) = extract_last_user_assistant(ctx.get_messages());
-                self.memory_sync(&u, &a, session_id);
-                self.spawn_background_review(total_turns, &ctx, review_memory_at_end);
-                self.turn_end_plugin_hooks(
-                    ctx.get_messages(),
-                    true,
-                    false,
-                    total_turns,
-                    session_started_hooks_fired,
-                );
-                replay.record(
-                    "session_end",
-                    serde_json::json!({
-                        "reason": "finished_naturally",
-                        "total_turns": total_turns,
-                        "session_cost_usd": session_cost_usd,
-                        "continuation_trigger_count": continuation_trigger_count,
-                        "ack_trigger_count": ack_trigger_count,
-                        "premature_finalize_suspected_count": premature_finalize_suspected_count,
-                    }),
-                );
-                if stream_mute.swap(false, Ordering::AcqRel) {
-                    on_chunk(StreamChunk {
-                        delta: Some(hermes_core::StreamDelta {
-                            content: None,
-                            tool_calls: None,
-                            extra: Some(serde_json::json!({
-                                "control": "mute_post_response",
-                                "enabled": false
-                            })),
-                        }),
-                        finish_reason: None,
-                        usage: None,
-                    });
-                }
-                return Ok(self.seal_loop_result(
-                    &ctx,
-                    persist_user_idx,
-                    LoopExit {
-                        turn_exit_reason: "text_response",
-                        api_calls: api_call_count,
-                        failed: false,
-                        partial: false,
-                        finished_naturally: true,
-                        interrupted: false,
-                    },
-                    total_turns,
-                    &tool_errors,
-                    accumulated_usage,
-                    session_cost_usd,
-                    session_started_hooks_fired,
-                ));
-            }
-
-            codex_ack_continuations = 0;
-
-            let mut tool_calls = Self::deduplicate_tool_calls(&tool_calls);
-            for tc in &mut tool_calls {
-                self.repair_tool_call(tc);
-                self.hydrate_session_search_args(tc);
-            }
-            if let Some(note) =
-                apply_repo_review_tool_profile_narrowing(&mut tool_calls, ctx.get_messages())
-            {
-                self.emit_status("lifecycle", "Applied repo-review tool profile narrowing.");
-                ctx.add_message(Message::system(note));
-            }
-            if let Some(note) = apply_repo_review_discovery_budget_policy(
-                &mut tool_calls,
-                ctx.get_messages(),
-                &mut repo_review_budget_state,
-            ) {
-                self.emit_status("lifecycle", "Applied repo-review discovery budget policy.");
-                ctx.add_message(Message::system(note));
-            }
-            if tool_calls.is_empty() {
-                ctx.add_message(Message::system(
-                    "[SYSTEM] Tool profile/budget policy filtered this turn's calls. Propose refined, scoped code-inspection calls next.",
-                ));
-                continue;
-            }
-            let all_housekeeping = tool_calls.iter().all(|tc| {
-                matches!(
-                    tc.function.name.as_str(),
-                    "memory" | "todo" | "skill_manage" | "session_search"
-                )
-            });
-            let should_mute_post =
-                all_housekeeping && Self::assistant_visible_text_after_think_blocks(&assistant_msg);
-            let was_muted = stream_mute.swap(should_mute_post, Ordering::AcqRel);
-            if was_muted != should_mute_post {
-                on_chunk(StreamChunk {
-                    delta: Some(hermes_core::StreamDelta {
-                        content: None,
-                        tool_calls: None,
-                        extra: Some(serde_json::json!({
-                            "control": "mute_post_response",
-                            "enabled": should_mute_post
-                        })),
-                    }),
-                    finish_reason: None,
-                    usage: None,
-                });
-            }
-
-            let invalid_tool_calls: Vec<String> = tool_calls
-                .iter()
-                .filter(|tc| self.tool_registry.get(&tc.function.name).is_none())
-                .map(|tc| tc.function.name.clone())
-                .collect();
-            if !invalid_tool_calls.is_empty() {
-                invalid_tool_retries = invalid_tool_retries.saturating_add(1);
-                self.emit_status(
-                    "lifecycle",
-                    &format!(
-                        "Invalid tool call detected - retrying ({}/{})",
-                        invalid_tool_retries,
-                        self.config().invalid_tool_call_max_retries
-                    ),
-                );
-                let available = self.tool_registry.names().join(", ");
-                if invalid_tool_retries >= self.config().invalid_tool_call_max_retries {
-                    self.emit_status(
-                        "lifecycle",
-                        &format!(
-                            "Max invalid tool retries reached ({})",
-                            self.config().invalid_tool_call_max_retries
-                        ),
-                    );
-                    ctx.add_message(Message::system(format!(
-                        "Max invalid tool retries reached ({}). Last invalid tool: {}",
-                        self.config().invalid_tool_call_max_retries,
-                        invalid_tool_calls[0]
-                    )));
-                    self.turn_end_plugin_hooks(
-                        ctx.get_messages(),
-                        false,
-                        false,
-                        total_turns,
-                        session_started_hooks_fired,
-                    );
-                    return Ok(self.seal_loop_result(
-                        &ctx,
-                        persist_user_idx,
-                        LoopExit {
-                            turn_exit_reason: "invalid_tool_calls",
-                            api_calls: api_call_count,
-                            failed: false,
-                            partial: true,
-                            finished_naturally: false,
-                            interrupted: false,
-                        },
-                        total_turns,
-                        &tool_errors,
-                        accumulated_usage,
-                        session_cost_usd,
-                        session_started_hooks_fired,
-                    ));
-                }
-                for tc in &tool_calls {
-                    let content = if self.tool_registry.get(&tc.function.name).is_none() {
-                        format!(
-                            "Tool '{}' does not exist. Available tools: {}",
-                            tc.function.name, available
-                        )
-                    } else {
-                        "Skipped: another tool call in this turn used an invalid name. Please retry this tool call.".to_string()
-                    };
-                    ctx.add_message(Message::tool_result(tc.id.clone(), content));
-                }
-                continue;
-            }
-            invalid_tool_retries = 0;
-
-            let mut invalid_json_args: Vec<(String, String)> = Vec::new();
-            for tc in &mut tool_calls {
-                if let Err(e) = Self::normalize_tool_call_arguments(tc) {
-                    invalid_json_args.push((tc.function.name.clone(), e));
-                }
-            }
-            if !invalid_json_args.is_empty() {
-                invalid_json_retries = invalid_json_retries.saturating_add(1);
-                if invalid_json_retries < self.config().invalid_tool_json_max_retries {
-                    self.emit_status(
-                        "lifecycle",
-                        &format!(
-                            "Invalid tool JSON arguments - retrying ({}/{})",
-                            invalid_json_retries,
-                            self.config().invalid_tool_json_max_retries
-                        ),
-                    );
-                    let _ = ctx.get_messages_mut().pop();
-                    continue;
-                }
-                self.emit_status(
-                    "lifecycle",
-                    &format!(
-                        "Max invalid JSON retries reached ({}); returning tool errors",
-                        self.config().invalid_tool_json_max_retries
-                    ),
-                );
-                invalid_json_retries = 0;
-                for tc in &tool_calls {
-                    let content = if let Some((_, err)) = invalid_json_args
-                        .iter()
-                        .find(|(name, _)| name == &tc.function.name)
-                    {
-                        format!(
-                            "Error: Invalid JSON arguments. {}. For tools with no required parameters, use an empty object: {{}}. Please retry with valid JSON.",
-                            err
-                        )
-                    } else {
-                        "Skipped: other tool call in this response had invalid JSON.".to_string()
-                    };
-                    ctx.add_message(Message::tool_result(tc.id.clone(), content));
-                }
-                continue;
-            }
-            invalid_json_retries = 0;
-            for tc in &tool_calls {
-                if let Ok(mut c) = self.evolution_counters.lock() {
-                    match tc.function.name.as_str() {
-                        "memory" => c.turns_since_memory = 0,
-                        "skill_manage" => c.iters_since_skill = 0,
-                        _ => {}
-                    }
-                }
-            }
-            self.cap_delegates(&mut tool_calls);
-            if WebResearchController::tool_calls_include_web(&tool_calls) {
-                web_research_ctrl
-                    .ensure_plan_on_first_web(
-                        web_research_auxiliary.as_ref(),
-                        &task_hint,
-                        &tool_calls,
-                    )
-                    .await;
-            }
-            let (deferred_web_results, web_user_notices) = web_research_ctrl
-                .gate_web_batch(
-                    web_research_auxiliary.as_ref(),
-                    ctx.get_messages(),
-                    &mut tool_calls,
-                    total_turns,
-                )
-                .await;
-            for notice in web_user_notices {
-                self.emit_status("tool_failure", &notice);
-            }
-            if web_research_ctrl.force_finalize() || web_research_ctrl.planner_invoked() {
-                active_tool_schemas =
-                    Arc::from(web_research_ctrl.filter_tool_schemas(tool_schemas.as_ref()));
-            }
-            let contextlattice_connect_intent =
-                detect_contextlattice_connect_intent(ctx.get_messages());
-            if tool_calls.is_empty() {
-                for (_, result) in deferred_web_results {
-                    ctx.add_message(Message::tool_result(&result.tool_call_id, &result.content));
-                }
-                continue;
-            }
-
-            // Pre-tool hooks + callbacks
-            let tool_names_for_log: Vec<&str> = tool_calls
-                .iter()
-                .map(|tc| tc.function.name.as_str())
-                .collect();
-            tracing::debug!(
-                turn = total_turns,
-                tool_count = tool_calls.len(),
-                tools = ?tool_names_for_log,
-                streaming = true,
-                "agent tool batch start"
-            );
-            for tc in &tool_calls {
-                let tc_ctx = serde_json::json!({"tool": &tc.function.name, "turn": total_turns});
-                self.invoke_hook(HookType::PreToolCall, &tc_ctx);
-                if let Some(ref cb) = self.callbacks.on_tool_start {
-                    let args: Value =
-                        serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
-                    cb(&tc.function.name, &args);
-                }
-            }
-
-            if self.interrupt.take_interrupt_graceful().is_some() {
-                return Ok(self.graceful_interrupt_result(
-                    &ctx,
-                    total_turns,
-                    &tool_errors,
-                    accumulated_usage.clone(),
-                    session_cost_usd,
-                    session_started_hooks_fired,
-                    persist_user_idx,
-                    api_call_count,
-                ));
-            }
-
-            for tc in &tool_calls {
-                let args: Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
-                match tool_guardrails.before_call(&tc.function.name, &args) {
-                    crate::tool_guardrails::GuardrailDecision::Halt(reason) => {
-                        ctx.add_message(Message::assistant(format!(
-                            "[Tool guardrail halt] {reason}"
-                        )));
-                        return Ok(self.seal_loop_result(
-                            &ctx,
-                            persist_user_idx,
-                            LoopExit {
-                                turn_exit_reason: "guardrail_halt",
-                                api_calls: api_call_count,
-                                failed: false,
-                                partial: false,
-                                finished_naturally: true,
-                                interrupted: false,
-                            },
-                            total_turns,
-                            &tool_errors,
-                            accumulated_usage,
-                            session_cost_usd,
-                            session_started_hooks_fired,
-                        ));
-                    }
-                    crate::tool_guardrails::GuardrailDecision::Block(reason) => {
-                        tracing::warn!(tool = %tc.function.name, %reason, "tool guardrail block");
-                    }
-                    crate::tool_guardrails::GuardrailDecision::Allow => {}
-                }
-            }
-            let tool_start = Instant::now();
-            let tool_progress_names: Vec<String> = tool_calls
-                .iter()
-                .map(|tc| tc.function.name.clone())
-                .collect();
-            let _tool_progress = ToolProgressWatchdog::start(
-                self.callbacks.status_callback.clone(),
-                total_turns,
-                tool_progress_names,
-            );
-            let mut results = self
-                .execute_tool_calls(
-                    &tool_calls,
-                    total_turns,
-                    governor_for_turn(
-                        &self.config(),
-                        &ctx,
-                        tool_calls.len(),
-                        Some(&turn_governor_runtime),
-                    )
-                    .tool_concurrency,
-                    contextlattice_connect_intent,
-                    self.config()
-                        .max_cost_usd
-                        .map(|limit| (limit - session_cost_usd).max(0.0)),
-                    &mut tool_errors,
-                    Some(&mut checkpoint_mgr),
-                    latest_user_content(ctx.get_messages()).map(str::to_string),
-                )
-                .await;
-            if !deferred_web_results.is_empty() {
-                results.extend(deferred_web_results.into_iter().map(|(_, result)| result));
-            }
-            let tool_elapsed = tool_start.elapsed().as_millis() as u64;
-            _total_tool_time_ms += tool_elapsed;
-            let turn_tool_error_count = results.iter().filter(|r| r.is_error).count() as u32;
-            if web_research_ctrl.record_results(&tool_calls, &results) {
-                active_tool_schemas =
-                    Arc::from(web_research_ctrl.filter_tool_schemas(tool_schemas.as_ref()));
-            }
-            tracing::info!(
-                turn = total_turns,
-                tool_count = tool_calls.len(),
-                result_count = results.len(),
-                errors = turn_tool_error_count,
-                elapsed_ms = tool_elapsed,
-                streaming = true,
-                "agent tool batch finished"
-            );
-            self.emit_tool_failure_notices(&tool_calls, &results);
-            let turn_tool_error_rate = if results.is_empty() {
-                0.0
-            } else {
-                turn_tool_error_count as f64 / results.len() as f64
-            };
-            push_window_f64(
-                &mut governor_tool_error_window,
-                turn_tool_error_rate,
-                governor_window_limit,
-            );
-            if turn_tool_error_count > 0 {
-                governor_consecutive_error_turns =
-                    governor_consecutive_error_turns.saturating_add(1);
-            } else {
-                governor_consecutive_error_turns = 0;
-            }
-            replay.record(
-                "tool_batch",
-                serde_json::json!({
-                    "turn": total_turns,
-                    "tool_count": tool_calls.len(),
-                    "tool_concurrency": governor_for_turn(
-                        &self.config(),
-                        &ctx,
-                        tool_calls.len(),
-                        Some(&turn_governor_runtime),
-                    )
-                    .tool_concurrency,
-                    "errors": turn_tool_error_count,
-                    "error_rate": turn_tool_error_rate,
-                }),
-            );
-            update_repo_review_budget_state_from_results(
-                &mut repo_review_budget_state,
-                ctx.get_messages(),
-                &results,
-            );
-            if self.config().rollback_on_tool_error_threshold > 0
-                && turn_tool_error_count >= self.config().rollback_on_tool_error_threshold
-            {
-                if let Some(snapshot) = last_checkpoint_messages.clone() {
-                    *ctx.get_messages_mut() = snapshot;
-                    let _ = checkpoint_mgr.restore_latest();
-                    ctx.add_message(Message::system(format!(
-                        "Auto-rollback: {} tool call(s) failed in one turn. Restored latest checkpoint and continuing.",
-                        turn_tool_error_count
-                    )));
-                    continue;
-                }
-            }
-
-            // Post-tool hooks + callbacks
-            for res in &results {
-                let Some(tc) = tool_calls.iter().find(|tc| tc.id == res.tool_call_id) else {
-                    continue;
-                };
-                let tc_ctx = serde_json::json!({"tool": &tc.function.name, "is_error": res.is_error, "turn": total_turns});
-                self.invoke_hook(HookType::PostToolCall, &tc_ctx);
-                if let Some(ref cb) = self.callbacks.on_tool_complete {
-                    cb(&tc.function.name, &res.content);
-                }
-            }
-
-            for (tc, res) in tool_calls.iter().zip(results.iter()) {
-                let args: Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
-                tool_guardrails.after_call(&tc.function.name, res.is_error, &res.content);
-                file_mutation.record_tool_result(
-                    &tc.function.name,
-                    &args,
-                    &res.content,
-                    res.is_error,
-                );
-            }
-
-            self.notify_memory_writes(&tool_calls, &results);
-            self.notify_delegations(&tool_calls, &results);
-
-            budget::enforce_budget(&mut results, &self.config().budget);
-
-            if !results.is_empty() {
-                let w = budget_pressure_text(
-                    total_turns,
-                    self.config().max_turns,
-                    self.config().budget_caution_threshold,
-                    self.config().budget_warning_threshold,
-                    self.config().budget_pressure_enabled,
-                );
-                if let Some(ref text) = w {
-                    tracing::info!("{}", text);
-                }
-                inject_budget_pressure_into_last_tool_result(&mut results, w.as_deref());
-            }
-            let lsp_note = self.lsp_context_note(&tool_calls, &results);
-
-            let execute_code_refund = !tool_calls.is_empty()
-                && tool_calls
-                    .iter()
-                    .all(|tc| tc.function.name == "execute_code")
-                && !results.iter().any(|r| r.is_error);
-
-            let num_tool_msgs = results.len();
-            for result in results {
-                replay.record(
-                    "tool_result",
-                    serde_json::json!({
-                        "turn": total_turns,
-                        "tool_call_id": result.tool_call_id,
-                        "is_error": result.is_error,
-                        "content_preview": result.content.chars().take(240).collect::<String>(),
-                    }),
-                );
-                ctx.add_message(Message::tool_result(&result.tool_call_id, &result.content));
-            }
-            self.pending_steer
-                .apply_to_tool_results(ctx.get_messages_mut(), num_tool_msgs);
-            if let Some(note) = lsp_note {
-                ctx.add_message(Message::system(note));
-            }
-            if should_trip_tool_loop_guard(
-                governor_consecutive_error_turns,
-                tool_calls.len(),
-                turn_tool_error_count,
-            ) {
-                let guard_message = format!(
-                    "Tool-loop guard tripped after {} consecutive error turn(s); latest turn failed {}/{} tool call(s).",
-                    governor_consecutive_error_turns,
-                    turn_tool_error_count,
-                    tool_calls.len()
-                );
-                self.emit_status("lifecycle", &guard_message);
-                replay.record(
-                    "tool_loop_guard",
-                    serde_json::json!({
-                        "turn": total_turns,
-                        "consecutive_error_turns": governor_consecutive_error_turns,
-                        "failed_calls": turn_tool_error_count,
-                        "total_calls": tool_calls.len(),
-                    }),
-                );
-                if let Some(summary) = self
-                    .handle_tool_loop_guard_summary(
-                        &mut ctx,
-                        governor_consecutive_error_turns,
-                        turn_tool_error_count,
-                        tool_calls.len(),
-                    )
-                    .await?
-                {
-                    ctx.add_message(summary);
-                }
-                if stream_mute.swap(false, Ordering::AcqRel) {
-                    on_chunk(StreamChunk {
-                        delta: Some(hermes_core::StreamDelta {
-                            content: None,
-                            tool_calls: None,
-                            extra: Some(serde_json::json!({
-                                "control": "mute_post_response",
-                                "enabled": false
-                            })),
-                        }),
-                        finish_reason: None,
-                        usage: None,
-                    });
-                }
-                self.turn_end_plugin_hooks(
-                    ctx.get_messages(),
-                    false,
-                    false,
-                    total_turns,
-                    session_started_hooks_fired,
-                );
-                return Ok(self.seal_loop_result(
-                    &ctx,
-                    persist_user_idx,
-                    LoopExit {
-                        turn_exit_reason: "tool_loop_guard",
-                        api_calls: api_call_count,
-                        failed: false,
-                        partial: false,
-                        finished_naturally: false,
-                        interrupted: false,
-                    },
-                    total_turns,
-                    &tool_errors,
-                    accumulated_usage,
-                    session_cost_usd,
-                    session_started_hooks_fired,
-                ));
-            }
-            if execute_code_refund {
-                iteration_budget.refund(1);
-                total_turns = total_turns.saturating_sub(1);
-            }
-            stream_needs_break.store(true, Ordering::Release);
-            on_chunk(StreamChunk {
-                delta: Some(hermes_core::StreamDelta {
-                    content: None,
-                    tool_calls: None,
-                    extra: Some(serde_json::json!({"control": "stream_break"})),
-                }),
-                finish_reason: None,
-                usage: None,
-            });
-            self.emit_background_review_metrics(total_turns, &ctx);
-
-            let total_chars = ctx.total_chars();
-            let threshold = ((ctx.max_context_chars().max(1) as f64) * 0.8) as usize;
-            if threshold > 0 {
-                let progress = total_chars as f64 / threshold as f64;
-                let tier = if progress >= 0.95 {
-                    0.95
-                } else if progress >= 0.85 {
-                    0.85
-                } else {
-                    0.0
-                };
-                if Self::should_emit_context_pressure_warning(
-                    progress,
-                    tier,
-                    &mut context_pressure_warned_at,
-                    &mut context_pressure_last_warn_at,
-                    &mut context_pressure_last_warn_percent,
-                ) {
-                    tracing::warn!(
-                        "Context pressure {:.0}% of compaction threshold ({} / {})",
-                        progress * 100.0,
-                        total_chars,
-                        threshold
-                    );
-                }
-            }
-
-            self.auto_compress_if_over_threshold(&mut ctx).await;
-        }
+        strip_budget_warnings_from_messages(messages);
+        self.preprocess_user_message_context_references(messages)
+            .await;
+        self.restore_primary_runtime_at_turn_start();
     }
 
     // -----------------------------------------------------------------------
@@ -9334,7 +6419,7 @@ impl AgentLoop {
     // -----------------------------------------------------------------------
 
     /// Remove duplicate tool calls that share the same function name and arguments.
-    fn deduplicate_tool_calls(calls: &[ToolCall]) -> Vec<ToolCall> {
+    pub(crate) fn deduplicate_tool_calls(calls: &[ToolCall]) -> Vec<ToolCall> {
         let mut seen = HashSet::new();
         let mut deduped = Vec::new();
         for tc in calls {
@@ -9350,7 +6435,7 @@ impl AgentLoop {
 
     /// Try to repair an unknown tool name via case-insensitive or substring matching.
     /// Returns `true` if the tool call was repaired.
-    fn repair_tool_call(&self, tc: &mut ToolCall) -> bool {
+    pub(crate) fn repair_tool_call(&self, tc: &mut ToolCall) -> bool {
         if self.tool_registry.get(&tc.function.name).is_some() {
             return false;
         }
@@ -9379,7 +6464,7 @@ impl AgentLoop {
     }
 
     /// Inject current session id into `session_search` calls when absent.
-    fn hydrate_session_search_args(&self, tc: &mut ToolCall) {
+    pub(crate) fn hydrate_session_search_args(&self, tc: &mut ToolCall) {
         if tc.function.name != "session_search" {
             return;
         }
@@ -9441,7 +6526,73 @@ impl AgentLoop {
         snap
     }
 
-    fn turn_route_cost_guard(&self, model: String) -> TurnRuntimeRoute {
+    /// Python `_has_stream_consumers()` for this turn.
+    pub(crate) fn has_stream_consumers(&self, turn_stream_callback: bool) -> bool {
+        turn_stream_callback || self.callbacks.on_stream_delta.is_some()
+    }
+
+    fn route_blocks_llm_streaming(route: &TurnRuntimeRoute) -> bool {
+        is_copilot_acp_transport(
+            route.provider.as_deref().unwrap_or(""),
+            route.base_url.as_deref().unwrap_or(""),
+        )
+    }
+
+    pub(crate) fn provider_blocks_llm_streaming(&self) -> bool {
+        let rt = self.primary_runtime_snapshot();
+        let cfg = self.config();
+        let prov = rt
+            .provider
+            .as_deref()
+            .or(cfg.provider.as_deref())
+            .unwrap_or("");
+        let url = rt.base_url.as_deref().unwrap_or("");
+        is_copilot_acp_transport(prov, url)
+    }
+
+    /// Python `_use_streaming` gate for the first LLM attempt in a turn (`inner_attempt == 0`).
+    pub(crate) fn use_streaming_llm_transport(
+        &self,
+        turn_stream_callback: bool,
+        inner_attempt: u32,
+        route: Option<&TurnRuntimeRoute>,
+    ) -> bool {
+        if inner_attempt > 0 {
+            return false;
+        }
+        if self.disable_streaming.load(Ordering::Acquire) {
+            return false;
+        }
+        if route.is_some_and(Self::route_blocks_llm_streaming) || self.provider_blocks_llm_streaming()
+        {
+            return false;
+        }
+        if !self.has_stream_consumers(turn_stream_callback) {
+            return !self.llm_provider.prefers_non_streaming_transport();
+        }
+        true
+    }
+
+    pub(crate) fn session_disable_streaming(&self) {
+        self.disable_streaming.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn note_stream_not_supported(&self, err: &AgentError) {
+        if !is_stream_not_supported_error(err) {
+            return;
+        }
+        self.session_disable_streaming();
+        if !self.config().quiet_mode {
+            self.emit_status(
+                "lifecycle",
+                "Streaming is not supported for this model/provider. Switching to non-streaming. \
+                 Set display.streaming: false in config.yaml to skip this probe.",
+            );
+        }
+        tracing::info!(error = %err, "streaming disabled for remainder of agent session");
+    }
+
+    pub(crate) fn turn_route_cost_guard(&self, model: String) -> TurnRuntimeRoute {
         let pri = self.primary_runtime_snapshot();
         let mut sig = pri.to_signature();
         sig.model = model.clone();
@@ -9461,7 +6612,7 @@ impl AgentLoop {
         }
     }
 
-    fn turn_route_reliability_guard(&self, model: String) -> TurnRuntimeRoute {
+    pub(crate) fn turn_route_reliability_guard(&self, model: String) -> TurnRuntimeRoute {
         let pri = self.primary_runtime_snapshot();
         let (provider, _) = self.extract_provider_and_model(model.as_str());
         let mut sig = pri.to_signature();
@@ -9642,7 +6793,7 @@ impl AgentLoop {
             - failure_penalty
     }
 
-    fn update_route_learning(
+    pub(crate) fn update_route_learning(
         &self,
         route: Option<&TurnRuntimeRoute>,
         response_model: Option<&str>,
@@ -9682,7 +6833,7 @@ impl AgentLoop {
         }
     }
 
-    fn route_learning_snapshot(
+    pub(crate) fn route_learning_snapshot(
         &self,
         route: Option<&TurnRuntimeRoute>,
         response_model: Option<&str>,
@@ -9702,7 +6853,7 @@ impl AgentLoop {
         })
     }
 
-    fn resolve_smart_runtime_route(&self, messages: &[Message]) -> Option<TurnRuntimeRoute> {
+    pub(crate) fn resolve_smart_runtime_route(&self, messages: &[Message]) -> Option<TurnRuntimeRoute> {
         let text = self.latest_user_text(messages)?;
         let primary = self.primary_runtime_snapshot();
         let outcome = resolve_turn_route(
@@ -9771,7 +6922,7 @@ impl AgentLoop {
 
     /// Resolve the model used for automatic degradation when nearing
     /// `max_cost_usd`.
-    fn resolve_cost_degrade_model(&self) -> Option<String> {
+    pub(crate) fn resolve_cost_degrade_model(&self) -> Option<String> {
         if let Some(ref m) = self.config().cost_guard_degrade_model {
             if !m.trim().is_empty() {
                 return Some(m.trim().to_string());
@@ -9788,7 +6939,7 @@ impl AgentLoop {
         None
     }
 
-    fn resolve_reliability_degrade_model(
+    pub(crate) fn resolve_reliability_degrade_model(
         &self,
         active_model: &str,
         route: Option<&TurnRuntimeRoute>,
@@ -9852,7 +7003,7 @@ impl AgentLoop {
     }
 
     /// Ask the LLM for a final summary when the turn budget is exhausted.
-    async fn handle_max_iterations(
+    pub(crate) async fn handle_max_iterations(
         &self,
         ctx: &mut ContextManager,
     ) -> Result<Option<Message>, AgentError> {
@@ -9885,7 +7036,7 @@ impl AgentLoop {
         Ok(Some(response.message))
     }
 
-    async fn handle_tool_loop_guard_summary(
+    pub(crate) async fn handle_tool_loop_guard_summary(
         &self,
         ctx: &mut ContextManager,
         consecutive_error_turns: u32,
@@ -9923,7 +7074,7 @@ impl AgentLoop {
     }
 
     /// Execute a batch of tool calls in parallel using a JoinSet.
-    async fn execute_tool_calls(
+    pub(crate) async fn execute_tool_calls(
         &self,
         tool_calls: &[ToolCall],
         turn: u32,
@@ -9935,12 +7086,7 @@ impl AgentLoop {
         current_user_task: Option<String>,
     ) -> Vec<ToolResult> {
         let mut join_set = JoinSet::new();
-        let batch_has_browser = tool_calls
-            .iter()
-            .any(|tc| hermes_tools::is_browser_tool(&tc.function.name));
-        let tool_concurrency = if batch_has_browser {
-            1
-        } else if hermes_tools::should_parallelize_tool_batch(tool_calls) {
+        let tool_concurrency = if hermes_tools::should_parallelize_tool_batch(tool_calls) {
             tool_concurrency.max(1)
         } else {
             1
@@ -10344,7 +7490,7 @@ impl AgentLoop {
     }
 
     /// Cap concurrent delegate_task calls based on config.
-    fn cap_delegates(&self, tool_calls: &mut Vec<ToolCall>) {
+    pub(crate) fn cap_delegates(&self, tool_calls: &mut Vec<ToolCall>) {
         if delegation_spawning_paused() {
             let delegate_count = tool_calls
                 .iter()
@@ -10385,7 +7531,7 @@ impl AgentLoop {
         }
     }
 
-    fn emit_background_review_metrics(&self, turn: u32, ctx: &ContextManager) {
+    pub(crate) fn emit_background_review_metrics(&self, turn: u32, ctx: &ContextManager) {
         if !self.config().background_review_metrics_enabled {
             return;
         }
@@ -10405,7 +7551,7 @@ impl AgentLoop {
     }
 
     /// Metrics (always) + optional Python-style memory/skill review LLM pass on session end.
-    fn spawn_background_review(&self, turn: u32, ctx: &ContextManager, review_memory_at_end: bool) {
+    pub(crate) fn spawn_background_review(&self, turn: u32, ctx: &ContextManager, review_memory_at_end: bool) {
         self.emit_background_review_metrics(turn, ctx);
         if !self.config().background_review_enabled {
             return;
@@ -10488,7 +7634,7 @@ impl AgentLoop {
     }
 
     /// Recover todo-state hints from historical messages at loop start.
-    fn hydrate_todo_store(&self, ctx: &ContextManager) {
+    pub(crate) fn hydrate_todo_store(&self, ctx: &ContextManager) {
         let todo_markers = ctx
             .get_messages()
             .iter()
@@ -10502,7 +7648,7 @@ impl AgentLoop {
 }
 
 /// Extract the last user and assistant content from a message slice for memory sync.
-fn extract_last_user_assistant(messages: &[Message]) -> (String, String) {
+pub(crate) fn extract_last_user_assistant(messages: &[Message]) -> (String, String) {
     let user = messages
         .iter()
         .rev()
@@ -10518,7 +7664,7 @@ fn extract_last_user_assistant(messages: &[Message]) -> (String, String) {
     (user, assistant)
 }
 
-fn latest_user_content(messages: &[Message]) -> Option<&str> {
+pub(crate) fn latest_user_content(messages: &[Message]) -> Option<&str> {
     messages
         .iter()
         .rev()
@@ -10539,14 +7685,7 @@ fn inject_runtime_tool_params(
         return;
     };
 
-    if tool_name.starts_with("browser_") {
-        if let Some(task_id) = task_id.filter(|v| !v.trim().is_empty()) {
-            obj.insert(
-                "task_id".to_string(),
-                Value::String(task_id.to_string()),
-            );
-        }
-    } else if let Some(task_id) = task_id.filter(|v| !v.trim().is_empty()) {
+    if let Some(task_id) = task_id.filter(|v| !v.trim().is_empty()) {
         obj.entry("task_id".to_string())
             .or_insert_with(|| Value::String(task_id.to_string()));
     }
@@ -10664,7 +7803,7 @@ fn repo_review_tool_profile_mode() -> RepoReviewToolProfileMode {
         .unwrap_or(RepoReviewToolProfileMode::Balanced)
 }
 
-fn exploratory_problem_solving_system_hint(messages: &[Message]) -> Option<String> {
+pub(crate) fn exploratory_problem_solving_system_hint(messages: &[Message]) -> Option<String> {
     if !detect_repo_review_intent(messages) {
         return None;
     }
@@ -10728,7 +7867,7 @@ fn detect_deep_repo_audit_intent(messages: &[Message]) -> bool {
     .any(|needle| combined.contains(needle))
 }
 
-fn objective_guard_policy(messages: &[Message]) -> (bool, bool, bool) {
+pub(crate) fn objective_guard_policy(messages: &[Message]) -> (bool, bool, bool) {
     let user = latest_user_content(messages)
         .unwrap_or_default()
         .to_ascii_lowercase();
@@ -10763,7 +7902,7 @@ fn objective_guard_policy(messages: &[Message]) -> (bool, bool, bool) {
     (guard_active, trading_like, deep_audit_required)
 }
 
-fn objective_mode_system_hint(messages: &[Message]) -> Option<String> {
+pub(crate) fn objective_mode_system_hint(messages: &[Message]) -> Option<String> {
     let (guard_active, requires_analytics, deep_audit_required) = objective_guard_policy(messages);
     if !guard_active {
         return None;
@@ -10937,7 +8076,7 @@ fn objective_deep_audit_satisfied(lower: &str) -> bool {
     has_unknowns_field && has_blockers_field
 }
 
-fn objective_guard_satisfied(
+pub(crate) fn objective_guard_satisfied(
     text: &str,
     requires_analytics: bool,
     deep_audit_required: bool,
@@ -10967,7 +8106,7 @@ fn objective_guard_satisfied(
     true
 }
 
-fn objective_guard_retry_prompt(requires_analytics: bool, deep_audit_required: bool) -> String {
+pub(crate) fn objective_guard_retry_prompt(requires_analytics: bool, deep_audit_required: bool) -> String {
     let analytics_line = if requires_analytics {
         "Also include copied analytics values and `objective_state=<advancing|flat|regressing|unproven>`."
     } else {
@@ -11096,7 +8235,7 @@ fn discovery_signature(tool_calls: &[ToolCall]) -> Option<String> {
     )
 }
 
-fn apply_repo_review_tool_profile_narrowing(
+pub(crate) fn apply_repo_review_tool_profile_narrowing(
     tool_calls: &mut Vec<ToolCall>,
     messages: &[Message],
 ) -> Option<String> {
@@ -11228,7 +8367,7 @@ fn repo_review_min_signal_score() -> f64 {
         .clamp(0.0, 1.0)
 }
 
-fn apply_repo_review_discovery_budget_policy(
+pub(crate) fn apply_repo_review_discovery_budget_policy(
     tool_calls: &mut Vec<ToolCall>,
     messages: &[Message],
     state: &mut RepoReviewBudgetState,
@@ -11351,7 +8490,7 @@ fn tool_result_signal_score(content: &str, is_error: bool) -> f64 {
     score.clamp(0.0, 1.0)
 }
 
-fn update_repo_review_budget_state_from_results(
+pub(crate) fn update_repo_review_budget_state_from_results(
     state: &mut RepoReviewBudgetState,
     messages: &[Message],
     results: &[ToolResult],
@@ -11415,7 +8554,7 @@ fn claim_verifier_enabled_runtime() -> bool {
         .unwrap_or(true)
 }
 
-fn finalizer_claim_requires_evidence_retry(
+pub(crate) fn finalizer_claim_requires_evidence_retry(
     messages: &[Message],
     assistant_text: &str,
     retry_count: u32,
@@ -11478,7 +8617,7 @@ fn strip_list_prefix(line: &str) -> &str {
     without_bullet
 }
 
-fn finalizer_output_quality_requires_retry(assistant_text: &str, retry_count: u32) -> bool {
+pub(crate) fn finalizer_output_quality_requires_retry(assistant_text: &str, retry_count: u32) -> bool {
     if retry_count >= FINALIZER_OUTPUT_QUALITY_MAX_RETRIES {
         return false;
     }
@@ -11582,7 +8721,7 @@ fn detect_execution_required_intent(messages: &[Message]) -> bool {
     has_action && has_surface
 }
 
-fn finalizer_action_execution_requires_retry(
+pub(crate) fn finalizer_action_execution_requires_retry(
     messages: &[Message],
     assistant_text: &str,
     retry_count: u32,
@@ -11611,7 +8750,7 @@ fn finalizer_action_execution_requires_retry(
     deferral_markers.iter().any(|needle| lower.contains(needle))
 }
 
-fn detect_contextlattice_connect_intent(messages: &[Message]) -> bool {
+pub(crate) fn detect_contextlattice_connect_intent(messages: &[Message]) -> bool {
     let Some(last_user) = messages
         .iter()
         .rev()
@@ -11640,7 +8779,7 @@ fn detect_contextlattice_connect_intent(messages: &[Message]) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-fn contextlattice_connect_system_hint(messages: &[Message]) -> Option<String> {
+pub(crate) fn contextlattice_connect_system_hint(messages: &[Message]) -> Option<String> {
     if !detect_contextlattice_connect_intent(messages) {
         return None;
     }
@@ -11656,7 +8795,7 @@ fn contextlattice_connect_system_hint(messages: &[Message]) -> Option<String> {
     )
 }
 
-fn contextlattice_intelligence_system_hint(
+pub(crate) fn contextlattice_intelligence_system_hint(
     messages: &[Message],
     tool_schemas: &[ToolSchema],
 ) -> Option<String> {
@@ -11881,7 +9020,7 @@ fn extract_marker_values(text: &str, marker: &str, limit: usize) -> Vec<String> 
     out
 }
 
-fn estimate_usage_cost_usd(usage: &UsageStats, model: &str, config: &AgentConfig) -> Option<f64> {
+pub(crate) fn estimate_usage_cost_usd(usage: &UsageStats, model: &str, config: &AgentConfig) -> Option<f64> {
     if let Some(v) = usage.estimated_cost {
         return Some(v.max(0.0));
     }
@@ -11898,7 +9037,7 @@ fn estimate_usage_cost_usd(usage: &UsageStats, model: &str, config: &AgentConfig
 }
 
 /// Merge two UsageStats, summing token counts and keeping the latest cost estimate.
-fn merge_usage(existing: Option<UsageStats>, new: &UsageStats) -> UsageStats {
+pub(crate) fn merge_usage(existing: Option<UsageStats>, new: &UsageStats) -> UsageStats {
     match existing {
         Some(prev) => UsageStats {
             prompt_tokens: prev.prompt_tokens + new.prompt_tokens,
@@ -11919,7 +9058,7 @@ fn merge_usage(existing: Option<UsageStats>, new: &UsageStats) -> UsageStats {
 mod tests {
     use super::*;
     use futures::stream::BoxStream;
-    use hermes_core::{FunctionCall, JsonSchema};
+    use hermes_core::JsonSchema;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn env_test_lock() -> MutexGuard<'static, ()> {
@@ -11927,34 +9066,6 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .expect("env test lock poisoned")
-    }
-
-    #[test]
-    fn resolve_turn_tool_calls_uses_provider_structured_calls() {
-        let tc = ToolCall {
-            id: "tc1".into(),
-            function: FunctionCall {
-                name: "web_search".into(),
-                arguments: r#"{"query":"番茄小说"}"#.to_string(),
-            },
-            extra_content: None,
-        };
-        let msg = Message::assistant_with_tool_calls(None, vec![tc.clone()]);
-        let resolved = AgentLoop::resolve_turn_tool_calls(vec![], &msg);
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].function.name, "web_search");
-    }
-
-    #[test]
-    fn finish_reason_tool_calls_skips_continuation_when_tools_resolved() {
-        assert!(!AgentLoop::finish_reason_requires_continuation(
-            Some("tool_calls"),
-            true
-        ));
-        assert!(AgentLoop::finish_reason_requires_continuation(
-            Some("tool_calls"),
-            false
-        ));
     }
 
     #[test]
@@ -15259,6 +12370,130 @@ mod tests {
     }
 
     #[test]
+    fn test_use_streaming_llm_transport_matches_python_gates() {
+        use futures::stream::BoxStream;
+
+        struct HealthCheckProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for HealthCheckProvider {
+            async fn chat_completion(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> Result<hermes_core::LlmResponse, AgentError> {
+                Ok(hermes_core::LlmResponse {
+                    message: Message::assistant("ok"),
+                    usage: None,
+                    model: "t".into(),
+                    finish_reason: Some("stop".into()),
+                    ..Default::default()
+                })
+            }
+
+            fn chat_completion_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> BoxStream<'static, Result<StreamChunk, AgentError>> {
+                futures::stream::empty().boxed()
+            }
+
+            fn prefers_non_streaming_transport(&self) -> bool {
+                true
+            }
+        }
+
+        struct OpenProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for OpenProvider {
+            async fn chat_completion(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> Result<hermes_core::LlmResponse, AgentError> {
+                Ok(hermes_core::LlmResponse {
+                    message: Message::assistant("ok"),
+                    usage: None,
+                    model: "t".into(),
+                    finish_reason: Some("stop".into()),
+                    ..Default::default()
+                })
+            }
+
+            fn chat_completion_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> BoxStream<'static, Result<StreamChunk, AgentError>> {
+                futures::stream::empty().boxed()
+            }
+        }
+
+        let registry = Arc::new(ToolRegistry::new());
+        let mock_like = AgentLoop::new(
+            AgentConfig::default(),
+            registry.clone(),
+            Arc::new(HealthCheckProvider),
+        );
+        assert!(!mock_like.use_streaming_llm_transport(false, 0, None));
+        assert!(mock_like.use_streaming_llm_transport(true, 0, None));
+
+        let open = AgentLoop::new(AgentConfig::default(), registry.clone(), Arc::new(OpenProvider));
+        assert!(open.use_streaming_llm_transport(false, 0, None));
+
+        let acp_cfg = AgentConfig {
+            provider: Some("copilot-acp".to_string()),
+            ..AgentConfig::default()
+        };
+        let acp = AgentLoop::new(acp_cfg, registry.clone(), Arc::new(OpenProvider));
+        assert!(!acp.use_streaming_llm_transport(true, 0, None));
+
+        let acp_url_cfg = AgentConfig {
+            provider: Some("custom".to_string()),
+            runtime_providers: [(
+                "custom".to_string(),
+                RuntimeProviderConfig {
+                    base_url: Some("acp://copilot".to_string()),
+                    ..RuntimeProviderConfig::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..AgentConfig::default()
+        };
+        let acp_url = AgentLoop::new(acp_url_cfg, registry, Arc::new(OpenProvider));
+        assert!(!acp_url.use_streaming_llm_transport(true, 0, None));
+
+        open.session_disable_streaming();
+        assert!(!open.use_streaming_llm_transport(true, 0, None));
+        assert!(!open.use_streaming_llm_transport(true, 1, None));
+    }
+
+    #[test]
+    fn test_is_stream_not_supported_error_detects_provider_message() {
+        let err = AgentError::LlmApi("Streaming is not supported for this model".into());
+        assert!(is_stream_not_supported_error(&err));
+        let transient = AgentError::LlmApi("connection reset".into());
+        assert!(!is_stream_not_supported_error(&transient));
+    }
+
+    #[test]
     fn test_smart_model_routing_copilot_acp_missing_cli_falls_back() {
         use futures::stream::BoxStream;
 
@@ -16882,5 +14117,38 @@ mod tests {
         )
         .expect("expected user notice");
         assert!(msg.contains("浏览器"));
+    }
+
+    #[test]
+    fn test_apply_web_tool_budget_caps_web_search_calls() {
+        let _guard = env_test_lock();
+        hermes_core::test_env::set_var("HERMES_WEB_SEARCH_BUDGET_MAX_CALLS", "2");
+        let mut calls = vec![ToolCall {
+            id: "s1".to_string(),
+            function: hermes_core::FunctionCall {
+                name: "web_search".to_string(),
+                arguments: r#"{"query":"test"}"#.to_string(),
+            },
+            extra_content: None,
+        }];
+        let blocked = apply_web_tool_budget(&mut calls, 0, 2, 0, 1);
+        assert_eq!(blocked.len(), 1);
+        assert!(calls.is_empty());
+        hermes_core::test_env::remove_var("HERMES_WEB_SEARCH_BUDGET_MAX_CALLS");
+    }
+
+    #[test]
+    fn test_apply_web_tool_budget_includes_browser_navigate() {
+        let mut calls = vec![ToolCall {
+            id: "b1".to_string(),
+            function: hermes_core::FunctionCall {
+                name: "browser_navigate".to_string(),
+                arguments: r#"{"url":"https://example.com"}"#.to_string(),
+            },
+            extra_content: None,
+        }];
+        let blocked = apply_web_tool_budget(&mut calls, 3, 0, 0, 1);
+        assert_eq!(blocked.len(), 1);
+        assert!(calls.is_empty());
     }
 }

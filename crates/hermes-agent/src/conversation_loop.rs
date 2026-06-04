@@ -276,6 +276,7 @@ impl AgentLoop {
         self.apply_turn_message_prelude(&mut messages).await;
 
         self.apply_turn_prep_infrastructure_hooks();
+        crate::skill_provenance::set_current_write_origin("assistant_tool");
 
         Ok(PreparedTurn {
             meta: TurnFinalizeMeta {

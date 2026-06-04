@@ -45,6 +45,7 @@ pub mod reasoning;
 mod retry_failover;
 pub mod session_persistence;
 pub mod shell_hooks;
+pub mod skill_provenance;
 pub mod skill_orchestrator;
 pub mod smart_model_routing;
 pub mod steer;

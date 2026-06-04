@@ -44,6 +44,7 @@ pub mod providers_extra;
 pub mod rate_limit;
 pub mod reasoning;
 mod retry_failover;
+pub mod session_log;
 pub mod session_persistence;
 pub mod shell_hooks;
 pub mod skill_provenance;

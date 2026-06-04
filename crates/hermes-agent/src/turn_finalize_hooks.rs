@@ -66,10 +66,15 @@ impl AgentLoop {
         if loop_result.turn_exit_reason.contains("max_iterations")
             && hermes_tools::kanban_task_from_env().is_some()
         {
-            tracing::info!(
-                task_id = %meta.task_id,
-                api_calls = loop_result.api_calls,
-                "kanban worker hit iteration budget — failure recorded via tool result path"
+            let max_iters = self.config().max_turns;
+            let err = format!(
+                "iteration budget exhausted after {} API calls (max {})",
+                loop_result.api_calls, max_iters
+            );
+            hermes_tools::record_iteration_budget_exhausted(
+                loop_result.api_calls,
+                max_iters,
+                &err,
             );
         }
     }

@@ -1133,6 +1133,8 @@ impl FinalizationSignals {
 /// Session-scoped counters for memory / skill nudges (mirrors Python `AIAgent` fields).
 #[derive(Debug, Default)]
 pub struct EvolutionCounters {
+    /// User turns in this session (Python `_user_turn_count`).
+    pub user_turn_count: u32,
     pub turns_since_memory: u32,
     pub iters_since_skill: u32,
 }
@@ -2295,6 +2297,8 @@ pub struct AgentLoop {
     pub(crate) codex_app_server_session: Arc<Mutex<Option<crate::transports::codex_app_server_session::CodexAppServerSession>>>,
     /// Last-known Nous `x-ratelimit-*` headers from a successful response (Python `_rate_limit_state`).
     pub(crate) last_nous_rate_limit_headers: Arc<Mutex<Option<std::collections::HashMap<String, String>>>>,
+    /// Per-turn vision capability (Python `_vision_supported`; reset each `prepare_turn`).
+    pub(crate) vision_supported: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Async tool execution hook (gateway: `hermes_tools::ToolRegistry::dispatch_async`).
@@ -2874,6 +2878,7 @@ impl AgentLoop {
             disable_streaming: Arc::new(AtomicBool::new(false)),
             codex_app_server_session: Arc::new(Mutex::new(None)),
             last_nous_rate_limit_headers: Arc::new(Mutex::new(None)),
+            vision_supported: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -2976,6 +2981,8 @@ impl AgentLoop {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let force_strip_images =
+            !self.vision_supported.load(std::sync::atomic::Ordering::Acquire);
         let messages = crate::api_messages::assemble_api_messages_from_ctx(
             ctx.get_messages(),
             &prefetch,
@@ -2984,6 +2991,7 @@ impl AgentLoop {
             cfg.cache_ttl.as_str(),
             cfg.use_prompt_caching,
             cfg.use_native_cache_layout,
+            force_strip_images,
         );
         let arc: Arc<[Message]> = messages.into();
 
@@ -3159,6 +3167,7 @@ impl AgentLoop {
             disable_streaming: Arc::new(AtomicBool::new(false)),
             codex_app_server_session: Arc::new(Mutex::new(None)),
             last_nous_rate_limit_headers: Arc::new(Mutex::new(None)),
+            vision_supported: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -3661,6 +3670,98 @@ impl AgentLoop {
                 }
             }
         }
+    }
+
+    /// Python `_sync_external_memory_for_turn` — end-of-turn durable memory sync.
+    pub(crate) fn sync_external_memory_for_turn(
+        &self,
+        original_user_message: &str,
+        final_response: Option<&str>,
+        interrupted: bool,
+    ) {
+        if interrupted || self.config().skip_memory {
+            return;
+        }
+        let Some(response) = final_response.map(str::trim).filter(|s| !s.is_empty()) else {
+            return;
+        };
+        if original_user_message.trim().is_empty() {
+            return;
+        }
+        let session_id = self
+            .config()
+            .session_id
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
+        self.memory_sync(original_user_message, response, &session_id);
+    }
+
+    pub(crate) fn reset_vision_supported_for_turn(&self) {
+        self.vision_supported
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn disable_vision_supported_and_strip_context(&self, ctx: &mut ContextManager) {
+        self.vision_supported
+            .store(false, std::sync::atomic::Ordering::Release);
+        crate::vision_message_prepare::strip_images_for_non_vision_model_in_place(
+            ctx.get_messages_mut(),
+        );
+        self.invalidate_turn_api_messages_cache();
+    }
+
+    pub(crate) async fn cleanup_dead_connections_at_turn_start(&self) {
+        let rt = self.primary_runtime_snapshot();
+        let provider = rt.provider.as_deref().unwrap_or("").trim();
+        let Some(mut base) = self.resolve_runtime_base_url(provider, rt.base_url.as_deref()) else {
+            return;
+        };
+        if base.is_empty() {
+            return;
+        }
+        if !base.ends_with('/') {
+            base.push('/');
+        }
+        let probe_url = format!("{base}models");
+        self.effective_llm_provider()
+            .turn_start_connection_hygiene(&probe_url)
+            .await;
+    }
+
+    pub(crate) fn log_turn_exit_diagnostic(
+        &self,
+        loop_result: &hermes_core::AgentResult,
+        messages: &[Message],
+    ) {
+        let last_role = messages
+            .last()
+            .map(|m| format!("{:?}", m.role))
+            .unwrap_or_else(|| "none".into());
+        let pending_tool_assistant = messages
+            .iter()
+            .filter(|m| {
+                m.role == MessageRole::Assistant
+                    && m.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
+            })
+            .count();
+        let max_turns = effective_max_turns(self.config().max_turns)
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "unlimited".into());
+        tracing::info!(
+            session_id = %crate::session_log::current_session_tag(),
+            turn_exit_reason = %loop_result.turn_exit_reason,
+            api_calls = loop_result.api_calls,
+            total_turns = loop_result.total_turns,
+            max_turns = %max_turns,
+            interrupted = loop_result.interrupted,
+            failed = loop_result.failed,
+            partial = loop_result.partial,
+            finished_naturally = loop_result.finished_naturally,
+            last_msg_role = %last_role,
+            pending_tool_assistant_msgs = pending_tool_assistant,
+            "conversation turn exit"
+        );
     }
 
     fn memory_write_event_from_tool_call(tc: &ToolCall) -> Option<(String, String, String)> {

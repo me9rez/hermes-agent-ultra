@@ -38,7 +38,7 @@ impl AgentLoop {
         ))
     }
 
-    async fn call_llm_with_retry_inner(
+    pub(crate) async fn call_llm_with_retry_inner(
         &self,
         ctx: &mut ContextManager,
         tool_schemas: &[ToolSchema],
@@ -207,6 +207,21 @@ impl AgentLoop {
                 Err(e) => {
                     hermes_telemetry::record_error();
                     let err_str = e.to_string();
+                    if crate::vision_message_prepare::is_api_image_rejection_error(&err_str)
+                        && self
+                            .vision_supported
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        tracing::warn!(
+                            "API rejected image content — stripping images and retrying text-only"
+                        );
+                        self.disable_vision_supported_and_strip_context(ctx);
+                        self.emit_status(
+                            "lifecycle",
+                            "Model rejected images — retrying without image content",
+                        );
+                        continue;
+                    }
                     let failover = crate::retry_failover::classify_failover_reason(&err_str);
                     if failover == crate::retry_failover::FailoverReason::ThinkingSignature
                         && !thinking_sig_retry_attempted

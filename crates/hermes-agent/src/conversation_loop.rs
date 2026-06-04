@@ -270,11 +270,31 @@ impl AgentLoop {
 
         let conversation_history = strip_system_messages_from_history(&params.conversation_history);
         self.hydrate_memory_nudge_counters_from_history(&conversation_history);
+        let user_turn_count = {
+            if let Ok(mut c) = self.evolution_counters.lock() {
+                c.user_turn_count = c.user_turn_count.saturating_add(1);
+                c.user_turn_count
+            } else {
+                1
+            }
+        };
 
         let mut messages: Vec<Message> = conversation_history;
         messages.push(Message::user(user_message));
 
         self.apply_turn_message_prelude(&mut messages).await;
+
+        crate::session_log::set_session_context(self.config().session_id.as_deref());
+        self.reset_vision_supported_for_turn();
+        self.cleanup_dead_connections_at_turn_start().await;
+        tracing::info!(
+            session_id = %crate::session_log::current_session_tag(),
+            task_id = %task_id,
+            user_turn = user_turn_count,
+            model = %self.active_model(),
+            "conversation turn"
+        );
+        self.memory_on_turn_start(user_turn_count, &original_user_message);
 
         self.apply_turn_prep_infrastructure_hooks();
         crate::skill_provenance::set_current_write_origin("assistant_tool");
@@ -314,6 +334,13 @@ impl AgentLoop {
 
         let mut messages = messages;
         self.apply_turn_finalize_infrastructure_hooks(meta, &mut messages, &loop_result, completed);
+        self.log_turn_exit_diagnostic(&loop_result, &messages);
+
+        self.sync_external_memory_for_turn(
+            &meta.original_user_message,
+            final_response.as_deref(),
+            interrupted,
+        );
 
         // Python `_persist_session` always runs at turn end; `persist_turn_session` no-ops without session_id.
         self.persist_turn_session(&messages, &loop_result);
@@ -321,6 +348,7 @@ impl AgentLoop {
         loop_result.messages = messages;
         let loop_result = self.finalize_agent_result(loop_result);
         hermes_telemetry::record_agent_turn();
+        crate::session_log::clear_session_context();
 
         ConversationResult {
             final_response,
@@ -346,6 +374,9 @@ impl AgentLoop {
             return;
         }
         if let Ok(mut c) = self.evolution_counters.lock() {
+            if c.user_turn_count == 0 {
+                c.user_turn_count = prior_user_turns as u32;
+            }
             if c.turns_since_memory == 0 {
                 c.turns_since_memory = (prior_user_turns % interval as usize) as u32;
             }
@@ -871,16 +902,11 @@ impl AgentLoop {
                 }
             }
 
-            self.memory_on_turn_start(total_turns, "");
-
             if self.config().checkpoint_interval_turns > 0
                 && (total_turns - 1) % self.config().checkpoint_interval_turns == 0
             {
                 last_checkpoint_messages = Some(ctx.get_messages().to_vec());
             }
-
-            // Notify memory + plugins of new turn
-            self.memory_on_turn_start(total_turns, "");
 
             // Memory sync at flush interval
             if total_turns % self.config().memory_flush_interval == 0 && total_turns > 0 {
@@ -2406,12 +2432,64 @@ mod tests {
         );
         let history: Vec<Message> = (0..5).map(|i| Message::user(format!("u{i}"))).collect();
         agent.hydrate_memory_nudge_counters_from_history(&history);
-        let turns = agent
-            .evolution_counters
-            .lock()
-            .expect("lock")
-            .turns_since_memory;
-        assert_eq!(turns, 1);
+        let counters = agent.evolution_counters.lock().expect("lock");
+        assert_eq!(counters.turns_since_memory, 1);
+        assert_eq!(counters.user_turn_count, 5);
+    }
+
+    #[test]
+    fn hydrate_user_turn_count_from_history() {
+        use crate::agent_loop::AgentConfig;
+        use crate::agent_loop::ToolRegistry;
+        use futures::StreamExt;
+        use std::sync::Arc;
+
+        struct StopProvider;
+        #[async_trait::async_trait]
+        impl hermes_core::LlmProvider for StopProvider {
+            async fn chat_completion(
+                &self,
+                _messages: &[Message],
+                _tools: &[hermes_core::ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> Result<hermes_core::LlmResponse, AgentError> {
+                Ok(hermes_core::LlmResponse {
+                    message: Message::assistant("ok"),
+                    usage: None,
+                    model: "t".into(),
+                    finish_reason: Some("stop".into()),
+                    ..Default::default()
+                })
+            }
+
+            fn chat_completion_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[hermes_core::ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> futures::stream::BoxStream<'static, Result<hermes_core::StreamChunk, AgentError>>
+            {
+                futures::stream::empty().boxed()
+            }
+        }
+
+        let agent = AgentLoop::new(
+            AgentConfig::default(),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(StopProvider),
+        );
+        let history: Vec<Message> = (0..3).map(|i| Message::user(format!("u{i}"))).collect();
+        agent.hydrate_memory_nudge_counters_from_history(&history);
+        assert_eq!(
+            agent.evolution_counters.lock().expect("lock").user_turn_count,
+            3
+        );
     }
 
     #[test]

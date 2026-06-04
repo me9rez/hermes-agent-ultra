@@ -40,6 +40,9 @@ pub trait LlmProvider: Send + Sync {
     fn prefers_non_streaming_transport(&self) -> bool {
         false
     }
+
+    /// B-segment dead-connection hygiene (Python `_cleanup_dead_connections`).
+    async fn turn_start_connection_hygiene(&self, _probe_url: &str) {}
 }
 
 // ---------------------------------------------------------------------------

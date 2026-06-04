@@ -55,6 +55,7 @@ pub(crate) fn assemble_api_messages_from_ctx(
     cache_ttl: &str,
     use_prompt_caching: bool,
     use_native_cache_layout: bool,
+    force_strip_images: bool,
 ) -> Vec<Message> {
     let last_user_idx = source
         .iter()
@@ -88,9 +89,28 @@ pub(crate) fn assemble_api_messages_from_ctx(
         apply_anthropic_cache_control_in_place(&mut out, cache_ttl, use_native_cache_layout);
     }
 
-    if model_supports_vision(model) {
+    if model_supports_vision(model) && !force_strip_images {
         return out;
     }
     strip_images_for_non_vision_model_in_place(&mut out);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn force_strip_overrides_vision_model_hint() {
+        let mut msgs = vec![Message::user("see data:image/png;base64,abc")];
+        let out = assemble_api_messages_from_ctx(&msgs, "", None, "gpt-4o", "5m", false, false, true);
+        assert!(out[0]
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("Image content removed"));
+        msgs = vec![Message::user("see data:image/png;base64,abc")];
+        let kept = assemble_api_messages_from_ctx(&msgs, "", None, "gpt-4o", "5m", false, false, false);
+        assert!(kept[0].content.as_deref().unwrap_or("").contains("data:image"));
+    }
 }

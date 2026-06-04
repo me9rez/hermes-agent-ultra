@@ -342,6 +342,11 @@ impl GenericProvider {
         }
     }
 
+    pub async fn turn_start_hygiene(&self, probe_url: &str) {
+        self.force_close_tcp_sockets();
+        self.maybe_refresh_stale_client(probe_url).await;
+    }
+
     async fn maybe_refresh_stale_client(&self, probe_url: &str) {
         const STALE_CLIENT_REFRESH_SECS: u64 = 300;
         let stale_after = Duration::from_secs(STALE_CLIENT_REFRESH_SECS);
@@ -556,6 +561,10 @@ impl GenericProvider {
 
 #[async_trait]
 impl LlmProvider for GenericProvider {
+    async fn turn_start_connection_hygiene(&self, probe_url: &str) {
+        self.turn_start_hygiene(probe_url).await;
+    }
+
     async fn chat_completion(
         &self,
         messages: &[Message],
@@ -801,6 +810,10 @@ impl OpenAiProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
+    async fn turn_start_connection_hygiene(&self, probe_url: &str) {
+        self.inner.turn_start_hygiene(probe_url).await;
+    }
+
     async fn chat_completion(
         &self,
         messages: &[Message],
@@ -1910,6 +1923,10 @@ impl OpenRouterProvider {
 
 #[async_trait]
 impl LlmProvider for OpenRouterProvider {
+    async fn turn_start_connection_hygiene(&self, probe_url: &str) {
+        self.inner.turn_start_hygiene(probe_url).await;
+    }
+
     async fn chat_completion(
         &self,
         messages: &[Message],

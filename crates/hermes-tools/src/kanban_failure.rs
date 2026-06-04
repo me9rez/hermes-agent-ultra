@@ -131,10 +131,10 @@ fn record_task_failure_inner(
             )
             .map_err(|e| format!("task lookup: {e}"))?;
         let failures = row.0 + 1;
-        let (effective_limit, limit_source) = if let Some(limit) = opts.failure_limit {
-            (limit.max(1), "dispatcher")
-        } else if let Some(task_limit) = row.1 {
+        let (effective_limit, limit_source) = if let Some(task_limit) = row.1 {
             (task_limit.max(1), "task")
+        } else if let Some(limit) = opts.failure_limit {
+            (limit.max(1), "dispatcher")
         } else {
             (dispatcher_failure_limit().max(1), "dispatcher")
         };

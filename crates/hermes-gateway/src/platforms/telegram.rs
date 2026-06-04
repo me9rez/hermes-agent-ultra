@@ -1136,6 +1136,23 @@ impl PlatformAdapter for TelegramAdapter {
         Ok(())
     }
 
+    async fn send_message_in_thread(
+        &self,
+        chat_id: &str,
+        text: &str,
+        parse_mode: Option<ParseMode>,
+        reply_to_message_id: Option<&str>,
+        message_thread_id: Option<&str>,
+    ) -> Result<Option<String>, GatewayError> {
+        let pm = self.resolve_parse_mode(parse_mode);
+        let reply_to = reply_to_message_id.and_then(|id| id.parse::<i64>().ok());
+        let thread_id = message_thread_id.and_then(|id| id.parse::<i64>().ok());
+        let ids = self
+            .send_text_inner(chat_id, text, pm, reply_to, None, thread_id)
+            .await?;
+        Ok(ids.first().map(|id| id.to_string()))
+    }
+
     async fn edit_message(
         &self,
         chat_id: &str,

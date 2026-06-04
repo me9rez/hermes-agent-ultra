@@ -113,6 +113,27 @@ pub fn sessions_dir() -> PathBuf {
     hermes_home().join("sessions")
 }
 
+/// `$hermes_home/state.db` — session SQLite store (Python `hermes_state` parity).
+///
+/// Uses legacy `sessions.db` when it exists and `state.db` does not yet.
+pub fn state_db_path() -> PathBuf {
+    state_db_path_in(hermes_home())
+}
+
+/// Resolve session DB path under an explicit Hermes home directory.
+pub fn state_db_path_in(home: impl AsRef<Path>) -> PathBuf {
+    let home = home.as_ref();
+    let state_db = home.join("state.db");
+    let legacy = home.join("sessions.db");
+    if state_db.exists() {
+        state_db
+    } else if legacy.exists() {
+        legacy
+    } else {
+        state_db
+    }
+}
+
 /// `$hermes_home/cron/`
 pub fn cron_dir() -> PathBuf {
     hermes_home().join("cron")

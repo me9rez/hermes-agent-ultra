@@ -1,12 +1,10 @@
-//! Real session search backend using rusqlite with FTS5.
+//! Real session search backend using shared `state_db` search APIs.
 
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
-use hermes_core::{ensure_aware_naive, format_wall_datetime};
-use rusqlite::Connection;
+use chrono::{TimeZone, Utc};
+use crate::state_db::{StateDb, decode_content_preview};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::sync::Mutex;
 use std::time::Duration;
 use tokio::task::JoinSet;
 
@@ -17,9 +15,9 @@ const MAX_SESSION_CHARS: usize = 100_000;
 const MAX_SUMMARY_TOKENS: usize = 10_000;
 const HIDDEN_SESSION_SOURCES: &[&str] = &["tool", "internal"];
 
-/// Real session search backend using SQLite FTS5.
+/// Real session search backend backed by `SessionPersistence` search parity.
 pub struct SqliteSessionSearchBackend {
-    conn: Mutex<Connection>,
+    db: StateDb,
 }
 
 #[derive(Clone)]
@@ -40,103 +38,17 @@ struct SummaryTask {
 }
 
 impl SqliteSessionSearchBackend {
-    fn ensure_fts_triggers(conn: &Connection) -> Result<(), ToolError> {
-        conn.execute_batch(
-            "CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-                INSERT INTO messages_fts(messages_fts, rowid, content, session_id, role)
-                VALUES('delete', old.id, old.content, old.session_id, old.role);
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-                INSERT INTO messages_fts(messages_fts, rowid, content, session_id, role)
-                VALUES('delete', old.id, old.content, old.session_id, old.role);
-                INSERT INTO messages_fts(rowid, content, session_id, role)
-                VALUES (new.id, new.content, new.session_id, new.role);
-            END;",
-        )
-        .map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to ensure FTS triggers: {}", e))
-        })?;
-        Ok(())
-    }
-
-    fn maybe_rebuild_fts_index(conn: &Connection) -> Result<(), ToolError> {
-        const META_KEY: &str = "fts_external_triggers_v1";
-        let done: bool = conn
-            .query_row(
-                "SELECT 1 FROM state_meta WHERE key = ?1",
-                rusqlite::params![META_KEY],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-        if done {
-            return Ok(());
-        }
-        conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')", [])
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to rebuild messages_fts: {}", e))
-            })?;
-        conn.execute(
-            "INSERT INTO state_meta (key, value) VALUES (?1, '1')
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![META_KEY],
-        )
-        .map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to record FTS rebuild marker: {}", e))
-        })?;
-        Ok(())
-    }
-
-    fn ensure_parent_session_column(conn: &Connection) -> Result<(), ToolError> {
-        match conn.execute(
-            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
-            rusqlite::params![],
-        ) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("duplicate column name") {
-                    Ok(())
-                } else {
-                    Err(ToolError::ExecutionFailed(format!(
-                        "Failed to ensure parent_session_id column: {}",
-                        e
-                    )))
-                }
-            }
-        }
-    }
-
-    fn resolve_to_parent(conn: &Connection, session_id: &str) -> String {
-        let mut visited = HashSet::new();
-        let mut sid = session_id.to_string();
-        loop {
-            if sid.is_empty() || !visited.insert(sid.clone()) {
-                break;
-            }
-            let parent = conn
-                .query_row(
-                    "SELECT parent_session_id FROM sessions WHERE id = ?1",
-                    rusqlite::params![sid.clone()],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .ok()
-                .flatten()
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty());
-            match parent {
-                Some(next) => sid = next,
-                None => break,
-            }
-        }
-        sid
+    fn resolve_lineage_root(&self, session_id: &str) -> String {
+        self.db
+            .get_compression_tip(session_id)
+            .unwrap_or_else(|_| session_id.to_string())
     }
 
     fn format_conversation(messages: &[(String, String, Option<String>)]) -> String {
         let mut parts = Vec::new();
         for (role_raw, content_raw, tool_calls_raw) in messages {
             let role_upper = role_raw.to_uppercase();
-            let mut content = content_raw.clone();
+            let mut content = decode_content_preview(Some(content_raw.as_str()));
 
             if role_upper == "TOOL" {
                 if content.chars().count() > 500 {
@@ -231,30 +143,16 @@ impl SqliteSessionSearchBackend {
         format!("{prefix}{body}{suffix}")
     }
 
-    fn format_timestamp(ts: Option<&str>) -> String {
-        let Some(raw) = ts.map(str::trim).filter(|s| !s.is_empty()) else {
+    fn format_timestamp(ts: Option<f64>) -> String {
+        let Some(seconds) = ts else {
             return "unknown".to_string();
         };
-
-        let format_human = format_wall_datetime;
-
-        if let Ok(seconds) = raw.parse::<f64>() {
-            let sec = seconds.trunc() as i64;
-            let nanos = ((seconds.fract().abs()) * 1_000_000_000_f64).round() as u32;
-            if let Some(dt_utc) = Utc.timestamp_opt(sec, nanos).single() {
-                return format_human(dt_utc);
-            }
+        let sec = seconds.trunc() as i64;
+        let nanos = ((seconds.fract().abs()) * 1_000_000_000_f64).round() as u32;
+        if let Some(dt_utc) = Utc.timestamp_opt(sec, nanos).single() {
+            return hermes_core::format_wall_datetime(dt_utc);
         }
-
-        if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
-            return format_human(dt.with_timezone(&Utc));
-        }
-
-        if let Ok(naive) = NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S") {
-            return format_human(ensure_aware_naive(naive));
-        }
-
-        raw.to_string()
+        "unknown".to_string()
     }
 
     fn summary_client_from_env() -> Option<SessionSummaryClient> {
@@ -337,8 +235,7 @@ impl SqliteSessionSearchBackend {
                     .header("HTTP-Referer", "https://hermes-agent.nousresearch.com")
                     .header("X-OpenRouter-Title", "Hermes Agent");
             }
-            let resp = req.send().await;
-            if let Ok(ok_resp) = resp {
+            if let Ok(ok_resp) = req.send().await {
                 if let Ok(v) = ok_resp.json::<Value>().await {
                     let text = v
                         .get("choices")
@@ -361,98 +258,16 @@ impl SqliteSessionSearchBackend {
         None
     }
 
-    /// Open or create the sessions database at the given path.
     pub fn new(db_path: &str) -> Result<Self, ToolError> {
-        if let Some(parent) = std::path::Path::new(db_path).parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to create session db directory: {}", e))
-            })?;
-        }
-        let conn = Connection::open(db_path).map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to open sessions DB: {}", e))
-        })?;
-
-        // Align with session persistence schema used by the agent loop.
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                model TEXT,
-                platform TEXT DEFAULT 'cli',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                title TEXT,
-                message_count INTEGER DEFAULT 0,
-                parent_session_id TEXT
-            );
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT,
-                tool_call_id TEXT,
-                tool_calls TEXT,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (session_id) REFERENCES sessions(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                content,
-                session_id UNINDEXED,
-                role UNINDEXED,
-                content='messages',
-                content_rowid='id'
-            );
-            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-                INSERT INTO messages_fts(rowid, content, session_id, role)
-                VALUES (new.id, new.content, new.session_id, new.role);
-            END;
-            CREATE TABLE IF NOT EXISTS state_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );",
-        )
-        .map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to ensure session schema: {}", e))
-        })?;
-
-        Self::ensure_fts_triggers(&conn)?;
-        Self::maybe_rebuild_fts_index(&conn)?;
-        Self::ensure_parent_session_column(&conn)?;
-
-        Ok(Self {
-            conn: Mutex::new(conn),
+        StateDb::open(db_path).map(|db| Self { db }).map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to open state DB: {}", e))
         })
     }
 
-    /// Open or create the default sessions database at ~/.hermes/sessions.db.
     pub fn default_path() -> Result<Self, ToolError> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let hermes_dir = std::path::Path::new(&home).join(".hermes");
-        std::fs::create_dir_all(&hermes_dir).map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to create ~/.hermes: {}", e))
-        })?;
-        let db_path = hermes_dir.join("sessions.db");
-        Self::new(db_path.to_str().unwrap_or("sessions.db"))
-    }
-
-    /// Index a message into the FTS5 table.
-    pub fn index_message(
-        &self,
-        session_id: &str,
-        role: &str,
-        content: &str,
-        timestamp: &str,
-    ) -> Result<(), ToolError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![session_id, role, content, timestamp],
-        )
-        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to index message: {}", e)))?;
-        Ok(())
+        StateDb::open_default().map(|db| Self { db }).map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to open state DB: {}", e))
+        })
     }
 }
 
@@ -468,239 +283,116 @@ impl SessionSearchBackend for SqliteSessionSearchBackend {
         let query = query.map(str::trim).unwrap_or("");
         let limit = limit.min(5).max(1);
 
-        let (tasks, sessions_searched, recent_payload): (Vec<SummaryTask>, usize, Option<Value>) = {
-            let conn = self
-                .conn
-                .lock()
-                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-
-            // Recent-mode parity: no query means list recent sessions metadata.
-            if query.is_empty() {
-                let placeholders = HIDDEN_SESSION_SOURCES
-                    .iter()
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let sql = format!(
-                    "SELECT id, title, platform, created_at, updated_at, message_count
-                     FROM sessions
-                     WHERE (parent_session_id IS NULL OR parent_session_id = '')
-                       AND COALESCE(platform, '') NOT IN ({})
-                     ORDER BY updated_at DESC
-                     LIMIT ?",
-                    placeholders
-                );
-                let mut stmt = conn.prepare(&sql).map_err(|e| {
-                    ToolError::ExecutionFailed(format!(
-                        "Failed to prepare recent sessions query: {}",
-                        e
-                    ))
-                })?;
-                let mut params_values: Vec<rusqlite::types::Value> = HIDDEN_SESSION_SOURCES
-                    .iter()
-                    .map(|s| rusqlite::types::Value::Text((*s).to_string()))
-                    .collect();
-                params_values.push(rusqlite::types::Value::Integer(limit as i64));
-                let params = rusqlite::params_from_iter(params_values.iter());
-                let rows = stmt
-                    .query_map(params, |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<String>>(2)?
-                                .unwrap_or_else(|| "cli".to_string()),
-                            row.get::<_, String>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, i64>(5).unwrap_or(0),
-                        ))
-                    })
-                    .map_err(|e| {
-                        ToolError::ExecutionFailed(format!("Recent sessions query failed: {}", e))
-                    })?;
-
-                let current_lineage_root =
-                    current_session_id.map(|sid| Self::resolve_to_parent(&conn, sid.trim()));
-                let mut results = Vec::new();
-                for row in rows.flatten() {
-                    let (session_id, title, source, started_at, last_active, message_count) = row;
-                    if let Some(ref current_root) = current_lineage_root {
-                        if current_root == &session_id {
-                            continue;
-                        }
-                    }
-                    let preview: String = conn
-                        .query_row(
-                            "SELECT COALESCE(content, '') FROM messages
-                             WHERE session_id = ?1 AND content IS NOT NULL
-                             ORDER BY id DESC LIMIT 1",
-                            rusqlite::params![session_id.clone()],
-                            |r| r.get::<_, String>(0),
-                        )
-                        .unwrap_or_default();
-                    let preview = if preview.chars().count() > 200 {
-                        format!("{}…", preview.chars().take(200).collect::<String>())
-                    } else {
-                        preview
-                    };
-                    results.push(json!({
-                        "session_id": session_id,
-                        "title": title,
-                        "source": source,
-                        "started_at": started_at,
-                        "last_active": last_active,
-                        "message_count": message_count,
-                        "preview": preview,
-                    }));
-                }
-                let payload = json!({
-                    "success": true,
-                    "mode": "recent",
-                    "results": results,
-                    "count": results.len(),
-                    "message": format!(
-                        "Showing {} most recent sessions. Use a keyword query to search specific topics.",
-                        results.len()
-                    ),
-                });
-                (Vec::new(), 0, Some(payload))
-            } else {
-                let hidden_placeholders = HIDDEN_SESSION_SOURCES
-                    .iter()
-                    .map(|_| "?".to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let mut sql = String::from(
-                    "SELECT m.session_id, s.created_at, s.platform, s.model, bm25(messages_fts) AS rank
-                     FROM messages_fts
-                     JOIN messages m ON m.id = messages_fts.rowid
-                     LEFT JOIN sessions s ON s.id = m.session_id
-                     WHERE messages_fts MATCH ?1
-                       AND m.content IS NOT NULL
-                       AND m.content != ''
-                       AND COALESCE(s.platform, '') NOT IN (",
-                );
-                sql.push_str(&hidden_placeholders);
-                sql.push(')');
-
-                let mut role_values = Vec::new();
-                if let Some(raw_roles) = role_filter {
-                    for role in raw_roles
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                    {
-                        role_values.push(role.to_string());
-                    }
-                    if !role_values.is_empty() {
-                        let placeholders = (0..role_values.len())
-                            .map(|_| "?".to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        sql.push_str(&format!(" AND m.role IN ({})", placeholders));
-                    }
-                }
-                sql.push_str(" ORDER BY rank LIMIT 50");
-
-                let mut stmt = conn.prepare(&sql).map_err(|e| {
-                    ToolError::ExecutionFailed(format!(
-                        "Failed to prepare session search query: {}",
-                        e
-                    ))
-                })?;
-
-                let mut values: Vec<rusqlite::types::Value> =
-                    vec![rusqlite::types::Value::Text(query.to_string())];
-                values.extend(
-                    HIDDEN_SESSION_SOURCES
-                        .iter()
-                        .map(|s| rusqlite::types::Value::Text((*s).to_string())),
-                );
-                values.extend(role_values.into_iter().map(rusqlite::types::Value::Text));
-                let params = rusqlite::params_from_iter(values.iter());
-
-                let rows = stmt
-                    .query_map(params, |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<String>>(2)?
-                                .unwrap_or_else(|| "cli".to_string()),
-                            row.get::<_, Option<String>>(3)?,
-                        ))
-                    })
-                    .map_err(|e| {
-                        ToolError::ExecutionFailed(format!("Session search query failed: {}", e))
-                    })?;
-
-                let mut seen = HashSet::new();
-                let current_lineage_root =
-                    current_session_id.map(|sid| Self::resolve_to_parent(&conn, sid.trim()));
-                let mut tasks = Vec::new();
-                for row in rows.flatten() {
-                    let (raw_session_id, started_at, source, model) = row;
-                    let resolved_session_id = Self::resolve_to_parent(&conn, &raw_session_id);
-                    if let Some(ref current_root) = current_lineage_root {
-                        if &resolved_session_id == current_root {
-                            continue;
-                        }
-                    }
-                    if !seen.insert(resolved_session_id.clone()) {
-                        continue;
-                    }
-
-                    let mut msg_stmt = conn
-                        .prepare(
-                            "SELECT role, COALESCE(content, ''), tool_calls
-                             FROM messages WHERE session_id = ?1 ORDER BY id ASC",
-                        )
-                        .map_err(|e| {
-                            ToolError::ExecutionFailed(format!(
-                                "Failed to prepare messages query: {}",
-                                e
-                            ))
-                        })?;
-                    let msg_rows = msg_stmt
-                        .query_map(rusqlite::params![resolved_session_id.clone()], |r| {
-                            Ok((
-                                r.get::<_, String>(0)?,
-                                r.get::<_, String>(1)?,
-                                r.get::<_, Option<String>>(2)?,
-                            ))
-                        })
-                        .map_err(|e| {
-                            ToolError::ExecutionFailed(format!(
-                                "Failed to load session messages: {}",
-                                e
-                            ))
-                        })?;
-                    let messages: Vec<(String, String, Option<String>)> =
-                        msg_rows.flatten().collect();
-                    if messages.is_empty() {
-                        continue;
-                    }
-                    let transcript = Self::format_conversation(&messages);
-                    let transcript =
-                        Self::truncate_around_matches(&transcript, query, MAX_SESSION_CHARS);
-                    tasks.push(SummaryTask {
-                        session_id: resolved_session_id,
-                        source,
-                        when: Some(Self::format_timestamp(started_at.as_deref())),
-                        model,
-                        conversation_text: transcript,
-                    });
-                    if tasks.len() >= limit {
-                        break;
-                    }
-                }
-                let searched = seen.len();
-                (tasks, searched, None)
-            }
+        let role_values: Vec<String> = role_filter
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let role_refs: Vec<&str> = role_values.iter().map(String::as_str).collect();
+        let role_arg = if role_refs.is_empty() {
+            None
+        } else {
+            Some(role_refs.as_slice())
         };
 
-        if let Some(payload) = recent_payload {
-            return Ok(payload.to_string());
+        let current_lineage_root = current_session_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|sid| self.resolve_lineage_root(sid));
+
+        if query.is_empty() {
+            let rows = self
+                .db
+                .list_sessions_rich(
+                    None,
+                    HIDDEN_SESSION_SOURCES,
+                    limit,
+                    0,
+                    0,
+                    true,
+                )
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            let mut results = Vec::new();
+            for row in rows {
+                if let Some(ref root) = current_lineage_root {
+                    if root == &row.id {
+                        continue;
+                    }
+                }
+                results.push(json!({
+                    "session_id": row.id,
+                    "title": row.title,
+                    "source": row.source,
+                    "started_at": row.started_at,
+                    "last_active": row.last_active,
+                    "message_count": row.message_count,
+                    "preview": row.preview.unwrap_or_default(),
+                }));
+            }
+            return Ok(json!({
+                "success": true,
+                "mode": "recent",
+                "results": results,
+                "count": results.len(),
+                "message": format!(
+                    "Showing {} most recent sessions. Use a keyword query to search specific topics.",
+                    results.len()
+                ),
+            })
+            .to_string());
         }
 
+        let hits = self
+            .db
+            .search_messages(
+                query,
+                None,
+                Some(HIDDEN_SESSION_SOURCES),
+                role_arg,
+                50,
+                0,
+                None,
+            )
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        let mut seen = HashSet::new();
+        let mut tasks = Vec::new();
+        for hit in hits {
+            let resolved = self.resolve_lineage_root(&hit.session_id);
+            if let Some(ref root) = current_lineage_root {
+                if root == &resolved {
+                    continue;
+                }
+            }
+            if !seen.insert(resolved.clone()) {
+                continue;
+            }
+            let messages = self
+                .db
+                .load_session_messages(&resolved)
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            if messages.is_empty() {
+                continue;
+            }
+            let transcript = Self::format_conversation(&messages);
+            let transcript = Self::truncate_around_matches(&transcript, query, MAX_SESSION_CHARS);
+            tasks.push(SummaryTask {
+                session_id: resolved,
+                source: hit.source,
+                when: Some(Self::format_timestamp(Some(hit.session_started))),
+                model: hit.model,
+                conversation_text: transcript,
+            });
+            if tasks.len() >= limit {
+                break;
+            }
+        }
+
+        let sessions_searched = seen.len();
         let summary_client = Self::summary_client_from_env();
         let mut summaries = Vec::new();
         if let Some(summary_client) = summary_client {
@@ -783,23 +475,12 @@ mod tests {
 
     #[test]
     fn format_timestamp_handles_none() {
-        assert_eq!(
-            SqliteSessionSearchBackend::format_timestamp(None),
-            "unknown"
-        );
+        assert_eq!(SqliteSessionSearchBackend::format_timestamp(None), "unknown");
     }
 
     #[test]
     fn format_timestamp_handles_unix_number() {
-        let out = SqliteSessionSearchBackend::format_timestamp(Some("1700000000"));
+        let out = SqliteSessionSearchBackend::format_timestamp(Some(1_700_000_000.0));
         assert!(out.contains("2023") || out.contains("2024"));
-        assert!(out.contains(" at "));
-    }
-
-    #[test]
-    fn format_timestamp_handles_rfc3339() {
-        let out = SqliteSessionSearchBackend::format_timestamp(Some("2026-01-02T03:04:05Z"));
-        assert!(out.contains("2026"));
-        assert!(out.contains(" at "));
     }
 }

@@ -15,7 +15,8 @@ use std::{
 
 use bytes::Bytes;
 use hermes_agent::{
-    RunConversationParams, plugins::PluginManifest, split_messages_for_run_conversation,
+    format_session_db_unavailable, RunConversationParams, plugins::PluginManifest,
+    split_messages_for_run_conversation, SessionPersistence,
 };
 use hermes_core::AgentError;
 use hermes_intelligence::model_metadata::{get_model_context_length, get_model_info};
@@ -8651,6 +8652,130 @@ fn summarize_branch_diff(
     out.trim_end().to_string()
 }
 
+fn session_db(app: &App) -> SessionPersistence {
+    SessionPersistence::new(&app.state_root)
+}
+
+/// Try to restore a session from `state.db`. Returns `Ok(None)` when DB is unavailable or target not found.
+fn try_load_session_from_db(
+    app: &mut App,
+    target: Option<&str>,
+    resume_mode: bool,
+) -> Result<Option<CommandResult>, AgentError> {
+    let sp = session_db(app);
+    if sp.ensure_db().is_err() {
+        return Ok(None);
+    }
+
+    let session_id = if let Some(name) = target.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Ok(Some(by_title)) = sp.resolve_session_by_title(name) {
+            by_title
+        } else if let Ok(Some(by_id)) = sp.resolve_session_id(name) {
+            by_id
+        } else {
+            return Ok(None);
+        }
+    } else {
+        let rows = sp.list_sessions_rich(
+            None,
+            &["tool", "internal"],
+            1,
+            0,
+            1,
+            true,
+        )?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        row.id
+    };
+
+    let resolved = sp.resolve_resume_session_id(&session_id)?;
+    let messages = sp.load_session(&resolved)?;
+    if messages.is_empty() {
+        return Ok(None);
+    }
+
+    let meta = sp.get_session(&resolved)?;
+    let display = meta
+        .as_ref()
+        .and_then(|s| s.title.clone())
+        .unwrap_or_else(|| resolved.clone());
+    let model = meta.as_ref().and_then(|s| s.model.clone());
+
+    let old_session_id = app.session_id.clone();
+    app.messages = messages;
+    app.ui_messages.clear();
+
+    if resume_mode {
+        if resolved != old_session_id {
+            app.notify_memory_session_switch(&resolved, &old_session_id, false, "resume");
+        } else {
+            app.agent.set_runtime_session_id(&resolved);
+        }
+        app.session_id = resolved.clone();
+        let _ = sp.reopen_session(&resolved);
+    }
+
+    let mut model_note = String::new();
+    if let Some(restored_model) = model.as_deref().filter(|s| !s.is_empty()) {
+        if !restored_model.eq_ignore_ascii_case(&app.current_model) {
+            let previous = app.current_model.clone();
+            app.switch_model(restored_model);
+            model_note = format!("\nModel restored: {} -> {}", previous, app.current_model);
+        }
+    }
+
+    let verb = if resume_mode { "Resumed" } else { "Loaded" };
+    emit_command_output(
+        app,
+        format!(
+            "{} session '{}' from state.db ({} messages; session_id={}){}",
+            verb,
+            display,
+            app.messages.len(),
+            resolved,
+            model_note
+        ),
+    );
+    Ok(Some(CommandResult::Handled))
+}
+
+fn format_db_session_list(app: &App) -> Result<Option<String>, AgentError> {
+    let sp = session_db(app);
+    if sp.ensure_db().is_err() {
+        return Ok(None);
+    }
+    let rows = sp.list_sessions_rich(
+        None,
+        &["tool", "internal"],
+        20,
+        0,
+        0,
+        true,
+    )?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut out = String::from("Saved sessions (state.db):\n");
+    for (idx, row) in rows.iter().enumerate() {
+        let title = row.title.as_deref().unwrap_or("(untitled)");
+        let marker = if idx == 0 { " (latest)" } else { "" };
+        let preview = row.preview.as_deref().unwrap_or("");
+        let _ = writeln!(
+            out,
+            "- `{}`{} — id={} msgs={} — {}",
+            title,
+            marker,
+            row.id,
+            row.message_count,
+            preview
+        );
+    }
+    out.push_str("\nUsage: `/load <session-title|id>` or `/resume [session-title|id]`");
+    Ok(Some(out.trim_end().to_string()))
+}
+
 fn load_session_from_path(
     app: &mut App,
     session_name: &str,
@@ -8730,6 +8855,13 @@ fn load_session_from_path(
 }
 
 fn handle_load_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    if args.is_empty() {
+        if let Some(db_list) = format_db_session_list(app)? {
+            emit_command_output(app, db_list);
+            return Ok(CommandResult::Handled);
+        }
+    }
+
     let sessions_dir = hermes_config::hermes_home().join("sessions");
 
     if args.is_empty() {
@@ -8769,6 +8901,9 @@ fn handle_load_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Ag
     }
 
     let name = args[0];
+    if let Some(result) = try_load_session_from_db(app, Some(name), false)? {
+        return Ok(result);
+    }
     let path = sessions_dir.join(format!("{}.json", name));
     if !path.exists() {
         emit_command_output(
@@ -8781,14 +8916,28 @@ fn handle_load_command(app: &mut App, args: &[&str]) -> Result<CommandResult, Ag
 }
 
 fn handle_resume_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+    if args.is_empty() {
+        if let Some(result) = try_load_session_from_db(app, None, true)? {
+            return Ok(result);
+        }
+    } else if let Some(result) = try_load_session_from_db(app, Some(args[0]), true)? {
+        return Ok(result);
+    }
+
     let sessions_dir = hermes_config::hermes_home().join("sessions");
     if !sessions_dir.exists() {
-        emit_command_output(app, "No saved sessions found.");
+        emit_command_output(
+            app,
+            format_session_db_unavailable("No saved sessions found and session database not available"),
+        );
         return Ok(CommandResult::Handled);
     }
     let entries = enumerate_saved_sessions(&sessions_dir);
     if entries.is_empty() {
-        emit_command_output(app, "No saved sessions found.");
+        emit_command_output(
+            app,
+            format_session_db_unavailable("No saved sessions found and session database not available"),
+        );
         return Ok(CommandResult::Handled);
     }
 
@@ -11401,12 +11550,30 @@ fn handle_policy_command(app: &mut App, args: &[&str]) -> Result<CommandResult, 
 }
 
 fn handle_history_command(app: &mut App) -> Result<CommandResult, AgentError> {
-    let transcript = app.transcript_messages();
+    let sp = session_db(app);
+    let db_messages = if sp.ensure_db().is_ok() && !app.session_id.is_empty() {
+        sp.load_session(&app.session_id).ok()
+    } else {
+        None
+    };
+
+    let transcript: Vec<_> = db_messages
+        .as_ref()
+        .filter(|m| !m.is_empty())
+        .cloned()
+        .unwrap_or_else(|| app.transcript_messages());
+
     if transcript.is_empty() {
         emit_command_output(app, "No conversation history yet.");
         return Ok(CommandResult::Handled);
     }
-    let mut out = String::from("Recent conversation history:\n");
+
+    let source_note = if db_messages.is_some() {
+        " (from state.db)"
+    } else {
+        ""
+    };
+    let mut out = format!("Recent conversation history{source_note}:\n");
     for (idx, msg) in transcript.iter().enumerate().rev().take(12).rev() {
         let role = match msg.role {
             hermes_core::MessageRole::User => "USER",
@@ -11414,14 +11581,8 @@ fn handle_history_command(app: &mut App) -> Result<CommandResult, AgentError> {
             hermes_core::MessageRole::System => "SYSTEM",
             hermes_core::MessageRole::Tool => "TOOL",
         };
-        let preview = msg
-            .content
-            .as_deref()
-            .unwrap_or("")
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim();
+        let preview = hermes_agent::session_persistence::decode_content_preview(msg.content.as_deref());
+        let preview = preview.lines().next().unwrap_or("").trim();
         let clipped = if preview.chars().count() > 96 {
             let mut s: String = preview.chars().take(95).collect();
             s.push('…');
@@ -16748,9 +16909,20 @@ fn handle_session_compat_command(
     let msg = match cmd {
         "/title" => {
             if arg_joined.trim().is_empty() {
-                "Usage: /title <name>".to_string()
+                match session_db(app).get_session_title(&app.session_id) {
+                    Ok(Some(title)) => format!("Session title: {title}"),
+                    Ok(None) => "Session has no title.".to_string(),
+                    Err(e) => format!(
+                        "Session title unavailable: {}",
+                        format_session_db_unavailable(&e.to_string())
+                    ),
+                }
             } else {
-                format!("Session title marker set to: {}", arg_joined.trim())
+                match session_db(app).set_session_title(&app.session_id, Some(arg_joined.trim())) {
+                    Ok(true) => format!("Session title set to: {}", arg_joined.trim()),
+                    Ok(false) => "Session not found in state.db.".to_string(),
+                    Err(e) => format!("Failed to set title: {e}"),
+                }
             }
         }
         "/branch" => "Use `/branch` (native) for list/diff/merge/save controls.".to_string(),

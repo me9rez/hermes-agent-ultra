@@ -512,6 +512,7 @@ impl FeishuAdapter {
             channel_prompt: None,
             channel_skills: vec![],
             channel_topic: None,
+            message_thread_id: None,
         };
         if let Some(tx) = inbound_tx.read().await.clone() {
             let _ = tx.send(incoming).await;

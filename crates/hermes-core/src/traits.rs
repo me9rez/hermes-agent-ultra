@@ -110,6 +110,22 @@ pub trait PlatformAdapter: Send + Sync {
         Ok(None)
     }
 
+    /// Send a text message into a platform thread/topic when supported.
+    ///
+    /// Default: ignores `message_thread_id` and delegates to [`Self::send_message_replying`].
+    async fn send_message_in_thread(
+        &self,
+        chat_id: &str,
+        text: &str,
+        parse_mode: Option<ParseMode>,
+        reply_to_message_id: Option<&str>,
+        message_thread_id: Option<&str>,
+    ) -> Result<Option<String>, GatewayError> {
+        let _ = message_thread_id;
+        self.send_message_replying(chat_id, text, parse_mode, reply_to_message_id)
+            .await
+    }
+
     /// Edit an existing message.
     async fn edit_message(
         &self,

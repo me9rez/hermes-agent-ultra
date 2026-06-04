@@ -576,6 +576,25 @@ impl SessionManager {
         sessions.get(session_id).cloned()
     }
 
+    /// Rebind an in-memory session to a persisted session id (Telegram topic restore).
+    pub async fn apply_persisted_session_id(&self, session_key: &str, session_id: &str) {
+        let mut sessions = self.sessions.write().await;
+        let Some(session) = sessions.get_mut(session_key) else {
+            return;
+        };
+        if session.id == session_id {
+            return;
+        }
+        session.id = session_id.to_string();
+        if let Some(loader) = &self.history_loader {
+            let (messages, id_override) = loader(session_id);
+            session.set_messages(messages);
+            if let Some(uuid) = id_override {
+                session.id = uuid;
+            }
+        }
+    }
+
     /// Find all sessions for a given user across all platforms
     /// (cross-platform session continuity).
     pub async fn get_user_sessions(&self, user_id: &str) -> Vec<Session> {

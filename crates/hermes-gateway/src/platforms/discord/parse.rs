@@ -249,6 +249,7 @@ pub fn raw_to_incoming(
         channel_prompt: None,
         channel_skills: Vec::new(),
         channel_topic: None,
+        message_thread_id: None,
     }
 }
 
@@ -287,6 +288,7 @@ pub fn interaction_to_incoming(interaction: &InteractionData) -> Option<Incoming
         channel_prompt: None,
         channel_skills: Vec::new(),
         channel_topic: None,
+        message_thread_id: None,
     })
 }
 

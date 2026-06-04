@@ -180,7 +180,7 @@ impl AgentLoop {
         }
 
         if meta.persist_session {
-            self.persist_turn_session(&messages);
+            self.persist_turn_session(&messages, &inner);
         }
 
         inner.messages = messages.clone();
@@ -250,7 +250,7 @@ impl AgentLoop {
         out
     }
 
-    fn persist_turn_session(&self, messages: &[Message]) {
+    fn persist_turn_session(&self, messages: &[Message], inner: &AgentResult) {
         let cfg = self.config();
         let Some(ref sid) = cfg.session_id else {
             return;
@@ -285,6 +285,19 @@ impl AgentLoop {
         }
         if let Err(err) = result {
             tracing::warn!(session_id = %sid, "persist_session after run_conversation: {}", err);
+            return;
+        }
+
+        if let Some(ref usage) = inner.usage {
+            let update = hermes_tools::state_db::TokenCountUpdate::increment(
+                i64::try_from(usage.prompt_tokens).unwrap_or(i64::MAX),
+                i64::try_from(usage.completion_tokens).unwrap_or(i64::MAX),
+                Some(model.clone()),
+                usage.estimated_cost.or(inner.session_cost_usd),
+            );
+            if let Err(err) = sp.update_token_counts(sid, &update) {
+                tracing::warn!(session_id = %sid, "update_token_counts after run_conversation: {}", err);
+            }
         }
     }
 

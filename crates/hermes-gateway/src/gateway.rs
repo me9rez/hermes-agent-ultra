@@ -194,6 +194,8 @@ pub struct IncomingMessage {
     pub channel_skills: Vec<String>,
     /// Channel topic string when known (Discord P2-7).
     pub channel_topic: Option<String>,
+    /// Telegram DM topic thread id (`message_thread_id`).
+    pub message_thread_id: Option<String>,
 }
 
 impl IncomingMessage {
@@ -220,6 +222,7 @@ impl IncomingMessage {
             channel_prompt: None,
             channel_skills: Vec::new(),
             channel_topic: None,
+            message_thread_id: None,
         }
     }
 }
@@ -1074,12 +1077,26 @@ impl Gateway {
         }
 
         let is_dm = Some(incoming.is_dm);
-        let session_key = self.session_manager.compose_session_key_with_dm(
-            &incoming.platform,
-            &incoming.chat_id,
-            &incoming.user_id,
-            is_dm,
-        );
+        let session_key = crate::telegram_topic::compose_telegram_session_key(incoming)
+            .unwrap_or_else(|| {
+                self.session_manager.compose_session_key_with_dm(
+                    &incoming.platform,
+                    &incoming.chat_id,
+                    &incoming.user_id,
+                    is_dm,
+                )
+            });
+
+        if let Some(reply) = crate::telegram_topic::try_handle_topic_command(incoming) {
+            self.send_incoming_reply(incoming, &reply, None).await?;
+            return Ok(());
+        }
+
+        if let Some(reply) = crate::telegram_topic::telegram_lobby_reply(incoming) {
+            self.send_incoming_reply(incoming, &reply, None).await?;
+            return Ok(());
+        }
+
         let route_id = Self::route_correlation_id(incoming, &session_key);
         // Fast-path stop/cancel so it can interrupt an in-flight run without waiting
         // for the per-session serial lock.
@@ -1112,6 +1129,13 @@ impl Gateway {
                 is_dm,
             )
             .await;
+        crate::telegram_topic::maybe_bind_new_topic_lane(incoming, &session_key, &session.id);
+        if let Some(bound_id) = crate::telegram_topic::bound_session_id(incoming) {
+            self.session_manager
+                .apply_persisted_session_id(&session_key, &bound_id)
+                .await;
+        }
+        let session = self.session_manager.get_session(&session_key).await.unwrap_or(session);
         trace!(
             platform = %incoming.platform,
             session_key = %session_key,
@@ -2127,7 +2151,13 @@ impl Gateway {
                 None
             } else if let Some(adapter) = self.get_adapter(&incoming.platform).await {
                 adapter
-                    .send_message_replying(&incoming.chat_id, "...", None, reply_to)
+                    .send_message_in_thread(
+                        &incoming.chat_id,
+                        "...",
+                        None,
+                        reply_to,
+                        incoming.message_thread_id.as_deref(),
+                    )
                     .await?
             } else {
                 self.send_message(&incoming.platform, &incoming.chat_id, "...", None)
@@ -3124,7 +3154,13 @@ impl Gateway {
             .filter(|id| !id.is_empty());
         if let Some(adapter) = self.get_adapter(&incoming.platform).await {
             return adapter
-                .send_message_replying(&incoming.chat_id, text, parse_mode, reply_to)
+                .send_message_in_thread(
+                    &incoming.chat_id,
+                    text,
+                    parse_mode,
+                    reply_to,
+                    incoming.message_thread_id.as_deref(),
+                )
                 .await
                 .map(|_| ());
         }

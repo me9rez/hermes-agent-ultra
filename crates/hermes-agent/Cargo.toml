@@ -38,6 +38,7 @@ uuid = { workspace = true, features = ["v4"] }
 syn = { version = "2", features = ["full"] }
 sha2 = "0.11"
 hex = "0.4"
+rand = "0.10"
 
 [dev-dependencies]
 proptest = { workspace = true }

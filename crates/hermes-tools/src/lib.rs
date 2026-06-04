@@ -19,6 +19,7 @@ pub mod dispatch;
 pub mod kanban;
 pub mod media_extract;
 pub mod register_builtins;
+pub mod state_db;
 pub mod registry;
 pub mod rtk_filter;
 pub mod tool_dispatch_helpers;
@@ -119,6 +120,10 @@ pub use backends::image_gen::FalImageGenBackend;
 pub use backends::memory::FileMemoryBackend;
 pub use backends::messaging::SignalMessagingBackend;
 pub use backends::session_search::SqliteSessionSearchBackend;
+pub use state_db::{
+    StateDb, StateDbError, TokenCountUpdate, decode_content_preview, sanitize_fts5_query,
+    SearchMessageMatch,
+};
 pub use backends::todo::FileTodoBackend;
 pub use backends::tts::MultiTtsBackend;
 pub use backends::video::VisionFrameSamplingVideoBackend;

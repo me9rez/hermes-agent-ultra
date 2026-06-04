@@ -55,7 +55,7 @@ pub use paths::{
     cli_config_path, config_path, cron_dir, env_path, expand_tilde, gateway_json_path,
     gateway_pid_path, gateway_pid_path_in, hermes_home, interest_db_path, interest_db_path_in,
     memory_path, resolve_agent_path, resolve_outbound_media_path, session_temp_dir, sessions_dir,
-    skills_dir, state_dir, user_path,
+    skills_dir, state_db_path, state_db_path_in, state_dir, user_path,
 };
 pub use platform::{extra_string, platform_token_or_extra, PlatformConfig, UnauthorizedDmBehavior};
 pub use session::{DailyReset, IdleReset, SessionConfig, SessionResetPolicy, SessionType};

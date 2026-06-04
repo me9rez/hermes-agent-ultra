@@ -131,7 +131,8 @@ pub use skill_orchestrator::SkillOrchestrator;
 
 // Re-export session persistence
 pub use session_persistence::{
-    SessionFlushCursor, SessionPersistence, leading_system_prompt_for_persist,
+    decode_content_preview, format_session_db_unavailable, get_last_init_error,
+    leading_system_prompt_for_persist, SessionFlushCursor, SessionPersistence, SessionRecord,
 };
 
 // Re-export context files

@@ -296,10 +296,12 @@ fn register_builtin_tools_impl(
 
     // -- Session search ------------------------------------------------------
     {
-        let db_path = hermes_data_dir().join("sessions.db");
-        if let Ok(backend) = crate::backends::session_search::SqliteSessionSearchBackend::new(
-            &db_path.to_string_lossy(),
-        ) {
+        let db_path = hermes_config::state_db_path();
+        if let Ok(backend) =
+            crate::backends::session_search::SqliteSessionSearchBackend::new(
+                &db_path.to_string_lossy(),
+            )
+            .or_else(|_| crate::backends::session_search::SqliteSessionSearchBackend::default_path()) {
             reg(
                 registry,
                 "session_search",

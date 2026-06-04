@@ -4480,6 +4480,7 @@ async fn run_api_server_inbound_loop(
             channel_prompt: None,
             channel_skills: vec![],
             channel_topic: None,
+            message_thread_id: None,
         };
         if let Err(err) = gateway.route_message(&incoming).await {
             tracing::warn!("Failed to route api_server message: {}", err);
@@ -4507,6 +4508,7 @@ async fn run_webhook_inbound_loop(gateway: Arc<Gateway>, mut rx: mpsc::Receiver<
             channel_prompt: None,
             channel_skills: vec![],
             channel_topic: None,
+            message_thread_id: None,
         };
         if let Err(err) = gateway.route_message(&incoming).await {
             tracing::warn!("Failed to route webhook message: {}", err);
@@ -5115,6 +5117,9 @@ async fn run_telegram_poll_loop(gateway: Arc<Gateway>, adapter: Arc<TelegramAdap
                         channel_prompt: None,
                         channel_skills: vec![],
                         channel_topic: None,
+                        message_thread_id: msg
+                            .message_thread_id
+                            .map(|id| id.to_string()),
                     };
 
                     if let Err(err) = gateway.route_message(&incoming).await {

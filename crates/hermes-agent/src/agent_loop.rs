@@ -1188,7 +1188,7 @@ fn has_ssl_transient_phrase(lower: &str) -> bool {
         || lower.contains("[ssl:")
 }
 
-fn maybe_nous_401_diagnostic(
+pub(crate) fn maybe_nous_401_diagnostic(
     provider_hint: &str,
     err: &str,
     hermes_home: Option<&str>,
@@ -1234,7 +1234,7 @@ fn maybe_nous_401_diagnostic(
     ))
 }
 
-fn classify_error(err: &str) -> ErrorClass {
+pub(crate) fn classify_error(err: &str) -> ErrorClass {
     let lower = err.to_lowercase();
     let model_not_found = lower.contains("model not found")
         || lower.contains("invalid model")
@@ -1279,7 +1279,7 @@ fn classify_error(err: &str) -> ErrorClass {
     }
 }
 
-fn is_tool_payload_validation_error(err: &str) -> bool {
+pub(crate) fn is_tool_payload_validation_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     (lower.contains("invalid input") && lower.contains("function"))
         || lower.contains("provider returned error")
@@ -1293,7 +1293,7 @@ fn is_tool_payload_validation_error(err: &str) -> bool {
         || lower.contains("tools") && lower.contains("invalid")
 }
 
-fn preferred_tool_payload_fallback_model(provider_hint: &str, model_name: &str) -> Option<String> {
+pub(crate) fn preferred_tool_payload_fallback_model(provider_hint: &str, model_name: &str) -> Option<String> {
     let provider = provider_hint.trim().to_ascii_lowercase();
     let model = model_name.trim().to_ascii_lowercase();
     let nous_openai_route = provider == "nous" && model.starts_with("openai/");
@@ -1363,7 +1363,7 @@ fn is_transient_stream_error(err: &AgentError) -> bool {
 }
 
 /// Compute jittered exponential backoff delay.
-fn jittered_backoff(attempt: u32, base_ms: u64, max_ms: u64) -> Duration {
+pub(crate) fn jittered_backoff(attempt: u32, base_ms: u64, max_ms: u64) -> Duration {
     let exp = base_ms.saturating_mul(1u64 << attempt.min(10));
     let capped = exp.min(max_ms);
     let jitter = capped / 4;
@@ -1960,7 +1960,7 @@ pub(crate) fn apply_web_tool_budget(
     blocked_results
 }
 
-fn looks_like_tool_error_output(output: &str) -> bool {
+pub(crate) fn looks_like_tool_error_output(output: &str) -> bool {
     let trimmed = output.trim();
     if trimmed.is_empty() {
         return false;
@@ -2254,7 +2254,7 @@ pub struct AgentLoop {
     /// Optional in-process sub-agent orchestrator. When set, `delegate_task`
     /// tool calls are executed by the orchestrator (spawn/timeout/cancel/
     /// lineage) instead of simply returning a signal envelope.
-    sub_agent_orchestrator: Option<Arc<crate::sub_agent_orchestrator::SubAgentOrchestrator>>,
+    pub(crate) sub_agent_orchestrator: Option<Arc<crate::sub_agent_orchestrator::SubAgentOrchestrator>>,
     /// Always-on workspace code index + repo-map source.
     code_index: Option<Arc<Mutex<CodeIndex>>>,
     /// LSP-style context injection controls.
@@ -2266,10 +2266,10 @@ pub struct AgentLoop {
     /// Effective model/provider for the current turn (restored at turn boundaries).
     active_runtime: Mutex<PrimaryRuntime>,
     /// Turn-scoped fallback activation (Python `_fallback_activated` / chain index).
-    turn_fallback: Mutex<TurnFallbackState>,
+    pub(crate) turn_fallback: Mutex<TurnFallbackState>,
     /// When set, tool calls use this async path instead of sync `ToolRegistry` handlers
     /// (avoids `block_in_place` + `block_on` from inside `JoinSet` tasks on the gateway).
-    async_tool_dispatch: Option<AsyncToolDispatch>,
+    pub(crate) async_tool_dispatch: Option<AsyncToolDispatch>,
     /// Mid-run `/steer` queue (Python `_pending_steer`).
     pub(crate) pending_steer: PendingSteer,
     /// Active turn task id (Python `_current_task_id`).
@@ -2294,7 +2294,7 @@ pub struct AgentLoop {
     /// Lazy `CodexAppServerSession` (Python `agent._codex_session`).
     pub(crate) codex_app_server_session: Arc<Mutex<Option<crate::transports::codex_app_server_session::CodexAppServerSession>>>,
     /// Last-known Nous `x-ratelimit-*` headers from a successful response (Python `_rate_limit_state`).
-    last_nous_rate_limit_headers: Arc<Mutex<Option<std::collections::HashMap<String, String>>>>,
+    pub(crate) last_nous_rate_limit_headers: Arc<Mutex<Option<std::collections::HashMap<String, String>>>>,
 }
 
 /// Async tool execution hook (gateway: `hermes_tools::ToolRegistry::dispatch_async`).
@@ -2660,7 +2660,7 @@ impl AgentLoop {
         cfg.api_mode = active.api_mode.clone();
     }
 
-    fn primary_runtime_for_failover_model(&self, model_id: &str) -> PrimaryRuntime {
+    pub(crate) fn primary_runtime_for_failover_model(&self, model_id: &str) -> PrimaryRuntime {
         let cfg = self.config_snapshot();
         let mut rt = Self::primary_runtime_from_config(&cfg);
         let (provider, _) = self.extract_provider_and_model(model_id);
@@ -2706,7 +2706,7 @@ impl AgentLoop {
     }
 
     /// Build an LLM provider from a full [`PrimaryRuntime`] snapshot (failover / fallback).
-    fn build_llm_provider_for_runtime(
+    pub(crate) fn build_llm_provider_for_runtime(
         &self,
         runtime: &PrimaryRuntime,
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
@@ -2733,7 +2733,7 @@ impl AgentLoop {
     }
 
     /// Effective provider for API calls: rebuild from active runtime when fallback is active.
-    fn effective_llm_provider(&self) -> Arc<dyn LlmProvider> {
+    pub(crate) fn effective_llm_provider(&self) -> Arc<dyn LlmProvider> {
         let fallback_active = self
             .turn_fallback
             .lock()
@@ -2749,7 +2749,7 @@ impl AgentLoop {
         self.llm_provider.clone()
     }
 
-    fn note_primary_rate_limited_if_applicable(&self) {
+    pub(crate) fn note_primary_rate_limited_if_applicable(&self) {
         let already = self
             .turn_fallback
             .lock()
@@ -4026,7 +4026,7 @@ impl AgentLoop {
         Some(provider_obj)
     }
 
-    fn invoke_pre_api_request_hook(
+    pub(crate) fn invoke_pre_api_request_hook(
         &self,
         api_call_count: u32,
         api_messages: &[Message],
@@ -4315,7 +4315,7 @@ impl AgentLoop {
         }
     }
 
-    fn extract_provider_and_model<'a>(&self, model: &'a str) -> (String, &'a str) {
+    pub(crate) fn extract_provider_and_model<'a>(&self, model: &'a str) -> (String, &'a str) {
         if let Some((p, m)) = model.split_once(':') {
             let p = p.trim();
             let m = m.trim();
@@ -4435,7 +4435,7 @@ impl AgentLoop {
         }
     }
 
-    fn resolve_runtime_base_url(
+    pub(crate) fn resolve_runtime_base_url(
         &self,
         provider: &str,
         route_base_url: Option<&str>,
@@ -4926,7 +4926,7 @@ impl AgentLoop {
         (command, args)
     }
 
-    fn build_runtime_provider(
+    pub(crate) fn build_runtime_provider(
         &self,
         provider: &str,
         model_name: &str,
@@ -5074,7 +5074,7 @@ impl AgentLoop {
         Ok(provider_obj)
     }
 
-    fn credential_pool_for_route<'a>(
+    pub(crate) fn credential_pool_for_route<'a>(
         &'a self,
         rt: &'a TurnRuntimeRoute,
     ) -> Option<&'a Arc<CredentialPool>> {
@@ -5128,7 +5128,7 @@ impl AgentLoop {
 
     /// Run context compression on `ctx` (auxiliary LLM summary + tool-pair sanitiser).
     /// Returns `true` when messages were actually compressed and session rotation occurred.
-    async fn compress_context(&self, ctx: &mut ContextManager) -> bool {
+    pub(crate) async fn compress_context(&self, ctx: &mut ContextManager) -> bool {
         let task_hint = ctx
             .get_messages()
             .iter()
@@ -5678,7 +5678,7 @@ impl AgentLoop {
         }
     }
 
-    fn extra_body_for_api_mode(&self, api_mode: &ApiMode) -> Option<Value> {
+    pub(crate) fn extra_body_for_api_mode(&self, api_mode: &ApiMode) -> Option<Value> {
         let mut body = self
             .config()
             .extra_body
@@ -5705,651 +5705,6 @@ impl AgentLoop {
             }
         }
         Some(body)
-    }
-
-    // -- Retry-aware LLM call ---------------------------------------------
-
-    pub(crate) fn call_llm_with_retry<'a>(
-        &'a self,
-        ctx: &'a mut ContextManager,
-        tool_schemas: &'a [ToolSchema],
-        route: Option<&'a TurnRuntimeRoute>,
-        max_tokens_override: Option<u32>,
-        api_call_count: &'a mut u32,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<hermes_core::LlmResponse, AgentError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(self.call_llm_with_retry_inner(
-            ctx,
-            tool_schemas,
-            route,
-            max_tokens_override,
-            api_call_count,
-        ))
-    }
-
-    async fn call_llm_with_retry_inner(
-        &self,
-        ctx: &mut ContextManager,
-        tool_schemas: &[ToolSchema],
-        route: Option<&TurnRuntimeRoute>,
-        max_tokens_override: Option<u32>,
-        api_call_count: &mut u32,
-    ) -> Result<hermes_core::LlmResponse, AgentError> {
-        let default_model = self.active_model();
-        let model = route
-            .map(|r| r.model.as_str())
-            .unwrap_or(default_model.as_str());
-        let (inferred_provider, model_name) = self.extract_provider_and_model(model);
-        let route_provider_hint = route
-            .and_then(|r| r.provider.as_deref())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let active_provider = route_provider_hint.unwrap_or(inferred_provider);
-        // Always try the requested model first. Some providers only reveal tool
-        // schema limitations at request time, so proactive substitution hides
-        // the real model behavior and makes quorum voters appear to "succeed"
-        // on a different backend.
-        let effective_model_name = model_name.to_string();
-        if let Some(rt) = route {
-            if let Some(ref label) = rt.route_label {
-                tracing::debug!(%label, model = %rt.model, ?rt.signature, "smart model route");
-            }
-            if rt.command.is_some() || !rt.args.is_empty() {
-                tracing::debug!(command = ?rt.command, args = ?rt.args, "smart route process metadata");
-            }
-        }
-        let retry = self.config().retry.clone();
-        let (effective_max_retries, effective_base_delay_ms) =
-            (retry.max_retries, retry.base_delay_ms);
-        let active_runtime = self.primary_runtime_snapshot();
-        let default_api_mode = active_runtime.api_mode.clone();
-        let default_extra_body = self.extra_body_for_api_mode(&default_api_mode);
-        let effective_max_tokens = max_tokens_override.or(self.config().max_tokens);
-        let mut context_overflow_retries = 0u32;
-        let mut has_retried_429_same_cred = false;
-        let mut auth_refresh_attempted = false;
-        let mut thinking_sig_retry_attempted = false;
-
-        if active_provider == "nous" {
-            if let Some(remaining) = crate::nous_rate_guard::nous_rate_limit_remaining(
-                self.config().hermes_home.as_deref(),
-            ) {
-                if remaining > 0.0 {
-                    let msg = format!(
-                        "Nous Portal rate limit active — resets in {}.",
-                        crate::nous_rate_guard::format_remaining(remaining)
-                    );
-                    tracing::info!(%msg, "nous rate guard: skipping API call");
-                    hermes_telemetry::record_nous_rate_limit_skip();
-                    if self.try_activate_session_fallback(&effective_model_name) {
-                        return self
-                            .call_llm_with_retry(
-                                ctx,
-                                tool_schemas,
-                                route,
-                                max_tokens_override,
-                                api_call_count,
-                            )
-                            .await;
-                    }
-                    return Err(hermes_core::AgentError::RateLimited {
-                        retry_after_secs: Some(remaining.ceil() as u64),
-                    });
-                }
-            }
-        }
-
-        for attempt in 0..=effective_max_retries {
-            let api_messages = self.build_turn_api_messages(ctx);
-            self.interrupt.check_interrupt()?;
-            let api_start = Instant::now();
-            *api_call_count = api_call_count.saturating_add(1);
-            let hook_api_mode = route
-                .and_then(|rt| rt.api_mode.as_ref())
-                .unwrap_or(&default_api_mode);
-            let hook_base_url = self.resolve_runtime_base_url(
-                active_provider.as_str(),
-                route.and_then(|rt| rt.base_url.as_deref()),
-            );
-            self.invoke_pre_api_request_hook(
-                *api_call_count,
-                &api_messages,
-                tool_schemas.len(),
-                model,
-                active_provider.as_str(),
-                hook_base_url.as_deref(),
-                hook_api_mode,
-                effective_max_tokens,
-            );
-            let result = if let Some(rt) = route {
-                let (provider_name, _) = self.extract_provider_and_model(model);
-                let mode = rt.api_mode.as_ref().unwrap_or(&default_api_mode);
-                let extra_body_for_call = self.extra_body_for_api_mode(mode);
-                let pool = self.credential_pool_for_route(rt);
-                let routed_provider = self.build_runtime_provider(
-                    rt.provider.as_deref().unwrap_or(provider_name.as_str()),
-                    &effective_model_name,
-                    rt.base_url.as_deref(),
-                    rt.api_key_env.as_deref(),
-                    None,
-                    Some(mode),
-                    pool,
-                );
-                match routed_provider {
-                    Ok(provider) => {
-                        provider
-                            .chat_completion(
-                                &api_messages,
-                                tool_schemas,
-                                effective_max_tokens,
-                                self.config().temperature,
-                                Some(&effective_model_name),
-                                extra_body_for_call.as_ref(),
-                            )
-                            .await
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Runtime route unavailable (reason={:?}), falling back to primary runtime: {}",
-                            rt.routing_reason,
-                            e
-                        );
-                        self.effective_llm_provider()
-                            .chat_completion(
-                                &api_messages,
-                                tool_schemas,
-                                effective_max_tokens,
-                                self.config().temperature,
-                                Some(&effective_model_name),
-                                default_extra_body.as_ref(),
-                            )
-                            .await
-                    }
-                }
-            } else {
-                self.effective_llm_provider()
-                    .chat_completion(
-                        &api_messages,
-                        tool_schemas,
-                        effective_max_tokens,
-                        self.config().temperature,
-                        Some(&effective_model_name),
-                        default_extra_body.as_ref(),
-                    )
-                    .await
-            };
-
-            match result {
-                Ok(mut response) => {
-                    hermes_telemetry::record_llm_request();
-                    hermes_telemetry::record_llm_latency(api_start.elapsed());
-                    if active_provider == "nous" {
-                        if let Some(headers) = response.rate_limit_headers.take() {
-                            if let Ok(mut slot) = self.last_nous_rate_limit_headers.lock() {
-                                *slot = Some(headers);
-                            }
-                        }
-                    }
-                    return Ok(response);
-                }
-                Err(e) => {
-                    hermes_telemetry::record_error();
-                    let err_str = e.to_string();
-                    let failover = crate::retry_failover::classify_failover_reason(&err_str);
-                    if failover == crate::retry_failover::FailoverReason::ThinkingSignature
-                        && !thinking_sig_retry_attempted
-                    {
-                        thinking_sig_retry_attempted = true;
-                        crate::retry_failover::strip_thinking_blocks_from_context(ctx);
-                        self.invalidate_turn_api_messages_cache();
-                        tracing::warn!(
-                            "Thinking block signature invalid — stripped reasoning blocks, retrying"
-                        );
-                        self.emit_status(
-                            "lifecycle",
-                            "Thinking block signature invalid — stripped reasoning blocks and retrying",
-                        );
-                        continue;
-                    }
-                    let class = if failover == crate::retry_failover::FailoverReason::Billing {
-                        ErrorClass::RateLimit
-                    } else {
-                        classify_error(&err_str)
-                    };
-                    tracing::warn!(
-                        attempt,
-                        error_class = ?class,
-                        failover = ?failover,
-                        "LLM API error: {}",
-                        &err_str[..err_str.len().min(200)]
-                    );
-
-                    match class {
-                        ErrorClass::Auth => {
-                            if !auth_refresh_attempted {
-                                auth_refresh_attempted = true;
-                                self.refresh_oauth_store_tokens_if_needed().await;
-                                tracing::info!("Auth error — refreshed OAuth tokens, retrying");
-                                self.emit_status(
-                                    "lifecycle",
-                                    "Authentication error — refreshed OAuth tokens and retrying",
-                                );
-                                continue;
-                            }
-                            if let Some(diag) = maybe_nous_401_diagnostic(
-                                active_provider.as_str(),
-                                &err_str,
-                                self.config().hermes_home.as_deref(),
-                            ) {
-                                self.emit_status("lifecycle", &diag);
-                                return Err(AgentError::LlmApi(format!("{err_str}\n\n{diag}")));
-                            }
-                            return Err(AgentError::LlmApi(err_str));
-                        }
-                        ErrorClass::Fatal => {
-                            if !tool_schemas.is_empty()
-                                && is_tool_payload_validation_error(&err_str)
-                            {
-                                let (provider_name, model_name) =
-                                    self.extract_provider_and_model(model);
-                                if let Some(fallback_model_name) =
-                                    preferred_tool_payload_fallback_model(
-                                        active_provider.as_str(),
-                                        model_name,
-                                    )
-                                {
-                                    if !fallback_model_name.eq_ignore_ascii_case(model_name) {
-                                        tracing::warn!(
-                                            "LLM rejected tool payload on {}:{}; retrying with fallback tool-capable model {}",
-                                            provider_name,
-                                            model_name,
-                                            fallback_model_name
-                                        );
-                                        let fallback_with_tools = if let Some(rt) = route {
-                                            let mode =
-                                                rt.api_mode.as_ref().unwrap_or(&default_api_mode);
-                                            let extra_body_for_call =
-                                                self.extra_body_for_api_mode(mode);
-                                            let pool = self.credential_pool_for_route(rt);
-                                            match self.build_runtime_provider(
-                                                rt.provider
-                                                    .as_deref()
-                                                    .unwrap_or(provider_name.as_str()),
-                                                &fallback_model_name,
-                                                rt.base_url.as_deref(),
-                                                rt.api_key_env.as_deref(),
-                                                None,
-                                                Some(mode),
-                                                pool,
-                                            ) {
-                                                Ok(provider) => {
-                                                    provider
-                                                        .chat_completion(
-                                                            &api_messages,
-                                                            tool_schemas,
-                                                            effective_max_tokens,
-                                                            self.config().temperature,
-                                                            Some(&fallback_model_name),
-                                                            extra_body_for_call.as_ref(),
-                                                        )
-                                                        .await
-                                                }
-                                                Err(build_err) => Err(build_err),
-                                            }
-                                        } else {
-                                            match self.build_runtime_provider(
-                                                provider_name.as_str(),
-                                                &fallback_model_name,
-                                                None,
-                                                None,
-                                                None,
-                                                None,
-                                                self.primary_credential_pool.as_ref(),
-                                            ) {
-                                                Ok(provider) => {
-                                                    provider
-                                                        .chat_completion(
-                                                            &api_messages,
-                                                            tool_schemas,
-                                                            effective_max_tokens,
-                                                            self.config().temperature,
-                                                            Some(&fallback_model_name),
-                                                            default_extra_body.as_ref(),
-                                                        )
-                                                        .await
-                                                }
-                                                Err(build_err) => Err(build_err),
-                                            }
-                                        };
-                                        match fallback_with_tools {
-                                            Ok(resp) => {
-                                                self.emit_status(
-                                                    "lifecycle",
-                                                    &format!(
-                                                        "Model/tool-schema mismatch on {}:{}; auto-routed to {} for this turn",
-                                                        provider_name, model_name, fallback_model_name
-                                                    ),
-                                                );
-                                                return Ok(resp);
-                                            }
-                                            Err(fallback_err) => {
-                                                tracing::warn!(
-                                                    "Fallback tool-capable retry failed: {}",
-                                                    fallback_err
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-
-                                tracing::warn!(
-                                    "LLM rejected tool payload; retrying once without tools"
-                                );
-                                let no_tools_result = if let Some(rt) = route {
-                                    let mode = rt.api_mode.as_ref().unwrap_or(&default_api_mode);
-                                    let extra_body_for_call = self.extra_body_for_api_mode(mode);
-                                    let pool = self.credential_pool_for_route(rt);
-                                    match self.build_runtime_provider(
-                                        rt.provider.as_deref().unwrap_or(provider_name.as_str()),
-                                        model_name,
-                                        rt.base_url.as_deref(),
-                                        rt.api_key_env.as_deref(),
-                                        None,
-                                        Some(mode),
-                                        pool,
-                                    ) {
-                                        Ok(provider) => {
-                                            provider
-                                                .chat_completion(
-                                                    &api_messages,
-                                                    &[],
-                                                    effective_max_tokens,
-                                                    self.config().temperature,
-                                                    Some(model_name),
-                                                    extra_body_for_call.as_ref(),
-                                                )
-                                                .await
-                                        }
-                                        Err(_) => {
-                                            self.llm_provider
-                                                .chat_completion(
-                                                    &api_messages,
-                                                    &[],
-                                                    effective_max_tokens,
-                                                    self.config().temperature,
-                                                    Some(
-                                                        self.extract_provider_and_model(
-                                                            self.active_model().as_str(),
-                                                        )
-                                                        .1,
-                                                    ),
-                                                    default_extra_body.as_ref(),
-                                                )
-                                                .await
-                                        }
-                                    }
-                                } else {
-                                    self.llm_provider
-                                        .chat_completion(
-                                            &api_messages,
-                                            &[],
-                                            effective_max_tokens,
-                                            self.config().temperature,
-                                            Some(model_name),
-                                            default_extra_body.as_ref(),
-                                        )
-                                        .await
-                                };
-                                match no_tools_result {
-                                    Ok(resp) => {
-                                        self.emit_status(
-                                            "lifecycle",
-                                            "Model/tool-schema mismatch detected; retried once without tools for this turn",
-                                        );
-                                        return Ok(resp);
-                                    }
-                                    Err(no_tools_err) => {
-                                        return Err(AgentError::LlmApi(no_tools_err.to_string()));
-                                    }
-                                }
-                            }
-                            return Err(AgentError::LlmApi(err_str));
-                        }
-                        ErrorClass::ContextOverflow => {
-                            if context_overflow_retries == 0 {
-                                context_overflow_retries = 1;
-                                tracing::warn!(
-                                    "Context overflow detected; compressing context and retrying in-turn"
-                                );
-                                self.emit_status(
-                                    "lifecycle",
-                                    "Context window exceeded; compressing history and retrying",
-                                );
-                                self.compress_context(ctx).await;
-                                continue;
-                            }
-                            return Err(AgentError::LlmApi(err_str));
-                        }
-                        ErrorClass::RateLimit | ErrorClass::Retryable => {
-                            if failover == crate::retry_failover::FailoverReason::Billing {
-                                let pool = route
-                                    .and_then(|rt| self.credential_pool_for_route(rt))
-                                    .or(self.primary_credential_pool.as_ref());
-                                let base_url = self.resolve_runtime_base_url(
-                                    active_provider.as_str(),
-                                    route.and_then(|rt| rt.base_url.as_deref()),
-                                );
-                                let pool_may_recover =
-                                    crate::credential_pool_recovery::pool_may_recover_from_rate_limit(
-                                        pool.map(|p| p.as_ref()),
-                                        active_provider.as_str(),
-                                        base_url.as_deref(),
-                                    );
-                                if !pool_may_recover {
-                                    self.emit_status(
-                                        "lifecycle",
-                                        "Billing or credits exhausted — switching to fallback provider",
-                                    );
-                                    if self.try_activate_session_fallback(&effective_model_name) {
-                                        return self
-                                            .call_llm_with_retry(
-                                                ctx,
-                                                tool_schemas,
-                                                route,
-                                                max_tokens_override,
-                                                api_call_count,
-                                            )
-                                            .await;
-                                    }
-                                }
-                            }
-                            if matches!(class, ErrorClass::RateLimit)
-                                && active_provider == "nous"
-                            {
-                                let parsed =
-                                    crate::nous_rate_guard::parse_rate_limit_headers_from_llm_error(
-                                        &err_str,
-                                    );
-                                let last = self
-                                    .last_nous_rate_limit_headers
-                                    .lock()
-                                    .ok()
-                                    .and_then(|g| g.clone());
-                                let genuine = crate::nous_rate_guard::is_genuine_nous_rate_limit(
-                                    parsed.as_ref(),
-                                ) || crate::nous_rate_guard::is_genuine_nous_rate_limit(
-                                    last.as_ref(),
-                                );
-                                if genuine {
-                                    crate::nous_rate_guard::record_nous_rate_limit(
-                                        self.config().hermes_home.as_deref(),
-                                        parsed.as_ref(),
-                                        None,
-                                        300.0,
-                                    );
-                                    hermes_telemetry::record_nous_rate_limit_recorded();
-                                    tracing::info!(
-                                        "Nous genuine rate limit — tripping cross-session breaker"
-                                    );
-                                    if self.try_activate_session_fallback(&effective_model_name)
-                                    {
-                                        return self
-                                            .call_llm_with_retry(
-                                                ctx,
-                                                tool_schemas,
-                                                route,
-                                                max_tokens_override,
-                                                api_call_count,
-                                            )
-                                            .await;
-                                    }
-                                    return Err(hermes_core::AgentError::RateLimited {
-                                        retry_after_secs: parsed
-                                            .as_ref()
-                                            .and_then(|h| {
-                                                crate::nous_rate_guard::parse_reset_seconds(
-                                                    Some(h),
-                                                )
-                                            })
-                                            .map(|s| s.ceil() as u64),
-                                    });
-                                }
-                            }
-                            if matches!(class, ErrorClass::RateLimit) {
-                                let pool = route
-                                    .and_then(|rt| self.credential_pool_for_route(rt))
-                                    .or(self.primary_credential_pool.as_ref());
-                                let base_url = self.resolve_runtime_base_url(
-                                    active_provider.as_str(),
-                                    route.and_then(|rt| rt.base_url.as_deref()),
-                                );
-                                let (recovered, new_flag) =
-                                    crate::credential_pool_recovery::try_recover_with_credential_pool(
-                                        pool.map(|p| p.as_ref()),
-                                        active_provider.as_str(),
-                                        base_url.as_deref(),
-                                        has_retried_429_same_cred,
-                                    );
-                                has_retried_429_same_cred = new_flag;
-                                if recovered {
-                                    tracing::info!(
-                                        "Rate limit: rotated credential pool entry, retrying"
-                                    );
-                                    self.emit_status(
-                                        "lifecycle",
-                                        "Rate limited; rotated API credential and retrying",
-                                    );
-                                    continue;
-                                }
-                                if !crate::credential_pool_recovery::pool_may_recover_from_rate_limit(
-                                    pool.map(|p| p.as_ref()),
-                                    active_provider.as_str(),
-                                    base_url.as_deref(),
-                                ) {
-                                    if attempt >= effective_max_retries {
-                                        self.note_primary_rate_limited_if_applicable();
-                                    }
-                                }
-                            }
-                            if attempt >= effective_max_retries {
-                                if matches!(class, ErrorClass::RateLimit) {
-                                    self.note_primary_rate_limited_if_applicable();
-                                }
-                                let failover_chain = self.resolve_retry_failover_chain(model);
-                                if !failover_chain.is_empty() {
-                                    let mut failover_errors = Vec::new();
-                                    for fallback in failover_chain {
-                                        if let Ok(mut fb) = self.turn_fallback.lock() {
-                                            fb.fallback_chain_index =
-                                                fb.fallback_chain_index.saturating_add(1);
-                                        }
-                                        tracing::info!(
-                                            "All retries exhausted on {}. Trying fallback: {}",
-                                            model,
-                                            fallback
-                                        );
-                                        let failover_runtime =
-                                            self.primary_runtime_for_failover_model(&fallback);
-                                        let (_, failover_model_name) =
-                                            self.extract_provider_and_model(&fallback);
-                                        let extra_body = self
-                                            .extra_body_for_api_mode(&failover_runtime.api_mode);
-                                        let fallback_result = match self
-                                            .build_llm_provider_for_runtime(&failover_runtime)
-                                        {
-                                            Ok(provider) => {
-                                                provider
-                                                    .chat_completion(
-                                                        &api_messages,
-                                                        tool_schemas,
-                                                        effective_max_tokens,
-                                                        self.config().temperature,
-                                                        Some(failover_model_name),
-                                                        extra_body.as_ref(),
-                                                    )
-                                                    .await
-                                            }
-                                            Err(build_err) => Err(build_err),
-                                        };
-                                        match fallback_result {
-                                            Ok(resp) => {
-                                                self.activate_runtime_fallback(failover_runtime);
-                                                self.emit_status(
-                                                    "lifecycle",
-                                                    &format!(
-                                                        "Failover recovered request via {}",
-                                                        fallback
-                                                    ),
-                                                );
-                                                return Ok(resp);
-                                            }
-                                            Err(err) => {
-                                                failover_errors
-                                                    .push(format!("{} => {}", fallback, err));
-                                            }
-                                        }
-                                    }
-                                    return Err(AgentError::LlmApi(format!(
-                                        "{} | failover attempts failed: {}",
-                                        err_str,
-                                        failover_errors.join(" ; ")
-                                    )));
-                                }
-                                return Err(AgentError::LlmApi(err_str));
-                            }
-                            let delay = jittered_backoff(
-                                attempt,
-                                effective_base_delay_ms,
-                                retry.max_delay_ms,
-                            );
-                            tracing::info!(
-                                "Retrying in {}ms (attempt {}/{})",
-                                delay.as_millis(),
-                                attempt + 1,
-                                effective_max_retries
-                            );
-                            self.emit_status(
-                                "lifecycle",
-                                &format!(
-                                    "LLM API retry in {}ms (attempt {}/{})",
-                                    delay.as_millis(),
-                                    attempt + 1,
-                                    effective_max_retries
-                                ),
-                            );
-                            sleep(delay).await;
-                        }
-                    }
-                }
-            }
-        }
-        unreachable!()
     }
 
     fn assemble_stream_assistant_message(
@@ -7301,7 +6656,7 @@ impl AgentLoop {
         None
     }
 
-    fn resolve_retry_failover_chain(&self, active_model: &str) -> Vec<String> {
+    pub(crate) fn resolve_retry_failover_chain(&self, active_model: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let active_lc = active_model.trim().to_ascii_lowercase();
@@ -7395,7 +6750,7 @@ impl AgentLoop {
         Ok(Some(response.message))
     }
 
-    fn tool_result_from_dispatch_output(output: String) -> Result<String, hermes_core::ToolError> {
+    pub(crate) fn tool_result_from_dispatch_output(output: String) -> Result<String, hermes_core::ToolError> {
         if let Ok(value) = serde_json::from_str::<Value>(&output) {
             if let Some(err) = value.get("error").and_then(|v| v.as_str()) {
                 return Err(hermes_core::ToolError::ExecutionFailed(err.to_string()));
@@ -7405,414 +6760,7 @@ impl AgentLoop {
     }
 
     /// Execute a batch of tool calls in parallel using a JoinSet.
-    pub(crate) async fn execute_tool_calls(
-        &self,
-        tool_calls: &[ToolCall],
-        turn: u32,
-        tool_concurrency: usize,
-        contextlattice_connect_intent: bool,
-        parent_budget_remaining_usd: Option<f64>,
-        tool_errors: &mut Vec<hermes_core::ToolErrorRecord>,
-        mut checkpoint_mgr: Option<&mut hermes_tools::CheckpointManager>,
-        current_user_task: Option<String>,
-    ) -> Vec<ToolResult> {
-        let mut join_set = JoinSet::new();
-        let tool_concurrency = if hermes_tools::should_parallelize_tool_batch(tool_calls) {
-            tool_concurrency.max(1)
-        } else {
-            1
-        };
-        let mut results = Vec::with_capacity(tool_calls.len());
-        let max_delegate_depth = self.resolve_max_delegate_depth();
-        let current_delegate_depth = self.delegate_depth;
-        let orchestrator = self.sub_agent_orchestrator.clone();
-        let async_tool_dispatch = self.async_tool_dispatch.clone();
-        let active_task_id = self.current_task_id();
-        let mut dedupe_search_seen: HashMap<String, String> = HashMap::new();
-        let mut dedupe_search_dups: Vec<(String, String)> = Vec::new();
-
-        // Run orchestrated `delegate_task` calls sequentially in the caller's
-        // task - this keeps the inner AgentLoop future out of the Send-bound
-        // JoinSet and preserves the requested concurrency cap which is already
-        // applied upstream via `cap_delegates`.
-        let mut orchestrated: Vec<ToolResult> = Vec::new();
-        if let Some(orch) = orchestrator.as_ref() {
-            for tc in tool_calls {
-                if tc.function.name != "delegate_task" {
-                    continue;
-                }
-                if current_delegate_depth >= max_delegate_depth {
-                    orchestrated.push(ToolResult::err(
-                        &tc.id,
-                        format!(
-                            "Delegation depth limit reached ({}/{}).",
-                            current_delegate_depth, max_delegate_depth
-                        ),
-                    ));
-                    continue;
-                }
-                let parsed: Value = match serde_json::from_str(&tc.function.arguments) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        orchestrated.push(ToolResult::err(
-                            &tc.id,
-                            format!(
-                                "Invalid JSON params for tool 'delegate_task': {}. \
-                                 Please retry with valid JSON.",
-                                e
-                            ),
-                        ));
-                        continue;
-                    }
-                };
-                let task = parsed
-                    .get("task")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if task.trim().is_empty() {
-                    orchestrated.push(ToolResult::err(
-                        &tc.id,
-                        "delegate_task requires non-empty 'task' string.",
-                    ));
-                    continue;
-                }
-                let req = crate::sub_agent_orchestrator::SubAgentRequest {
-                    task,
-                    context: parsed
-                        .get("context")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                    toolset: parsed
-                        .get("toolset")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                    model: parsed
-                        .get("model")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                    child_depth: current_delegate_depth + 1,
-                    max_depth: max_delegate_depth,
-                    parent_budget_remaining_usd,
-                };
-                // Orchestrator internally runs the child on its own
-                // `tokio::spawn` task, which erases the child future and breaks
-                // async recursion between parent / child `execute_tool_calls`.
-                let output = orch.execute(req).await;
-                orchestrated.push(ToolResult::ok(&tc.id, output));
-            }
-        }
-
-        for tc in tool_calls {
-            // Skip `delegate_task` when an orchestrator already handled it.
-            if orchestrator.is_some() && tc.function.name == "delegate_task" {
-                continue;
-            }
-            if tc.function.name == "search_files" {
-                if let Some(original_id) = dedupe_search_seen.get(&tc.function.arguments).cloned() {
-                    dedupe_search_dups.push((tc.id.clone(), original_id.clone()));
-                    tracing::debug!(
-                        tool = "search_files",
-                        duplicate_tool_call_id = %tc.id,
-                        original_tool_call_id = %original_id,
-                        "agent tool call deduplicated"
-                    );
-                    continue;
-                }
-                dedupe_search_seen.insert(tc.function.arguments.clone(), tc.id.clone());
-            }
-            if let Some(ref mut mgr) = checkpoint_mgr {
-                if let Ok(args) = serde_json::from_str::<Value>(&tc.function.arguments) {
-                    if matches!(tc.function.name.as_str(), "write_file" | "patch") {
-                        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                            let _ = mgr.ensure_checkpoint(Path::new(path), "pre-tool");
-                        }
-                    } else if tc.function.name == "terminal" {
-                        if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                            if hermes_tools::is_destructive_command(cmd) {
-                                let cwd = args
-                                    .get("cwd")
-                                    .and_then(|v| v.as_str())
-                                    .map(Path::new)
-                                    .unwrap_or_else(|| Path::new("."));
-                                let _ = mgr.ensure_checkpoint(cwd, "pre-terminal");
-                            }
-                        }
-                    }
-                }
-            }
-            if contextlattice_connect_intent
-                && tc.function.name == "terminal"
-                && is_contextlattice_shell_invocation(&tc.function.arguments)
-            {
-                let msg = "ContextLattice integration requests must use `contextlattice_search` / `contextlattice_context_pack`, not shell command `contextlattice`. Retry by calling `contextlattice_search` first with a scoped query.".to_string();
-                tool_errors.push(hermes_core::ToolErrorRecord {
-                    tool_name: tc.function.name.clone(),
-                    error: msg.clone(),
-                    turn,
-                });
-                results.push(ToolResult::err(&tc.id, msg));
-                continue;
-            }
-            let tool_call_id = tc.id.clone();
-            let tool_name = tc.function.name.clone();
-            let raw_args = tc.function.arguments.clone();
-            let registry = self.tool_registry.clone();
-            let async_tool_dispatch = async_tool_dispatch.clone();
-            let max_delegate_depth = max_delegate_depth;
-            let current_delegate_depth = current_delegate_depth;
-            let parent_budget_remaining_usd = parent_budget_remaining_usd;
-            let active_task_id = active_task_id.clone();
-            let current_user_task = current_user_task.clone();
-
-            join_set.spawn(async move {
-                let started = Instant::now();
-                let dispatch_result = if let Some(dispatch) = async_tool_dispatch.as_ref() {
-                    tracing::debug!(tool = %tool_name, "agent tool call start (async dispatch)");
-                    let mut params: Value = match serde_json::from_str(&raw_args) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            let error_msg = format!(
-                                "Invalid JSON params for tool '{}': {}. \
-                                 Please check your parameters and retry with valid JSON.",
-                                tool_name, e
-                            );
-                            return ToolResult::err(&tool_call_id, error_msg);
-                        }
-                    };
-                    inject_runtime_tool_params(
-                        &tool_name,
-                        &mut params,
-                        active_task_id.as_deref(),
-                        current_user_task.as_deref(),
-                    );
-                    if tool_name == "delegate_task" {
-                        if current_delegate_depth >= max_delegate_depth {
-                            return ToolResult::err(
-                                &tool_call_id,
-                                format!(
-                                    "Delegation depth limit reached ({}/{}).",
-                                    current_delegate_depth, max_delegate_depth
-                                ),
-                            );
-                        }
-                        if let Some(obj) = params.as_object_mut() {
-                            obj.insert(
-                                "child_depth".to_string(),
-                                Value::from(current_delegate_depth + 1),
-                            );
-                            obj.insert("max_depth".to_string(), Value::from(max_delegate_depth));
-                            if let Some(remaining) = parent_budget_remaining_usd {
-                                obj.insert(
-                                    "parent_budget_remaining_usd".to_string(),
-                                    Value::from(remaining),
-                                );
-                            }
-                        }
-                    }
-                    dispatch(tool_name.clone(), params).await
-                } else {
-                    match registry.get(&tool_name) {
-                        Some(entry) => {
-                            tracing::debug!(tool = %tool_name, "agent tool call start");
-                            let mut params: Value = match serde_json::from_str(&raw_args) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    let error_msg = format!(
-                                        "Invalid JSON params for tool '{}': {}. \
-                                         Please check your parameters and retry with valid JSON.",
-                                        tool_name, e
-                                    );
-                                    return ToolResult::err(&tool_call_id, error_msg);
-                                }
-                            };
-                            inject_runtime_tool_params(
-                                &tool_name,
-                                &mut params,
-                                active_task_id.as_deref(),
-                                current_user_task.as_deref(),
-                            );
-                            if tool_name == "delegate_task" {
-                                if current_delegate_depth >= max_delegate_depth {
-                                    return ToolResult::err(
-                                        &tool_call_id,
-                                        format!(
-                                            "Delegation depth limit reached ({}/{}).",
-                                            current_delegate_depth, max_delegate_depth
-                                        ),
-                                    );
-                                }
-                                if let Some(obj) = params.as_object_mut() {
-                                    obj.insert(
-                                        "child_depth".to_string(),
-                                        Value::from(current_delegate_depth + 1),
-                                    );
-                                    obj.insert(
-                                        "max_depth".to_string(),
-                                        Value::from(max_delegate_depth),
-                                    );
-                                    if let Some(remaining) = parent_budget_remaining_usd {
-                                        obj.insert(
-                                            "parent_budget_remaining_usd".to_string(),
-                                            Value::from(remaining),
-                                        );
-                                    }
-                                }
-                            }
-                            let handler = Arc::clone(&entry.handler);
-                            match tokio::task::spawn_blocking(move || handler(params)).await {
-                                Ok(result) => result,
-                                Err(e) => Err(ToolError::ExecutionFailed(format!(
-                                    "Tool blocking task join failed: {e}"
-                                ))),
-                            }
-                        }
-                        None => {
-                            let available = registry.names().join(", ");
-                            let error_msg = format!(
-                                "Unknown tool '{}'. Available tools: [{}]",
-                                tool_name, available
-                            );
-                            return ToolResult::err(&tool_call_id, error_msg);
-                        }
-                    }
-                };
-
-                match dispatch_result {
-                    Ok(output) if async_tool_dispatch.is_some() => {
-                        match Self::tool_result_from_dispatch_output(output) {
-                            Ok(output) => {
-                                tracing::debug!(
-                                    tool = %tool_name,
-                                    elapsed_ms = started.elapsed().as_millis() as u64,
-                                    output_chars = output.chars().count(),
-                                    "agent tool call finished"
-                                );
-                                if looks_like_tool_error_output(&output) {
-                                    ToolResult::err(&tool_call_id, output)
-                                } else {
-                                    ToolResult::ok(&tool_call_id, output)
-                                }
-                            }
-                            Err(e) => {
-                                tracing::debug!(
-                                    tool = %tool_name,
-                                    elapsed_ms = started.elapsed().as_millis() as u64,
-                                    error = %e,
-                                    "agent tool call failed"
-                                );
-                                ToolResult::err(&tool_call_id, e.to_string())
-                            }
-                        }
-                    }
-                    Ok(output) => {
-                        tracing::debug!(
-                            tool = %tool_name,
-                            elapsed_ms = started.elapsed().as_millis() as u64,
-                            output_chars = output.chars().count(),
-                            "agent tool call finished"
-                        );
-                        if looks_like_tool_error_output(&output) {
-                            ToolResult::err(&tool_call_id, output)
-                        } else {
-                            ToolResult::ok(&tool_call_id, output)
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            tool = %tool_name,
-                            elapsed_ms = started.elapsed().as_millis() as u64,
-                            error = %e,
-                            "agent tool call failed"
-                        );
-                        ToolResult::err(&tool_call_id, e.to_string())
-                    }
-                }
-            });
-            if join_set.len() >= tool_concurrency {
-                if let Some(result) = join_set.join_next().await {
-                    match result {
-                        Ok(tool_result) => {
-                            if tool_result.is_error {
-                                let tc = tool_calls
-                                    .iter()
-                                    .find(|tc| tc.id == tool_result.tool_call_id);
-                                if let Some(tc) = tc {
-                                    tool_errors.push(hermes_core::ToolErrorRecord {
-                                        tool_name: tc.function.name.clone(),
-                                        error: tool_result.content.clone(),
-                                        turn,
-                                    });
-                                }
-                            }
-                            results.push(tool_result);
-                        }
-                        Err(e) => {
-                            tracing::error!("Task join error: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-
-        for tool_result in orchestrated {
-            if tool_result.is_error {
-                let tc = tool_calls
-                    .iter()
-                    .find(|tc| tc.id == tool_result.tool_call_id);
-                if let Some(tc) = tc {
-                    tool_errors.push(hermes_core::ToolErrorRecord {
-                        tool_name: tc.function.name.clone(),
-                        error: tool_result.content.clone(),
-                        turn,
-                    });
-                }
-            }
-            results.push(tool_result);
-        }
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok(tool_result) => {
-                    if tool_result.is_error {
-                        // Record the error but we still add the result to context
-                        let tc = tool_calls
-                            .iter()
-                            .find(|tc| tc.id == tool_result.tool_call_id);
-                        if let Some(tc) = tc {
-                            tool_errors.push(hermes_core::ToolErrorRecord {
-                                tool_name: tc.function.name.clone(),
-                                error: tool_result.content.clone(),
-                                turn,
-                            });
-                        }
-                    }
-                    results.push(tool_result);
-                }
-                Err(e) => {
-                    tracing::error!("Task join error: {}", e);
-                }
-            }
-        }
-        if !dedupe_search_dups.is_empty() {
-            let mut by_id: HashMap<String, ToolResult> = HashMap::new();
-            for result in &results {
-                by_id.insert(result.tool_call_id.clone(), result.clone());
-            }
-            for (dup_id, original_id) in dedupe_search_dups {
-                if let Some(original) = by_id.get(&original_id) {
-                    results.push(ToolResult {
-                        tool_call_id: dup_id,
-                        content: original.content.clone(),
-                        is_error: original.is_error,
-                    });
-                }
-            }
-        }
-
-        results
-    }
-
-    fn resolve_max_delegate_depth(&self) -> u32 {
+    pub(crate) fn resolve_max_delegate_depth(&self) -> u32 {
         std::env::var("HERMES_MAX_DELEGATE_DEPTH")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
@@ -8003,7 +6951,7 @@ pub(crate) fn latest_user_content(messages: &[Message]) -> Option<&str> {
         .and_then(|m| m.content.as_deref())
 }
 
-fn inject_runtime_tool_params(
+pub(crate) fn inject_runtime_tool_params(
     tool_name: &str,
     params: &mut Value,
     task_id: Option<&str>,
@@ -9162,7 +8110,7 @@ pub(crate) fn contextlattice_intelligence_system_hint(
     )
 }
 
-fn is_contextlattice_shell_invocation(raw_args: &str) -> bool {
+pub(crate) fn is_contextlattice_shell_invocation(raw_args: &str) -> bool {
     let Ok(args) = serde_json::from_str::<Value>(raw_args) else {
         return false;
     };

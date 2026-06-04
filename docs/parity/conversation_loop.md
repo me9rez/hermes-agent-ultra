@@ -219,7 +219,7 @@ Each inner loop iteration calls `invalidate_turn_api_messages_cache()` before LL
 
 | Python | Rust | Status |
 |--------|------|--------|
-| `agent/chat_completion_helpers.py` | `chat_completion_helpers.rs` + `retry_failover.rs` | ⚠️ core retry paths; full matrix audit ongoing |
+| `agent/chat_completion_helpers.py` | `chat_completion_helpers.rs` + `retry_failover.rs` | ✅ classify matrix fixture + recovery paths in `chat_completion_helpers` |
 | `run_agent.handle_function_call` | `tool_executor.rs` | ✅ split; behavior unchanged |
 | `agent/iteration_budget.py` | `iteration_budget.rs` | ✅ |
 | `agent/message_sanitization.py` | `message_sanitization.rs` | ✅ core paths |

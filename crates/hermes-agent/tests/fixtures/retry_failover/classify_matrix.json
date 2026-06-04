@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "fixture_group": "retry_failover",
+  "python_module": "agent/chat_completion_helpers.py",
+  "cases": [
+    {
+      "id": "billing_insufficient_credits",
+      "error": "Error 402: insufficient credits on this account",
+      "provider": "",
+      "expected": "Billing"
+    },
+    {
+      "id": "rate_limit_429",
+      "error": "429 too many requests — rate limit exceeded",
+      "provider": "",
+      "expected": "RateLimit"
+    },
+    {
+      "id": "auth_401",
+      "error": "401 unauthorized: invalid API key",
+      "provider": "",
+      "expected": "Auth"
+    },
+    {
+      "id": "thinking_signature_400",
+      "error": "400 invalid request: thinking block signature mismatch",
+      "provider": "",
+      "expected": "ThinkingSignature"
+    },
+    {
+      "id": "image_too_large",
+      "error": "messages.0.content.1.image: image exceeds 5 MB maximum",
+      "provider": "",
+      "expected": "ImageTooLarge"
+    },
+    {
+      "id": "provider_policy_guardrail",
+      "error": "No endpoints available matching your guardrail restrictions",
+      "provider": "",
+      "expected": "ProviderPolicyBlocked"
+    },
+    {
+      "id": "llama_cpp_grammar_400",
+      "error": "HTTP 400: parse: error parsing grammar: unknown escape",
+      "provider": "",
+      "expected": "LlamaCppGrammarPattern"
+    },
+    {
+      "id": "oauth_1m_beta_anthropic",
+      "error": "The long context beta is not yet available for this subscription.",
+      "provider": "anthropic",
+      "expected": "OAuthLongContextBetaForbidden"
+    },
+    {
+      "id": "invalid_encrypted_replay",
+      "error": "failed to decrypt encrypted_content replay",
+      "provider": "",
+      "expected": "InvalidEncryptedReplay"
+    },
+    {
+      "id": "unknown_generic",
+      "error": "something unexpected happened",
+      "provider": "",
+      "expected": "Unknown"
+    }
+  ]
+}

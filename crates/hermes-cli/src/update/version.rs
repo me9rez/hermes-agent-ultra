@@ -25,6 +25,7 @@ impl Channel {
         } else if pre.is_empty() {
             Channel::Stable
         } else {
+            tracing::warn!("Unknown pre-release suffix '{}', defaulting to Beta channel", pre);
             Channel::Beta // 未知 pre-release 默认视为 beta
         }
     }

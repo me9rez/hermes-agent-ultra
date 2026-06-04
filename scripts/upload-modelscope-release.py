@@ -36,15 +36,31 @@ def parse_checksums(dist_dir: Path) -> dict[str, str]:
 
 
 def derive_channel(version: str) -> str:
-    """Derive release channel from version string."""
+    """Derive release channel from version string.
+
+    Known channels: stable (no pre-release), beta, rc, nightly.
+    Unknown pre-release suffixes default to 'beta' for safety,
+    matching the Rust client's Channel::from_prerelease behavior.
+    """
     v_lower = version.lower()
+    # Strip leading 'v' and parse pre-release
+    version_clean = v_lower.lstrip('v')
+
+    # Priority must match Rust: nightly > beta > rc > (empty=stable) > unknown=beta
+    if "nightly" in v_lower:
+        return "nightly"
     if "beta" in v_lower:
         return "beta"
     if "rc" in v_lower:
         return "rc"
-    if "nightly" in v_lower:
-        return "nightly"
-    return "stable"
+
+    # Pure semver with no pre-release suffix → stable
+    if re.match(r'^\d+\.\d+\.\d+$', version_clean):
+        return "stable"
+
+    # Has pre-release but doesn't match known channels → treat as beta (safe default)
+    print(f"WARNING: Unknown pre-release suffix in '{version}', defaulting to 'beta' channel")
+    return "beta"
 
 
 def artifact_to_platform_key(filename: str) -> str | None:

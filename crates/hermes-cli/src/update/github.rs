@@ -3,6 +3,7 @@ use hermes_core::errors::AgentError;
 use semver::Version;
 use serde::Deserialize;
 use std::process::Command;
+use tracing::debug;
 use crate::update::platform::Platform;
 use crate::update::version::Channel;
 
@@ -45,6 +46,37 @@ impl GitHubSource {
     fn download_base_url(&self, tag: &str) -> String {
         format!("https://github.com/{}/releases/download/{}", self.repo, tag)
     }
+}
+
+/// Parse hermes metadata from GitHub release body.
+/// Expected format (in HTML comment):
+/// <!-- hermes-meta
+/// forced: true
+/// min_version: 1.0.0
+/// -->
+fn parse_release_meta(body: &str) -> (bool, Option<Version>) {
+    let mut forced = false;
+    let mut min_version = None;
+
+    if let Some(start) = body.find("<!-- hermes-meta")
+        && let Some(end) = body[start..].find("-->")
+    {
+        let meta_block = &body[start..start + end];
+        debug!("Found hermes-meta block in release body");
+        for raw_line in meta_block.lines() {
+            let line = raw_line.trim();
+            if let Some(value) = line.strip_prefix("forced:") {
+                forced = value.trim() == "true";
+                debug!("Parsed forced={forced} from release meta");
+            }
+            if let Some(value) = line.strip_prefix("min_version:") {
+                min_version = Version::parse(value.trim()).ok();
+                debug!("Parsed min_version={min_version:?} from release meta");
+            }
+        }
+    }
+
+    (forced, min_version)
 }
 
 #[derive(Deserialize)]
@@ -121,6 +153,11 @@ impl ReleaseSource for GitHubSource {
             .unwrap_or_else(|_| Version::new(0, 0, 0));
         let channel = Channel::from_prerelease(&version.pre.to_string());
 
+        let (forced, min_version) = release.body
+            .as_deref()
+            .map(parse_release_meta)
+            .unwrap_or((false, None));
+
         Ok(ReleaseInfo {
             version,
             tag: release.tag_name,
@@ -128,8 +165,8 @@ impl ReleaseSource for GitHubSource {
             artifact_url,
             checksum_url,
             release_notes: release.body,
-            forced: false,  // GitHub releases 暂不支持 forced 标记
-            min_version: None,  // GitHub releases 暂不支持 min_version
+            forced,
+            min_version,
         })
     }
 }
@@ -170,5 +207,45 @@ mod tests {
             source.download_base_url("v1.2.3"),
             "https://github.com/owner/repo/releases/download/v1.2.3"
         );
+    }
+
+    #[test]
+    fn test_parse_release_meta_full() {
+        let body = "Some release notes\n<!-- hermes-meta\nforced: true\nmin_version: 1.0.0\n-->";
+        let (forced, min_version) = parse_release_meta(body);
+        assert!(forced);
+        assert_eq!(min_version, Some(Version::new(1, 0, 0)));
+    }
+
+    #[test]
+    fn test_parse_release_meta_no_block() {
+        let body = "Just some regular release notes";
+        let (forced, min_version) = parse_release_meta(body);
+        assert!(!forced);
+        assert!(min_version.is_none());
+    }
+
+    #[test]
+    fn test_parse_release_meta_partial() {
+        let body = "<!-- hermes-meta\nforced: true\n-->";
+        let (forced, min_version) = parse_release_meta(body);
+        assert!(forced);
+        assert!(min_version.is_none());
+    }
+
+    #[test]
+    fn test_parse_release_meta_only_min_version() {
+        let body = "<!-- hermes-meta\nmin_version: 2.3.4\n-->";
+        let (forced, min_version) = parse_release_meta(body);
+        assert!(!forced);
+        assert_eq!(min_version, Some(Version::new(2, 3, 4)));
+    }
+
+    #[test]
+    fn test_parse_release_meta_invalid_version() {
+        let body = "<!-- hermes-meta\nforced: false\nmin_version: not-a-version\n-->";
+        let (forced, min_version) = parse_release_meta(body);
+        assert!(!forced);
+        assert!(min_version.is_none());
     }
 }

@@ -9,7 +9,23 @@ permissions:
   contents: read
 
 jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate SemVer tag format
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*)?$'; then
+            echo "::error::Tag '$TAG' is not a valid SemVer format."
+            echo "::error::Expected format: v<MAJOR>.<MINOR>.<PATCH>[-prerelease]"
+            echo "::error::Examples: v1.2.0, v1.2.0-beta.1, v1.2.0-rc.1"
+            exit 1
+          fi
+          echo "Tag format validated: $TAG"
+
   security-release-gate:
+    needs: [validate-tag]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,7 +64,7 @@ jobs:
             release-sbom.cdx.json
 
   cross-build:
-    needs: security-release-gate
+    needs: [validate-tag, security-release-gate]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -98,7 +114,7 @@ jobs:
           path: ${{ matrix.artifact }}
 
   macos-build:
-    needs: security-release-gate
+    needs: [validate-tag, security-release-gate]
     strategy:
       matrix:
         include:
@@ -132,7 +148,7 @@ jobs:
           path: ${{ matrix.artifact }}
 
   sign-and-publish:
-    needs: [security-release-gate, cross-build, macos-build]
+    needs: [validate-tag, security-release-gate, cross-build, macos-build]
     runs-on: ubuntu-latest
     permissions:
       contents: write

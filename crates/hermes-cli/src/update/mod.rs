@@ -10,7 +10,7 @@ pub mod manifest;
 
 use hermes_core::errors::AgentError;
 use crate::update::platform::Platform;
-use crate::update::version::{SemverPolicy, VersionPolicy, UpdateMeta, UpdateDecision};
+use crate::update::version::{ChannelPolicy, Channel, VersionPolicy, UpdateMeta, UpdateDecision};
 
 /// 更新选项
 pub struct UpdateOptions {
@@ -31,7 +31,8 @@ pub async fn check_for_updates() -> Result<String, AgentError> {
         env!("CARGO_PKG_VERSION").trim_start_matches('v')
     ).unwrap_or_else(|_| semver::Version::new(0, 0, 0));
 
-    let policy = SemverPolicy;
+    let subscribed = Channel::Stable;
+    let policy = ChannelPolicy { subscribed_channel: subscribed };
     let meta = UpdateMeta {
         channel: info.channel,
         forced: info.forced,
@@ -74,12 +75,16 @@ pub async fn perform_update(opts: UpdateOptions) -> Result<(), AgentError> {
     println!("Checking for updates from {}...", source.name());
     let info = source.fetch_latest(&platform).await?;
 
-    // 3. Version comparison using SemverPolicy
+    // 3. Version comparison using ChannelPolicy
     let current = semver::Version::parse(
         env!("CARGO_PKG_VERSION").trim_start_matches('v')
     ).unwrap_or_else(|_| semver::Version::new(0, 0, 0));
 
-    let policy = SemverPolicy;
+    let subscribed = opts.channel
+        .as_deref()
+        .map(Channel::from_str)
+        .unwrap_or_default();
+    let policy = ChannelPolicy { subscribed_channel: subscribed };
     let meta = UpdateMeta {
         channel: info.channel,
         forced: info.forced,

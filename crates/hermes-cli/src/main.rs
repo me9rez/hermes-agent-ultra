@@ -87,7 +87,7 @@ use hermes_gateway::platforms::wecom_callback::{
     WeComCallbackAdapter, WeComCallbackApp, WeComCallbackConfig,
 };
 use hermes_gateway::platforms::weixin::{WeChatAdapter, WeixinConfig};
-use hermes_gateway::platforms::whatsapp::{WhatsAppAdapter, WhatsAppConfig};
+use hermes_gateway::platforms::whatsapp::{is_paired, WhatsAppAdapter, WhatsAppConfig};
 use hermes_gateway::tool_backends::ClarifyDispatcher;
 use hermes_gateway::{DmManager, Gateway, GatewayRuntimeContext, SessionManager};
 use hermes_skills::{FileSkillStore, SkillManager};
@@ -3409,20 +3409,6 @@ async fn configure_platform_basic_prompts(
             let api_url = prompt_line("Signal api_url (default http://localhost:8080): ").await?;
             set_extra_string_if_nonempty(p, "api_url", &api_url);
         }
-        "whatsapp" => {
-            let token = prompt_line("WhatsApp Cloud API token: ").await?;
-            if !token.trim().is_empty() {
-                p.token = Some(token.trim().to_string());
-            }
-            let phone_id = prompt_line("WhatsApp phone_number_id: ").await?;
-            set_extra_string_if_nonempty(p, "phone_number_id", &phone_id);
-            let verify = prompt_line("WhatsApp verify_token (optional): ").await?;
-            set_extra_string_if_nonempty(p, "verify_token", &verify);
-            let home = prompt_line("WhatsApp home channel (optional): ").await?;
-            if !home.trim().is_empty() {
-                p.home_channel = Some(home.trim().to_string());
-            }
-        }
         "dingtalk" => {
             let client_id = prompt_line("DingTalk client_id/appkey: ").await?;
             set_extra_string_if_nonempty(p, "client_id", &client_id);
@@ -3678,8 +3664,12 @@ fn gateway_platform_is_configured(key: &str, platform: Option<&PlatformConfig>) 
         return false;
     }
     match key {
-        "telegram" | "discord" | "slack" | "whatsapp" | "signal" | "matrix" | "mattermost"
+        "telegram" | "discord" | "slack" | "signal" | "matrix" | "mattermost"
         | "bluebubbles" | "email" | "homeassistant" => platform_token_or_extra(platform).is_some(),
+        "whatsapp" => {
+            platform.enabled
+                && is_paired(&WhatsAppConfig::from_platform_config(platform).session_path())
+        }
         "weixin" => {
             platform_token_or_extra(platform).is_some()
                 && platform_extra_nonempty(platform, "account_id")
@@ -3841,6 +3831,9 @@ async fn configure_gateway_platform(
             if !home.trim().is_empty() {
                 tg.home_channel = Some(home.trim().to_string());
             }
+        }
+        "whatsapp" => {
+            hermes_cli::whatsapp_wizard::configure_whatsapp_for_gateway(disk).await?;
         }
         other => configure_platform_basic_prompts(disk, other).await?,
     }

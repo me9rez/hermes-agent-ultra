@@ -49,6 +49,9 @@ pub struct WhatsAppConfig {
     pub text_batch_split_delay_seconds: f64,
     #[serde(default)]
     pub proxy: AdapterProxyConfig,
+    /// `self-chat` or `bot`, persisted from gateway setup / wizard.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -81,6 +84,7 @@ impl Default for WhatsAppConfig {
             text_batch_delay_seconds: DEFAULT_TEXT_BATCH_DELAY_SECS,
             text_batch_split_delay_seconds: DEFAULT_TEXT_BATCH_SPLIT_DELAY_SECS,
             proxy: AdapterProxyConfig::default(),
+            mode: None,
         }
     }
 }
@@ -129,6 +133,7 @@ impl WhatsAppConfig {
             "text_batch_split_delay_seconds",
             DEFAULT_TEXT_BATCH_SPLIT_DELAY_SECS,
         );
+        cfg.mode = extra_string(ex, "mode");
         cfg
     }
 
@@ -155,6 +160,12 @@ impl WhatsAppConfig {
     }
 
     pub fn whatsapp_mode(&self) -> String {
+        if let Some(ref mode) = self.mode {
+            let m = mode.trim().to_lowercase();
+            if !m.is_empty() {
+                return m;
+            }
+        }
         std::env::var("WHATSAPP_MODE")
             .unwrap_or_else(|_| "self-chat".into())
             .trim()

@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::io::Cursor;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,6 +58,8 @@ pub struct WhatsAppRustClient {
     run_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stop: Arc<Notify>,
     pair_done: Arc<Notify>,
+    pairing_qr_shown: Arc<AtomicBool>,
+    pairing_crypto_done: Arc<AtomicBool>,
 }
 
 impl WhatsAppRustClient {
@@ -74,6 +77,8 @@ impl WhatsAppRustClient {
             run_handle: Mutex::new(None),
             stop: Arc::new(Notify::new()),
             pair_done: Arc::new(Notify::new()),
+            pairing_qr_shown: Arc::new(AtomicBool::new(false)),
+            pairing_crypto_done: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -111,6 +116,8 @@ impl WhatsAppRustClient {
         let config = self.config.clone();
         let session_path_clone = session_path.clone();
         let pair_done = Arc::clone(&self.pair_done);
+        let pairing_qr_shown = Arc::clone(&self.pairing_qr_shown);
+        let pairing_crypto_done = Arc::clone(&self.pairing_crypto_done);
         let stop = Arc::clone(&self.stop);
         let state = self.state.clone();
 
@@ -124,6 +131,8 @@ impl WhatsAppRustClient {
                 let config = config.clone();
                 let session_path = session_path_clone.clone();
                 let pair_done = pair_done.clone();
+                let pairing_qr_shown = pairing_qr_shown.clone();
+                let pairing_crypto_done = pairing_crypto_done.clone();
                 let stop = stop.clone();
                 let state = state.clone();
                 async move {
@@ -135,6 +144,8 @@ impl WhatsAppRustClient {
                         &session_path,
                         pair_only,
                         pair_done,
+                        pairing_qr_shown,
+                        pairing_crypto_done,
                         stop,
                         state,
                     )
@@ -168,7 +179,10 @@ impl WhatsAppRustClient {
 
     /// Run QR pairing until success or failure. Used by CLI wizard.
     pub async fn run_pairing(&self) -> Result<(), GatewayError> {
+        self.pairing_qr_shown.store(false, Ordering::SeqCst);
+        self.pairing_crypto_done.store(false, Ordering::SeqCst);
         let mut bot = self.build_bot(None, true).await?;
+        println!("Connecting to WhatsApp for QR pairing...");
         let handle = bot
             .run()
             .await
@@ -181,10 +195,12 @@ impl WhatsAppRustClient {
             }
         };
 
-        self.stop.notify_one();
+        // Let wa-rs finish post-pair reconnect + SQLite flush before closing the DB.
+        tokio::time::sleep(Duration::from_secs(3)).await;
         if let Some(client) = self.state.read().await.client.clone() {
             client.disconnect().await;
         }
+        tokio::time::sleep(Duration::from_millis(500)).await;
         handle.abort();
         result
     }
@@ -304,21 +320,28 @@ async fn handle_event(
     session_path: &Path,
     pair_only: bool,
     pair_done: Arc<Notify>,
-    stop: Arc<Notify>,
+    pairing_qr_shown: Arc<AtomicBool>,
+    pairing_crypto_done: Arc<AtomicBool>,
+    _stop: Arc<Notify>,
     state: Arc<RwLock<ClientState>>,
 ) {
     match event {
         Event::PairingQrCode { code, timeout } => {
-            info!("WhatsApp QR code (valid ~{}s):\n{code}", timeout.as_secs());
+            pairing_qr_shown.store(true, Ordering::SeqCst);
+            info!("WhatsApp QR code (valid ~{}s)", timeout.as_secs());
+            super::qr_terminal::print_pairing_qr(&code, timeout);
         }
         Event::PairSuccess(success) => {
-            info!("WhatsApp pairing successful");
+            info!("WhatsApp pair-success received");
+            pairing_crypto_done.store(true, Ordering::SeqCst);
+            if pair_only {
+                println!(
+                    "\nQR accepted — completing login on your phone (keep WhatsApp open)..."
+                );
+            }
             let pn = success.id.to_string();
             let lid = success.lid.to_string();
             let bot_ids = vec![pn.clone(), lid.clone()];
-            if let Err(e) = mark_paired(session_path) {
-                warn!("[whatsapp] Failed to write paired marker: {e}");
-            }
             {
                 let mut st = state.write().await;
                 st.bot_ids = bot_ids.clone();
@@ -326,9 +349,13 @@ async fn handle_event(
                 st.bot_lid = Some(jid_user_part(&lid));
                 st.client = Some(client.clone());
             }
-            pair_done.notify_one();
+            // wa-rs expects a disconnect + reconnect after pair-success; finish on Connected.
             if pair_only {
-                stop.notify_one();
+                let pair_done = pair_done.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    pair_done.notify_one();
+                });
             }
         }
         Event::Connected(_) => {
@@ -345,13 +372,40 @@ async fn handle_event(
                     st.bot_ids.push(pn_str);
                 }
             }
+            if pair_only && pairing_crypto_done.load(Ordering::SeqCst) {
+                if let Err(e) = mark_paired(session_path) {
+                    warn!("[whatsapp] Failed to write paired marker: {e}");
+                }
+                println!("\nWhatsApp linked successfully!");
+                pair_done.notify_one();
+            }
         }
-        Event::Disconnected(_) | Event::LoggedOut(_) => {
+        Event::Disconnected(_) => {
             warn!("[whatsapp] Disconnected from WhatsApp");
             state.write().await.connected = false;
+            if pair_only
+                && !pairing_qr_shown.load(Ordering::SeqCst)
+                && !pairing_crypto_done.load(Ordering::SeqCst)
+            {
+                eprintln!(
+                    "\nWhatsApp disconnected before showing a QR code. Check network and try again."
+                );
+                pair_done.notify_one();
+            }
+        }
+        Event::LoggedOut(_) => {
+            warn!("[whatsapp] Logged out from WhatsApp");
+            state.write().await.connected = false;
+            if pair_only && !pairing_crypto_done.load(Ordering::SeqCst) {
+                eprintln!("\nWhatsApp session was logged out. Retry QR pairing.");
+                pair_done.notify_one();
+            }
         }
         Event::PairError(err) => {
             warn!("[whatsapp] Pairing error: {}", err.error);
+            if pair_only {
+                eprintln!("\nWhatsApp pairing error: {}", err.error);
+            }
             pair_done.notify_one();
         }
         Event::Message(msg, info) => {

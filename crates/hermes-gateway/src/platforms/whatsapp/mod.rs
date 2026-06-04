@@ -5,6 +5,7 @@
 mod config;
 mod format;
 mod policy;
+mod qr_terminal;
 mod rust_client;
 mod session_store;
 mod text_batch;
@@ -14,8 +15,8 @@ pub use format::{format_message, outgoing_chunks};
 pub use policy::WhatsAppPolicy;
 pub use rust_client::{WaMessage, WhatsAppRustClient};
 pub use session_store::{
-    ensure_session_dir, has_legacy_baileys_session, is_paired, legacy_creds_path, mark_paired,
-    session_db_path,
+    clear_pairing_session, ensure_session_dir, has_legacy_baileys_session, is_paired,
+    legacy_creds_path, mark_paired, session_db_path,
 };
 pub use text_batch::{batch_key, TextBatchState};
 

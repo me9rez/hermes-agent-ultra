@@ -1,0 +1,13 @@
+[build]
+incremental = true
+
+[unstable]
+
+[profile.dev]
+opt-level = 0
+debug = 1
+codegen-units = 16
+lto = false
+
+[profile.release]
+codegen-units = 1

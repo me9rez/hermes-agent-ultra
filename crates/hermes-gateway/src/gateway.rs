@@ -98,7 +98,7 @@ use crate::dm::{DmDecision, DmManager};
 use crate::hooks::{HookEvent, HookRegistry};
 use crate::pairing_store::DmPairingStore;
 use crate::platforms::helpers::extract_inline_images;
-use crate::session::SessionManager;
+use crate::session::{SessionManager, SessionTeardownSnapshot};
 use crate::stream::{StreamConfig, StreamManager};
 use crate::voice::VoiceManager;
 use hermes_config::resolve_outbound_media_path;
@@ -305,6 +305,31 @@ pub type StreamingMessageHandlerWithContext = Arc<
         + Sync,
 >;
 
+/// Payload for agent-layer session teardown (POI flush, memory `on_session_end`, etc.).
+#[derive(Debug, Clone)]
+pub struct SessionTeardownContext {
+    pub session_key: String,
+    pub session_id: String,
+    pub platform: String,
+    pub chat_id: String,
+    pub user_id: String,
+    pub messages: Arc<Vec<Message>>,
+    pub reason: String,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub personality: Option<String>,
+    pub home: Option<String>,
+}
+
+/// Optional hook invoked before a gateway session is reset, expired, or drained.
+pub type SessionTeardownHandler = Arc<
+    dyn Fn(
+            SessionTeardownContext,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Debug, Clone, Default)]
 struct UsageStats {
     user_messages: u64,
@@ -441,6 +466,8 @@ pub struct Gateway {
     active_routes: RwLock<HashMap<String, AbortHandle>>,
     /// Outbound files delivered during the current inbound route (tool + MEDIA).
     turn_outbound: StdMutex<HashMap<String, TurnOutboundTracker>>,
+    /// Optional agent-layer hook for POI / memory flush before session removal.
+    session_teardown_handler: RwLock<Option<SessionTeardownHandler>>,
     /// Concrete Discord adapter for history backfill (P2-8).
     #[cfg(feature = "discord")]
     discord_adapter: RwLock<Option<Arc<crate::platforms::discord::DiscordAdapter>>>,
@@ -582,6 +609,7 @@ impl Gateway {
             session_serial: RwLock::new(HashMap::new()),
             active_routes: RwLock::new(HashMap::new()),
             turn_outbound: StdMutex::new(HashMap::new()),
+            session_teardown_handler: RwLock::new(None),
             #[cfg(feature = "discord")]
             discord_adapter: RwLock::new(None),
         }
@@ -803,6 +831,73 @@ impl Gateway {
     /// Attach gateway hook registry for emitting lifecycle/progress events.
     pub async fn set_hook_registry(&self, registry: Arc<HookRegistry>) {
         *self.hook_registry.write().await = Some(registry);
+    }
+
+    /// Register agent-layer session teardown (POI flush, memory `on_session_end`, etc.).
+    pub async fn set_session_teardown_handler(&self, handler: SessionTeardownHandler) {
+        *self.session_teardown_handler.write().await = Some(handler);
+    }
+
+    async fn build_teardown_context(
+        &self,
+        snapshot: &SessionTeardownSnapshot,
+        reason: &str,
+    ) -> SessionTeardownContext {
+        let state = self
+            .runtime_state
+            .read()
+            .await
+            .get(&snapshot.session_key)
+            .cloned()
+            .unwrap_or_default();
+        SessionTeardownContext {
+            session_key: snapshot.session_key.clone(),
+            session_id: snapshot.session.id.clone(),
+            platform: snapshot.session.platform.clone(),
+            chat_id: snapshot.session.chat_id.clone(),
+            user_id: snapshot.session.user_id.clone(),
+            messages: snapshot.session.message_snapshot(),
+            reason: reason.to_string(),
+            model: state.model,
+            provider: state.provider,
+            personality: state.personality,
+            home: state.home,
+        }
+    }
+
+    async fn invoke_session_teardown(&self, ctx: SessionTeardownContext) {
+        let handler = self.session_teardown_handler.read().await.clone();
+        if let Some(handler) = handler {
+            handler(ctx).await;
+        }
+    }
+
+    async fn teardown_session_snapshot(&self, snapshot: SessionTeardownSnapshot, reason: &str) {
+        let ctx = self.build_teardown_context(&snapshot, reason).await;
+        self.invoke_session_teardown(ctx).await;
+    }
+
+    async fn teardown_session_key(&self, session_key: &str, reason: &str) {
+        let session = self.session_manager.get_session(session_key).await;
+        let Some(session) = session else {
+            return;
+        };
+        self.teardown_session_snapshot(
+            SessionTeardownSnapshot {
+                session_key: session_key.to_string(),
+                session,
+            },
+            reason,
+        )
+        .await;
+    }
+
+    /// Flush agent session-end hooks for every in-memory session (gateway shutdown).
+    pub async fn teardown_all_sessions(&self, reason: &str) {
+        let snapshots = self.session_manager.drain_all_sessions().await;
+        for snapshot in snapshots {
+            self.teardown_session_snapshot(snapshot, reason).await;
+        }
     }
 
     /// Set per-platform access policies for non-DM and slash-command traffic.
@@ -1406,6 +1501,7 @@ impl Gateway {
                     }),
                 )
                 .await;
+                self.teardown_session_key(session_key, "reset").await;
                 self.session_manager.reset_session(session_key).await;
                 self.clear_session_boundary_security_state(session_key)
                     .await;
@@ -3322,8 +3418,12 @@ impl Gateway {
         loop {
             ticker.tick().await;
             let expired = self.session_manager.expire_idle_sessions().await;
-            if expired > 0 {
-                tracing::info!(expired, "Expired idle sessions");
+            let expired_count = expired.len();
+            for snapshot in expired {
+                self.teardown_session_snapshot(snapshot, "idle_expiry").await;
+            }
+            if expired_count > 0 {
+                tracing::info!(expired = expired_count, "Expired idle sessions");
             }
         }
     }

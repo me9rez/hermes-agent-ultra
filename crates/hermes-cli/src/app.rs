@@ -2303,8 +2303,24 @@ impl App {
         Ok(())
     }
 
+    /// Flush POI buffer, memory providers, and plugin hooks before session teardown.
+    pub fn flush_session_teardown(&self, interrupted: bool) {
+        let cfg = self.agent.config();
+        if !cfg.interest.enabled && self.messages.is_empty() && cfg.skip_memory {
+            return;
+        }
+        self.agent.session_end_hooks(
+            &self.messages,
+            false,
+            interrupted,
+            0,
+            true,
+        );
+    }
+
     /// Create a new session, clearing all messages.
     pub fn new_session(&mut self) {
+        self.flush_session_teardown(false);
         let old_session_id = self.session_id.clone();
         self.session_id = Uuid::new_v4().to_string();
         self.notify_memory_session_switch(&self.session_id, &old_session_id, true, "new_session");

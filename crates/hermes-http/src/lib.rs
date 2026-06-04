@@ -44,7 +44,10 @@ use hermes_core::errors::GatewayError;
 use hermes_core::traits::{ParseMode, PlatformAdapter};
 use hermes_core::{AgentError, LlmProvider, Message, MessageRole, StreamChunk};
 use hermes_gateway::gateway::{GatewayConfig as RuntimeGatewayConfig, IncomingMessage};
-use hermes_gateway::{DmManager, Gateway, GatewayRuntimeContext, SessionManager};
+use hermes_gateway::{
+    DmManager, Gateway, GatewayRuntimeContext, SessionManager, SessionTeardownContext,
+    SessionTeardownHandler,
+};
 use hermes_tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -156,7 +159,9 @@ impl HttpServerState {
 
         let tool_registry = Arc::new(ToolRegistry::new());
         let agent_tools = Arc::new(bridge_tool_registry(&tool_registry));
+        let agent_tools_handler = agent_tools.clone();
         let config_arc = Arc::new(config.clone());
+        let config_arc_handler = config_arc.clone();
         let config_arc_stream = config_arc.clone();
         let agent_tools_stream = agent_tools.clone();
         let runtime_tools_stream = tool_registry.clone();
@@ -164,8 +169,8 @@ impl HttpServerState {
 
         gateway
             .set_message_handler_with_context(Arc::new(move |messages, ctx| {
-                let config = config_arc.clone();
-                let agent_tools = agent_tools.clone();
+                let config = config_arc_handler.clone();
+                let agent_tools = agent_tools_handler.clone();
                 let runtime_tools = tool_registry_handler.clone();
                 Box::pin(async move {
                     hermes_telemetry::record_llm_request();
@@ -290,6 +295,40 @@ impl HttpServerState {
                     })
                 })
             }))
+            .await;
+
+        let config_teardown = config_arc.clone();
+        let agent_tools_teardown = agent_tools.clone();
+        let runtime_tools_teardown = tool_registry.clone();
+        let teardown_handler: SessionTeardownHandler = Arc::new(move |ctx: SessionTeardownContext| {
+            let config = config_teardown.clone();
+            let agent_tools = agent_tools_teardown.clone();
+            let runtime_tools = runtime_tools_teardown.clone();
+            Box::pin(async move {
+                let gateway_ctx = GatewayRuntimeContext {
+                    session_key: ctx.session_key.clone(),
+                    session_id: ctx.session_id.clone(),
+                    platform: ctx.platform.clone(),
+                    chat_id: ctx.chat_id.clone(),
+                    user_id: ctx.user_id.clone(),
+                    model: ctx.model.clone(),
+                    provider: ctx.provider.clone(),
+                    personality: ctx.personality.clone(),
+                    home: ctx.home.clone(),
+                    ..Default::default()
+                };
+                let agent = build_agent_for_gateway_context(
+                    config.as_ref(),
+                    &gateway_ctx,
+                    agent_tools,
+                    runtime_tools,
+                );
+                let interrupted = ctx.reason == "shutdown";
+                agent.session_end_hooks(ctx.messages.as_ref(), false, interrupted, 0, true);
+            })
+        });
+        gateway
+            .set_session_teardown_handler(teardown_handler)
             .await;
 
         gateway

@@ -314,6 +314,13 @@ pub struct SessionManager {
     group_sessions_per_user: bool,
 }
 
+/// Snapshot of a session removed during idle expiry or gateway shutdown.
+#[derive(Debug, Clone)]
+pub struct SessionTeardownSnapshot {
+    pub session_key: String,
+    pub session: Session,
+}
+
 impl SessionManager {
     /// Create a new `SessionManager` with the given config.
     pub fn new(config: SessionConfig) -> Self {
@@ -682,19 +689,42 @@ impl SessionManager {
 
     /// Expire idle sessions according to their reset policy.
     ///
-    /// Returns the number of removed sessions.
-    pub async fn expire_idle_sessions(&self) -> usize {
+    /// Returns snapshots of removed sessions (for POI / memory flush hooks).
+    pub async fn expire_idle_sessions(&self) -> Vec<SessionTeardownSnapshot> {
         let mut sessions = self.sessions.write().await;
-        let before = sessions.len();
         let stale_ids: Vec<String> = sessions
             .iter()
             .filter(|(_, s)| s.should_reset())
             .map(|(id, _)| id.clone())
             .collect();
-        for id in &stale_ids {
-            sessions.remove(id);
+        let mut removed = Vec::with_capacity(stale_ids.len());
+        for id in stale_ids {
+            if let Some(session) = sessions.remove(&id) {
+                removed.push(SessionTeardownSnapshot {
+                    session_key: id,
+                    session,
+                });
+            }
         }
-        before.saturating_sub(sessions.len())
+        removed
+    }
+
+    /// Remove and return every in-memory session (gateway shutdown).
+    pub async fn drain_all_sessions(&self) -> Vec<SessionTeardownSnapshot> {
+        let mut sessions = self.sessions.write().await;
+        let drained: Vec<SessionTeardownSnapshot> = sessions
+            .drain()
+            .map(|(session_key, session)| SessionTeardownSnapshot {
+                session_key,
+                session,
+            })
+            .collect();
+        drop(sessions);
+
+        let mut user_sessions = self.user_sessions.write().await;
+        user_sessions.clear();
+
+        drained
     }
 
     /// Infer the session type from the chat_id format.

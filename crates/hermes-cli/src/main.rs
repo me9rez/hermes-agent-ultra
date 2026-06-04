@@ -3024,6 +3024,11 @@ async fn run_gateway(
             };
             let handler_deps_stream = handler_deps.clone();
             gateway
+                .set_session_teardown_handler(
+                    gateway_handlers::make_gateway_session_teardown_handler(handler_deps.clone()),
+                )
+                .await;
+            gateway
                 .set_message_handler_with_context(Arc::new(move |messages, ctx| {
                     let deps = handler_deps.clone();
                     Box::pin(gateway_handlers::gateway_handle_message_non_streaming(
@@ -3129,6 +3134,7 @@ async fn run_gateway(
                 .map_err(|e| AgentError::Io(format!("Failed to listen for Ctrl+C: {}", e)))?;
 
             println!("\nShutting down gateway...");
+            gateway.teardown_all_sessions("shutdown").await;
             cron_scheduler.stop().await;
             gateway.stop_all().await?;
             let _ = std::fs::remove_file(&pid_path);

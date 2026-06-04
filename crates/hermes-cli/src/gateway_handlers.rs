@@ -9,7 +9,9 @@ use hermes_agent::{
 };
 use hermes_core::{Message, MessageRole, StreamChunk, ToolSchema};
 use hermes_gateway::tool_backends::ClarifyDispatcher;
-use hermes_gateway::{Gateway, GatewayError, GatewayRuntimeContext};
+use hermes_gateway::{
+    Gateway, GatewayError, GatewayRuntimeContext, SessionTeardownContext, SessionTeardownHandler,
+};
 use hermes_tools::ToolRegistry;
 
 use hermes_cli::app::bridge_tool_registry;
@@ -241,6 +243,49 @@ pub(crate) async fn gateway_handle_message_non_streaming(
         .final_response
         .clone()
         .unwrap_or_else(|| extract_last_assistant_reply(conv.messages())))
+}
+
+/// Agent-layer POI / memory flush before gateway session reset, idle expiry, or shutdown.
+pub fn make_gateway_session_teardown_handler(
+    deps: GatewayHandlerDeps,
+) -> SessionTeardownHandler {
+    Arc::new(move |ctx| {
+        let deps = deps.clone();
+        Box::pin(async move { gateway_run_session_teardown(ctx, deps).await })
+    })
+}
+
+async fn gateway_run_session_teardown(ctx: SessionTeardownContext, deps: GatewayHandlerDeps) {
+    let gateway_ctx = GatewayRuntimeContext {
+        session_key: ctx.session_key.clone(),
+        session_id: ctx.session_id.clone(),
+        platform: ctx.platform.clone(),
+        chat_id: ctx.chat_id.clone(),
+        user_id: ctx.user_id.clone(),
+        model: ctx.model.clone(),
+        provider: ctx.provider.clone(),
+        personality: ctx.personality.clone(),
+        home: ctx.home.clone(),
+        ..Default::default()
+    };
+    let agent_tools = Arc::new(bridge_tool_registry(&deps.runtime_tools));
+    let agent = get_or_build_gateway_cached_agent(
+        &deps.gateway_agent_cache,
+        deps.config.as_ref(),
+        &gateway_ctx,
+        agent_tools,
+        deps.runtime_tools.clone(),
+    )
+    .await;
+    let agent = agent.lock().await;
+    let interrupted = ctx.reason == "shutdown";
+    agent.session_end_hooks(
+        ctx.messages.as_ref(),
+        false,
+        interrupted,
+        0,
+        true,
+    );
 }
 
 pub(crate) async fn gateway_handle_message_streaming(

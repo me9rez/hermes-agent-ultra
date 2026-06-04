@@ -5991,6 +5991,7 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
 
     app.interrupt_controller.interrupt(None);
     abort_and_join_task(&mut active_agent_task).await;
+    app.flush_session_teardown(false);
     shutdown_crossterm_event_pipeline(event_pipeline).await;
     shutdown_signal_bridge(signal_bridge).await;
 

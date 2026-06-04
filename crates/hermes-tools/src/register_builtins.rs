@@ -663,6 +663,15 @@ pub fn register_builtin_tools(
         vec![],
     );
 
+    // -- Runtime recovery runbooks ------------------------------------------
+    reg(
+        registry,
+        "system",
+        Arc::new(crate::tools::runbook::RunbookControlHandler::new()),
+        "📘",
+        vec![],
+    );
+
     // -- Tool result storage -------------------------------------------------
     reg(
         registry,
@@ -899,6 +908,10 @@ mod tests {
         assert!(
             names.contains(&"replay_trace_control".to_string()),
             "invalid backend should keep replay trace control"
+        );
+        assert!(
+            names.contains(&"runbook_control".to_string()),
+            "invalid backend should keep runtime runbooks"
         );
     }
 

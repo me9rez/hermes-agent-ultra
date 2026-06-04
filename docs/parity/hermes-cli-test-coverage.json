@@ -46,11 +46,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -90,11 +90,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -196,11 +196,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -239,11 +239,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -279,11 +279,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -323,11 +323,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -367,11 +367,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -411,11 +411,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -509,7 +509,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -738,7 +738,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -781,7 +781,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -937,11 +937,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -1000,7 +1000,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -1105,7 +1105,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -2022,7 +2022,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -2065,7 +2065,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -2108,7 +2108,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -2131,11 +2131,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -2170,11 +2170,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -2210,11 +2210,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -2273,7 +2273,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -2316,7 +2316,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -2359,7 +2359,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -2542,11 +2542,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -2620,11 +2620,11 @@
           "name": "test_build_agent_config_maps_runtime_provider_api_key_env"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "oauth_capable_provider_registry_matches_upstream_snapshot"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "provider_capability_registry_marks_nous_as_oauth_and_managed_tools"
         },
         {
@@ -2680,7 +2680,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -2758,7 +2758,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -3000,7 +3000,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -3079,7 +3079,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -3480,7 +3480,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],
@@ -3956,7 +3956,7 @@
           "name": "provider_curated_models_accepts_aliases"
         },
         {
-          "file": "crates/hermes-cli/src/providers.rs",
+          "file": "crates/hermes-core/src/providers.rs",
           "name": "known_provider_registry_covers_upstream_snapshot_required_ids"
         }
       ],

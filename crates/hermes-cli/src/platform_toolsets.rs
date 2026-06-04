@@ -210,6 +210,9 @@ mod tests {
         register(&reg, "memory", "memory");
         register(&reg, "todo", "todo");
         register(&reg, "clarify", "clarify");
+        register(&reg, "auth_snapshot", "system");
+        register(&reg, "integrations_snapshot", "system");
+        register(&reg, "ops_snapshot", "system");
         register(&reg, "browser_navigate", "browser");
         register(&reg, "browser_snapshot", "browser");
         register(&reg, "browser_click", "browser");
@@ -248,6 +251,7 @@ mod tests {
         let names = resolve_platform_tool_names(&cfg, "discord", &reg);
         assert!(names.contains(&"send_message".to_string()));
         assert!(names.contains(&"terminal".to_string()));
+        assert!(names.contains(&"integrations_snapshot".to_string()));
     }
 
     #[test]

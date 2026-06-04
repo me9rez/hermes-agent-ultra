@@ -82,7 +82,20 @@ pub const TOOLSET_VOICE: &[&str] = &["transcription", "voice_mode"];
 /// Security helpers.
 pub const TOOLSET_SECURITY: &[&str] = &["osv_check", "url_safety"];
 /// System utility helpers.
-pub const TOOLSET_SYSTEM: &[&str] = &["env_passthrough", "credential_files", "tool_result_storage"];
+pub const TOOLSET_SYSTEM: &[&str] = &[
+    "env_passthrough",
+    "credential_files",
+    "auth_snapshot",
+    "integrations_snapshot",
+    "tool_policy_simulate",
+    "raw_trace_control",
+    "replay_trace_control",
+    "runbook_control",
+    "telemetry_snapshot",
+    "ops_snapshot",
+    "tool_result_storage",
+    "disk_cleanup",
+];
 /// Mixture-of-agents workflow.
 pub const TOOLSET_MIXTURE_OF_AGENTS: &[&str] = &["mixture_of_agents"];
 
@@ -283,6 +296,7 @@ impl ToolsetManager {
                 "messaging",
                 "homeassistant",
                 "tts",
+                "system",
             ]
             .into_iter()
             .map(String::from)
@@ -586,6 +600,9 @@ mod tests {
         assert!(tools.contains(&"send_message".to_string()));
         assert!(tools.contains(&"ha_call_service".to_string()));
         assert!(tools.contains(&"cronjob".to_string()));
+        assert!(tools.contains(&"auth_snapshot".to_string()));
+        assert!(tools.contains(&"integrations_snapshot".to_string()));
+        assert!(tools.contains(&"ops_snapshot".to_string()));
     }
 
     #[test]

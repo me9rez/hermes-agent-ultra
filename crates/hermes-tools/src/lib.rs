@@ -71,6 +71,7 @@ pub use tools::homeassistant::{
     HomeAssistantBackend,
 };
 pub use tools::image_gen::{ImageGenBackend, ImageGenerateHandler};
+pub use tools::integrations_snapshot::IntegrationsSnapshotHandler;
 pub use tools::managed_tool_gateway::ManagedToolGatewayHandler;
 pub use tools::memory::{MemoryBackend, MemoryHandler};
 pub use tools::messaging::{MessagingBackend, SendMessageHandler};

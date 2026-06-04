@@ -16,6 +16,7 @@ pub mod env_passthrough;
 pub mod file;
 pub mod homeassistant;
 pub mod image_gen;
+pub mod integrations_snapshot;
 pub mod managed_tool_gateway;
 pub mod memory;
 pub mod messaging;

@@ -637,6 +637,19 @@ pub fn register_builtin_tools(
         vec![],
     );
 
+    // -- Integration control-plane snapshot ---------------------------------
+    reg(
+        registry,
+        "system",
+        Arc::new(
+            crate::tools::integrations_snapshot::IntegrationsSnapshotHandler::new(Arc::new(
+                registry.clone(),
+            )),
+        ),
+        "🧩",
+        vec![],
+    );
+
     // -- Tool policy simulation ---------------------------------------------
     reg(
         registry,
@@ -935,6 +948,10 @@ mod tests {
             "invalid backend should keep read-only auth snapshots"
         );
         assert!(
+            names.contains(&"integrations_snapshot".to_string()),
+            "invalid backend should keep read-only integration snapshots"
+        );
+        assert!(
             names.contains(&"raw_trace_control".to_string()),
             "invalid backend should keep raw trace control"
         );
@@ -953,6 +970,30 @@ mod tests {
         assert!(
             names.contains(&"ops_snapshot".to_string()),
             "invalid backend should keep read-only ops snapshots"
+        );
+    }
+
+    #[test]
+    fn builtin_registry_exposes_integration_snapshot_to_cli_list() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().expect("temp home");
+        let _home = EnvGuard::set("HOME", home.path().to_string_lossy().as_ref());
+        let _terminal_env = EnvGuard::set("TERMINAL_ENV", "local");
+        let registry = ToolRegistry::new();
+        register_builtin_tools(
+            &registry,
+            Arc::new(MockTerminalBackend),
+            Arc::new(MockSkillProvider),
+        );
+
+        let names: Vec<String> = registry
+            .list_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(
+            names.contains(&"integrations_snapshot".to_string()),
+            "`hermes tools list` should expose integrations_snapshot"
         );
     }
 

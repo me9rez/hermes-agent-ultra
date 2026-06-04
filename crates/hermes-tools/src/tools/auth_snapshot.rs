@@ -5,7 +5,7 @@
 //! and gate evidence agents need before asking the operator to run those flows.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use hermes_core::auth_gate::{
@@ -126,11 +126,13 @@ pub fn auth_status_snapshot(
 ) -> Value {
     let resolved = resolve_auth_provider(provider, model);
     let credential = credential_snapshot(&resolved);
+    let auth_store = auth_state_presence_snapshot(&resolved);
     json!({
         "status": "ok",
         "provider": resolved,
         "model_hint": effective_model_hint(model),
         "credential": credential,
+        "auth_store": auth_store,
         "oauth": oauth_gate_snapshot(&resolved),
         "known_providers": if include_known { Some(provider_status_rows()) } else { None },
         "secret_values_emitted": false,
@@ -237,6 +239,65 @@ fn credential_snapshot(provider: &str) -> Value {
         "sources": sources,
         "secret_values_emitted": false,
     })
+}
+
+pub fn auth_state_presence_snapshot(provider: &str) -> Value {
+    let provider = normalize_auth_provider(provider);
+    let mut candidates = auth_store_discovery_paths();
+    candidates.dedup();
+
+    let mut stores = Vec::new();
+    let mut present = false;
+    for path in candidates {
+        let provider_present = read_provider_auth_state_from_store_path(&path, &provider);
+        present |= provider_present;
+        stores.push(json!({
+            "path": path.display().to_string(),
+            "exists": path.is_file(),
+            "provider_present": provider_present,
+        }));
+    }
+
+    json!({
+        "present": present,
+        "provider": provider,
+        "stores": stores,
+        "secret_values_emitted": false,
+    })
+}
+
+fn auth_store_discovery_paths() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = env_nonempty("HERMES_AUTH_FILE") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(hermes_config::paths::auth_json_path());
+    if let Some(home) = user_home_dir() {
+        candidates.push(home.join(".hermes").join("auth.json"));
+        candidates.push(home.join(".hermes-agent-ultra").join("auth.json"));
+    }
+    candidates
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
+}
+
+fn read_provider_auth_state_from_store_path(path: &Path, provider: &str) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    parsed
+        .get("providers")
+        .and_then(Value::as_object)
+        .and_then(|providers| providers.get(provider))
+        .is_some()
 }
 
 fn credential_env_vars(provider: &str) -> Vec<&'static str> {
@@ -475,5 +536,34 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("required>=99.0.0"));
+    }
+
+    #[test]
+    fn status_reports_oauth_state_presence_without_secret_value() {
+        let _lock = env_lock();
+        let temp = tempdir().expect("tempdir");
+        let _home = EnvGuard::set("HERMES_HOME", temp.path().to_string_lossy().as_ref());
+        let _provider = EnvGuard::set("HERMES_AUTH_DEFAULT_PROVIDER", "nous");
+        let _pool = EnvGuard::remove("HERMES_AUTH_PROVIDER_POOL");
+        std::fs::write(
+            temp.path().join("auth.json"),
+            r#"{
+  "providers": {
+    "nous": {
+      "access_token": "secret-access-token",
+      "refresh_token": "secret-refresh-token"
+    }
+  }
+}"#,
+        )
+        .expect("write auth store");
+
+        let raw = auth_status_snapshot(None, None, false).to_string();
+        let payload: Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(payload["provider"], "nous");
+        assert_eq!(payload["auth_store"]["present"], true);
+        assert_eq!(payload["auth_store"]["secret_values_emitted"], false);
+        assert!(!raw.contains("secret-access-token"));
+        assert!(!raw.contains("secret-refresh-token"));
     }
 }

@@ -3,6 +3,7 @@
 //! The TUI exposes these through `/raw trace ...`; this tool makes the same
 //! replay log surface callable from the Rust tool registry.
 
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
@@ -21,6 +22,7 @@ const DEFAULT_GRAPH_LIMIT: usize = 80;
 const MAX_GRAPH_LIMIT: usize = 500;
 const DEFAULT_EXPORT_LIMIT: usize = 100;
 const MAX_EXPORT_LIMIT: usize = 1_000;
+const MAX_DIFF_HASH_SAMPLES: usize = 100;
 const PREVIEW_CHARS: usize = 2_000;
 
 #[derive(Clone, Default)]
@@ -134,15 +136,33 @@ impl ToolHandler for ReplayTraceControlHandler {
             }
             "verify" => {
                 let root = self.replay_dir();
-                let path = resolve_replay_path(&root, &params)?;
-                let summary = verify_replay_log(&path)?;
-                let ok = summary.exists && summary.parse_errors == 0 && summary.chain_breaks == 0;
-                Ok(json!({
-                    "status": if ok { "pass" } else { "fail" },
-                    "path": path.display().to_string(),
-                    "summary": summary.to_json(),
-                })
-                .to_string())
+                let path = resolve_verify_path(&root, &params)?;
+                if path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                {
+                    let summary = verify_replay_export(&path)?;
+                    let ok = summary
+                        .get("exists")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    Ok(json!({
+                        "status": if ok { "pass" } else { "fail" },
+                        "path": path.display().to_string(),
+                        "summary": summary,
+                    })
+                    .to_string())
+                } else {
+                    let summary = verify_replay_log(&path)?;
+                    let ok = summary.exists && summary.parse_errors == 0 && summary.chain_breaks == 0;
+                    Ok(json!({
+                        "status": if ok { "pass" } else { "fail" },
+                        "path": path.display().to_string(),
+                        "summary": summary.to_json(),
+                    })
+                    .to_string())
+                }
             }
             "export" => {
                 let limit = parse_limit(&params, DEFAULT_EXPORT_LIMIT, MAX_EXPORT_LIMIT);
@@ -169,19 +189,24 @@ impl ToolHandler for ReplayTraceControlHandler {
                 })
                 .to_string())
             }
+            "diff" => {
+                let root = self.replay_dir();
+                Ok(diff_replay_exports(&root, &params)?.to_string())
+            }
             "help" => Ok(json!({
                 "status": "ok",
                 "tool": TOOL_NAME,
-                "actions": ["status", "on", "off", "toggle", "path", "tail", "focus", "graph", "verify", "export", "help"],
+                "actions": ["status", "on", "off", "toggle", "path", "tail", "focus", "graph", "verify", "export", "diff", "help"],
                 "notes": [
                     "mirrors `/raw trace ...` without requiring a TUI",
                     "session_id selects `<hermes_home>/logs/replay/<session_id>.jsonl`",
-                    "tail/focus/graph/export are bounded and redact secret-like values"
+                    "tail/focus/graph/export are bounded and redact secret-like values",
+                    "diff compares replay export JSON files by event_hash"
                 ],
             })
             .to_string()),
             _ => Err(ToolError::InvalidParams(format!(
-                "unknown action '{action}'; expected status|on|off|toggle|path|tail|focus|graph|verify|export|help"
+                "unknown action '{action}'; expected status|on|off|toggle|path|tail|focus|graph|verify|export|diff|help"
             ))),
         }
     }
@@ -192,7 +217,7 @@ impl ToolHandler for ReplayTraceControlHandler {
             "action".into(),
             json!({
                 "type": "string",
-                "enum": ["status", "on", "off", "toggle", "path", "tail", "focus", "graph", "verify", "export", "help"],
+                "enum": ["status", "on", "off", "toggle", "path", "tail", "focus", "graph", "verify", "export", "diff", "help"],
                 "description": "Replay trace action. Defaults to status."
             }),
         );
@@ -233,9 +258,23 @@ impl ToolHandler for ReplayTraceControlHandler {
                 "description": "Optional export path. Relative paths are placed under replay exports; absolute paths must stay under the replay directory."
             }),
         );
+        props.insert(
+            "left_path".into(),
+            json!({
+                "type": "string",
+                "description": "Left replay export JSON for diff. Relative paths resolve under replay exports; absolute paths must stay under the replay directory."
+            }),
+        );
+        props.insert(
+            "right_path".into(),
+            json!({
+                "type": "string",
+                "description": "Right replay export JSON for diff. Relative paths resolve under replay exports; absolute paths must stay under the replay directory."
+            }),
+        );
         tool_schema(
             TOOL_NAME,
-            "Inspect and control deterministic replay trace logs without a TUI.",
+            "Inspect, verify, export, and diff deterministic replay traces without a TUI.",
             JsonSchema::object(props, vec![]),
         )
     }
@@ -364,6 +403,34 @@ fn resolve_replay_path(root: &Path, params: &Value) -> Result<PathBuf, ToolError
     safe_path_under_root(root, raw_path, "path")
 }
 
+fn resolve_verify_path(root: &Path, params: &Value) -> Result<PathBuf, ToolError> {
+    let Some(raw_path) = params
+        .get("path")
+        .or_else(|| params.get("export_path"))
+        .or_else(|| params.get("output_path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(root.join(format!("{}.jsonl", session_id(params))));
+    };
+
+    let candidate = Path::new(raw_path);
+    if candidate.is_absolute() {
+        return safe_path_under_root(root, raw_path, "path");
+    }
+    let relative = safe_relative_path(raw_path, "path")?;
+    if candidate
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    {
+        Ok(root.join("exports").join(relative))
+    } else {
+        Ok(root.join(relative))
+    }
+}
+
 fn export_path(root: &Path, params: &Value) -> Result<PathBuf, ToolError> {
     let default = root
         .join("exports")
@@ -382,6 +449,38 @@ fn export_path(root: &Path, params: &Value) -> Result<PathBuf, ToolError> {
     }
     let relative = safe_relative_path(raw_path, "output_path")?;
     Ok(root.join("exports").join(relative))
+}
+
+fn resolve_export_input_path(
+    root: &Path,
+    params: &Value,
+    keys: &[&str],
+    field: &str,
+) -> Result<PathBuf, ToolError> {
+    let raw_path = string_param(params, keys)
+        .ok_or_else(|| ToolError::InvalidParams(format!("diff requires {field}")))?;
+    export_input_path(root, raw_path, field)
+}
+
+fn export_input_path(root: &Path, raw_path: &str, field: &str) -> Result<PathBuf, ToolError> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err(ToolError::InvalidParams(format!(
+            "{field} must not be empty"
+        )));
+    }
+    if Path::new(raw_path).is_absolute() {
+        return safe_path_under_root(root, raw_path, field);
+    }
+    let relative = safe_relative_path(raw_path, field)?;
+    Ok(root.join("exports").join(relative))
+}
+
+fn string_param<'a>(params: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .filter_map(|key| params.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
 }
 
 fn safe_path_under_root(root: &Path, raw_path: &str, field: &str) -> Result<PathBuf, ToolError> {
@@ -573,6 +672,110 @@ fn verify_replay_log(path: &Path) -> Result<ReplayVerifySummary, ToolError> {
         chain_breaks,
         bytes: metadata.len(),
     })
+}
+
+fn read_replay_export_rows(path: &Path) -> Result<Option<Vec<Value>>, ToolError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| ToolError::ExecutionFailed(format!("read {}: {e}", path.display())))?;
+    let parsed: Value = serde_json::from_str(&raw)
+        .map_err(|e| ToolError::ExecutionFailed(format!("parse {}: {e}", path.display())))?;
+    Ok(Some(
+        parsed
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    ))
+}
+
+fn verify_replay_export(path: &Path) -> Result<Value, ToolError> {
+    let Some(rows) = read_replay_export_rows(path)? else {
+        return Ok(json!({
+            "kind": "export",
+            "exists": false,
+            "rows": 0,
+            "hashes": 0,
+            "status": "missing",
+        }));
+    };
+    let hashes = replay_event_hashes(&rows);
+    Ok(json!({
+        "kind": "export",
+        "exists": true,
+        "rows": rows.len(),
+        "hashes": hashes.len(),
+        "status": if rows.is_empty() { "empty" } else { "ok" },
+    }))
+}
+
+fn diff_replay_exports(root: &Path, params: &Value) -> Result<Value, ToolError> {
+    let left_path = resolve_export_input_path(
+        root,
+        params,
+        &["left_path", "a_path", "path_a", "export_a_path", "export_a"],
+        "left_path",
+    )?;
+    let right_path = resolve_export_input_path(
+        root,
+        params,
+        &[
+            "right_path",
+            "b_path",
+            "path_b",
+            "export_b_path",
+            "export_b",
+        ],
+        "right_path",
+    )?;
+    let left_rows = read_replay_export_rows(&left_path)?.ok_or_else(|| {
+        ToolError::ExecutionFailed(format!("read {}: file not found", left_path.display()))
+    })?;
+    let right_rows = read_replay_export_rows(&right_path)?.ok_or_else(|| {
+        ToolError::ExecutionFailed(format!("read {}: file not found", right_path.display()))
+    })?;
+    let left_hashes = replay_event_hashes(&left_rows);
+    let right_hashes = replay_event_hashes(&right_rows);
+    let only_left_count = left_hashes.difference(&right_hashes).count();
+    let only_right_count = right_hashes.difference(&left_hashes).count();
+    let only_left_hashes: Vec<String> = left_hashes
+        .difference(&right_hashes)
+        .take(MAX_DIFF_HASH_SAMPLES)
+        .cloned()
+        .collect();
+    let only_right_hashes: Vec<String> = right_hashes
+        .difference(&left_hashes)
+        .take(MAX_DIFF_HASH_SAMPLES)
+        .cloned()
+        .collect();
+    Ok(json!({
+        "status": "ok",
+        "left": {
+            "path": left_path.display().to_string(),
+            "rows": left_rows.len(),
+            "hashes": left_hashes.len(),
+        },
+        "right": {
+            "path": right_path.display().to_string(),
+            "rows": right_rows.len(),
+            "hashes": right_hashes.len(),
+        },
+        "overlap_hashes": left_hashes.intersection(&right_hashes).count(),
+        "only_in_left": only_left_count,
+        "only_in_right": only_right_count,
+        "only_in_left_hashes": only_left_hashes,
+        "only_in_right_hashes": only_right_hashes,
+        "hash_samples_truncated": only_left_count > MAX_DIFF_HASH_SAMPLES || only_right_count > MAX_DIFF_HASH_SAMPLES,
+    }))
+}
+
+fn replay_event_hashes(rows: &[Value]) -> BTreeSet<String> {
+    rows.iter()
+        .filter_map(|row| row.get("event_hash").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn export_rows(source: &Path, output_path: &Path, limit: usize) -> Result<usize, ToolError> {
@@ -780,6 +983,18 @@ mod tests {
         assert!(output.exists());
         assert!(output.starts_with(&env.replay_dir));
         assert_eq!(export["rows"], 2);
+
+        let verify_export: Value = serde_json::from_str(
+            &handler
+                .execute(json!({"action":"verify","path":"sample.json"}))
+                .await
+                .unwrap(),
+        )
+        .expect("verify export json");
+        assert_eq!(verify_export["status"], "pass");
+        assert_eq!(verify_export["summary"]["kind"], "export");
+        assert_eq!(verify_export["summary"]["rows"], 2);
+        assert_eq!(verify_export["summary"]["hashes"], 2);
     }
 
     #[tokio::test]
@@ -790,6 +1005,8 @@ mod tests {
             json!({"action":"path","path":"../outside.jsonl"}),
             json!({"action":"path","path":outside.display().to_string()}),
             json!({"action":"export","output_path":"/tmp/hermes-replay-export.json"}),
+            json!({"action":"diff","left_path":"../a.json","right_path":"b.json"}),
+            json!({"action":"diff","left_path":"a.json","right_path":"/tmp/b.json"}),
         ] {
             let err = handler
                 .execute(params)
@@ -832,5 +1049,56 @@ mod tests {
         let output = PathBuf::from(export["output"].as_str().expect("output path"));
         assert!(output.starts_with(&env.replay_dir));
         assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn diff_compares_replay_export_hashes_with_aliases() {
+        let (env, handler) = handler_with_home();
+        let exports = env.replay_dir.join("exports");
+        std::fs::create_dir_all(&exports).expect("mkdir exports");
+        std::fs::write(
+            exports.join("a.json"),
+            serde_json::to_string_pretty(&json!({
+                "rows": [
+                    {"seq": 1, "event_hash": "aaa"},
+                    {"seq": 2, "event_hash": "bbb"},
+                    {"seq": 3, "event_hash": "shared"}
+                ]
+            }))
+            .expect("json a"),
+        )
+        .expect("write a");
+        std::fs::write(
+            exports.join("b.json"),
+            serde_json::to_string_pretty(&json!({
+                "rows": [
+                    {"seq": 1, "event_hash": "ccc"},
+                    {"seq": 2, "event_hash": "shared"},
+                    {"seq": 3, "event_hash": "shared"}
+                ]
+            }))
+            .expect("json b"),
+        )
+        .expect("write b");
+
+        let diff: Value = serde_json::from_str(
+            &handler
+                .execute(json!({"action":"diff","export_a":"a.json","export_b":"b.json"}))
+                .await
+                .unwrap(),
+        )
+        .expect("diff json");
+
+        assert_eq!(diff["status"], "ok");
+        assert_eq!(diff["left"]["rows"], 3);
+        assert_eq!(diff["left"]["hashes"], 3);
+        assert_eq!(diff["right"]["rows"], 3);
+        assert_eq!(diff["right"]["hashes"], 2);
+        assert_eq!(diff["overlap_hashes"], 1);
+        assert_eq!(diff["only_in_left"], 2);
+        assert_eq!(diff["only_in_right"], 1);
+        assert_eq!(diff["only_in_left_hashes"], json!(["aaa", "bbb"]));
+        assert_eq!(diff["only_in_right_hashes"], json!(["ccc"]));
+        assert_eq!(diff["hash_samples_truncated"], false);
     }
 }

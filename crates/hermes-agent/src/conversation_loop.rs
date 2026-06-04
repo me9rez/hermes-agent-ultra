@@ -29,7 +29,7 @@ use crate::agent_loop::{
     AgentLoop, LoopExit, OBJECTIVE_DEEP_AUDIT_MAX_RETRIES, OBJECTIVE_GUARD_MAX_RETRIES,
     ReplayRecorder, RepoReviewBudgetState, StreamCollectOutcome, ToolProgressWatchdog,
     TurnRuntimeRoute, apply_repo_review_discovery_budget_policy,
-    apply_repo_review_tool_profile_narrowing, apply_web_tool_budget,
+    apply_repo_review_tool_profile_narrowing, apply_web_tool_budget, build_auxiliary_arc_for_config,
     contextlattice_connect_system_hint, contextlattice_intelligence_system_hint,
     detect_contextlattice_connect_intent, effective_max_turns, estimate_usage_cost_usd,
     exploratory_problem_solving_system_hint, extract_last_user_assistant,
@@ -54,6 +54,7 @@ use crate::message_sanitization::{
 };
 use crate::plugins::{HookResult, HookType};
 use crate::session_persistence::leading_system_prompt_for_persist;
+use crate::web_research::WebResearchController;
 
 /// Inputs for one `run_conversation` call (Python `run_conversation` kwargs).
 pub struct RunConversationParams {
@@ -765,6 +766,20 @@ impl AgentLoop {
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         );
 
+        let web_research_cfg = self.config().web_research.clone();
+        let web_auxiliary = if web_research_cfg.enabled
+            && (web_research_cfg.planner_enabled || web_research_cfg.evaluator_enabled)
+        {
+            Some(build_auxiliary_arc_for_config(&self.config()))
+        } else {
+            None
+        };
+        let mut web_research_ctrl = web_research_cfg
+            .enabled
+            .then(|| WebResearchController::new(web_research_cfg));
+        let mut active_tool_schemas = tool_schemas.clone();
+        let mut web_finalize_hint_injected = false;
+
         loop {
             if let Some(scrubber) = stream_scrubber.as_mut() {
                 scrubber.reset();
@@ -891,20 +906,31 @@ impl AgentLoop {
             let llm_governor =
                 governor_for_turn(&self.config(), &ctx, 0, Some(&turn_governor_runtime));
 
+            if let Some(ref ctrl) = web_research_ctrl {
+                active_tool_schemas =
+                    Arc::from(ctrl.filter_tool_schemas(tool_schemas.as_ref()));
+                if !web_finalize_hint_injected {
+                    if let Some(hint) = ctrl.finalization_system_hint() {
+                        ctx.add_message(Message::system(hint));
+                        web_finalize_hint_injected = true;
+                    }
+                }
+            }
+
             let approx_request_tokens = crate::compression::estimate_request_tokens_for_compression(
                 ctx.get_messages(),
                 &system_content,
-                tool_schemas.as_ref(),
+                active_tool_schemas.as_ref(),
             ) as u32;
             let rt_snap = self.primary_runtime_snapshot();
             if let Some(err) = crate::message_sanitization::ollama_context_limit_error(
                 self.config().ollama_num_ctx,
-                !tool_schemas.is_empty(),
+                !active_tool_schemas.is_empty(),
                 approx_request_tokens,
                 active_model,
                 rt_snap.provider.as_deref().unwrap_or("unknown"),
                 rt_snap.base_url.as_deref().unwrap_or("unknown"),
-                tool_schemas.len(),
+                active_tool_schemas.len(),
                 self.config().session_id.as_deref(),
             ) {
                 ctx.add_message(Message::assistant(err));
@@ -1004,7 +1030,7 @@ impl AgentLoop {
                     match self
                         .collect_stream_llm_response(
                             &mut ctx,
-                            &tool_schemas,
+                            &active_tool_schemas,
                             turn_runtime_route.as_ref(),
                             active_model,
                             llm_governor.max_tokens,
@@ -1053,7 +1079,7 @@ impl AgentLoop {
                     match self
                         .call_llm_with_retry(
                             &mut ctx,
-                            &tool_schemas,
+                            &active_tool_schemas,
                             turn_runtime_route.as_ref(),
                             llm_governor.max_tokens,
                             &mut api_call_count,
@@ -1770,23 +1796,44 @@ impl AgentLoop {
 
             // Cap concurrent delegate_task calls
             self.cap_delegates(&mut tool_calls);
-            let deferred_web_budget_results = apply_web_tool_budget(
-                &mut tool_calls,
-                web_tool_calls_used,
-                web_search_calls_used,
-                web_tool_consecutive_error_turns,
-                total_turns,
-            );
-            if !deferred_web_budget_results.is_empty() {
-                let blocked_by_errors =
-                    web_tool_consecutive_error_turns >= web_tool_budget_max_consecutive_errors();
-                for (tool_name, _) in &deferred_web_budget_results {
-                    self.emit_status(
-                        "tool_failure",
-                        &web_tool_budget_user_notice(tool_name, blocked_by_errors),
-                    );
+            let deferred_web_budget_results = if let Some(ref mut ctrl) = web_research_ctrl {
+                ctrl.ensure_plan_on_first_web(
+                    web_auxiliary.as_ref(),
+                    &first_user,
+                    &tool_calls,
+                )
+                .await;
+                let (blocked, notices) = ctrl.gate_web_batch(
+                    web_auxiliary.as_ref(),
+                    ctx.get_messages(),
+                    &mut tool_calls,
+                    total_turns,
+                )
+                .await;
+                for notice in notices {
+                    self.emit_status("tool_failure", &notice);
                 }
-            }
+                blocked
+            } else {
+                let blocked = apply_web_tool_budget(
+                    &mut tool_calls,
+                    web_tool_calls_used,
+                    web_search_calls_used,
+                    web_tool_consecutive_error_turns,
+                    total_turns,
+                );
+                if !blocked.is_empty() {
+                    let blocked_by_errors =
+                        web_tool_consecutive_error_turns >= web_tool_budget_max_consecutive_errors();
+                    for (tool_name, _) in &blocked {
+                        self.emit_status(
+                            "tool_failure",
+                            &web_tool_budget_user_notice(tool_name, blocked_by_errors),
+                        );
+                    }
+                }
+                blocked
+            };
             let contextlattice_connect_intent =
                 detect_contextlattice_connect_intent(ctx.get_messages());
             if tool_calls.is_empty() {
@@ -1906,6 +1953,12 @@ impl AgentLoop {
                     latest_user_content(ctx.get_messages()).map(str::to_string),
                 )
                 .await;
+            if let Some(ref mut ctrl) = web_research_ctrl {
+                if ctrl.record_results(&tool_calls, &results) {
+                    active_tool_schemas =
+                        Arc::from(ctrl.filter_tool_schemas(tool_schemas.as_ref()));
+                }
+            }
             if !deferred_web_budget_results.is_empty() {
                 results.extend(
                     deferred_web_budget_results

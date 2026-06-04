@@ -2347,7 +2347,7 @@ fn runtime_llm_providers_map(
         .collect()
 }
 
-fn build_auxiliary_arc_for_config(config: &AgentConfig) -> Arc<AuxiliaryClient> {
+pub(crate) fn build_auxiliary_arc_for_config(config: &AgentConfig) -> Arc<AuxiliaryClient> {
     let (auxiliary, _) = build_auxiliary_client(AuxiliaryBuildParams {
         config: AuxiliaryConfig::default(),
         primary_provider: config.provider.clone(),

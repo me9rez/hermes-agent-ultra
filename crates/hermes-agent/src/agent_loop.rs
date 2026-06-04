@@ -8461,6 +8461,12 @@ pub(crate) fn estimate_usage_cost_usd(usage: &UsageStats, model: &str, config: &
     if let Some(v) = usage.estimated_cost {
         return Some(v.max(0.0));
     }
+    let canonical = usage_stats_to_canonical(usage);
+    let provider = config.provider.as_deref();
+    let cost = hermes_intelligence::usage_pricing::calculate_cost(model, &canonical, provider, None);
+    if let Some(amount) = cost.amount_usd {
+        return Some(amount.max(0.0));
+    }
     let (in_pm, out_pm) = match (
         config.prompt_cost_per_million_usd,
         config.completion_cost_per_million_usd,
@@ -8473,6 +8479,29 @@ pub(crate) fn estimate_usage_cost_usd(usage: &UsageStats, model: &str, config: &
     Some(prompt_cost + completion_cost)
 }
 
+fn usage_stats_to_canonical(usage: &UsageStats) -> hermes_intelligence::usage_pricing::CanonicalUsage {
+    let input = if usage.input_tokens > 0 {
+        usage.input_tokens
+    } else {
+        usage
+            .prompt_tokens
+            .saturating_sub(usage.cache_read_tokens + usage.cache_write_tokens)
+    };
+    let output = if usage.output_tokens > 0 {
+        usage.output_tokens
+    } else {
+        usage.completion_tokens
+    };
+    hermes_intelligence::usage_pricing::CanonicalUsage {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: usage.cache_read_tokens,
+        cache_write_tokens: usage.cache_write_tokens,
+        reasoning_tokens: usage.reasoning_tokens,
+        request_count: 1,
+    }
+}
+
 /// Merge two UsageStats, summing token counts and keeping the latest cost estimate.
 pub(crate) fn merge_usage(existing: Option<UsageStats>, new: &UsageStats) -> UsageStats {
     match existing {
@@ -8480,6 +8509,11 @@ pub(crate) fn merge_usage(existing: Option<UsageStats>, new: &UsageStats) -> Usa
             prompt_tokens: prev.prompt_tokens + new.prompt_tokens,
             completion_tokens: prev.completion_tokens + new.completion_tokens,
             total_tokens: prev.total_tokens + new.total_tokens,
+            input_tokens: prev.input_tokens + new.input_tokens,
+            output_tokens: prev.output_tokens + new.output_tokens,
+            cache_read_tokens: prev.cache_read_tokens + new.cache_read_tokens,
+            cache_write_tokens: prev.cache_write_tokens + new.cache_write_tokens,
+            reasoning_tokens: prev.reasoning_tokens + new.reasoning_tokens,
             estimated_cost: match (prev.estimated_cost, new.estimated_cost) {
                 (Some(a), Some(b)) => Some(a + b),
                 (Some(a), None) => Some(a),
@@ -12410,18 +12444,23 @@ mod tests {
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
+            cache_read_tokens: 10,
             estimated_cost: Some(0.01),
+            ..Default::default()
         };
         let b = UsageStats {
             prompt_tokens: 200,
             completion_tokens: 100,
             total_tokens: 300,
+            cache_read_tokens: 20,
             estimated_cost: Some(0.02),
+            ..Default::default()
         };
         let merged = merge_usage(Some(a), &b);
         assert_eq!(merged.prompt_tokens, 300);
         assert_eq!(merged.completion_tokens, 150);
         assert_eq!(merged.total_tokens, 450);
+        assert_eq!(merged.cache_read_tokens, 30);
         assert_eq!(merged.estimated_cost, Some(0.03));
     }
 
@@ -12431,7 +12470,7 @@ mod tests {
             prompt_tokens: 200,
             completion_tokens: 100,
             total_tokens: 300,
-            estimated_cost: None,
+            ..Default::default()
         };
         let merged = merge_usage(None, &b);
         assert_eq!(merged.prompt_tokens, 200);
@@ -12445,6 +12484,7 @@ mod tests {
             completion_tokens: 1000,
             total_tokens: 2000,
             estimated_cost: Some(0.42),
+            ..Default::default()
         };
         let cost = estimate_usage_cost_usd(&u, "openai:gpt-4o", &cfg).unwrap();
         assert!((cost - 0.42).abs() < 1e-9);
@@ -12457,7 +12497,7 @@ mod tests {
             prompt_tokens: 1_000_000,
             completion_tokens: 1_000_000,
             total_tokens: 2_000_000,
-            estimated_cost: None,
+            ..Default::default()
         };
         let cost = estimate_usage_cost_usd(&u, "openai:gpt-4o-mini", &cfg).unwrap();
         assert!((cost - 0.75).abs() < 1e-9);

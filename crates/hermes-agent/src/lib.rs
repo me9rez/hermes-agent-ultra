@@ -48,6 +48,7 @@ mod retry_failover;
 pub mod session_log;
 pub mod session_persistence;
 pub mod session_state;
+pub mod usage_parse;
 pub mod shell_hooks;
 pub mod skill_provenance;
 pub mod skill_orchestrator;

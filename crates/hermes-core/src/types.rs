@@ -259,12 +259,28 @@ impl ToolResult {
 // UsageStats / ToolErrorRecord / AgentResult
 // ---------------------------------------------------------------------------
 
+fn usage_bucket_is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
 /// Token usage statistics from an LLM response.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct UsageStats {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// Non-cached input tokens (`normalize_usage` / Python canonical `input_tokens`).
+    #[serde(default, skip_serializing_if = "usage_bucket_is_zero")]
+    pub input_tokens: u64,
+    /// Completion / output tokens (canonical `output_tokens`).
+    #[serde(default, skip_serializing_if = "usage_bucket_is_zero")]
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "usage_bucket_is_zero")]
+    pub cache_read_tokens: u64,
+    #[serde(default, skip_serializing_if = "usage_bucket_is_zero")]
+    pub cache_write_tokens: u64,
+    #[serde(default, skip_serializing_if = "usage_bucket_is_zero")]
+    pub reasoning_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost: Option<f64>,
 }

@@ -128,6 +128,7 @@ pub fn arb_usage_stats() -> impl Strategy<Value = UsageStats> {
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
                 estimated_cost,
+                ..Default::default()
             },
         )
 }

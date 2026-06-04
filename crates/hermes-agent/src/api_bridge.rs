@@ -12,11 +12,12 @@ use std::sync::Arc;
 
 use hermes_core::{
     AgentError, FunctionCall, FunctionCallDelta, LlmProvider, LlmResponse, Message, MessageRole,
-    StreamChunk, StreamDelta, ToolCall, ToolCallDelta, ToolSchema, UsageStats,
+    StreamChunk, StreamDelta, ToolCall, ToolCallDelta, ToolSchema,
 };
 
 use crate::credential_pool::CredentialPool;
 use crate::rate_limit::RateLimitTracker;
+use crate::usage_parse::usage_stats_from_raw;
 
 /// OpenAI Responses API provider for Codex models.
 #[derive(Debug, Clone)]
@@ -208,14 +209,7 @@ impl CodexProvider {
         }
 
         let usage = json.get("usage").and_then(|u| {
-            let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            Some(UsageStats {
-                prompt_tokens: input,
-                completion_tokens: output,
-                total_tokens: input + output,
-                estimated_cost: None,
-            })
+            usage_stats_from_raw(u, Some("openai"), Some("codex_responses"))
         });
 
         let model = json
@@ -474,14 +468,7 @@ impl LlmProvider for CodexProvider {
                         }
                         "response.completed" => {
                             let usage = json.get("response").and_then(|r| r.get("usage")).and_then(|u| {
-                                let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                Some(UsageStats {
-                                    prompt_tokens: input,
-                                    completion_tokens: output,
-                                    total_tokens: input + output,
-                                    estimated_cost: None,
-                                })
+                                usage_stats_from_raw(u, Some("openai"), Some("codex_responses"))
                             });
                             yield Ok(StreamChunk {
                                 delta: None,

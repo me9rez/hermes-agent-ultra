@@ -82,17 +82,25 @@ fn reset_clears_user_turn_count() {
 fn accumulate_api_call_updates_session_metrics() {
     let agent = test_agent();
     let usage = hermes_core::UsageStats {
-        prompt_tokens: 100,
-        completion_tokens: 50,
-        total_tokens: 150,
+        prompt_tokens: 1000,
+        completion_tokens: 200,
+        total_tokens: 1200,
+        input_tokens: 200,
+        output_tokens: 200,
+        cache_read_tokens: 500,
+        cache_write_tokens: 300,
         estimated_cost: None,
+        ..Default::default()
     };
     agent.record_api_usage(&usage);
     let m = agent.session_usage_metrics();
     assert_eq!(m.api_calls, 1);
-    assert_eq!(m.prompt_tokens, 100);
-    assert_eq!(m.completion_tokens, 50);
-    assert_eq!(m.total_tokens, 150);
+    assert_eq!(m.prompt_tokens, 1000);
+    assert_eq!(m.completion_tokens, 200);
+    assert_eq!(m.total_tokens, 1200);
+    assert_eq!(m.input_tokens, 200);
+    assert_eq!(m.cache_read_tokens, 500);
+    assert_eq!(m.cache_write_tokens, 300);
 }
 
 #[test]

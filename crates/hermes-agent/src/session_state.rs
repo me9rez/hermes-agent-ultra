@@ -58,12 +58,34 @@ impl SessionUsageMetrics {
         self.prompt_tokens = self.prompt_tokens.saturating_add(usage.prompt_tokens);
         self.completion_tokens = self.completion_tokens.saturating_add(usage.completion_tokens);
         self.total_tokens = self.total_tokens.saturating_add(usage.total_tokens);
-        self.input_tokens = self.input_tokens.saturating_add(usage.prompt_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(usage.completion_tokens);
+        let input = if usage.input_tokens > 0 {
+            usage.input_tokens
+        } else {
+            usage.prompt_tokens
+        };
+        let output = if usage.output_tokens > 0 {
+            usage.output_tokens
+        } else {
+            usage.completion_tokens
+        };
+        self.input_tokens = self.input_tokens.saturating_add(input);
+        self.output_tokens = self.output_tokens.saturating_add(output);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(usage.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(usage.cache_write_tokens);
+        self.reasoning_tokens = self
+            .reasoning_tokens
+            .saturating_add(usage.reasoning_tokens);
 
         let canonical = CanonicalUsage {
-            input_tokens: usage.prompt_tokens,
-            output_tokens: usage.completion_tokens,
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
             ..CanonicalUsage::default()
         };
         let cost = calculate_cost(model, &canonical, provider, base_url);
@@ -565,7 +587,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
-            estimated_cost: None,
+            ..Default::default()
         };
         m.accumulate_api_call(&usage, "gpt-4o", Some("openai"), None);
         assert_eq!(m.api_calls, 1);

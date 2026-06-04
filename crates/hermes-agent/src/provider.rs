@@ -17,12 +17,13 @@ use hermes_intelligence::anthropic_adapter::get_anthropic_max_output;
 
 use hermes_core::{
     AgentError, FunctionCall, FunctionCallDelta, LlmProvider, LlmResponse, Message, MessageRole,
-    StreamChunk, StreamDelta, ToolCall, ToolCallDelta, ToolSchema, UsageStats,
+    StreamChunk, StreamDelta, ToolCall, ToolCallDelta, ToolSchema,
 };
 
 use crate::credential_pool::CredentialPool;
 use crate::provider_serialize_cache::ProviderSerializeCache;
 use crate::rate_limit::RateLimitTracker;
+use crate::usage_parse::usage_stats_from_raw;
 
 const ACP_MULTIMODAL_PREFIX: &str = "__hermes_acp_parts_json__:";
 
@@ -1299,14 +1300,7 @@ impl AnthropicProvider {
 
         let usage = json.get("usage").and_then(|u| {
             crate::prompt_caching::record_prompt_cache_telemetry(u);
-            let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            Some(UsageStats {
-                prompt_tokens: input,
-                completion_tokens: output,
-                total_tokens: input + output,
-                estimated_cost: None,
-            })
+            usage_stats_from_raw(u, Some("anthropic"), Some("anthropic_messages"))
         });
 
         let stop_reason = json
@@ -1609,13 +1603,7 @@ impl LlmProvider for AnthropicProvider {
                                 });
                             let usage = json.get("usage").and_then(|u| {
                                 crate::prompt_caching::record_prompt_cache_telemetry(u);
-                                let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                Some(UsageStats {
-                                    prompt_tokens: 0,
-                                    completion_tokens: output,
-                                    total_tokens: output,
-                                    estimated_cost: None,
-                                })
+                                usage_stats_from_raw(u, Some("anthropic"), Some("anthropic_messages"))
                             });
                             yield Ok(StreamChunk {
                                 delta: None,
@@ -1627,13 +1615,7 @@ impl LlmProvider for AnthropicProvider {
                             // Extract usage from the initial message
                             let usage = json.get("message").and_then(|m| m.get("usage")).and_then(|u| {
                                 crate::prompt_caching::record_prompt_cache_telemetry(u);
-                                let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                Some(UsageStats {
-                                    prompt_tokens: input,
-                                    completion_tokens: 0,
-                                    total_tokens: input,
-                                    estimated_cost: None,
-                                })
+                                usage_stats_from_raw(u, Some("anthropic"), Some("anthropic_messages"))
                             });
                             if let Some(u) = usage {
                                 yield Ok(StreamChunk {
@@ -2135,15 +2117,8 @@ fn parse_sse_chunk(json: &Value) -> Option<StreamChunk> {
 
     // Usage may appear in the final chunk
     let usage = json.get("usage").and_then(|u| {
-        Some(UsageStats {
-            prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            completion_tokens: u
-                .get("completion_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            estimated_cost: None,
-        })
+        crate::prompt_caching::record_prompt_cache_telemetry(u);
+        usage_stats_from_raw(u, None, Some("chat_completions"))
     });
 
     Some(StreamChunk {
@@ -2215,12 +2190,8 @@ fn parse_openai_response(json: &Value) -> Result<LlmResponse, AgentError> {
 
     // Parse usage
     let usage = json.get("usage").and_then(|u| {
-        Some(UsageStats {
-            prompt_tokens: u.get("prompt_tokens")?.as_u64()? as u64,
-            completion_tokens: u.get("completion_tokens")?.as_u64()? as u64,
-            total_tokens: u.get("total_tokens")?.as_u64()? as u64,
-            estimated_cost: None,
-        })
+        crate::prompt_caching::record_prompt_cache_telemetry(u);
+        usage_stats_from_raw(u, None, Some("chat_completions"))
     });
 
     let role = message_obj

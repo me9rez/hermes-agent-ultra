@@ -533,6 +533,7 @@ impl hermes_core::LlmProvider for CostedStopProvider {
                 completion_tokens: 50,
                 total_tokens: 150,
                 estimated_cost: Some(0.042),
+                ..Default::default()
             }),
             model: "test".into(),
             finish_reason: Some("stop".into()),

@@ -49,7 +49,10 @@ pub use toolset::{Toolset, ToolsetError, ToolsetManager};
 pub use checkpoint_manager::{CheckpointManager, checkpoint_shadow_dir_id};
 pub use dispatch::{DispatchedResult, dispatch_single, dispatch_tools};
 pub use kanban::{KANBAN_TASK_ENV, kanban_block_reason, kanban_task_from_env};
-pub use kanban_failure::record_iteration_budget_exhausted;
+pub use kanban_failure::{
+    record_iteration_budget_exhausted, record_task_failure, KanbanFailureOptions,
+    KanbanFailureOutcome,
+};
 pub use tool_dispatch_helpers::{
     NEVER_PARALLEL_TOOLS, extract_parallel_scope_path, is_browser_tool, is_destructive_command,
     paths_overlap, should_parallelize_tool_batch,

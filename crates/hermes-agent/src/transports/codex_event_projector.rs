@@ -108,7 +108,7 @@ impl CodexEventProjector {
             "command": item.get("command").and_then(|v| v.as_str()).unwrap_or(""),
             "cwd": item.get("cwd").and_then(|v| v.as_str()).unwrap_or(""),
         });
-        let mut assistant = Message {
+        let assistant = Message {
             role: MessageRole::Assistant,
             content: None,
             tool_calls: Some(vec![ToolCall {

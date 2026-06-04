@@ -198,9 +198,11 @@ impl HttpServerState {
                         })
                         .await
                         .map_err(|e| GatewayError::Platform(e.to_string()))?;
-                    Ok(conv
-                        .final_response
-                        .unwrap_or_else(|| extract_last_assistant_reply(conv.messages())))
+                    Ok(if let Some(r) = conv.final_response {
+                        r
+                    } else {
+                        extract_last_assistant_reply(conv.messages())
+                    })
                 })
             }))
             .await;
@@ -281,9 +283,11 @@ impl HttpServerState {
                         })
                         .await
                         .map_err(|e| GatewayError::Platform(e.to_string()))?;
-                    Ok(conv
-                        .final_response
-                        .unwrap_or_else(|| extract_last_assistant_reply(conv.messages())))
+                    Ok(if let Some(r) = conv.final_response {
+                        r
+                    } else {
+                        extract_last_assistant_reply(conv.messages())
+                    })
                 })
             }))
             .await;
@@ -571,6 +575,7 @@ async fn send_message(
         channel_prompt: None,
         channel_skills: vec![],
         channel_topic: None,
+        message_thread_id: None,
     };
 
     state
@@ -646,6 +651,7 @@ async fn exec_command(
         channel_prompt: None,
         channel_skills: vec![],
         channel_topic: None,
+        message_thread_id: None,
     };
 
     state

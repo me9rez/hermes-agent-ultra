@@ -10,7 +10,6 @@ use crate::agent_loop::{
     preferred_tool_payload_fallback_model, AgentLoop, ErrorClass, TurnRuntimeRoute,
 };
 use crate::context::ContextManager;
-use crate::smart_model_routing::ApiMode;
 
 impl AgentLoop {
     // -- Retry-aware LLM call ---------------------------------------------

@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use hermes_core::{
-    AgentError, AgentResult, LlmResponse, Message, MessageRole, StreamChunk, ToolCall, ToolSchema,
+    AgentError, AgentResult, Message, MessageRole, StreamChunk, ToolCall, ToolSchema,
     UsageStats,
 };
 use serde_json::Value;
@@ -45,11 +45,9 @@ use crate::agent_loop::{
 use crate::budget;
 use crate::context::ContextManager;
 use crate::message_sanitization::{
-    CODEX_CONTINUE_USER_MESSAGE, budget_pressure_text, build_partial_stream_stub_response,
-    continuation_prompt_for_response, format_partial_stream_tool_call_warning,
-    inject_budget_pressure_into_last_tool_result, looks_like_codex_intermediate_ack,
-    partial_stream_dropped_tool_names, partial_stream_tool_calls_in_flight, sanitize_surrogates,
-    should_treat_stop_as_truncated, strip_budget_warnings_from_messages,
+    CODEX_CONTINUE_USER_MESSAGE, budget_pressure_text,
+    continuation_prompt_for_response,
+    inject_budget_pressure_into_last_tool_result, sanitize_surrogates,
     strip_system_messages_from_history, strip_think_blocks_for_ack,
 };
 use crate::plugins::{HookResult, HookType};
@@ -1906,14 +1904,14 @@ impl AgentLoop {
                 ));
             }
 
-            let tool_start = Instant::now();
-            let tool_governor = governor_for_turn(
+            let _tool_start = Instant::now();
+            let _tool_governor = governor_for_turn(
                 &self.config(),
                 &ctx,
                 tool_calls.len(),
                 Some(&turn_governor_runtime),
             );
-            let parent_budget_remaining_usd = self
+            let _parent_budget_remaining_usd = self
                 .config()
                 .max_cost_usd
                 .map(|limit| (limit - session_cost_usd).max(0.0));

@@ -22,8 +22,6 @@ use hermes_intelligence::get_model_context_length;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::task::JoinSet;
-use tokio::time::sleep;
 
 use hermes_core::{
     AgentError, AgentResult, BudgetConfig, LlmProvider, LlmResponse, Message, MessageRole,
@@ -46,9 +44,7 @@ use crate::interrupt::InterruptController;
 use crate::lsp_context::{LspContextConfig, build_lsp_context_note};
 use crate::memory_manager::MemoryManager;
 use crate::message_sanitization::{
-    CODEX_CONTINUE_USER_MESSAGE, budget_pressure_text, build_partial_stream_stub_response,
-    continuation_prompt_for_response, format_partial_stream_tool_call_warning,
-    inject_budget_pressure_into_last_tool_result, looks_like_codex_intermediate_ack,
+    build_partial_stream_stub_response, format_partial_stream_tool_call_warning, looks_like_codex_intermediate_ack,
     partial_stream_dropped_tool_names, partial_stream_tool_calls_in_flight, sanitize_surrogates,
     should_treat_stop_as_truncated, strip_budget_warnings_from_messages,
     strip_think_blocks_for_ack,

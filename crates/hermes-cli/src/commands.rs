@@ -22529,7 +22529,7 @@ pub async fn handle_cli_contribute(
     action: Option<String>,
     poi_only: bool,
     skills_only: bool,
-    last_session: bool,
+    _last_session: bool,
     outbox_clear: bool,
 ) -> Result<(), hermes_core::AgentError> {
     let config = hermes_config::load_config(None).unwrap_or_default();

@@ -11,6 +11,8 @@ use crate::interrupt::InterruptController;
 use crate::transports::codex_app_server::{CodexAppServerClient, CodexAppServerError};
 use crate::transports::codex_event_projector::{has_turn_aborted_marker, CodexEventProjector};
 
+type ApprovalCallback = Arc<dyn Fn(&str, &str) -> String + Send + Sync>;
+
 const STDERR_TAIL_LINES: usize = 12;
 #[derive(Debug, Clone, Default)]
 pub struct TurnResult {
@@ -35,6 +37,7 @@ pub struct CodexAppServerSession {
     closed: bool,
     auto_approve_exec: bool,
     auto_approve_apply_patch: bool,
+    approval_callback: Option<ApprovalCallback>,
 }
 
 impl CodexAppServerSession {
@@ -43,6 +46,16 @@ impl CodexAppServerSession {
         interrupt: Arc<InterruptController>,
         codex_bin: Option<String>,
         codex_home: Option<String>,
+    ) -> Self {
+        Self::with_approval_callback(cwd, interrupt, codex_bin, codex_home, None)
+    }
+
+    pub fn with_approval_callback(
+        cwd: impl Into<String>,
+        interrupt: Arc<InterruptController>,
+        codex_bin: Option<String>,
+        codex_home: Option<String>,
+        approval_callback: Option<ApprovalCallback>,
     ) -> Self {
         Self {
             cwd: cwd.into(),
@@ -55,6 +68,7 @@ impl CodexAppServerSession {
             closed: false,
             auto_approve_exec: false,
             auto_approve_apply_patch: false,
+            approval_callback,
         }
     }
 
@@ -298,19 +312,9 @@ impl CodexAppServerSession {
         let params = req.get("params").cloned().unwrap_or(Value::Null);
         let decision = match method {
             "item/commandExecution/requestApproval" => {
-                if self.auto_approve_exec {
-                    "accept".to_string()
-                } else {
-                    "decline".to_string()
-                }
+                self.decide_exec_approval(&params)
             }
-            "item/fileChange/requestApproval" => {
-                if self.auto_approve_apply_patch {
-                    "accept".to_string()
-                } else {
-                    "decline".to_string()
-                }
-            }
+            "item/fileChange/requestApproval" => self.decide_apply_patch_approval(&params),
             "item/permissions/requestApproval" => "decline".to_string(),
             "mcpServer/elicitation/request" => {
                 let server = params.get("serverName").and_then(|v| v.as_str()).unwrap_or("");
@@ -342,6 +346,77 @@ impl CodexAppServerSession {
             }
         };
         let _ = client.respond(&rid, serde_json::json!({ "decision": decision }));
+    }
+
+    fn decide_exec_approval(&self, params: &Value) -> String {
+        if self.auto_approve_exec {
+            return "accept".to_string();
+        }
+        let command = params.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let cwd = params
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(self.cwd.as_str());
+        let reason = params.get("reason").and_then(|v| v.as_str());
+        let mut description = format!("Codex requests exec in {cwd}");
+        if let Some(r) = reason {
+            if !r.is_empty() {
+                description.push_str(" — ");
+                description.push_str(r);
+            }
+        }
+        self.approval_decision(command, &description)
+    }
+
+    fn decide_apply_patch_approval(&self, params: &Value) -> String {
+        if self.auto_approve_apply_patch {
+            return "accept".to_string();
+        }
+        let reason = params.get("reason").and_then(|v| v.as_str());
+        let grant_root = params.get("grantRoot").and_then(|v| v.as_str());
+        let item_id = params.get("itemId").and_then(|v| v.as_str()).unwrap_or("");
+        let change_summary = self
+            .pending_file_changes
+            .lock()
+            .ok()
+            .and_then(|g| g.get(item_id).cloned());
+        let mut parts = Vec::new();
+        if let Some(r) = reason.filter(|s| !s.is_empty()) {
+            parts.push(r.to_string());
+        }
+        if let Some(summary) = change_summary.as_ref().filter(|s| !s.is_empty()) {
+            parts.push(summary.clone());
+        }
+        if let Some(root) = grant_root.filter(|s| !s.is_empty()) {
+            parts.push(format!("grants write to {root}"));
+        }
+        let description = if parts.is_empty() {
+            "Codex requests to apply a patch".to_string()
+        } else {
+            parts.join("; ")
+        };
+        let command_label = change_summary
+            .as_deref()
+            .map(|s| format!("apply_patch: {s}"))
+            .or_else(|| reason.map(|r| format!("apply_patch: {r}")))
+            .unwrap_or_else(|| "apply_patch".to_string());
+        self.approval_decision(&command_label, &description)
+    }
+
+    fn approval_decision(&self, command: &str, description: &str) -> String {
+        let Some(cb) = self.approval_callback.as_ref() else {
+            return "decline".to_string();
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cb(command, description)
+        })) {
+            Ok(choice) => approval_choice_to_codex_decision(&choice),
+            Err(_) => {
+                tracing::error!("codex approval_callback panicked");
+                "decline".to_string()
+            }
+        }
     }
 
     fn track_pending_file_change(&self, note: &Value) {
@@ -443,4 +518,12 @@ fn classify_oauth_failure(message: &str, stderr: &str) -> Option<String> {
         );
     }
     None
+}
+
+fn approval_choice_to_codex_decision(choice: &str) -> String {
+    match choice.trim().to_ascii_lowercase().as_str() {
+        "once" => "accept".to_string(),
+        "session" | "always" => "acceptForSession".to_string(),
+        _ => "decline".to_string(),
+    }
 }

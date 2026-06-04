@@ -60,16 +60,18 @@ impl AgentLoop {
             let cwd = self.session_cwd();
             let codex_home = self.config().hermes_home.clone();
             let user = user_message.to_string();
+            let approval_callback = self.callbacks.codex_approval_callback.clone();
             move || -> Result<crate::transports::codex_app_server_session::TurnResult, String> {
                 let mut guard = slot
                     .lock()
                     .map_err(|_| "codex session lock poisoned".to_string())?;
                 if guard.is_none() {
-                    *guard = Some(CodexAppServerSession::new(
+                    *guard = Some(CodexAppServerSession::with_approval_callback(
                         cwd,
                         interrupt,
                         Some(codex_bin),
                         codex_home,
+                        approval_callback,
                     ));
                 }
                 let session = guard

@@ -1160,6 +1160,8 @@ pub struct AgentCallbacks {
     pub background_review_callback: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     /// Called for lifecycle/status notices (context pressure, retries, etc.).
     pub status_callback: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
+    /// Interactive Codex exec/patch approval (Python terminal `approval_callback`).
+    pub codex_approval_callback: Option<Arc<dyn Fn(&str, &str) -> String + Send + Sync>>,
 }
 
 /// Classify an API error for retry/failover decisions.

@@ -18,9 +18,11 @@ jobs:
     outputs:
       nightly-tag: ${{ steps.create-tag.outputs.nightly_tag }}
     steps:
+      # TODO: 合并到 main 后移除 ref 配置（当前硬编码 feature 分支以支持合并前的 nightly 构建）
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: feat/wecom_websocket
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure git

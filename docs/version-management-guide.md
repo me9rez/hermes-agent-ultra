@@ -437,6 +437,10 @@ hermes update --channel nightly
 hermes update --channel stable
 ```
 
+### Nightly 分支配置说明
+
+> **ℹ️ 已合并分支清理记录**：在 `feat/wecom_websocket` 合并到 `main` 之前，nightly 构建的 prepare job checkout 步骤中曾硬编码 `ref: feat/wecom_websocket`，以确保 nightly 能构建该 feature 分支的代码。合并后该 `ref` 配置已移除（连同 TODO 注释），nightly 现在默认使用仓库的默认分支（`main`）进行 checkout。cross-build 和 macos-build job 始终使用动态 ref（`${{ needs.prepare.outputs.nightly-tag }}`），无需额外修改。
+
 ### Nightly 故障排查
 
 | 症状 | 可能原因 | 解决方法 |
@@ -445,6 +449,7 @@ hermes update --channel stable
 | Tag 创建失败 | 权限不足 | 检查 `GITHUB_TOKEN` permissions 是否包含 `contents: write` |
 | ModelScope 上传失败 | `MODELSCOPE_TOKEN` 未配置 | 在 repo Settings > Secrets 中配置 |
 | 旧 tag 未清理 | GitHub API rate limit | 下次运行会补偿清理 |
+| Nightly 编译的不是最新代码 | `ref: feat/wecom_websocket` 硬编码未移除（已修复） | 已从 nightly.yml 的 prepare checkout 中删除 `ref` 行，现默认使用 main 分支 |
 
 ---
 

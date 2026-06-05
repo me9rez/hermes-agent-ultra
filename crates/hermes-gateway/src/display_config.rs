@@ -5,7 +5,7 @@ use serde_json::Value;
 /// Built-in platform tier defaults: `(platform, key, value)`.
 /// `streaming` uses empty string sentinel → [`None`] (follow global).
 const PLATFORM_DEFAULTS: &[(&str, &str, &str)] = &[
-    ("whatsapp", "tool_progress", "new"),
+    ("whatsapp", "tool_progress", "off"),
     ("whatsapp", "streaming", ""),
     ("telegram", "tool_progress", "all"),
     ("email", "tool_progress", "off"),

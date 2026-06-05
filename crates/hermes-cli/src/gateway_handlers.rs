@@ -25,6 +25,14 @@ use crate::{
     truncate_hook_tool_result,     GatewayAgentCache,
 };
 
+fn gateway_conversation_reply(conv: &hermes_agent::ConversationResult) -> String {
+    conv.final_response
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| extract_last_assistant_reply(conv.messages()))
+}
+
 fn prepend_cross_platform_hint(
     platform: &str,
     tool_schemas: &[ToolSchema],
@@ -245,10 +253,7 @@ pub(crate) async fn gateway_handle_message_non_streaming(
     gateway_for_review
         .sync_session_token_usage(&session_key, usage_display)
         .await;
-    Ok(conv
-        .final_response
-        .clone()
-        .unwrap_or_else(|| extract_last_assistant_reply(conv.messages())))
+    Ok(gateway_conversation_reply(&conv))
 }
 
 /// Agent-layer POI / memory flush before gateway session reset, idle expiry, or shutdown.
@@ -523,8 +528,5 @@ pub(crate) async fn gateway_handle_message_streaming(
     gateway_for_review
         .sync_session_token_usage(&session_key, usage_display)
         .await;
-    Ok(conv
-        .final_response
-        .clone()
-        .unwrap_or_else(|| extract_last_assistant_reply(conv.messages())))
+    Ok(gateway_conversation_reply(&conv))
 }

@@ -97,6 +97,18 @@ impl WhatsAppRustClient {
         self.state.read().await.connected
     }
 
+    /// Self-chat inbound often uses `@lid`; outbound to PN is more reliable in wa-rs.
+    pub async fn resolve_outbound_chat_id(&self, inbound_chat_id: &str) -> String {
+        if !inbound_chat_id.contains("@lid") {
+            return inbound_chat_id.to_string();
+        }
+        let st = self.state.read().await;
+        if let Some(pn) = st.bot_pn.as_ref() {
+            return format!("{pn}@s.whatsapp.net");
+        }
+        inbound_chat_id.to_string()
+    }
+
     async fn build_bot(
         &self,
         inbound_tx: Option<mpsc::UnboundedSender<WaMessage>>,
@@ -302,6 +314,17 @@ impl WhatsAppRustClient {
             .send_composing(&jid)
             .await
             .map_err(|e| GatewayError::SendFailed(format!("typing: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn stop_typing(&self, chat_id: &str) -> Result<(), GatewayError> {
+        let client = self.client().await?;
+        let jid = parse_jid(chat_id)?;
+        client
+            .chatstate()
+            .send_paused(&jid)
+            .await
+            .map_err(|e| GatewayError::SendFailed(format!("stop typing: {e}")))?;
         Ok(())
     }
 

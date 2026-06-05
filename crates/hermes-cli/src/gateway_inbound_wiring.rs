@@ -124,6 +124,7 @@ pub fn gateway_status_message_visible(event_type: &str, message: &str) -> bool {
         "Detected intermediate ack",
         "Truncated tool arguments",
         "Parsed textual tool-call markup",
+        "Starting conversation",
     ];
     !suppressed.iter().any(|needle| message.contains(needle))
 }

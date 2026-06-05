@@ -4538,7 +4538,9 @@ async fn run_gateway_incoming_loop(
         match gateway.route_message(&incoming).await {
             Ok(()) => {
                 if platform == "whatsapp" {
-                    println!("[whatsapp] Gateway route finished OK");
+                    println!(
+                        "[whatsapp] Gateway route finished OK (check Sent reply / Send failed above)"
+                    );
                 }
             }
             Err(err) => {

@@ -20,9 +20,20 @@ impl GatewayCronDeliveryBackend {
 #[async_trait]
 impl CronDeliveryBackend for GatewayCronDeliveryBackend {
     async fn send(&self, platform: &str, chat_id: &str, message: &str) -> Result<(), String> {
-        self.gateway
+        let result = self
+            .gateway
             .send_message(platform, chat_id, message, None)
             .await
-            .map_err(|e| format!("gateway send failed: {e}"))
+            .map_err(|e| format!("gateway send failed: {e}"));
+        if platform.eq_ignore_ascii_case("whatsapp") {
+            match &result {
+                Ok(()) => println!(
+                    "[whatsapp] Cron reminder delivered (chat={chat_id}, chars={})",
+                    message.chars().count()
+                ),
+                Err(e) => eprintln!("[whatsapp] Cron reminder failed (chat={chat_id}): {e}"),
+            }
+        }
+        result
     }
 }

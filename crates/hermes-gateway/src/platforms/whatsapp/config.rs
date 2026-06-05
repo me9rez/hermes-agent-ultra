@@ -12,7 +12,7 @@ use crate::adapter::AdapterProxyConfig;
 
 pub const DEFAULT_BRIDGE_PORT: u16 = 3000;
 pub const MAX_MESSAGE_LENGTH: usize = 4096;
-pub const DEFAULT_REPLY_PREFIX: &str = "⚕ *Hermes Agent*\n────────────\n";
+pub const DEFAULT_REPLY_PREFIX: &str = "────────────\n";
 pub const DEFAULT_TEXT_BATCH_DELAY_SECS: f64 = 5.0;
 pub const DEFAULT_TEXT_BATCH_SPLIT_DELAY_SECS: f64 = 10.0;
 pub const TEXT_BATCH_SPLIT_THRESHOLD: usize = 6000;

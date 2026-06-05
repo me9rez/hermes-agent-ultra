@@ -238,6 +238,63 @@ async fn dispatch_incoming(inner: &Arc<WhatsAppInner>, incoming: IncomingMessage
         .await;
 }
 
+impl WhatsAppAdapter {
+    async fn send_whatsapp_text(
+        &self,
+        chat_id: &str,
+        text: &str,
+        _parse_mode: Option<ParseMode>,
+        reply_to_message_id: Option<&str>,
+        include_reply_prefix: bool,
+    ) -> Result<Option<String>, GatewayError> {
+        if text.trim().is_empty() {
+            eprintln!("[whatsapp] Skipping send: reply text is empty (chat={chat_id})");
+            return Ok(None);
+        }
+        let outbound_chat = self.inner.client.resolve_outbound_chat_id(chat_id).await;
+        if self.inner.config.whatsapp_mode() == "self-chat" {
+            // Cron `deliver=origin` / WHATSAPP_HOME_CHANNEL fallback for gateway jobs.
+            // SAFETY: single-threaded gateway process; updates home channel after each outbound send.
+            unsafe {
+                std::env::set_var("WHATSAPP_HOME_CHANNEL", &outbound_chat);
+            }
+        }
+        if outbound_chat != chat_id {
+            println!(
+                "[whatsapp] Outbound chat resolved {chat_id} → {outbound_chat}"
+            );
+        }
+        let reply_to = if self.inner.config.whatsapp_mode() == "self-chat" {
+            None
+        } else {
+            reply_to_message_id
+        };
+        let chunks = outgoing_chunks(&self.inner.config, text, include_reply_prefix);
+        let mut last_id = None;
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let reply = if idx == 0 { reply_to } else { None };
+            let result = self
+                .inner
+                .client
+                .send_text(&outbound_chat, chunk, reply)
+                .await
+                .map_err(|e| {
+                    eprintln!("[whatsapp] Send failed (chat={outbound_chat}): {e}");
+                    e
+                })?;
+            last_id = result;
+            if chunks.len() > 1 && idx + 1 < chunks.len() {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+        }
+        println!(
+            "[whatsapp] Sent reply (chat={outbound_chat}, chars={}, msg_id={last_id:?})",
+            text.chars().count()
+        );
+        Ok(last_id)
+    }
+}
+
 #[async_trait]
 impl PlatformAdapter for WhatsAppAdapter {
     async fn start(&self) -> Result<(), GatewayError> {
@@ -282,7 +339,20 @@ impl PlatformAdapter for WhatsAppAdapter {
         text: &str,
         parse_mode: Option<ParseMode>,
     ) -> Result<Option<String>, GatewayError> {
-        self.send_message_replying(chat_id, text, parse_mode, None)
+        self.send_whatsapp_text(chat_id, text, parse_mode, None, false)
+            .await
+    }
+
+    async fn send_message_in_thread(
+        &self,
+        chat_id: &str,
+        text: &str,
+        parse_mode: Option<ParseMode>,
+        reply_to_message_id: Option<&str>,
+        message_thread_id: Option<&str>,
+    ) -> Result<Option<String>, GatewayError> {
+        let _ = message_thread_id;
+        self.send_whatsapp_text(chat_id, text, parse_mode, reply_to_message_id, true)
             .await
     }
 
@@ -290,35 +360,11 @@ impl PlatformAdapter for WhatsAppAdapter {
         &self,
         chat_id: &str,
         text: &str,
-        _parse_mode: Option<ParseMode>,
+        parse_mode: Option<ParseMode>,
         reply_to_message_id: Option<&str>,
     ) -> Result<Option<String>, GatewayError> {
-        if text.trim().is_empty() {
-            return Ok(None);
-        }
-        let chunks = outgoing_chunks(&self.inner.config, text);
-        let mut last_id = None;
-        for (idx, chunk) in chunks.iter().enumerate() {
-            let reply = if idx == 0 {
-                reply_to_message_id
-            } else {
-                None
-            };
-            let result = self
-                .inner
-                .client
-                .send_text(chat_id, chunk, reply)
-                .await
-                .map_err(|e| {
-                    eprintln!("[whatsapp] Send failed (chat={chat_id}): {e}");
-                    e
-                })?;
-            last_id = result;
-            if chunks.len() > 1 && idx + 1 < chunks.len() {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            }
-        }
-        Ok(last_id)
+        self.send_whatsapp_text(chat_id, text, parse_mode, reply_to_message_id, false)
+            .await
     }
 
     async fn edit_message(
@@ -327,7 +373,7 @@ impl PlatformAdapter for WhatsAppAdapter {
         message_id: &str,
         text: &str,
     ) -> Result<(), GatewayError> {
-        let chunks = outgoing_chunks(&self.inner.config, text);
+        let chunks = outgoing_chunks(&self.inner.config, text, false);
         self.inner
             .client
             .edit_message(chat_id, message_id, &chunks[0])
@@ -377,8 +423,17 @@ impl PlatformAdapter for WhatsAppAdapter {
     }
 
     async fn trigger_typing(&self, chat_id: &str) -> Result<(), GatewayError> {
-        if let Err(e) = self.inner.client.send_typing(chat_id).await {
+        let chat_id = self.inner.client.resolve_outbound_chat_id(chat_id).await;
+        if let Err(e) = self.inner.client.send_typing(&chat_id).await {
             warn!("[whatsapp] typing failed: {e}");
+        }
+        Ok(())
+    }
+
+    async fn stop_typing(&self, chat_id: &str) -> Result<(), GatewayError> {
+        let chat_id = self.inner.client.resolve_outbound_chat_id(chat_id).await;
+        if let Err(e) = self.inner.client.stop_typing(&chat_id).await {
+            warn!("[whatsapp] stop typing failed: {e}");
         }
         Ok(())
     }

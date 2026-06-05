@@ -61,6 +61,9 @@ fn streaming_feedback_delay_ms() -> u64 {
 #[cfg(not(feature = "weixin"))]
 const WEIXIN_TYPING_REFRESH_SECS_FALLBACK: u64 = 5;
 
+/// WhatsApp composing indicator refresh (wa-rs `chatstate` / "typing…").
+const WHATSAPP_TYPING_REFRESH_SECS: u64 = 5;
+
 /// Cancels a platform typing keepalive started by [`Gateway::spawn_route_typing`].
 struct RouteTypingGuard {
     cancel: Option<Arc<AtomicBool>>,
@@ -976,8 +979,8 @@ impl Gateway {
 
     /// Start platform typing indicators for the duration of a route (best-effort).
     ///
-    /// Discord: single `trigger_typing`. Weixin: START immediately, refresh every ~5s,
-    /// then STOP when [`RouteTypingGuard::finish`] is called.
+    /// Discord: single `trigger_typing`. Weixin / WhatsApp: START immediately, refresh
+    /// every ~5s, then STOP when [`RouteTypingGuard::finish`] is called.
     fn spawn_route_typing(
         platform: &str,
         adapter: Arc<dyn PlatformAdapter>,
@@ -990,14 +993,20 @@ impl Gateway {
             return RouteTypingGuard::none();
         }
 
-        if !platform.eq_ignore_ascii_case("weixin") {
+        let refresh_secs = if platform.eq_ignore_ascii_case("whatsapp") {
+            WHATSAPP_TYPING_REFRESH_SECS
+        } else if platform.eq_ignore_ascii_case("weixin") {
+            #[cfg(feature = "weixin")]
+            {
+                crate::platforms::weixin::WEIXIN_TYPING_REFRESH_SECS
+            }
+            #[cfg(not(feature = "weixin"))]
+            {
+                WEIXIN_TYPING_REFRESH_SECS_FALLBACK
+            }
+        } else {
             return RouteTypingGuard::none();
-        }
-
-        #[cfg(feature = "weixin")]
-        let refresh_secs = crate::platforms::weixin::WEIXIN_TYPING_REFRESH_SECS;
-        #[cfg(not(feature = "weixin"))]
-        let refresh_secs = WEIXIN_TYPING_REFRESH_SECS_FALLBACK;
+        };
 
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel_flag = cancelled.clone();

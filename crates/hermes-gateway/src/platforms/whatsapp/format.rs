@@ -86,8 +86,15 @@ pub fn truncate_message(content: &str, limit: usize) -> Vec<String> {
     chunks
 }
 
-pub fn outgoing_chunks(cfg: &WhatsAppConfig, content: &str) -> Vec<String> {
-    truncate_message(&format_message(content), cfg.outgoing_chunk_limit())
+pub fn outgoing_chunks(cfg: &WhatsAppConfig, content: &str, include_reply_prefix: bool) -> Vec<String> {
+    let mut body = format_message(content);
+    if include_reply_prefix {
+        let prefix = cfg.effective_reply_prefix();
+        if !prefix.is_empty() {
+            body = format!("{prefix}{body}");
+        }
+    }
+    truncate_message(&body, cfg.outgoing_chunk_limit())
 }
 
 #[cfg(test)]
@@ -121,6 +128,17 @@ mod tests {
         let text = "a".repeat(5000);
         let chunks = truncate_message(&text, 4096);
         assert!(chunks.len() > 1);
+    }
+
+    #[test]
+    fn outgoing_self_chat_includes_separator_only() {
+        let mut cfg = WhatsAppConfig::default();
+        cfg.mode = Some("self-chat".into());
+        let chunks = outgoing_chunks(&cfg, "hello", true);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].starts_with("────────────"));
+        assert!(!chunks[0].contains("Hermes"));
+        assert!(chunks[0].contains("hello"));
     }
 }
 

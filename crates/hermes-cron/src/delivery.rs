@@ -107,7 +107,8 @@ fn resolve_deliver_config(job: &CronJob, deliver: &DeliverConfig) -> Vec<Resolve
                 }
             }
             for platform in [
-                "wecom", "weixin", "telegram", "discord", "slack", "feishu", "dingtalk",
+                "whatsapp", "wecom", "weixin", "telegram", "discord", "slack", "feishu",
+                "dingtalk",
             ] {
                 if let Some(chat_id) = home_channel_from_env(platform) {
                     return vec![ResolvedDelivery {

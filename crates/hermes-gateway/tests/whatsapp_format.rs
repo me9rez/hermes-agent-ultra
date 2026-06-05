@@ -23,7 +23,7 @@ fn code_fence_preserved() {
 fn multi_chunk() {
     let cfg = WhatsAppConfig::default();
     let long = "x".repeat(MAX_MESSAGE_LENGTH + 100);
-    let chunks = outgoing_chunks(&cfg, &long);
+    let chunks = outgoing_chunks(&cfg, &long, true);
     assert!(chunks.len() > 1);
 }
 

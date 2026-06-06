@@ -508,6 +508,19 @@ impl BatchRunCheckpoint {
         }
     }
 
+    pub fn load_or_new_for_run(
+        path: impl AsRef<Path>,
+        run_name: impl Into<String>,
+    ) -> io::Result<Self> {
+        let run_name = run_name.into();
+        match Self::load_from_path(path) {
+            Ok(Some(checkpoint)) if checkpoint.run_name == run_name => Ok(checkpoint),
+            Ok(Some(_)) | Ok(None) => Ok(Self::new(run_name)),
+            Err(err) if err.kind() == io::ErrorKind::InvalidData => Ok(Self::new(run_name)),
+            Err(err) => Err(err),
+        }
+    }
+
     pub fn save_atomic_to_path(&self, path: impl AsRef<Path>) -> io::Result<()> {
         atomic_json_write(path, self)
     }
@@ -669,8 +682,9 @@ impl BatchDatasetRunner {
         checkpoint_path: impl AsRef<Path>,
     ) -> io::Result<BatchRunReport> {
         let checkpoint_path = checkpoint_path.as_ref();
-        let checkpoint = BatchRunCheckpoint::load_from_path(checkpoint_path)?;
-        self.run_internal(dataset, config, checkpoint, Some(checkpoint_path))
+        let checkpoint =
+            BatchRunCheckpoint::load_or_new_for_run(checkpoint_path, &config.run_name)?;
+        self.run_internal(dataset, config, Some(checkpoint), Some(checkpoint_path))
     }
 
     fn run_internal(
@@ -1425,6 +1439,94 @@ mod tests {
     }
 
     #[test]
+    fn atomic_json_write_preserves_original_on_serialization_error() {
+        struct FailingSerialize;
+
+        impl Serialize for FailingSerialize {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("intentional test failure"))
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("checkpoint.json");
+        atomic_json_write(&path, &serde_json::json!({"preserved": true})).unwrap();
+
+        let err = atomic_json_write(&path, &FailingSerialize).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value, serde_json::json!({"preserved": true}));
+        let leaked_tmp_files: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leaked_tmp_files.is_empty());
+    }
+
+    #[test]
+    fn atomic_json_write_handles_unicode_and_concurrent_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(tmp.path().join("concurrent.json"));
+        let mut handles = Vec::new();
+
+        for writer in 0..8 {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let japanese = "\u{65e5}\u{672c}\u{8a9e}";
+                atomic_json_write(
+                    &*path,
+                    &serde_json::json!({
+                        "writer": writer,
+                        "emoji": "sparkles",
+                        "japanese": japanese,
+                        "data": (0..32).collect::<Vec<_>>()
+                    }),
+                )
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&*path).unwrap()).unwrap();
+        assert!(value["writer"].as_u64().unwrap() < 8);
+        assert_eq!(value["japanese"], "\u{65e5}\u{672c}\u{8a9e}");
+        assert_eq!(value["data"].as_array().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn batch_run_checkpoint_load_handles_missing_corrupt_and_mismatched_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("checkpoint.json");
+
+        let missing = BatchRunCheckpoint::load_from_path(&path).unwrap();
+        assert!(missing.is_none());
+
+        std::fs::write(&path, "{broken json").unwrap();
+        let strict_err = BatchRunCheckpoint::load_from_path(&path).unwrap_err();
+        assert_eq!(strict_err.kind(), io::ErrorKind::InvalidData);
+        let recovered = BatchRunCheckpoint::load_or_new_for_run(&path, "fresh-run").unwrap();
+        assert_eq!(recovered.run_name, "fresh-run");
+        assert!(recovered.completed_prompts.is_empty());
+
+        let mut prior = BatchRunCheckpoint::new("old-run");
+        prior.completed_prompts = vec![7, 8, 9];
+        prior.save_atomic_to_path(&path).unwrap();
+        let fresh = BatchRunCheckpoint::load_or_new_for_run(&path, "new-run").unwrap();
+        assert_eq!(fresh.run_name, "new-run");
+        assert!(fresh.completed_prompts.is_empty());
+
+        let existing = BatchRunCheckpoint::load_or_new_for_run(&path, "old-run").unwrap();
+        assert_eq!(existing.completed_prompts, [7, 8, 9]);
+    }
+
+    #[test]
     fn batch_dataset_runner_persists_atomic_checkpoint_per_batch_and_resumes_from_file() {
         let tmp = tempfile::tempdir().unwrap();
         let checkpoint_path = tmp.path().join("checkpoints").join("run.json");
@@ -1453,6 +1555,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(persisted.run_name, "atomic-run");
+        assert!(persisted.last_updated.is_some());
         assert_eq!(persisted.completed_prompts, [0, 1, 2, 3]);
         assert_eq!(
             persisted.batch_stats.get("0").unwrap(),
@@ -1477,5 +1580,38 @@ mod tests {
         assert_eq!(resumed.statistics.checkpoints_written, 2);
         assert!(resumed.trajectories.is_empty());
         assert_eq!(resumed.checkpoint.completed_prompts, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn batch_dataset_runner_checkpoint_path_starts_fresh_on_corrupt_or_mismatched_checkpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkpoint_path = tmp.path().join("checkpoint.json");
+        let dataset = vec![BatchDatasetItem {
+            prompt_index: 0,
+            prompt: "recover from checkpoint".to_string(),
+            metadata: Map::new(),
+        }];
+        let config = BatchDatasetRunConfig {
+            run_name: "fresh-run".to_string(),
+            batch_size: 1,
+            ..BatchDatasetRunConfig::default()
+        };
+
+        std::fs::write(&checkpoint_path, "{broken json").unwrap();
+        let recovered = BatchDatasetRunner::new()
+            .run_with_checkpoint_path(&dataset, &config, &checkpoint_path)
+            .unwrap();
+        assert_eq!(recovered.statistics.processed, 1);
+        assert_eq!(recovered.checkpoint.run_name, "fresh-run");
+
+        let mut wrong_run = BatchRunCheckpoint::new("other-run");
+        wrong_run.completed_prompts = vec![0];
+        wrong_run.save_atomic_to_path(&checkpoint_path).unwrap();
+        let mismatched = BatchDatasetRunner::new()
+            .run_with_checkpoint_path(&dataset, &config, &checkpoint_path)
+            .unwrap();
+        assert_eq!(mismatched.statistics.processed, 1);
+        assert_eq!(mismatched.statistics.skipped, 0);
+        assert_eq!(mismatched.checkpoint.run_name, "fresh-run");
     }
 }

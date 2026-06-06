@@ -7,7 +7,8 @@
 use chrono::{DateTime, Utc};
 use hermes_core::{Message, ToolCall};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde_json::{Map, Value};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -385,7 +386,7 @@ impl Default for BatchRunnerConfig {
 }
 
 /// Minimal trajectory emitted by the offline batch runner.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatchTrajectory {
     pub id: String,
     pub prompt: String,
@@ -441,6 +442,339 @@ fn build_baseline_response(prompt: &str, max_turns: usize) -> String {
         "[baseline-{style}] steps_budget={max_turns}; response: {}",
         prompt.chars().take(180).collect::<String>()
     )
+}
+
+/// Dataset row accepted by the Rust batch runner.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchDatasetItem {
+    pub prompt_index: usize,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub metadata: Map<String, Value>,
+}
+
+/// Per-batch checkpoint counters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchCheckpointStats {
+    pub processed: usize,
+    pub skipped: usize,
+}
+
+/// Resume checkpoint for deterministic batch generation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchRunCheckpoint {
+    pub run_name: String,
+    #[serde(default)]
+    pub completed_prompts: Vec<usize>,
+    #[serde(default)]
+    pub completed_prompt_texts: Vec<String>,
+    #[serde(default)]
+    pub batch_stats: HashMap<String, BatchCheckpointStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_updated: Option<DateTime<Utc>>,
+}
+
+impl BatchRunCheckpoint {
+    pub fn new(run_name: impl Into<String>) -> Self {
+        Self {
+            run_name: run_name.into(),
+            completed_prompts: Vec::new(),
+            completed_prompt_texts: Vec::new(),
+            batch_stats: HashMap::new(),
+            last_updated: None,
+        }
+    }
+
+    pub fn from_json(raw: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(raw)
+    }
+
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+}
+
+/// Batch dataset runner configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchDatasetRunConfig {
+    pub run_name: String,
+    pub batch_size: usize,
+    pub distribution: String,
+    pub model: String,
+    pub max_turns: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_samples: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral_system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_toolsets: Vec<String>,
+}
+
+impl Default for BatchDatasetRunConfig {
+    fn default() -> Self {
+        Self {
+            run_name: "default".to_string(),
+            batch_size: 10,
+            distribution: "default".to_string(),
+            model: "baseline-local".to_string(),
+            max_turns: 10,
+            max_samples: None,
+            ephemeral_system_prompt: None,
+            selected_toolsets: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchToolStats {
+    pub count: usize,
+    pub success: usize,
+    pub failure: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchTrajectoryEntry {
+    pub prompt_index: usize,
+    pub conversations: Vec<Message>,
+    pub trajectory: BatchTrajectory,
+    pub completed: bool,
+    pub partial: bool,
+    pub api_calls: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolsets_used: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tool_stats: HashMap<String, BatchToolStats>,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchRunStatistics {
+    pub run_name: String,
+    pub distribution: String,
+    pub total_prompts: usize,
+    pub total_batches: usize,
+    pub batch_size: usize,
+    pub model: String,
+    pub processed: usize,
+    pub skipped: usize,
+    pub ephemeral_system_prompt_used: bool,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tool_statistics: HashMap<String, BatchToolStats>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchRunReport {
+    pub trajectories: Vec<BatchTrajectoryEntry>,
+    pub checkpoint: BatchRunCheckpoint,
+    pub statistics: BatchRunStatistics,
+}
+
+impl BatchRunReport {
+    pub fn trajectories_jsonl(&self) -> Result<String, serde_json::Error> {
+        let mut lines = Vec::with_capacity(self.trajectories.len());
+        for trajectory in &self.trajectories {
+            lines.push(serde_json::to_string(trajectory)?);
+        }
+        Ok(lines.join("\n"))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BatchDatasetRunner;
+
+impl BatchDatasetRunner {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn run(
+        &self,
+        dataset: &[BatchDatasetItem],
+        config: &BatchDatasetRunConfig,
+        checkpoint: Option<BatchRunCheckpoint>,
+    ) -> BatchRunReport {
+        let batch_size = config.batch_size.max(1);
+        let limit = config
+            .max_samples
+            .unwrap_or(dataset.len())
+            .min(dataset.len());
+        let items = &dataset[..limit];
+        let total_batches = if items.is_empty() {
+            0
+        } else {
+            items.len().div_ceil(batch_size)
+        };
+
+        let mut checkpoint =
+            checkpoint.unwrap_or_else(|| BatchRunCheckpoint::new(&config.run_name));
+        if checkpoint.run_name != config.run_name {
+            checkpoint = BatchRunCheckpoint::new(&config.run_name);
+        }
+        let completed_indices: HashSet<usize> =
+            checkpoint.completed_prompts.iter().copied().collect();
+        let completed_texts: HashSet<String> =
+            checkpoint.completed_prompt_texts.iter().cloned().collect();
+
+        let runner = BatchRunner::new(BatchRunnerConfig {
+            max_parallel_jobs: 1,
+            max_turns: config.max_turns,
+        });
+        let mut trajectories = Vec::new();
+        let mut completed = completed_indices;
+        let mut completed_prompt_texts = completed_texts;
+        let mut total_skipped = 0usize;
+        let mut total_processed = 0usize;
+        let mut tool_statistics: HashMap<String, BatchToolStats> = HashMap::new();
+
+        for (batch_num, batch) in items.chunks(batch_size).enumerate() {
+            let mut batch_processed = 0usize;
+            let mut batch_skipped = 0usize;
+
+            for item in batch {
+                if completed.contains(&item.prompt_index)
+                    || completed_prompt_texts.contains(item.prompt.trim())
+                {
+                    completed.insert(item.prompt_index);
+                    completed_prompt_texts.insert(item.prompt.trim().to_string());
+                    batch_skipped += 1;
+                    continue;
+                }
+
+                let generated = runner.generate_batch(std::slice::from_ref(&item.prompt));
+                let Some(trajectory) = generated.into_iter().next() else {
+                    batch_skipped += 1;
+                    continue;
+                };
+
+                completed.insert(item.prompt_index);
+                completed_prompt_texts.insert(item.prompt.trim().to_string());
+                batch_processed += 1;
+
+                for toolset in &config.selected_toolsets {
+                    tool_statistics.entry(toolset.clone()).or_default();
+                }
+
+                let mut metadata = item.metadata.clone();
+                metadata.insert("batch_num".to_string(), Value::from(batch_num));
+                metadata.insert("model".to_string(), Value::from(config.model.clone()));
+                metadata.insert("run_name".to_string(), Value::from(config.run_name.clone()));
+
+                trajectories.push(BatchTrajectoryEntry {
+                    prompt_index: item.prompt_index,
+                    conversations: vec![
+                        Message::user(item.prompt.clone()),
+                        Message::assistant(trajectory.response.clone()),
+                    ],
+                    trajectory,
+                    completed: true,
+                    partial: false,
+                    api_calls: 1,
+                    toolsets_used: config.selected_toolsets.clone(),
+                    tool_stats: HashMap::new(),
+                    metadata: Value::Object(metadata),
+                });
+            }
+
+            total_processed += batch_processed;
+            total_skipped += batch_skipped;
+            checkpoint.batch_stats.insert(
+                batch_num.to_string(),
+                BatchCheckpointStats {
+                    processed: batch_processed,
+                    skipped: batch_skipped,
+                },
+            );
+        }
+
+        let mut completed_prompts: Vec<_> = completed.into_iter().collect();
+        completed_prompts.sort_unstable();
+        let mut completed_prompt_texts: Vec<_> = completed_prompt_texts.into_iter().collect();
+        completed_prompt_texts.sort();
+        checkpoint.completed_prompts = completed_prompts;
+        checkpoint.completed_prompt_texts = completed_prompt_texts;
+        checkpoint.last_updated = Some(Utc::now());
+
+        BatchRunReport {
+            trajectories,
+            checkpoint,
+            statistics: BatchRunStatistics {
+                run_name: config.run_name.clone(),
+                distribution: config.distribution.clone(),
+                total_prompts: items.len(),
+                total_batches,
+                batch_size,
+                model: config.model.clone(),
+                processed: total_processed,
+                skipped: total_skipped,
+                ephemeral_system_prompt_used: config.ephemeral_system_prompt.is_some(),
+                tool_statistics,
+            },
+        }
+    }
+}
+
+pub fn parse_batch_jsonl_dataset(raw: &str) -> Result<Vec<BatchDatasetItem>, String> {
+    let mut items = Vec::new();
+    for (line_idx, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line)
+            .map_err(|err| format!("line {}: invalid JSON: {err}", line_idx + 1))?;
+        let Some(prompt) = prompt_from_dataset_value(&value) else {
+            continue;
+        };
+        let mut metadata = match value {
+            Value::Object(map) => map,
+            _ => Map::new(),
+        };
+        metadata.remove("prompt");
+        metadata.remove("conversations");
+        items.push(BatchDatasetItem {
+            prompt_index: items.len(),
+            prompt,
+            metadata,
+        });
+    }
+
+    if items.is_empty() {
+        Err("no valid batch dataset prompts found".to_string())
+    } else {
+        Ok(items)
+    }
+}
+
+fn prompt_from_dataset_value(value: &Value) -> Option<String> {
+    if let Some(prompt) = value.get("prompt").and_then(Value::as_str) {
+        let trimmed = prompt.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let conversations = value.get("conversations")?.as_array()?;
+    for message in conversations {
+        let Some(role) = message
+            .get("role")
+            .or_else(|| message.get("from"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if role == "user" || role == "human" {
+            let content = message
+                .get("content")
+                .or_else(|| message.get("value"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if !content.is_empty() {
+                return Some(content.to_string());
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -823,5 +1157,147 @@ mod tests {
         assert_eq!(trajectories[0].prompt, prompts[0]);
         assert!(trajectories[0].response.contains("[baseline-diagnostic]"));
         assert!(trajectories[0].response.contains("steps_budget=5"));
+    }
+
+    #[test]
+    fn parse_batch_jsonl_dataset_accepts_prompt_and_conversation_rows() {
+        let raw = r#"
+{"prompt":" Plan a verification slice ","source":"direct"}
+{"conversations":[{"role":"system","content":"ignore"},{"role":"user","content":"Fix the bug"}],"difficulty":"medium"}
+{"conversations":[{"from":"assistant","value":"hello"},{"from":"human","value":"Write tests"}]}
+{"conversations":[{"role":"assistant","content":"no user prompt"}]}
+
+"#;
+
+        let items = parse_batch_jsonl_dataset(raw).unwrap();
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].prompt_index, 0);
+        assert_eq!(items[0].prompt, "Plan a verification slice");
+        assert_eq!(items[0].metadata["source"], "direct");
+        assert_eq!(items[1].prompt, "Fix the bug");
+        assert_eq!(items[1].metadata["difficulty"], "medium");
+        assert_eq!(items[2].prompt, "Write tests");
+        assert!(items[1].metadata.get("conversations").is_none());
+    }
+
+    #[test]
+    fn parse_batch_jsonl_dataset_reports_invalid_or_empty_inputs() {
+        let invalid = parse_batch_jsonl_dataset("{not json").unwrap_err();
+        assert!(invalid.contains("line 1: invalid JSON"));
+
+        let empty = parse_batch_jsonl_dataset(r#"{"prompt":"   "}"#).unwrap_err();
+        assert_eq!(empty, "no valid batch dataset prompts found");
+    }
+
+    #[test]
+    fn batch_dataset_runner_updates_checkpoint_and_resumes_by_index_and_prompt() {
+        let dataset = vec![
+            BatchDatasetItem {
+                prompt_index: 0,
+                prompt: "Fix the parser".to_string(),
+                metadata: Map::new(),
+            },
+            BatchDatasetItem {
+                prompt_index: 1,
+                prompt: "Plan the rollout".to_string(),
+                metadata: Map::new(),
+            },
+            BatchDatasetItem {
+                prompt_index: 2,
+                prompt: "Verify the behavior".to_string(),
+                metadata: Map::new(),
+            },
+        ];
+        let mut prior = BatchRunCheckpoint::new("resume-run");
+        prior.completed_prompts = vec![0];
+        prior.completed_prompt_texts = vec!["Plan the rollout".to_string()];
+        let config = BatchDatasetRunConfig {
+            run_name: "resume-run".to_string(),
+            batch_size: 2,
+            selected_toolsets: vec!["rl_training".to_string()],
+            ..BatchDatasetRunConfig::default()
+        };
+
+        let report = BatchDatasetRunner::new().run(&dataset, &config, Some(prior));
+
+        assert_eq!(report.statistics.total_prompts, 3);
+        assert_eq!(report.statistics.total_batches, 2);
+        assert_eq!(report.statistics.processed, 1);
+        assert_eq!(report.statistics.skipped, 2);
+        assert_eq!(report.trajectories.len(), 1);
+        assert_eq!(report.trajectories[0].prompt_index, 2);
+        assert_eq!(report.trajectories[0].toolsets_used, ["rl_training"]);
+        assert_eq!(report.checkpoint.completed_prompts, [0, 1, 2]);
+        assert!(report
+            .checkpoint
+            .completed_prompt_texts
+            .contains(&"Verify the behavior".to_string()));
+        assert_eq!(
+            report.checkpoint.batch_stats.get("0").unwrap(),
+            &BatchCheckpointStats {
+                processed: 0,
+                skipped: 2,
+            }
+        );
+        assert_eq!(
+            report.checkpoint.batch_stats.get("1").unwrap(),
+            &BatchCheckpointStats {
+                processed: 1,
+                skipped: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn batch_dataset_runner_omits_ephemeral_system_prompt_from_outputs() {
+        let dataset = vec![BatchDatasetItem {
+            prompt_index: 0,
+            prompt: "Test prompt leakage".to_string(),
+            metadata: Map::new(),
+        }];
+        let config = BatchDatasetRunConfig {
+            run_name: "ephemeral-run".to_string(),
+            ephemeral_system_prompt: Some("never persist this system prompt".to_string()),
+            ..BatchDatasetRunConfig::default()
+        };
+
+        let report = BatchDatasetRunner::new().run(&dataset, &config, None);
+        let jsonl = report.trajectories_jsonl().unwrap();
+        let checkpoint = report.checkpoint.to_json_pretty().unwrap();
+
+        assert!(report.statistics.ephemeral_system_prompt_used);
+        assert!(!jsonl.contains("never persist this system prompt"));
+        assert!(!checkpoint.contains("never persist this system prompt"));
+        assert_eq!(
+            report.trajectories[0].conversations[0].content.as_deref(),
+            Some("Test prompt leakage")
+        );
+    }
+
+    #[test]
+    fn batch_dataset_runner_respects_max_samples_and_nonzero_batch_size() {
+        let dataset: Vec<_> = (0..5)
+            .map(|idx| BatchDatasetItem {
+                prompt_index: idx,
+                prompt: format!("prompt {idx}"),
+                metadata: Map::new(),
+            })
+            .collect();
+        let config = BatchDatasetRunConfig {
+            run_name: "limited-run".to_string(),
+            batch_size: 0,
+            max_samples: Some(3),
+            ..BatchDatasetRunConfig::default()
+        };
+
+        let report = BatchDatasetRunner::new().run(&dataset, &config, None);
+
+        assert_eq!(report.statistics.batch_size, 1);
+        assert_eq!(report.statistics.total_prompts, 3);
+        assert_eq!(report.statistics.total_batches, 3);
+        assert_eq!(report.statistics.processed, 3);
+        assert_eq!(report.checkpoint.completed_prompts, [0, 1, 2]);
+        assert_eq!(report.trajectories.len(), 3);
     }
 }

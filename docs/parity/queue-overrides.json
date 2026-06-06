@@ -36,6 +36,10 @@
       "disposition": "superseded",
       "notes": "documentation-only upstream delta superseded by local docs and rust parity guides"
     },
+    "0e2e69a71dda": {
+      "disposition": "ported",
+      "notes": "Rust hermes_intelligence::rl now has a deterministic BatchDatasetRunner with JSONL prompt/conversation parsing, max-sample batching, resume checkpoints by prompt index/text, per-batch processed/skipped statistics, toolset distribution metadata, JSONL trajectory serialization, and tests for checkpoint resume plus ephemeral prompt non-persistence."
+    },
     "395dbcc873c8": {
       "disposition": "superseded",
       "notes": "example-config upstream delta superseded by rust setup/auth/provider workflows and local config schema"

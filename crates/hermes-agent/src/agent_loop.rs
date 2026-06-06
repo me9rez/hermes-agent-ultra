@@ -10028,6 +10028,87 @@ mod tests {
             .any(|m| m.content.as_deref() == Some("done")));
     }
 
+    #[tokio::test]
+    async fn ephemeral_system_prompt_is_model_visible_but_not_returned_for_persistence() {
+        #[derive(Default)]
+        struct CapturingProvider {
+            seen_messages: Mutex<Vec<Message>>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmProvider for CapturingProvider {
+            async fn chat_completion(
+                &self,
+                messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> Result<LlmResponse, AgentError> {
+                *self.seen_messages.lock().expect("seen messages lock") = messages.to_vec();
+                Ok(LlmResponse {
+                    message: Message::assistant("done"),
+                    usage: None,
+                    model: "test".to_string(),
+                    finish_reason: Some("stop".to_string()),
+                })
+            }
+
+            fn chat_completion_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> BoxStream<'static, Result<StreamChunk, AgentError>> {
+                futures::stream::empty().boxed()
+            }
+        }
+
+        let provider = std::sync::Arc::new(CapturingProvider::default());
+        let mut config = AgentConfig {
+            skip_memory: true,
+            skip_context_files: true,
+            ephemeral_system_prompt: Some("ephemeral test-only system prompt".to_string()),
+            ..AgentConfig::default()
+        };
+        let _home = isolate_route_learning_home(&mut config);
+        let agent = AgentLoop::new(
+            config,
+            std::sync::Arc::new(ToolRegistry::new()),
+            provider.clone(),
+        );
+
+        let result = agent
+            .run(vec![Message::user("real question")], Some(Vec::new()))
+            .await
+            .expect("agent run");
+
+        let seen = provider.seen_messages.lock().expect("seen messages lock");
+        assert!(seen
+            .iter()
+            .any(|m| m.content.as_deref() == Some("ephemeral test-only system prompt")));
+        assert!(seen
+            .iter()
+            .any(|m| m.content.as_deref() == Some("real question")));
+
+        assert!(!result
+            .messages
+            .iter()
+            .any(|m| m.content.as_deref() == Some("ephemeral test-only system prompt")));
+        assert!(result
+            .messages
+            .iter()
+            .any(|m| m.content.as_deref() == Some("real question")));
+        assert!(result
+            .messages
+            .iter()
+            .any(|m| m.content.as_deref() == Some("done")));
+    }
+
     #[test]
     fn delegate_depth_parser_floors_without_legacy_ceiling() {
         assert_eq!(parse_delegate_depth("99"), Some(99));

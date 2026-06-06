@@ -40,6 +40,10 @@
       "disposition": "ported",
       "notes": "Rust hermes_intelligence::rl now has a deterministic BatchDatasetRunner with JSONL prompt/conversation parsing, max-sample batching, resume checkpoints by prompt index/text, per-batch processed/skipped statistics, toolset distribution metadata, JSONL trajectory serialization, and tests for checkpoint resume plus ephemeral prompt non-persistence."
     },
+    "d36790de9153": {
+      "disposition": "ported",
+      "notes": "Ephemeral system prompts are first-class in Rust for both batch and agent runners: BatchDatasetRunConfig tracks an ephemeral prompt without persisting it to trajectory JSONL or checkpoints, and AgentConfig::ephemeral_system_prompt is appended only to provider API-call messages and stripped from AgentResult persistence, with focused tests for both paths."
+    },
     "395dbcc873c8": {
       "disposition": "superseded",
       "notes": "example-config upstream delta superseded by rust setup/auth/provider workflows and local config schema"

@@ -65,8 +65,8 @@ fn wait_timeout_kill(mut child: Child, timeout: Duration) -> (i32, String, Strin
     loop {
         let elapsed = start.elapsed();
         if elapsed >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.kill().ok();
+            child.wait().ok();
             return (-1, String::new(), "timeout".into());
         }
         let remaining = timeout - elapsed;

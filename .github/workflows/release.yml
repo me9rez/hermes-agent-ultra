@@ -202,3 +202,40 @@ jobs:
             scripts/install.sh
             Formula/hermes-agent-ultra.rb
 
+  # ── Phase 4: Upload to ModelScope ──────────────────────────────────────────
+
+  modelscope-upload:
+    needs: [validate-tag, cross-build, macos-build, sign-and-publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist/
+          sha256sum hermes-*.tar.gz hermes-*.zip > checksums.sha256
+          cat checksums.sha256
+
+      - name: Upload to ModelScope
+        env:
+          MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
+        if: ${{ env.MODELSCOPE_TOKEN != '' }}
+        run: |
+          cp scripts/install.sh dist/
+          if [ -f Formula/hermes-agent-ultra.rb ]; then
+            cp Formula/hermes-agent-ultra.rb dist/
+          fi
+          pip install modelscope
+          python3 scripts/upload-modelscope-release.py \
+            --repo flowy2025/agent \
+            --version "${{ github.ref_name }}" \
+            --dist-dir dist/
+

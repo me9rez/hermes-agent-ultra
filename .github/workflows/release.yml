@@ -101,6 +101,7 @@ jobs:
         env:
           AWS_LC_SYS_CMAKE_BUILDER: "1"
           XDG_CACHE_HOME: /tmp/cross-cache
+          RUSTC_WRAPPER: ""
         run: cross build --release --target ${{ matrix.target }} -p hermes-cli
       - name: Package artifact (tar.gz)
         if: "!contains(matrix.artifact, '.zip')"
@@ -142,6 +143,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
       - name: Build release binary
+        env:
+          RUSTC_WRAPPER: ""
         run: cargo build --release --target ${{ matrix.target }} -p hermes-cli
       - name: Package artifact
         run: |

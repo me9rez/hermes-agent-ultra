@@ -37,6 +37,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      - name: Remove sccache wrapper
+        run: |
+          unset RUSTC_WRAPPER
+          if [ -f ~/.cargo/config.toml ]; then
+            sed -i '/rustc.wrapper/d' ~/.cargo/config.toml
+            sed -i '/rustc-wrapper/d' ~/.cargo/config.toml
+          fi
       - name: Secret scan (tracked files)
         run: |
           python3 scripts/release_secret_scan.py \
@@ -92,6 +99,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      - name: Remove sccache wrapper
+        run: |
+          unset RUSTC_WRAPPER
+          if [ -f ~/.cargo/config.toml ]; then
+            sed -i '/rustc.wrapper/d' ~/.cargo/config.toml
+            sed -i '/rustc-wrapper/d' ~/.cargo/config.toml
+          fi
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
       - name: Build release binary
@@ -140,6 +154,13 @@ jobs:
           targets: x86_64-apple-darwin
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      - name: Remove sccache wrapper
+        run: |
+          unset RUSTC_WRAPPER
+          if [ -f ~/.cargo/config.toml ]; then
+            sed -i '' '/rustc.wrapper/d' ~/.cargo/config.toml || true
+            sed -i '' '/rustc-wrapper/d' ~/.cargo/config.toml || true
+          fi
       - name: Build release binary
         run: |
           unset RUSTC_WRAPPER

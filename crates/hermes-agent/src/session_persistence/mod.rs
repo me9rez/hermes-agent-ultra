@@ -171,8 +171,7 @@ impl SessionPersistence {
         }
     }
 
-    /// Default home: `HERMES_HOME` → `HERMES_AGENT_ULTRA_HOME` → `~/.hermes-agent-ultra`
-    /// with legacy fallback to `~/.hermes`.
+    /// Default home: `HERMES_HOME` → `HERMES_AGENT_ULTRA_HOME` → `~/.hermes-agent-ultra`.
     pub fn default_home() -> Self {
         if let Ok(home) = std::env::var("HERMES_HOME") {
             let home = home.trim();
@@ -186,14 +185,7 @@ impl SessionPersistence {
                 return Self::new(home);
             }
         }
-        let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let primary = base.join(".hermes-agent-ultra");
-        let legacy = base.join(".hermes");
-        if primary.exists() || !legacy.exists() {
-            Self::new(primary)
-        } else {
-            Self::new(legacy)
-        }
+        Self::new(hermes_config::default_home_without_migration())
     }
 
     pub fn ensure_db(&self) -> Result<(), AgentError> {

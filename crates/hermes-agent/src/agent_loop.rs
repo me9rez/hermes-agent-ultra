@@ -410,7 +410,7 @@ pub(crate) fn maybe_nous_401_diagnostic(
         .unwrap_or_else(|| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join(".hermes-agent-ultra")
+                .join(hermes_config::PRIMARY_HOME_DIR)
         })
         .join("auth.json");
 

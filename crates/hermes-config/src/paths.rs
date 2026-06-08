@@ -6,9 +6,11 @@ use std::path::{Path, PathBuf};
 // hermes_home
 // ---------------------------------------------------------------------------
 
-/// Primary Hermes home directory name under the user profile.
+/// Primary Hermes Ultra home directory name under the user profile.
 pub const PRIMARY_HOME_DIR: &str = ".hermes-agent-ultra";
-/// Legacy Hermes home directory name (pre-ultra branding).
+/// Brief misnamed ultra directory (read-only remap target; never copied forward).
+pub const INTERMEDIATE_HOME_DIR: &str = ".hermes-ultra-agent";
+/// Legacy Hermes home directory name (pre-ultra branding; never copied forward).
 pub const LEGACY_HOME_DIR: &str = ".hermes";
 /// Project-local Hermes directory name in the working tree.
 pub const PROJECT_HOME_DIR: &str = ".hermes-agent-ultra";
@@ -16,6 +18,8 @@ pub const PROJECT_HOME_DIR: &str = ".hermes-agent-ultra";
 pub const LEGACY_PROJECT_HOME_DIR: &str = ".hermes";
 /// Windows `%LOCALAPPDATA%` subdirectory for Hermes Ultra data.
 pub const LOCALAPPDATA_SUBDIR_NEW: &str = "hermes-agent-ultra";
+/// Brief misnamed Windows `%LOCALAPPDATA%` ultra subdirectory.
+pub const LOCALAPPDATA_SUBDIR_INTERMEDIATE: &str = "hermes-ultra-agent";
 /// Legacy Windows `%LOCALAPPDATA%` subdirectory.
 pub const LOCALAPPDATA_SUBDIR_LEGACY: &str = "hermes";
 
@@ -24,8 +28,6 @@ pub const LOCALAPPDATA_SUBDIR_LEGACY: &str = "hermes";
 /// - If the `HERMES_HOME` environment variable is set, use that.
 /// - Else if `HERMES_AGENT_ULTRA_HOME` is set, use that.
 /// - Otherwise default to `~/.hermes-agent-ultra`.
-/// - Backward-compat: if `~/.hermes-agent-ultra` does not exist but
-///   `~/.hermes` exists, use `~/.hermes`.
 pub fn hermes_home() -> PathBuf {
     if let Some(home) = env_var_path("HERMES_HOME") {
         return home;
@@ -37,21 +39,19 @@ pub fn hermes_home() -> PathBuf {
     default_home_without_migration()
 }
 
-/// Resolve the default home without copying legacy data (read-only).
+/// Resolve the default home without touching legacy directories (read-only).
 pub fn default_home_without_migration() -> PathBuf {
-    let home_dir = user_home_dir();
-    let primary = home_dir.join(PRIMARY_HOME_DIR);
-    let legacy = home_dir.join(LEGACY_HOME_DIR);
-    if primary.exists() || !legacy.exists() {
-        primary
-    } else {
-        legacy
-    }
+    user_home_dir().join(PRIMARY_HOME_DIR)
 }
 
 /// Basename for the primary Hermes home directory (`.hermes-agent-ultra` or `hermes-agent-ultra`).
 pub fn primary_home_basename() -> &'static str {
     PRIMARY_HOME_DIR.trim_start_matches('.')
+}
+
+/// Basename for the intermediate ultra home directory.
+pub fn intermediate_home_basename() -> &'static str {
+    INTERMEDIATE_HOME_DIR.trim_start_matches('.')
 }
 
 /// Basename for the legacy Hermes home directory (`.hermes` or `hermes`).

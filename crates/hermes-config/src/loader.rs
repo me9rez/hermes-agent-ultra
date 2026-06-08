@@ -257,7 +257,7 @@ fn env_truthy(name: &str) -> bool {
 ///
 /// If `home_dir` is provided it overrides the `HERMES_HOME` env var.
 pub fn load_config(home_dir: Option<&str>) -> Result<GatewayConfig, ConfigError> {
-    // Migrate legacy home names and ensure the effective directory exists.
+    // Resolve the ultra home directory (fresh primary; no legacy copy).
     let effective_home_path = crate::migrate::ensure_migrated_hermes_home(home_dir);
     let effective_home = effective_home_path.to_string_lossy().into_owned();
     // SAFETY: startup path — align process env with migrated home before dotenv.

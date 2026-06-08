@@ -4,7 +4,7 @@
   Start (or stop) Hermes Agent Ultra gateway on Windows with stable paths and logging.
 
 .DESCRIPTION
-  - Uses %LOCALAPPDATA%\hermes-agent-ultra as HERMES_HOME (migrates from legacy \hermes if needed).
+  - Uses %LOCALAPPDATA%\hermes-agent-ultra as HERMES_HOME (fresh ultra config; does not copy legacy \hermes).
   - Writes logs to %LOCALAPPDATA%\hermes-agent-ultra\logs\hermes.log
   - Stops conflicting Python `hermes gateway` processes before start.
   - Does NOT change streaming or other config — only process/env setup.
@@ -28,17 +28,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Ensure-MigratedHermesHome {
+function Ensure-UltraHermesHome {
     param([string] $TargetHome)
-    $legacyHome = Join-Path $env:LOCALAPPDATA 'hermes'
-    if (Test-Path -LiteralPath $TargetHome) {
-        return $TargetHome
-    }
-    if (Test-Path -LiteralPath $legacyHome) {
-        Write-Host "迁移 Hermes 数据: $legacyHome -> $TargetHome"
-        Copy-Item -LiteralPath $legacyHome -Destination $TargetHome -Recurse -Force
-        return $TargetHome
-    }
     New-Item -ItemType Directory -Force -Path $TargetHome | Out-Null
     return $TargetHome
 }
@@ -105,7 +96,7 @@ function Stop-ConflictingGateways {
 }
 
 $exe = Resolve-HermesUltraBinary -Override $Binary
-$HermesHome = Ensure-MigratedHermesHome -TargetHome $HermesHome
+$HermesHome = Ensure-UltraHermesHome -TargetHome $HermesHome
 $logDir = Join-Path $HermesHome 'logs'
 $logFile = Join-Path $logDir 'hermes.log'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -117,7 +108,7 @@ if ($Stop) {
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $HermesHome 'config.yaml'))) {
-    Write-Warning "未找到 $HermesHome\config.yaml — 请确认 Discord 配置目录是否正确。"
+    Write-Warning "未找到 $HermesHome\config.yaml — 请在新 ultra 目录中重新配置（不会从旧 hermes 目录复制）。"
 }
 
 Stop-ConflictingGateways | Out-Null

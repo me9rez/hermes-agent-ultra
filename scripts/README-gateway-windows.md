@@ -10,10 +10,12 @@
 
 脚本会：
 
-1. 将 `HERMES_HOME` 设为 `%LOCALAPPDATA%\hermes-agent-ultra`（若仅有旧的 `\hermes` 目录则自动复制迁移）
+1. 将 `HERMES_HOME` 设为 `%LOCALAPPDATA%\hermes-agent-ultra`（全新 ultra 目录，**不会**从旧 `\hermes` 复制）
 2. 将日志写入 `%LOCALAPPDATA%\hermes-agent-ultra\logs\hermes.log`
 3. 启动前结束冲突的 Python `hermes gateway` 进程
 4. 运行 `hermes-agent-ultra.exe -C <HERMES_HOME> gateway run`
+
+首次使用请在该目录放置新的 `config.yaml`（或执行 `hermes gateway setup`）。
 
 ## 其它命令
 
@@ -51,9 +53,4 @@ Get-Content "$env:LOCALAPPDATA\hermes-agent-ultra\logs\hermes.log" -Wait -Tail 3
 )
 ```
 
-设置后需重新打开终端。旧的 `%LOCALAPPDATA%\hermes` 目录会保留作备份。
-
-## 未改动的配置
-
-- `streaming.enabled` 仍为 `true`（未做临时关闭）
-- 代理 / Discord 网络需在 Clash 等工具中自行配置直连规则
+设置后需重新打开终端。旧的 `%LOCALAPPDATA%\hermes` 目录会保留，不会被自动复制或覆盖。

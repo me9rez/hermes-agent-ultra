@@ -732,9 +732,9 @@ fn memory_fusion_trace_path() -> PathBuf {
         .or_else(|| {
             std::env::var("HOME")
                 .ok()
-                .map(|h| format!("{h}/.hermes-agent-ultra"))
+                .map(|h| format!("{h}/{}", hermes_config::PRIMARY_HOME_DIR))
         })
-        .unwrap_or_else(|| ".hermes-agent-ultra".to_string());
+        .unwrap_or_else(|| hermes_config::PRIMARY_HOME_DIR.to_string());
     PathBuf::from(home)
         .join("logs")
         .join("memory-fusion-trace.jsonl")

@@ -1,38 +1,36 @@
-//! One-time migration from legacy `.hermes` / `hermes` home directories to
-//! `.hermes-agent-ultra` / `hermes-agent-ultra`.
+//! Resolve the Hermes Ultra home directory without copying legacy data.
+//!
+//! Legacy `.hermes` / `hermes` and the brief misnamed ultra directory
+//! (`.hermes-ultra-agent` / `hermes-ultra-agent`) are **not** migrated.
+//! When those paths are requested, the process remaps to a fresh
+//! `.hermes-agent-ultra` / `hermes-agent-ultra` directory instead.
 
 use std::path::{Path, PathBuf};
 
 use crate::paths::{
-    self, legacy_home_basename, primary_home_basename, user_home_dir, LEGACY_HOME_DIR,
-    PRIMARY_HOME_DIR,
+    self, intermediate_home_basename, legacy_home_basename, primary_home_basename, user_home_dir,
+    INTERMEDIATE_HOME_DIR, LEGACY_HOME_DIR, LOCALAPPDATA_SUBDIR_INTERMEDIATE,
+    LOCALAPPDATA_SUBDIR_LEGACY, LOCALAPPDATA_SUBDIR_NEW, PRIMARY_HOME_DIR,
 };
 
-/// Ensure the effective Hermes home exists and legacy data has been copied forward.
+/// Ensure the effective Hermes Ultra home exists (empty if newly created).
 ///
 /// Resolution order:
 /// 1. `home_dir` CLI override
 /// 2. `HERMES_HOME`
 /// 3. `HERMES_AGENT_ULTRA_HOME`
-/// 4. Default `~/.hermes-agent-ultra` with legacy fallback
+/// 4. Default `~/.hermes-agent-ultra`
 ///
-/// When the resolved path uses a legacy directory name, map to the primary name,
-/// copy if needed, and return the primary path.
+/// Known legacy/intermediate directory names are remapped to the primary ultra
+/// name; custom absolute paths are left unchanged.
 pub fn ensure_migrated_hermes_home(home_dir: Option<&str>) -> PathBuf {
     let requested = resolve_requested_home(home_dir);
-    ensure_migrated_path(&requested)
+    ensure_primary_home(&requested)
 }
 
-/// Project-local Hermes directory under `cwd` (`.hermes-agent-ultra`, with read
-/// fallback to legacy `.hermes`).
+/// Project-local Hermes directory under `cwd` (`.hermes-agent-ultra` only).
 pub fn project_hermes_dir(cwd: &Path) -> PathBuf {
-    let primary = cwd.join(PRIMARY_HOME_DIR);
-    let legacy = cwd.join(LEGACY_HOME_DIR);
-    if primary.exists() || !legacy.exists() {
-        primary
-    } else {
-        legacy
-    }
+    cwd.join(PRIMARY_HOME_DIR)
 }
 
 /// Read-only legacy session roots for resume fallback (newest naming last).
@@ -44,15 +42,14 @@ pub fn legacy_hermes_home_candidates() -> Vec<PathBuf> {
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         let local = local.trim();
         if !local.is_empty() {
-            candidates.push(
-                PathBuf::from(local)
-                    .join(legacy_home_basename())
-                    .join("sessions"),
-            );
+            let local = PathBuf::from(local);
+            candidates.push(local.join(legacy_home_basename()).join("sessions"));
+            candidates.push(local.join(intermediate_home_basename()).join("sessions"));
         }
     }
 
     candidates.push(base.join(LEGACY_HOME_DIR).join("sessions"));
+    candidates.push(base.join(INTERMEDIATE_HOME_DIR).join("sessions"));
     candidates.push(base.join(PRIMARY_HOME_DIR).join("sessions"));
     candidates
 }
@@ -68,84 +65,46 @@ fn resolve_requested_home(home_dir: Option<&str>) -> PathBuf {
         return home;
     }
 
-    let base = user_home_dir();
-    let primary = base.join(PRIMARY_HOME_DIR);
-    let legacy = base.join(LEGACY_HOME_DIR);
-    if primary.exists() || !legacy.exists() {
-        primary
-    } else {
-        legacy
-    }
+    user_home_dir().join(PRIMARY_HOME_DIR)
 }
 
-fn ensure_migrated_path(requested: &Path) -> PathBuf {
-    let (primary, legacy) = primary_and_legacy_pair(requested);
-
-    if primary.exists() {
-        let _ = std::fs::create_dir_all(&primary);
-        return primary;
-    }
-
-    if legacy.exists() {
-        if let Err(err) = copy_home_tree(&legacy, &primary) {
-            tracing::warn!(
-                "Failed to migrate Hermes home {} -> {}: {err}",
-                legacy.display(),
-                primary.display()
-            );
-            return legacy;
-        }
-        tracing::info!(
-            "Migrated Hermes home: {} -> {}",
-            legacy.display(),
-            primary.display()
-        );
-        return primary;
-    }
-
+fn ensure_primary_home(requested: &Path) -> PathBuf {
+    let primary = remap_to_primary_if_needed(requested);
     let _ = std::fs::create_dir_all(&primary);
     primary
 }
 
-fn primary_and_legacy_pair(path: &Path) -> (PathBuf, PathBuf) {
-    if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-        if is_legacy_basename(file_name) {
-            return (
-                remap_basename(path, paired_primary_name(file_name)),
-                path.to_path_buf(),
-            );
-        }
-        if is_primary_basename(file_name) {
-            return (
-                path.to_path_buf(),
-                remap_basename(path, paired_legacy_name(file_name)),
-            );
-        }
+fn remap_to_primary_if_needed(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+        return path.to_path_buf();
+    };
+    if is_primary_basename(file_name) {
+        return path.to_path_buf();
     }
-    (path.to_path_buf(), path.to_path_buf())
+    if is_legacy_or_intermediate_basename(file_name) {
+        return remap_basename(path, paired_primary_name(file_name));
+    }
+    path.to_path_buf()
 }
 
-fn is_legacy_basename(name: &str) -> bool {
-    name == LEGACY_HOME_DIR || name == legacy_home_basename()
+fn is_legacy_or_intermediate_basename(name: &str) -> bool {
+    name == LEGACY_HOME_DIR
+        || name == legacy_home_basename()
+        || name == INTERMEDIATE_HOME_DIR
+        || name == intermediate_home_basename()
+        || name == LOCALAPPDATA_SUBDIR_LEGACY
+        || name == LOCALAPPDATA_SUBDIR_INTERMEDIATE
 }
 
 fn is_primary_basename(name: &str) -> bool {
-    name == PRIMARY_HOME_DIR || name == primary_home_basename()
+    name == PRIMARY_HOME_DIR || name == primary_home_basename() || name == LOCALAPPDATA_SUBDIR_NEW
 }
 
-fn paired_primary_name(legacy_name: &str) -> &'static str {
-    if legacy_name.starts_with('.') {
+fn paired_primary_name(requested_name: &str) -> &'static str {
+    if requested_name.starts_with('.') {
         PRIMARY_HOME_DIR
     } else {
-        paths::LOCALAPPDATA_SUBDIR_NEW
-    }
-}
-
-fn paired_legacy_name(primary_name: &str) -> &'static str {
-    if primary_name.starts_with('.') {
-        LEGACY_HOME_DIR
-    } else {
-        paths::LOCALAPPDATA_SUBDIR_LEGACY
+        LOCALAPPDATA_SUBDIR_NEW
     }
 }
 
@@ -156,56 +115,6 @@ fn remap_basename(path: &Path, new_base: &str) -> PathBuf {
     }
 }
 
-fn copy_home_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if dst.exists() {
-        return Ok(());
-    }
-
-    let lock = dst.with_extension("migrate.lock");
-    if lock.exists() {
-        // Another process may be migrating; wait briefly for dst to appear.
-        for _ in 0..20 {
-            if dst.exists() {
-                return Ok(());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-    }
-
-    std::fs::write(&lock, std::process::id().to_string())?;
-    let result = copy_dir_all(src, dst);
-    let _ = std::fs::remove_file(&lock);
-    result
-}
-
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_all(&src_path, &dst_path)?;
-        } else if file_type.is_file() || file_type.is_symlink() {
-            if file_type.is_symlink() {
-                #[cfg(unix)]
-                {
-                    let target = std::fs::read_link(&src_path)?;
-                    std::os::unix::fs::symlink(&target, &dst_path)?;
-                }
-                #[cfg(not(unix))]
-                {
-                    std::fs::copy(&src_path, &dst_path)?;
-                }
-            } else {
-                std::fs::copy(&src_path, &dst_path)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,7 +122,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn migrates_legacy_dot_hermes_to_primary() {
+    fn remaps_legacy_dot_hermes_to_fresh_primary_without_copy() {
         let _g = test_lock::lock();
         let original = std::env::var("HERMES_HOME").ok();
         let original_ultra = std::env::var("HERMES_AGENT_ULTRA_HOME").ok();
@@ -232,7 +141,8 @@ mod tests {
 
         let resolved = ensure_migrated_hermes_home(None);
         assert_eq!(resolved, primary);
-        assert!(primary.join("config.yaml").exists());
+        assert!(primary.is_dir());
+        assert!(!primary.join("config.yaml").exists());
         assert!(legacy.join("config.yaml").exists());
 
         unsafe {
@@ -272,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_localappdata_hermes_to_hermes_agent_ultra() {
+    fn remaps_localappdata_hermes_to_fresh_ultra_agent() {
         let _g = test_lock::lock();
         let original = std::env::var("HERMES_HOME").ok();
 
@@ -287,7 +197,8 @@ mod tests {
         }
         let resolved = ensure_migrated_hermes_home(None);
         assert_eq!(resolved, primary);
-        assert!(primary.join("config.yaml").exists());
+        assert!(primary.is_dir());
+        assert!(!primary.join("config.yaml").exists());
 
         unsafe {
             match original {
@@ -298,7 +209,56 @@ mod tests {
     }
 
     #[test]
-    fn initializes_empty_primary_when_no_legacy() {
+    fn remaps_intermediate_ultra_name_without_copy() {
+        let _g = test_lock::lock();
+        let original = std::env::var("HERMES_HOME").ok();
+
+        let tmp = tempdir().expect("tempdir");
+        let intermediate = tmp.path().join("hermes-ultra-agent");
+        let primary = tmp.path().join("hermes-agent-ultra");
+        std::fs::create_dir_all(intermediate.join("logs")).expect("intermediate");
+        std::fs::write(intermediate.join("config.yaml"), "platforms: {}\n").expect("config");
+
+        unsafe {
+            std::env::set_var("HERMES_HOME", intermediate.to_string_lossy().as_ref());
+        }
+        let resolved = ensure_migrated_hermes_home(None);
+        assert_eq!(resolved, primary);
+        assert!(!primary.join("config.yaml").exists());
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("HERMES_HOME", v),
+                None => std::env::remove_var("HERMES_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_custom_absolute_home() {
+        let _g = test_lock::lock();
+        let original = std::env::var("HERMES_HOME").ok();
+
+        let tmp = tempdir().expect("tempdir");
+        let custom = tmp.path().join("my-portable-config");
+        std::fs::create_dir_all(&custom).expect("custom");
+
+        unsafe {
+            std::env::set_var("HERMES_HOME", custom.to_string_lossy().as_ref());
+        }
+        let resolved = ensure_migrated_hermes_home(None);
+        assert_eq!(resolved, custom);
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("HERMES_HOME", v),
+                None => std::env::remove_var("HERMES_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn initializes_empty_primary_when_unset() {
         let _g = test_lock::lock();
         let original = std::env::var("HERMES_HOME").ok();
         let original_ultra = std::env::var("HERMES_AGENT_ULTRA_HOME").ok();
@@ -309,7 +269,8 @@ mod tests {
         unsafe {
             std::env::remove_var("HERMES_HOME");
             std::env::remove_var("HERMES_AGENT_ULTRA_HOME");
-            std::env::set_var("HERMES_HOME", primary.to_string_lossy().as_ref());
+            std::env::set_var("HOME", tmp.path().to_string_lossy().as_ref());
+            std::env::set_var("USERPROFILE", tmp.path().to_string_lossy().as_ref());
         }
 
         let resolved = ensure_migrated_hermes_home(None);

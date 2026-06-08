@@ -66,9 +66,9 @@ pub use paths::{
     gateway_json_path, gateway_pid_path, gateway_pid_path_in, hermes_home, interest_db_path,
     interest_db_path_in, legacy_home_basename, memory_path, primary_home_basename,
     resolve_agent_path, resolve_outbound_media_path, session_temp_dir, sessions_dir, skills_dir,
-    state_db_path, state_db_path_in, state_dir, user_home_dir, user_path, LEGACY_HOME_DIR,
-    LEGACY_PROJECT_HOME_DIR, LOCALAPPDATA_SUBDIR_LEGACY, LOCALAPPDATA_SUBDIR_NEW,
-    PRIMARY_HOME_DIR, PROJECT_HOME_DIR,
+    state_db_path, state_db_path_in, state_dir, user_home_dir, user_path, intermediate_home_basename,
+    INTERMEDIATE_HOME_DIR, LEGACY_HOME_DIR, LEGACY_PROJECT_HOME_DIR, LOCALAPPDATA_SUBDIR_INTERMEDIATE,
+    LOCALAPPDATA_SUBDIR_LEGACY, LOCALAPPDATA_SUBDIR_NEW, PRIMARY_HOME_DIR, PROJECT_HOME_DIR,
 };
 pub use platform::{extra_string, platform_token_or_extra, PlatformConfig, UnauthorizedDmBehavior};
 pub use session::{DailyReset, IdleReset, SessionConfig, SessionResetPolicy, SessionType};

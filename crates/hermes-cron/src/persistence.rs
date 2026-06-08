@@ -262,24 +262,9 @@ impl JobPersistence for FileJobPersistence {
 /// On Linux: ~/.local/share/hermes-agent-ultra
 /// On Windows: C:\Users\{User}\AppData\Roaming\hermes-agent-ultra
 fn default_data_dir() -> PathBuf {
-    let new_cron = project_cron_dir("hermes-agent-ultra");
-    let legacy_cron = project_cron_dir("hermes");
-    if !new_cron.exists() && legacy_cron.exists() {
-        if let Err(err) = copy_cron_tree(&legacy_cron, &new_cron) {
-            tracing::warn!(
-                "Failed to migrate cron data {} -> {}: {err}",
-                legacy_cron.display(),
-                new_cron.display()
-            );
-            return legacy_cron;
-        }
-        tracing::info!(
-            "Migrated cron data: {} -> {}",
-            legacy_cron.display(),
-            new_cron.display()
-        );
-    }
-    new_cron
+    let cron_dir = project_cron_dir("hermes-agent-ultra");
+    let _ = std::fs::create_dir_all(&cron_dir);
+    cron_dir
 }
 
 fn project_cron_dir(qualifier: &str) -> PathBuf {
@@ -287,22 +272,6 @@ fn project_cron_dir(qualifier: &str) -> PathBuf {
         .map(|p| p.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
         .join("cron")
-}
-
-fn copy_cron_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_cron_tree(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

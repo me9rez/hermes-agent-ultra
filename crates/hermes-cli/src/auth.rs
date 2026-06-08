@@ -3331,8 +3331,10 @@ mod tests {
             primary_store.to_string_lossy().to_string(),
         );
 
-        let home = dirs::home_dir().unwrap_or_else(|| tmp.path().to_path_buf());
-        let fallback_store = home.join(".hermes-agent-ultra").join("auth.json");
+        let fallback_store = tmp
+            .path()
+            .join(hermes_config::PRIMARY_HOME_DIR)
+            .join("auth.json");
         std::fs::create_dir_all(
             fallback_store
                 .parent()

@@ -1501,8 +1501,8 @@ fn log_legacy_home_env_hint(prior_home: Option<&str>, migrated_home: &Path) {
     if prior != migrated.as_ref() {
         tracing::info!(
             prior_hermes_home = prior,
-            migrated_hermes_home = migrated.as_ref(),
-            "HERMES_HOME was migrated for this process; update your user environment variable to the migrated path if you want new shells to match"
+            effective_hermes_home = migrated.as_ref(),
+            "HERMES_HOME was remapped to the fresh ultra home for this process; legacy data is not copied — update your user environment variable if you want new shells to match"
         );
     }
 }

@@ -237,9 +237,9 @@ fn default_memory_home() -> String {
         .or_else(|| {
             std::env::var("HOME")
                 .ok()
-                .map(|home| format!("{home}/.hermes-agent-ultra"))
+                .map(|home| format!("{home}/{}", hermes_config::PRIMARY_HOME_DIR))
         })
-        .unwrap_or_else(|| ".hermes-agent-ultra".to_string())
+        .unwrap_or_else(|| hermes_config::PRIMARY_HOME_DIR.to_string())
 }
 
 /// Attach a runtime [`PluginManager`] (config shell hooks + future native plugins).

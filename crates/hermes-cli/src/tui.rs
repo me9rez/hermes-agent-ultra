@@ -5685,8 +5685,13 @@ impl From<mpsc::UnboundedSender<Event>> for StreamHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env_lock;
     use hermes_core::Message;
     use unicode_width::UnicodeWidthStr;
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        test_env_lock::lock()
+    }
 
     #[test]
     fn test_input_mode_display() {
@@ -6288,6 +6293,7 @@ mod tests {
 
     #[test]
     fn test_format_tool_message_lines_parses_json_payload() {
+        let _guard = env_test_lock();
         let payload = r#"{"result":"line1\nline2","_budget_warning":"[BUDGET WARNING: Iteration 40/50.]","error":"boom"}"#;
         let lines = format_tool_message_lines(payload);
         let joined = lines.join("\n");
@@ -6300,6 +6306,7 @@ mod tests {
 
     #[test]
     fn test_format_tool_message_lines_adds_policy_remediation_block() {
+        let _guard = env_test_lock();
         let payload = r#"{
   "error":"Blocked by tool policy: tool params matched deny pattern '(?i)api[_-]?key'",
   "policy":{"code":"params_pattern_denied","mode":"enforce"}
@@ -6312,6 +6319,7 @@ mod tests {
 
     #[test]
     fn test_format_tool_message_lines_truncates_large_payload() {
+        let _guard = env_test_lock();
         let cap = max_tool_output_lines();
         let long = (0..(cap + 40))
             .map(|idx| format!("row-{idx}-{}", "x".repeat(120)))
@@ -6326,6 +6334,7 @@ mod tests {
 
     #[test]
     fn test_format_tool_message_lines_keeps_verbose_preview_small() {
+        let _guard = env_test_lock();
         let long = (0..80)
             .map(|idx| format!("row-{idx}-{}", "x".repeat(120)))
             .collect::<Vec<_>>()

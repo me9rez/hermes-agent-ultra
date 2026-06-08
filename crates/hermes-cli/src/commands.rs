@@ -27328,6 +27328,10 @@ mod tests {
                 "HERMES_INFERENCE_MODEL",
                 "HERMES_INFERENCE_PROVIDER",
                 "HERMES_TUI_PROVIDER",
+                "HERMES_TUI_MAX_ASSISTANT_RENDER_LINES",
+                "HERMES_TUI_MAX_TOOL_OUTPUT_LINES",
+                "HERMES_TUI_MAX_TOOL_OUTPUT_LINE_CHARS",
+                "HERMES_TUI_MAX_TOOL_OUTPUT_TOTAL_CHARS",
             ]
             .iter()
             .map(|key| (*key, std::env::var(key).ok()))

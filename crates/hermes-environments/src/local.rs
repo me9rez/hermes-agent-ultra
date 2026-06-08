@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use liteparse::{LiteParse, LiteParseConfig};
+// TODO: re-enable after CI can reliably fetch pdfium (liteparse-pdfium-sys build.rs download)
+// use liteparse::{LiteParse, LiteParseConfig};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::ChildStdin;
@@ -50,17 +51,24 @@ fn is_blocked_binary_extension(ext: &str) -> bool {
     BINARY_EXTENSIONS.contains(&ext)
 }
 
-async fn parse_pdf_with_liteparse(path: &std::path::Path) -> Result<String, AgentError> {
-    let parser = LiteParse::new(LiteParseConfig::default());
-    let path_str = path.to_string_lossy();
-    let result = parser.parse(path_str.as_ref()).await.map_err(|e| {
-        AgentError::Io(format!(
-            "LiteParse failed for '{}': {}",
-            path.display(),
-            e
-        ))
-    })?;
-    Ok(result.text)
+// TODO: re-enable after CI can reliably fetch pdfium (liteparse-pdfium-sys build.rs download)
+// async fn parse_pdf_with_liteparse(path: &std::path::Path) -> Result<String, AgentError> {
+//     let parser = LiteParse::new(LiteParseConfig::default());
+//     let path_str = path.to_string_lossy();
+//     let result = parser.parse(path_str.as_ref()).await.map_err(|e| {
+//         AgentError::Io(format!(
+//             "LiteParse failed for '{}': {}",
+//             path.display(),
+//             e
+//         ))
+//     })?;
+//     Ok(result.text)
+// }
+
+fn pdf_reading_disabled_error(path: &str) -> AgentError {
+    AgentError::Io(format!(
+        "Cannot read PDF file '{path}': PDF text extraction is temporarily disabled (liteparse/pdfium)."
+    ))
 }
 
 fn paginate_content_lines(content: &str, offset: Option<u64>, limit: Option<u64>) -> String {
@@ -953,8 +961,8 @@ impl TerminalBackend for LocalBackend {
     ) -> Result<String, AgentError> {
         let resolved = resolve_path(path)?;
         if extension_lower(&resolved).as_deref() == Some("pdf") {
-            let content = parse_pdf_with_liteparse(&resolved).await?;
-            return Ok(paginate_content_lines(&content, offset, limit));
+            // TODO: re-enable liteparse/pdfium path once CI download is stable.
+            return Err(pdf_reading_disabled_error(path));
         }
         if let Some(ext) = extension_lower(&resolved) {
             if is_blocked_binary_extension(&ext) {
@@ -1554,7 +1562,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_file_pdf_surfaces_liteparse_error() {
+    async fn test_read_file_pdf_surfaces_disabled_error() {
         let td = tempdir().unwrap();
         let pdf = td.path().join("test.pdf");
         std::fs::write(&pdf, b"not a valid pdf").unwrap();
@@ -1564,7 +1572,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("LiteParse failed for"));
+        assert!(err.contains("PDF text extraction is temporarily disabled"));
     }
 
     #[tokio::test]

@@ -30,20 +30,27 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      RUSTC_WRAPPER: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-      - name: Remove sccache wrapper
+      - name: Remove sccache wrapper from all cargo configs
         run: |
-          unset RUSTC_WRAPPER
+          # Clean user-level cargo config (set by rust-cache or other actions)
           if [ -f ~/.cargo/config.toml ]; then
             sed -i '/rustc.wrapper/d' ~/.cargo/config.toml
             sed -i '/rustc-wrapper/d' ~/.cargo/config.toml
           fi
+          # Clean project-level cargo config (defense in depth)
+          if [ -f .cargo/config.toml ]; then
+            sed -i '/rustc.wrapper/d' .cargo/config.toml
+            sed -i '/rustc-wrapper/d' .cargo/config.toml
+          fi
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
       - name: Secret scan (tracked files)
         run: |
           python3 scripts/release_secret_scan.py \
@@ -51,18 +58,15 @@ jobs:
             --report .sync-reports/release-secret-scan.json
       - name: Config redaction tests (CLI)
         run: |
-          unset RUSTC_WRAPPER
           cargo test -p hermes-cli secret_stdout_gate_defaults_false -- --nocapture
           cargo test -p hermes-cli secret_stdout_gate_accepts_truthy_values -- --nocapture
           cargo test -p hermes-cli mask_secret_value_hides_payload -- --nocapture
       - name: Config redaction tests (agent replay)
         run: |
-          unset RUSTC_WRAPPER
           cargo test -p hermes-agent test_redact_json_value_masks_sensitive_fields -- --nocapture
           cargo test -p hermes-agent test_replay_recorder_adds_hash_chain_metadata -- --nocapture
       - name: Generate SBOM (CycloneDX)
         run: |
-          unset RUSTC_WRAPPER
           cargo install cargo-cyclonedx --locked
           cargo cyclonedx --manifest-path crates/hermes-cli/Cargo.toml -f json --override-filename release-sbom.cdx
           cp crates/hermes-cli/release-sbom.cdx.json .
@@ -95,17 +99,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-      - name: Remove sccache wrapper
+      - name: Remove sccache wrapper from all cargo configs
         run: |
-          unset RUSTC_WRAPPER
+          # Clean user-level cargo config (set by rust-cache or other actions)
           if [ -f ~/.cargo/config.toml ]; then
             sed -i '/rustc.wrapper/d' ~/.cargo/config.toml
             sed -i '/rustc-wrapper/d' ~/.cargo/config.toml
           fi
+          # Clean project-level cargo config (defense in depth)
+          if [ -f .cargo/config.toml ]; then
+            sed -i '/rustc.wrapper/d' .cargo/config.toml
+            sed -i '/rustc-wrapper/d' .cargo/config.toml
+          fi
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
       - name: Build release binary
@@ -145,26 +154,31 @@ jobs:
             target: x86_64-apple-darwin
             artifact: hermes-macos-x86_64.tar.gz
     runs-on: ${{ matrix.runner }}
+    env:
+      RUSTC_WRAPPER: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Remove sccache wrapper from all cargo configs
+        run: |
+          # Clean user-level cargo config (set by rust-cache or other actions)
+          if [ -f ~/.cargo/config.toml ]; then
+            sed -i '' '/rustc.wrapper/d' ~/.cargo/config.toml || true
+            sed -i '' '/rustc-wrapper/d' ~/.cargo/config.toml || true
+          fi
+          # Clean project-level cargo config (defense in depth)
+          if [ -f .cargo/config.toml ]; then
+            sed -i '' '/rustc.wrapper/d' .cargo/config.toml || true
+            sed -i '' '/rustc-wrapper/d' .cargo/config.toml || true
+          fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - name: Remove sccache wrapper
-        run: |
-          unset RUSTC_WRAPPER
-          if [ -f ~/.cargo/config.toml ]; then
-            sed -i '' '/rustc.wrapper/d' ~/.cargo/config.toml || true
-            sed -i '' '/rustc-wrapper/d' ~/.cargo/config.toml || true
-          fi
       - name: Build release binary
-        run: |
-          unset RUSTC_WRAPPER
-          cargo build --release --target ${{ matrix.target }} -p hermes-cli
+        run: cargo build --release --target ${{ matrix.target }} -p hermes-cli
       - name: Package artifact
         run: |
           mkdir -p dist

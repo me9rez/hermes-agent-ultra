@@ -23,6 +23,7 @@ pub mod file;
 pub mod fuzzy_match;
 pub mod homeassistant;
 pub mod image_gen;
+pub mod interrupt;
 pub mod managed_tool_gateway;
 pub mod meeting_notes;
 pub mod memory;

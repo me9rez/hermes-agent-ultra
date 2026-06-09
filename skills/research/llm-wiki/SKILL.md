@@ -24,6 +24,21 @@ Contradictions have already been flagged. Synthesis reflects everything ingested
 **Division of labor:** The human curates sources and directs analysis. The agent
 summarizes, cross-references, files, and maintains consistency.
 
+## Fast CLI: `hwiki`
+
+Mechanical wiki operations are handled by `hwiki`, a Rust CLI included with Hermes Agent.
+It replaces shell pipelines and Python scripts for lint, search, init, and hashing.
+
+```bash
+hwiki init <path>           # Initialize a new wiki
+hwiki lint [path]            # Run all 10 health checks in parallel
+hwiki search <pattern>       # Full-text regex search
+hwiki stats [path]           # Page/source/link/tag statistics
+hwiki hash [--body-only] <file>  # SHA256 computation
+```
+
+`hwiki` respects `$WIKI_PATH` and defaults to `~/wiki`. Install: `cargo install --path crates/hermes-wiki`.
+
 ## When This Skill Activates
 
 Use this skill when the user:
@@ -319,58 +334,37 @@ When the user asks a question about the wiki's domain:
 
 When the user asks to lint, health-check, or audit the wiki:
 
-① **Orphan pages:** Find pages with no inbound `[[wikilinks]]` from other pages.
-```python
-# Use execute_code for this — programmatic scan across all wiki pages
-import os, re
-from collections import defaultdict
-wiki = "<WIKI_PATH>"
-# Scan all .md files in entities/, concepts/, comparisons/, queries/
-# Extract all [[wikilinks]] — build inbound link map
-# Pages with zero inbound links are orphans
+① **Run `hwiki lint`** — executes all 10 checks in parallel, single pass:
+```bash
+hwiki lint                    # human-readable output
+hwiki lint --errors-only      # only show errors
+hwiki lint --json             # machine-readable JSON
 ```
 
-② **Broken wikilinks:** Find `[[links]]` that point to pages that don't exist.
+`hwiki lint` replaces the old Python lint script. It checks:
+- Broken wikilinks (O(1) HashSet lookup, not N syscalls)
+- Orphan pages (zero inbound [[links]])
+- Index completeness (filesystem vs index.md)
+- Frontmatter validation (required fields present)
+- Stale content (updated >90 days ago)
+- Missing confidence on single-source pages
+- Contested pages needing review
+- Source drift in raw/ (SHA256 mismatch)
+- Oversized pages (>200 lines, split candidates)
+- Log rotation needed (>500 entries)
 
-③ **Index completeness:** Every wiki page should appear in `index.md`. Compare
-   the filesystem against index entries.
-
-④ **Frontmatter validation:** Every wiki page must have all required fields
-   (title, created, updated, type, tags, sources). Tags must be in the taxonomy.
-
-⑤ **Stale content:** Pages whose `updated` date is >90 days older than the most
-   recent source that mentions the same entities.
-
-⑥ **Contradictions:** Pages on the same topic with conflicting claims. Look for
-   pages that share tags/entities but state different facts. Surface all pages
-   with `contested: true` or `contradictions:` frontmatter for user review.
-
-⑦ **Quality signals:** List pages with `confidence: low` and any page that cites
-   only a single source but has no confidence field set — these are candidates
-   for either finding corroboration or demoting to `confidence: medium`.
-
-⑧ **Source drift:** For each file in `raw/` with a `sha256:` frontmatter, recompute
-   the hash and flag mismatches. Mismatches indicate the raw file was edited
-   (shouldn't happen — raw/ is immutable) or ingested from a URL that has since
-   changed. Not a hard error, but worth reporting.
-
-⑨ **Page size:** Flag pages over 200 lines — candidates for splitting.
-
-⑩ **Tag audit:** List all tags in use, flag any not in the SCHEMA.md taxonomy.
-
-⑪ **Log rotation:** If log.md exceeds 500 entries, rotate it.
-
-⑫ **Report findings** with specific file paths and suggested actions, grouped by
-   severity (broken links > orphans > source drift > contested pages > stale content > style issues).
-
-⑬ **Append to log.md:** `## [YYYY-MM-DD] lint | N issues found`
+② **Append to log.md:** `## [YYYY-MM-DD] lint | N issues found`
 
 ## Working with the Wiki
 
 ### Searching
 
 ```bash
-# Find pages by content
+# Fast full-text search (regex or literal)
+hwiki search "transformer"        # uses $WIKI_PATH or ~/wiki
+hwiki search "GPT-4\|Claude"      # regex patterns work too
+
+# Find pages by content (fallback if hwiki unavailable)
 search_files "transformer" path="$WIKI" file_glob="*.md"
 
 # Find pages by filename
@@ -382,6 +376,9 @@ search_files "tags:.*alignment" path="$WIKI" file_glob="*.md"
 # Recent activity
 read_file "$WIKI/log.md" offset=<last 20 lines>
 ```
+
+On large wikis (50+ pages), `hwiki search` builds an in-memory index on first use.
+Subsequent searches scan cached content — zero disk I/O.
 
 ### Bulk Ingest
 

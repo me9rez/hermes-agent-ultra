@@ -244,8 +244,6 @@ jobs:
             dist/security/release-sbom.cdx.json
             scripts/install.sh
             Formula/hermes-agent-ultra.rb
-<<<<<<< HEAD
-=======
 
   # ── Phase 4: Upload to ModelScope ──────────────────────────────────────────
 
@@ -284,4 +282,3 @@ jobs:
             --version "${{ github.ref_name }}" \
             --dist-dir dist/
 
->>>>>>> michael-lfx/feat/wecom_websocket

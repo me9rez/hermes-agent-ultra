@@ -1041,6 +1041,29 @@ fn scrub_subprocess_env(cmd: &mut TokioCommand, configured_passthrough: &[String
     cmd.env("PATH", normalized_path);
 }
 
+#[cfg(windows)]
+fn windows_shell_program() -> String {
+    std::env::var("COMSPEC")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "cmd.exe".to_string())
+}
+
+fn new_shell_command(command: &str) -> TokioCommand {
+    #[cfg(unix)]
+    {
+        let mut cmd = TokioCommand::new("sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = TokioCommand::new(windows_shell_program());
+        cmd.arg("/C").arg(command);
+        cmd
+    }
+}
+
 fn with_login_profile_sources(
     command: &str,
     explicit_files: &[String],
@@ -1324,14 +1347,10 @@ impl TerminalBackend for LocalBackend {
                 tracing::warn!(
                     "PTY mode is not supported on this platform; using standard shell execution"
                 );
-                let mut shell_cmd = TokioCommand::new("sh");
-                shell_cmd.arg("-c").arg(&command_with_profiles);
-                shell_cmd
+                new_shell_command(&command_with_profiles)
             }
         } else {
-            let mut shell_cmd = TokioCommand::new("sh");
-            shell_cmd.arg("-c").arg(&command_with_profiles);
-            shell_cmd
+            new_shell_command(&command_with_profiles)
         };
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         scrub_subprocess_env(&mut cmd, &self.env_passthrough);
@@ -1512,10 +1531,8 @@ impl TerminalBackend for LocalBackend {
             }
         }
 
-        let mut cmd = TokioCommand::new("sh");
-        cmd.arg("-c")
-            .arg(&command_with_profiles)
-            .stdout(Stdio::piped())
+        let mut cmd = new_shell_command(&command_with_profiles);
+        cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::piped());
         scrub_subprocess_env(&mut cmd, &self.env_passthrough);
@@ -1884,22 +1901,48 @@ mod tests {
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let original = std::env::var_os(key);
-            std::env::set_var(key, value);
+            // SAFETY: tests hold the env lock and restore on drop.
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, original }
         }
 
         fn remove(key: &'static str) -> Self {
             let original = std::env::var_os(key);
-            std::env::remove_var(key);
+            // SAFETY: tests hold the env lock and restore on drop.
+            unsafe {
+                std::env::remove_var(key);
+            }
             Self { key, original }
         }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match &self.original {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
+            // SAFETY: tests hold the env lock and restore prior values.
+            unsafe {
+                match &self.original {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    struct HomeEnvGuard {
+        _home: EnvGuard,
+        #[cfg(windows)]
+        _userprofile: EnvGuard,
+    }
+
+    impl HomeEnvGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let value = path.to_string_lossy();
+            Self {
+                _home: EnvGuard::set("HOME", value.as_ref()),
+                #[cfg(windows)]
+                _userprofile: EnvGuard::set("USERPROFILE", value.as_ref()),
             }
         }
     }
@@ -1912,7 +1955,7 @@ mod tests {
         for file in [".profile", ".bash_profile", ".bashrc", ".zshrc"] {
             std::fs::write(td.path().join(file), "export HERMES_TEST=1\n").unwrap();
         }
-        let _home = EnvGuard::set("HOME", td.path().to_string_lossy().as_ref());
+        let _home = HomeEnvGuard::set(td.path());
         let wrapped = with_login_profile_sources("echo hi", &[], true, &[]);
         assert!(wrapped.contains("command -v bash"));
         assert!(wrapped.contains("exec bash -lc"));
@@ -1947,7 +1990,7 @@ mod tests {
         for file in [".profile", ".bash_profile", ".bashrc"] {
             std::fs::write(td.path().join(file), "export HERMES_TEST=1\n").unwrap();
         }
-        let _home = EnvGuard::set("HOME", td.path().to_string_lossy().as_ref());
+        let _home = HomeEnvGuard::set(td.path());
 
         let resolved = resolve_shell_init_files_for_shell("bash", &[], true);
         let names = resolved
@@ -1964,7 +2007,7 @@ mod tests {
         std::fs::write(td.path().join(".bashrc"), "export FROM_BASHRC=1\n").unwrap();
         let custom = td.path().join("custom.sh");
         std::fs::write(&custom, "export FROM_CUSTOM=1\n").unwrap();
-        let _home = EnvGuard::set("HOME", td.path().to_string_lossy().as_ref());
+        let _home = HomeEnvGuard::set(td.path());
 
         let resolved = resolve_shell_init_files_for_shell(
             "bash",
@@ -1979,7 +2022,7 @@ mod tests {
         let _lock = lock_env();
         let td = tempdir().unwrap();
         std::fs::write(td.path().join(".bashrc"), "export FROM_BASHRC=1\n").unwrap();
-        let _home = EnvGuard::set("HOME", td.path().to_string_lossy().as_ref());
+        let _home = HomeEnvGuard::set(td.path());
 
         let resolved = resolve_shell_init_files_for_shell("bash", &[], false);
         assert!(resolved.is_empty());
@@ -1993,7 +2036,7 @@ mod tests {
         std::fs::create_dir_all(&rc_dir).unwrap();
         let custom = rc_dir.join("custom.sh");
         std::fs::write(&custom, "export FROM_CUSTOM=1\n").unwrap();
-        let _home = EnvGuard::set("HOME", td.path().to_string_lossy().as_ref());
+        let _home = HomeEnvGuard::set(td.path());
         let _custom_dir = EnvGuard::set("CUSTOM_RC_DIR", rc_dir.to_string_lossy().as_ref());
 
         let home_resolved =
@@ -2042,6 +2085,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_terminal_sanitizer_blocks_provider_env_by_default() {
         let _lock = lock_env();
@@ -2063,6 +2107,7 @@ mod tests {
         assert_eq!(output.stdout, "unset");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_terminal_config_passthrough_allows_blocklisted_env() {
         let _lock = lock_env();
@@ -2089,6 +2134,7 @@ mod tests {
         assert_eq!(output.stdout, "secret-value");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_terminal_registry_env_passthrough_allows_prefix_blocked_env() {
         let _lock = lock_env();
@@ -2158,6 +2204,7 @@ mod tests {
         assert!(output.stdout.trim().contains("hello"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_execute_command_with_stdin_data() {
         let backend = LocalBackend::default();
@@ -2172,14 +2219,28 @@ mod tests {
     #[tokio::test]
     async fn test_execute_command_with_workdir() {
         let backend = LocalBackend::default();
+        let workdir = std::env::temp_dir();
+        #[cfg(unix)]
+        let command = "pwd";
+        #[cfg(windows)]
+        let command = "cd";
         let output = backend
-            .execute_command("pwd", None, Some("/tmp"), false, false)
+            .execute_command(
+                command,
+                None,
+                Some(workdir.to_string_lossy().as_ref()),
+                false,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(output.exit_code, 0);
-        assert!(output.stdout.trim().contains("/tmp"));
+        let stdout = output.stdout.replace('\\', "/");
+        let expected = workdir.to_string_lossy().replace('\\', "/");
+        assert!(stdout.contains(expected.trim_end_matches('/')));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_execute_command_sources_explicit_shell_init_file() {
         let td = tempdir().unwrap();
@@ -2213,6 +2274,7 @@ mod tests {
         assert!(output.stdout.contains("/opt/shell-init-probe/bin"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_execute_command_timeout() {
         let backend = LocalBackend::new(1, 1_048_576);
@@ -2279,6 +2341,7 @@ mod tests {
         assert!(output.stdout.contains(marker), "stdout={:?}", output.stdout);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_foreground_collection_preserves_multibyte_utf8_boundaries() {
         let backend = LocalBackend::new(10, 100_000);
@@ -2292,6 +2355,7 @@ mod tests {
         assert!(!output.stdout.contains("binary output detected"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_foreground_collection_preserves_high_volume_line_output() {
         let backend = LocalBackend::new(10, 1_048_576);
@@ -2306,6 +2370,7 @@ mod tests {
         assert_eq!(lines.last().copied(), Some("3000"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_foreground_collection_replaces_invalid_utf8() {
         let backend = LocalBackend::new(10, 1_048_576);
@@ -2426,7 +2491,7 @@ mod tests {
     fn test_write_file_expands_tilde_home() {
         let _lock = lock_env();
         let td = tempdir().unwrap();
-        let _home_guard = EnvGuard::set("HOME", td.path().to_string_lossy().as_ref());
+        let _home_guard = HomeEnvGuard::set(td.path());
         let backend = LocalBackend::default();
         let file = "~/nested/path/test.txt";
 
@@ -2436,6 +2501,7 @@ mod tests {
         assert_eq!(content, "ok");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_execute_command_strips_gateway_env_vars() {
         let _lock = lock_env();
@@ -2458,6 +2524,7 @@ mod tests {
         assert_eq!(output.stdout, "|||ok");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_execute_command_strips_provider_tool_and_gateway_env_vars() {
         let _lock = lock_env();
@@ -2483,6 +2550,7 @@ mod tests {
         assert_eq!(output.stdout, "||||||ok");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_execute_command_preserves_general_aws_credentials() {
         let _lock = lock_env();
@@ -2521,6 +2589,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_execute_command_force_prefix_reinjects_blocked_var() {
         let _lock = lock_env();
@@ -2541,6 +2610,7 @@ mod tests {
         assert_eq!(output.stdout, "sk-explicit|");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_execute_command_cleans_profile_reintroduced_blocked_vars() {
         let _lock = lock_env();
@@ -2550,7 +2620,7 @@ mod tests {
             "export OPENAI_API_KEY=from-profile\nexport SAFE_PASSTHRU_TEST=ok\n",
         )
         .unwrap();
-        let _home = EnvGuard::set("HOME", td.path().to_string_lossy().as_ref());
+        let _home = HomeEnvGuard::set(td.path());
         let backend = LocalBackend::default();
 
         let output = block_on(backend.execute_command(
@@ -2566,6 +2636,7 @@ mod tests {
         assert_eq!(output.stdout, "|ok");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_subprocess_path_appends_homebrew_when_path_is_minimal() {
         let normalized = normalize_subprocess_path(Some("/some/custom/bin"));
@@ -2575,6 +2646,7 @@ mod tests {
         assert!(normalized.contains("/opt/homebrew/sbin"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_subprocess_path_preserves_full_path() {
         assert_eq!(
@@ -2583,6 +2655,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_background_process_lifecycle_with_stdin() {
         let backend = LocalBackend::new(10, 1_048_576);

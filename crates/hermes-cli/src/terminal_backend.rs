@@ -15,7 +15,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[cfg(unix)]
     async fn backend_from_default_config_executes_local_command() {
         let cfg = GatewayConfig::default();
         let backend = build_terminal_backend(&cfg);

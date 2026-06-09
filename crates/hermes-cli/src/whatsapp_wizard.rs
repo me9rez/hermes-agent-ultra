@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use hermes_config::{GatewayConfig, PlatformConfig};
 use hermes_gateway::platforms::whatsapp::{
-    clear_pairing_session, has_legacy_baileys_session, is_paired, session_db_path,
+    clear_pairing_session, has_legacy_baileys_session, is_paired, mark_paired, session_db_path,
     WhatsAppConfig, WhatsAppRustClient,
 };
 

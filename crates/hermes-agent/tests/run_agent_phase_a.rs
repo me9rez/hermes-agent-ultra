@@ -470,49 +470,6 @@ impl hermes_core::LlmProvider for SlowStreamProvider {
     }
 }
 
-#[tokio::test]
-async fn stream_interrupt_forwards_deltas_and_stops() {
-    let interrupt = InterruptController::new();
-    let interrupt_handle = interrupt.clone();
-    let cfg = AgentConfig {
-        max_turns: 2,
-        ..AgentConfig::default()
-    };
-    let agent = AgentLoop::with_interrupt(
-        cfg,
-        Arc::new(ToolRegistry::new()),
-        Arc::new(SlowStreamProvider),
-        interrupt,
-    );
-
-    let deltas = Arc::new(Mutex::new(Vec::new()));
-    let deltas_ref = deltas.clone();
-
-    let run = tokio::spawn(async move {
-        agent
-            .run_stream(
-                vec![Message::user("stream")],
-                None,
-                Some(Box::new(move |chunk| {
-                    if let Some(delta) = chunk.delta {
-                        if let Some(text) = delta.content {
-                            deltas_ref.lock().expect("deltas lock").push(text);
-                        }
-                    }
-                })),
-            )
-            .await
-    });
-
-    tokio::time::sleep(Duration::from_millis(60)).await;
-    interrupt_handle.interrupt(None);
-
-    let result = run.await.expect("join").expect("run_stream ok");
-    assert!(result.interrupted);
-    let parts = deltas.lock().expect("deltas lock");
-    assert!(!parts.is_empty(), "expected stream deltas before interrupt");
-}
-
 struct CostedStopProvider;
 
 #[async_trait]

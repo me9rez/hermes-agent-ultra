@@ -33,9 +33,9 @@ use crate::codex_responses_adapter::summarize_user_message_for_log_str;
 use crate::context::ContextManager;
 use crate::message_sanitization::{
     CLARIFY_TOOL_RETRY_MAX, CLARIFY_TOOL_RETRY_USER_MESSAGE, CODEX_CONTINUE_USER_MESSAGE,
-    budget_pressure_text, clarify_tool_invocation_requires_retry,
-    continuation_prompt_for_response, inject_budget_pressure_into_last_tool_result,
-    sanitize_surrogates, strip_system_messages_from_history, strip_think_blocks_for_ack,
+    budget_pressure_text, clarify_tool_invocation_requires_retry, continuation_prompt_for_response,
+    inject_budget_pressure_into_last_tool_result, sanitize_surrogates,
+    strip_system_messages_from_history, strip_think_blocks_for_ack,
 };
 use crate::plugins::{HookResult, HookType};
 use crate::session_persistence::leading_system_prompt_for_persist;
@@ -536,41 +536,6 @@ impl AgentLoop {
         self.run_with_message_prelude(messages, tools, None, false)
             .await
     }
-
-    /// Like [`Self::run`] after [`crate::conversation_loop::AgentLoop::prepare_turn`] applied the message prelude.
-    pub(crate) async fn run_prepared(
-        &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolSchema>>,
-    ) -> Result<AgentResult, AgentError> {
-        self.run_with_message_prelude(messages, tools, None, true)
-            .await
-    }
-
-    /// Run the same loop as [`Self::run`], streaming the first LLM attempt per turn when `on_chunk` is set.
-    ///
-    /// Retries after empty/thinking recovery use non-stream transport (Python parity).
-    pub async fn run_stream(
-        &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolSchema>>,
-        on_chunk: Option<Box<dyn Fn(StreamChunk) + Send + Sync>>,
-    ) -> Result<AgentResult, AgentError> {
-        self.run_with_message_prelude(messages, tools, on_chunk, false)
-            .await
-    }
-
-    /// Like [`Self::run_stream`] after B-segment [`crate::conversation_loop`] prelude.
-    pub(crate) async fn run_stream_prepared(
-        &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolSchema>>,
-        on_chunk: Option<Box<dyn Fn(StreamChunk) + Send + Sync>>,
-    ) -> Result<AgentResult, AgentError> {
-        self.run_with_message_prelude(messages, tools, on_chunk, true)
-            .await
-    }
-
     #[inline]
     fn emit_stream_chunk(emit: Option<&(dyn Fn(StreamChunk) + Send + Sync)>, chunk: StreamChunk) {
         if let Some(f) = emit {
@@ -678,8 +643,7 @@ impl AgentLoop {
             ctx.add_message(msg.clone());
         }
         let prefill_end = ctx.get_messages().len();
-        let prefill_range =
-            (prefill_end > prefill_start).then_some(prefill_start..prefill_end);
+        let prefill_range = (prefill_end > prefill_start).then_some(prefill_start..prefill_end);
 
         // Add initial messages
         for msg in messages {

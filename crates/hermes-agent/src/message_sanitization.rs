@@ -589,7 +589,11 @@ mod tests {
         let task = "调用 clarify 给一些买电脑的选型";
         assert!(user_message_requests_clarify_tool(task));
         assert!(clarify_tool_invocation_requires_retry(task, true, 0));
-        assert!(!clarify_tool_invocation_requires_retry(task, true, CLARIFY_TOOL_RETRY_MAX));
+        assert!(!clarify_tool_invocation_requires_retry(
+            task,
+            true,
+            CLARIFY_TOOL_RETRY_MAX
+        ));
     }
 
     #[test]

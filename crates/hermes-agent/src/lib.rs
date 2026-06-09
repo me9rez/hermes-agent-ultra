@@ -4,6 +4,7 @@
 //! context management into a fully autonomous loop that runs until the
 //! model finishes naturally or the turn budget is exhausted.
 
+pub mod agent_config;
 pub mod agent_loop;
 pub mod agent_runtime_helpers;
 pub mod api_bridge;

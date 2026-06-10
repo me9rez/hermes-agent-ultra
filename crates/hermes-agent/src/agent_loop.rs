@@ -2193,6 +2193,25 @@ impl AgentLoop {
         mm.on_session_end(&as_values);
     }
 
+    /// Full session teardown: memory providers + plugin `on_session_end`.
+    pub fn session_end_hooks(
+        &self,
+        messages: &[Message],
+        completed: bool,
+        interrupted: bool,
+        total_turns: u32,
+        session_started_hooks_fired: bool,
+    ) {
+        crate::hooks::session_end_hooks(
+            self,
+            messages,
+            completed,
+            interrupted,
+            total_turns,
+            session_started_hooks_fired,
+        );
+    }
+
     pub(crate) fn openrouter_provider_preferences(&self) -> Option<Value> {
         let cfg = self.config();
         let mut prefs = serde_json::Map::new();

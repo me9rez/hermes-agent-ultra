@@ -10469,9 +10469,7 @@ async fn run_setup(cli: Cli) -> Result<(), AgentError> {
         "Quick setup (recommended) — provider, auth, model".to_string(),
         "Full setup — quick + personality + optional sections".to_string(),
     ];
-    drop(reader);
     let mode_pick = hermes_cli::curses_select("Choose setup mode", &mode_labels, 0);
-    reader = stdin.lock();
     let full_setup = mode_pick.confirmed && mode_pick.index == 1;
 
     // 4. Prompt for provider first (upstream parity: provider before model).
@@ -10505,10 +10503,8 @@ async fn run_setup(cli: Cli) -> Result<(), AgentError> {
         })
         .collect();
     println!("\nSetup order: provider -> auth -> model.");
-    drop(reader);
     let selected =
         hermes_cli::curses_select("Select provider", &provider_labels, default_provider_index);
-    reader = stdin.lock();
     let selected_option = provider_defaults
         .get(selected.index)
         .unwrap_or(&provider_defaults[default_provider_index]);
@@ -10857,10 +10853,8 @@ async fn run_setup(cli: Cli) -> Result<(), AgentError> {
         };
         let default_model_index =
             setup_default_model_pick_index(&selected_provider, &model, &displayed_suggested_models);
-        drop(reader);
         let suggested_pick =
             hermes_cli::curses_select(&model_title, &suggested_labels, default_model_index);
-        reader = stdin.lock();
         if suggested_pick.confirmed && suggested_pick.index < displayed_suggested_models.len() {
             let candidate = &displayed_suggested_models[suggested_pick.index];
             model = if candidate.contains(':') {

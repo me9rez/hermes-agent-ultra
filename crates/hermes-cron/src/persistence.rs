@@ -3,7 +3,7 @@
 //! Provides a trait for persisting cron jobs and a file-based implementation
 //! that stores jobs as JSON files under the Hermes cron data directory.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::{collections::HashSet, ffi::OsStr};
 
 use async_trait::async_trait;

@@ -725,7 +725,6 @@ async fn turn_call_llm(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
             .as_ref()
             .map_or(false, |tc| !tc.is_empty());
         if has_tools {
-            tool_result_empty_continuation_requested = false;
             break r;
         }
         if AgentLoop::assistant_visible_text(&r.message) {

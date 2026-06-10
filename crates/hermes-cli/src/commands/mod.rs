@@ -44,6 +44,7 @@ use crate::alpha_runtime::{
     set_quorum_policy, summarize_objective_contract, upsert_objective_contract,
     utility_terms_from_contract,
 };
+pub(crate) mod auth_cmd;
 pub(crate) mod browser;
 pub(crate) mod compress;
 pub(crate) mod kanban;
@@ -3495,7 +3496,7 @@ pub async fn handle_slash_command(
         "/studio" => handle_studio_command(app, args).await,
         "/ask" => handle_interactive_question_command(app, args),
         "/model" => model::handle_model_command(app, args).await,
-        "/auth" => handle_auth_command(app, args).await,
+        "/auth" => auth_cmd::handle_auth_command(app, args).await,
         "/provider" => handle_provider_command(app).await,
         "/personality" => handle_personality_command(app, args),
         "/profile" | "/whoami" => handle_profile_command(app),
@@ -3529,7 +3530,7 @@ pub async fn handle_slash_command(
         "/status" => handle_status_command(app),
         "/about" => handle_about_command(app),
         "/ops" => handle_ops_command(app, args).await,
-        "/telemetry" => handle_telemetry_command(app, args),
+        "/telemetry" => auth_cmd::handle_telemetry_command(app, args),
         "/runbook" => handle_runbook_command(app, args),
         "/eval" => handle_ops_eval_command(app, args).await,
         "/autopilot" => handle_ops_autopilot_command(app, args).await,
@@ -9866,143 +9867,6 @@ async fn handle_provider_command(app: &mut App) -> Result<CommandResult, AgentEr
         };
         let _ = writeln!(out, "  - {:<14} {}{}", entry.provider, preview, suffix);
     }
-    emit_command_output(app, out.trim_end());
-    Ok(CommandResult::Handled)
-}
-
-async fn handle_auth_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
-    let action = args
-        .first()
-        .copied()
-        .unwrap_or("status")
-        .to_ascii_lowercase();
-    match action.as_str() {
-        "status" => {
-            let provider = app.current_runtime_provider();
-            let credential_present = crate::app::provider_api_key_from_env(&provider).is_some();
-            let state = if credential_present {
-                "present"
-            } else {
-                "missing"
-            };
-            let gate_line = oauth_runtime_gate_for_provider(&provider)
-                .map(|(ok, detail)| {
-                    format!(
-                        "oauth_runtime_gate: {} ({})",
-                        if ok { "PASS" } else { "FAIL" },
-                        detail
-                    )
-                })
-                .unwrap_or_else(|| "oauth_runtime_gate: n/a".to_string());
-            emit_command_output(
-                app,
-                format!(
-                    "Auth status\nprovider: {}\nmodel: {}\ncredential: {}\n{}\nnext: `/auth verify` (passive refresh check) or `/auth refresh` (forced token refresh)",
-                    provider, app.current_model, state, gate_line
-                ),
-            );
-        }
-        "verify" => {
-            let provider = app.current_runtime_provider();
-            if let Some((ok, detail)) = oauth_runtime_gate_for_provider(&provider) {
-                if !ok {
-                    emit_command_output(
-                        app,
-                        format!(
-                            "Auth verify blocked by OAuth runtime gate for `{}`.\n{}\nUpgrade runtime and retry.",
-                            provider, detail
-                        ),
-                    );
-                    return Ok(CommandResult::Handled);
-                }
-            }
-            let summary = app.verify_runtime_auth(false).await?;
-            emit_command_output(
-                app,
-                format!(
-                    "{}\nnext: if provider rejects again, run `/auth refresh` then retry.",
-                    summary
-                ),
-            );
-        }
-        "refresh" | "force" => {
-            let provider = app.current_runtime_provider();
-            if let Some((ok, detail)) = oauth_runtime_gate_for_provider(&provider) {
-                if !ok {
-                    emit_command_output(
-                        app,
-                        format!(
-                            "Auth refresh blocked by OAuth runtime gate for `{}`.\n{}\nUpgrade runtime and retry.",
-                            provider, detail
-                        ),
-                    );
-                    return Ok(CommandResult::Handled);
-                }
-            }
-            let summary = app.verify_runtime_auth(true).await?;
-            emit_command_output(
-                app,
-                format!(
-                    "{}\nforced refresh complete; retry your request now.",
-                    summary
-                ),
-            );
-        }
-        _ => emit_command_output(
-            app,
-            "Usage: /auth [status|verify|refresh]\n- status: show active provider auth state\n- verify: passive credential hydration + verification\n- refresh: force OAuth/session token refresh",
-        ),
-    }
-    Ok(CommandResult::Handled)
-}
-
-fn handle_telemetry_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
-    let action = args
-        .first()
-        .copied()
-        .unwrap_or("status")
-        .to_ascii_lowercase();
-    let provider = app
-        .current_model
-        .split_once(':')
-        .map(|(p, _)| p.to_string())
-        .unwrap_or_else(|| "openai".to_string());
-    let provider_health = provider_health_snapshot(&provider);
-    let session = app.session_info();
-    let mut out = String::new();
-    let _ = writeln!(out, "Telemetry snapshot");
-    let _ = writeln!(out, "session: {}", session.session_id);
-    let _ = writeln!(out, "model: {}", app.current_model);
-    let _ = writeln!(out, "messages: {}", session.message_count);
-    let _ = writeln!(out, "provider health: {}", provider_health);
-
-    if let Some(repo_root) = detect_repo_root_from_cwd() {
-        let report_dir = repo_root.join(".sync-reports");
-        let eval = latest_json_report(&report_dir, "eval-trend-gate-")
-            .and_then(|p| summarize_gate_report(&p, "eval"))
-            .unwrap_or_else(|| "eval=unknown".to_string());
-        let autopilot = latest_json_report(&report_dir, "performance-autopilot-")
-            .and_then(|p| summarize_performance_autopilot_report(&p, "autopilot"))
-            .unwrap_or_else(|| "autopilot=unknown".to_string());
-        let replay = latest_json_report(&report_dir, "deterministic-replay-")
-            .and_then(|p| summarize_gate_report(&p, "replay"))
-            .unwrap_or_else(|| "replay=unknown".to_string());
-        let _ = writeln!(out, "gates: {}; {}; {}", eval, autopilot, replay);
-    }
-
-    if action == "lane" {
-        let _ = writeln!(
-            out,
-            "lane hints:\n- Ctrl+L toggle activity lane\n- Ctrl+O switch lane mode (live/cockpit)\n- Ctrl+G force transcript refresh + jump latest"
-        );
-    } else if action != "status" {
-        emit_command_output(
-            app,
-            "Usage: /telemetry [status|lane]\n- status: session/provider + gate snapshots\n- lane: status plus TUI activity-lane controls",
-        );
-        return Ok(CommandResult::Handled);
-    }
-
     emit_command_output(app, out.trim_end());
     Ok(CommandResult::Handled)
 }

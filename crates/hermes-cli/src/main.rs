@@ -779,7 +779,7 @@ async fn run(cli: Cli) {
             action,
             name,
             extra,
-        } => hermes_cli::commands::handle_cli_skills(action, name, extra).await,
+        } => hermes_cli::commands::skills::handle_cli_skills(action, name, extra).await,
         CliCommand::Plugins {
             action,
             name,

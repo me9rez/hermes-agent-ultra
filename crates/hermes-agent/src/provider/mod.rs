@@ -7,7 +7,7 @@ mod anthropic;
 mod generic;
 mod openai;
 mod openrouter;
-mod shared;
+pub mod shared;
 
 // ---------------------------------------------------------------------------
 // Re-export public API – these are the names that crate::provider::* resolves to

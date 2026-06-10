@@ -197,8 +197,6 @@ pub(crate) struct TurnContext {
     pub checkpoint_mgr: hermes_tools::CheckpointManager,
 
     // --- Misc ---
-    pub _total_api_time_ms: u64,
-    pub _total_tool_time_ms: u64,
     pub repo_review_budget_state: RepoReviewBudgetState,
 
     // --- Context pressure ---
@@ -304,8 +302,6 @@ impl TurnContext {
                 hermes_home.as_deref().map(Path::new),
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             ),
-            _total_api_time_ms: 0,
-            _total_tool_time_ms: 0,
             repo_review_budget_state: RepoReviewBudgetState::default(),
             context_pressure_warned_at: 0.0,
             context_pressure_last_warn_at: None,
@@ -355,7 +351,8 @@ async fn turn_guard(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
             if let Some(msg) = summary_msg {
                 tc.ctx.add_message(msg);
             }
-            crate::hooks::turn_end_plugin_hooks(agent,
+            crate::hooks::turn_end_plugin_hooks(
+                agent,
                 tc.ctx.get_messages(),
                 false,
                 false,
@@ -752,7 +749,8 @@ async fn turn_call_llm(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
                 inner_empty,
                 agent.config().empty_content_max_retries
             );
-            hooks::emit_status(agent,
+            hooks::emit_status(
+                agent,
                 "lifecycle",
                 &format!(
                     "Empty assistant response - retrying ({}/{})",
@@ -767,7 +765,6 @@ async fn turn_call_llm(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
 
     crate::llm_caller::upgrade_finish_reason_for_truncated_tool_args(&mut response);
     let _api_elapsed_ms = api_start.elapsed().as_millis() as u64;
-    tc._total_api_time_ms += _api_elapsed_ms;
     route_learning::update_route_learning(
         agent,
         turn_runtime_route.as_ref(),
@@ -823,10 +820,10 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
         "api_time_ms": _api_elapsed_ms,
         "has_tool_calls": response.message.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty()),
     });
-    let post_results = hooks::invoke_hook(agent,HookType::PostLlmCall, &post_ctx);
-    hooks::inject_hook_context(agent,&post_results, &mut tc.ctx);
+    let post_results = hooks::invoke_hook(agent, HookType::PostLlmCall, &post_ctx);
+    hooks::inject_hook_context(agent, &post_results, &mut tc.ctx);
     hooks::apply_hook_output_transforms(&post_results, &mut response.message.content);
-    hooks::apply_transform_llm_output_hooks(agent,&mut response.message.content);
+    hooks::apply_transform_llm_output_hooks(agent, &mut response.message.content);
 
     // Accumulate usage (merged across semantic-retried sub-calls)
     if let Some(ref usage) = turn_usage_acc {
@@ -845,7 +842,8 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
             tc.cost_warned = true;
             if tc.forced_runtime_route.is_none() {
                 if let Some(model) = route_learning::resolve_cost_degrade_model(agent) {
-                    tc.forced_runtime_route = Some(route_learning::turn_route_cost_guard(agent,model.clone()));
+                    tc.forced_runtime_route =
+                        Some(route_learning::turn_route_cost_guard(agent, model.clone()));
                     tc.ctx.add_message(Message::system(format!(
                         "Cost guard: session spend is now ${:.4}/${:.4}. Switching to cheaper model `{}`.",
                         tc.session_cost_usd, limit, model
@@ -863,7 +861,8 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
                 "Cost guard tripped: session spend ${:.4} exceeded max_cost_usd ${:.4}. Stopping loop.",
                 tc.session_cost_usd, limit
             )));
-            crate::hooks::turn_end_plugin_hooks(agent,
+            crate::hooks::turn_end_plugin_hooks(
+                agent,
                 tc.ctx.get_messages(),
                 false,
                 false,
@@ -907,7 +906,8 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
     let (assistant_msg, parsed_tool_calls, parsed_textual_tool_calls) =
         crate::tool_executor::coerce_textual_tool_calls(response.message.clone());
     if parsed_textual_tool_calls {
-        hooks::emit_status(agent,
+        hooks::emit_status(
+            agent,
             "lifecycle",
             "Parsed textual tool-call markup from assistant output; executing parsed calls.",
         );
@@ -937,7 +937,8 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
         && tc.truncated_tool_call_retries < agent.config().truncated_tool_call_max_retries
     {
         tc.truncated_tool_call_retries = tc.truncated_tool_call_retries.saturating_add(1);
-        hooks::emit_status(agent,
+        hooks::emit_status(
+            agent,
             "lifecycle",
             &format!(
                 "Truncated tool arguments - retrying ({}/{})",
@@ -1006,7 +1007,8 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
             if tc.continuation_retries < agent.config().continuation_max_retries {
                 tc.continuation_retries = tc.continuation_retries.saturating_add(1);
                 tc.continuation_trigger_count = tc.continuation_trigger_count.saturating_add(1);
-                hooks::emit_status(agent,
+                hooks::emit_status(
+                    agent,
                     "lifecycle",
                     &format!(
                         "Assistant response incomplete ({:?}) - requesting continuation ({}/{})",
@@ -1021,7 +1023,8 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
             }
             tc.premature_finalize_suspected_count =
                 tc.premature_finalize_suspected_count.saturating_add(1);
-            hooks::emit_status(agent,
+            hooks::emit_status(
+                agent,
                 "lifecycle",
                 &format!(
                     "Continuation retries exhausted ({}) - finalizing with best effort output",
@@ -1056,7 +1059,8 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
             {
                 tc.codex_ack_continuations = tc.codex_ack_continuations.saturating_add(1);
                 tc.ack_trigger_count = tc.ack_trigger_count.saturating_add(1);
-                hooks::emit_status(agent,
+                hooks::emit_status(
+                    agent,
                     "lifecycle",
                     &format!(
                         "Detected intermediate ack - requesting continuation ({}/{})",
@@ -1111,7 +1115,8 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
         ) {
             tc.finalizer_output_quality_retries =
                 tc.finalizer_output_quality_retries.saturating_add(1);
-            hooks::emit_status(agent,
+            hooks::emit_status(
+                agent,
                 "lifecycle",
                 "Detected templated/duplicated output; forcing concrete unique rewrite.",
             );
@@ -1136,7 +1141,8 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
         ) {
             tc.finalizer_action_execution_retries =
                 tc.finalizer_action_execution_retries.saturating_add(1);
-            hooks::emit_status(agent,
+            hooks::emit_status(
+                agent,
                 "lifecycle",
                 "Detected intent narration without execution evidence; forcing action run.",
             );
@@ -1199,7 +1205,8 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
             assistant_msg.content.as_deref().unwrap_or_default(),
             tc.total_turns,
         ) {
-            hooks::emit_status(agent,
+            hooks::emit_status(
+                agent,
                 "lifecycle",
                 &format!("Objective runtime ledger append skipped: {}", err),
             );
@@ -1209,7 +1216,8 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
         let (u, a) = extract_last_user_assistant(tc.ctx.get_messages());
         agent.memory_sync(&u, &a, &tc.session_id);
         agent.spawn_background_review(tc.total_turns, &tc.ctx, tc.review_memory_at_end);
-        crate::hooks::turn_end_plugin_hooks(agent,
+        crate::hooks::turn_end_plugin_hooks(
+            agent,
             tc.ctx.get_messages(),
             true,
             false,
@@ -1306,7 +1314,11 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
     if let Some(note) =
         apply_repo_review_tool_profile_narrowing(&mut tool_calls, tc.ctx.get_messages())
     {
-        hooks::emit_status(agent,"lifecycle", "Applied repo-review tool profile narrowing.");
+        hooks::emit_status(
+            agent,
+            "lifecycle",
+            "Applied repo-review tool profile narrowing.",
+        );
         tc.ctx.add_message(Message::system(note));
     }
     if let Some(note) = apply_repo_review_discovery_budget_policy(
@@ -1314,7 +1326,11 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
         tc.ctx.get_messages(),
         &mut tc.repo_review_budget_state,
     ) {
-        hooks::emit_status(agent,"lifecycle", "Applied repo-review discovery budget policy.");
+        hooks::emit_status(
+            agent,
+            "lifecycle",
+            "Applied repo-review discovery budget policy.",
+        );
         tc.ctx.add_message(Message::system(note));
     }
 
@@ -1364,7 +1380,8 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
         .collect();
     if !invalid_tool_calls.is_empty() {
         tc.invalid_tool_retries = tc.invalid_tool_retries.saturating_add(1);
-        hooks::emit_status(agent,
+        hooks::emit_status(
+            agent,
             "lifecycle",
             &format!(
                 "Invalid tool call detected - retrying ({}/{})",
@@ -1374,7 +1391,8 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
         );
         let available = agent.tool_registry.names().join(", ");
         if tc.invalid_tool_retries >= agent.config().invalid_tool_call_max_retries {
-            hooks::emit_status(agent,
+            hooks::emit_status(
+                agent,
                 "lifecycle",
                 &format!(
                     "Max invalid tool retries reached ({})",
@@ -1386,7 +1404,8 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
                 agent.config().invalid_tool_call_max_retries,
                 invalid_tool_calls[0]
             )));
-            crate::hooks::turn_end_plugin_hooks(agent,
+            crate::hooks::turn_end_plugin_hooks(
+                agent,
                 tc.ctx.get_messages(),
                 false,
                 false,
@@ -1438,7 +1457,8 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
     if !invalid_json_args.is_empty() {
         tc.invalid_json_retries = tc.invalid_json_retries.saturating_add(1);
         if tc.invalid_json_retries < agent.config().invalid_tool_json_max_retries {
-            hooks::emit_status(agent,
+            hooks::emit_status(
+                agent,
                 "lifecycle",
                 &format!(
                     "Invalid tool JSON arguments - retrying ({}/{})",
@@ -1449,7 +1469,8 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
             let _ = tc.ctx.get_messages_mut().pop();
             return TurnState::CallLlm;
         }
-        hooks::emit_status(agent,
+        hooks::emit_status(
+            agent,
             "lifecycle",
             &format!(
                 "Max invalid JSON retries reached ({}); returning tool errors",
@@ -1502,7 +1523,7 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
             )
             .await;
         for notice in notices {
-            hooks::emit_status(agent,"tool_failure", &notice);
+            hooks::emit_status(agent, "tool_failure", &notice);
         }
         blocked
     } else {
@@ -1517,7 +1538,8 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
             let blocked_by_errors =
                 tc.web_tool_consecutive_error_turns >= web_tool_budget_max_consecutive_errors();
             for (tool_name, _) in &blocked {
-                hooks::emit_status(agent,
+                hooks::emit_status(
+                    agent,
                     "tool_failure",
                     &web_tool_budget_user_notice(tool_name, blocked_by_errors),
                 );
@@ -1549,7 +1571,7 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
     );
     for tc_ in &tool_calls {
         let tc_ctx = serde_json::json!({"tool": &tc_.function.name, "turn": tc.total_turns});
-        hooks::invoke_hook(agent,HookType::PreToolCall, &tc_ctx);
+        hooks::invoke_hook(agent, HookType::PreToolCall, &tc_ctx);
         if let Some(ref cb) = agent.callbacks.on_tool_start {
             let args: Value = serde_json::from_str(&tc_.function.arguments).unwrap_or(Value::Null);
             cb(&tc_.function.name, &args);
@@ -1663,7 +1685,6 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
     }
 
     let tool_elapsed = tool_start.elapsed().as_millis() as u64;
-    tc._total_tool_time_ms += tool_elapsed;
     let turn_tool_error_count = results.iter().filter(|r| r.is_error).count() as u32;
 
     let mut web_turn_calls: u32 = 0;
@@ -1704,7 +1725,7 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
         streaming = true,
         "agent tool batch finished"
     );
-    hooks::emit_tool_failure_notices(agent,&tool_calls, &results);
+    hooks::emit_tool_failure_notices(agent, &tool_calls, &results);
 
     let turn_tool_error_rate = if results.is_empty() {
         0.0
@@ -1794,7 +1815,7 @@ async fn turn_post_tool(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
             continue;
         };
         let tc_ctx = serde_json::json!({"tool": &tc_.function.name, "is_error": res.is_error, "turn": tc.total_turns});
-        hooks::invoke_hook(agent,HookType::PostToolCall, &tc_ctx);
+        hooks::invoke_hook(agent, HookType::PostToolCall, &tc_ctx);
         if let Some(ref cb) = agent.callbacks.on_tool_complete {
             cb(&tc_.function.name, &res.content);
         }
@@ -1868,7 +1889,7 @@ async fn turn_post_tool(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
             turn_tool_error_count,
             tool_calls.len()
         );
-        hooks::emit_status(agent,"lifecycle", &guard_message);
+        hooks::emit_status(agent, "lifecycle", &guard_message);
         tc.replay.record(
             "tool_loop_guard",
             serde_json::json!({
@@ -1914,7 +1935,8 @@ async fn turn_post_tool(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
                 },
             );
         }
-        crate::hooks::turn_end_plugin_hooks(agent,
+        crate::hooks::turn_end_plugin_hooks(
+            agent,
             tc.ctx.get_messages(),
             false,
             false,

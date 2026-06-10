@@ -5396,7 +5396,9 @@ mod tests {
     use super::*;
     use crate::governor::{GovernorRuntimeState, TurnGovernor};
     use crate::hooks::spill_hook_context_if_oversized;
-    use crate::llm_caller::use_streaming_llm_transport;
+    use crate::llm_caller::{
+        collect_stream_llm_response, session_disable_streaming, use_streaming_llm_transport,
+    };
     use crate::message_sanitization::budget_pressure_text;
     use crate::replay::{ReplayState, redact_json_value};
     use crate::route_learning::{
@@ -5811,16 +5813,13 @@ mod tests {
         };
         let agent = AgentLoop::new(cfg, Arc::new(ToolRegistry::new()), Arc::new(DummyProvider));
         let large = "x".repeat(2_048);
-        let spilled = agent
-            .spill_hook_context_if_oversized(&large)
-            .expect("spill should write file");
+        let spilled =
+            spill_hook_context_if_oversized(&agent, &large).expect("spill should write file");
         assert!(spilled.exists(), "spill file should exist");
         let read_back = std::fs::read_to_string(&spilled).expect("read spill file");
         assert_eq!(read_back.len(), large.len());
         assert!(
-            agent
-                .spill_hook_context_if_oversized("small payload")
-                .is_none(),
+            spill_hook_context_if_oversized(&agent, "small payload").is_none(),
             "small payload must not spill"
         );
         if let Some(v) = prev {
@@ -7048,24 +7047,24 @@ mod tests {
         let seen_ref = seen.clone();
         let mut api_call_count = 0u32;
 
-        let out = agent
-            .collect_stream_llm_response(
-                &mut ctx,
-                &[],
-                None,
-                "dummy-model",
-                None,
-                &move |chunk| {
-                    if let Some(delta) = chunk.delta {
-                        if let Some(text) = delta.content {
-                            seen_ref.lock().expect("seen lock").push(text);
-                        }
+        let out = collect_stream_llm_response(
+            &agent,
+            &mut ctx,
+            &[],
+            None,
+            "dummy-model",
+            None,
+            &move |chunk| {
+                if let Some(delta) = chunk.delta {
+                    if let Some(text) = delta.content {
+                        seen_ref.lock().expect("seen lock").push(text);
                     }
-                },
-                &mut api_call_count,
-                None,
-            )
-            .await;
+                }
+            },
+            &mut api_call_count,
+            None,
+        )
+        .await;
 
         let StreamCollectOutcome::Complete(resp) = out.expect("stream should recover") else {
             panic!("expected complete response");
@@ -7101,25 +7100,25 @@ mod tests {
         let seen_ref = seen.clone();
         let mut api_call_count = 0u32;
 
-        let out = agent
-            .collect_stream_llm_response(
-                &mut ctx,
-                &[],
-                None,
-                "dummy-model",
-                None,
-                &move |chunk| {
-                    if let Some(delta) = chunk.delta {
-                        if let Some(text) = delta.content {
-                            seen_ref.lock().expect("seen lock").push(text);
-                        }
+        let out = collect_stream_llm_response(
+            &agent,
+            &mut ctx,
+            &[],
+            None,
+            "dummy-model",
+            None,
+            &move |chunk| {
+                if let Some(delta) = chunk.delta {
+                    if let Some(text) = delta.content {
+                        seen_ref.lock().expect("seen lock").push(text);
                     }
-                },
-                &mut api_call_count,
-                None,
-            )
-            .await
-            .expect("partial stub should recover instead of hard error");
+                }
+            },
+            &mut api_call_count,
+            None,
+        )
+        .await
+        .expect("partial stub should recover instead of hard error");
 
         let StreamCollectOutcome::Complete(resp) = out else {
             panic!("expected complete partial-stream stub");
@@ -7171,25 +7170,25 @@ mod tests {
         let seen_ref = seen.clone();
         let mut api_call_count = 0u32;
 
-        let out = agent
-            .collect_stream_llm_response(
-                &mut ctx,
-                &[],
-                None,
-                "dummy-model",
-                None,
-                &move |chunk| {
-                    if let Some(delta) = chunk.delta {
-                        if let Some(text) = delta.content {
-                            seen_ref.lock().expect("seen lock").push(text);
-                        }
+        let out = collect_stream_llm_response(
+            &agent,
+            &mut ctx,
+            &[],
+            None,
+            "dummy-model",
+            None,
+            &move |chunk| {
+                if let Some(delta) = chunk.delta {
+                    if let Some(text) = delta.content {
+                        seen_ref.lock().expect("seen lock").push(text);
                     }
-                },
-                &mut api_call_count,
-                None,
-            )
-            .await
-            .expect("text-only partial stream should return stub");
+                }
+            },
+            &mut api_call_count,
+            None,
+        )
+        .await
+        .expect("text-only partial stream should return stub");
 
         let StreamCollectOutcome::Complete(resp) = out else {
             panic!("expected partial-stream stub");
@@ -7981,7 +7980,7 @@ mod tests {
             updated_at_unix_ms: now_ms - (8 * 24 * 60 * 60 * 1000),
         };
         assert!(
-            AgentLoop::route_learning_effective_stats(&stale, now_ms).is_none(),
+            route_learning_effective_stats(&stale, now_ms).is_none(),
             "stale route entries must expire by ttl"
         );
 
@@ -7992,7 +7991,7 @@ mod tests {
             consecutive_failures: 4,
             updated_at_unix_ms: now_ms - (12 * 60 * 60 * 1000),
         };
-        let adjusted = AgentLoop::route_learning_effective_stats(&recent, now_ms)
+        let adjusted = route_learning_effective_stats(&recent, now_ms)
             .expect("recent entry should not expire");
         assert!(adjusted.success_rate > recent.success_rate);
         assert!(adjusted.avg_latency_ms < recent.avg_latency_ms);
@@ -8848,22 +8847,22 @@ mod tests {
             registry.clone(),
             Arc::new(HealthCheckProvider),
         );
-        assert!(!mock_like.use_streaming_llm_transport(false, 0, None));
-        assert!(mock_like.use_streaming_llm_transport(true, 0, None));
+        assert!(!use_streaming_llm_transport(&mock_like, false, 0, None));
+        assert!(use_streaming_llm_transport(&mock_like, true, 0, None));
 
         let open = AgentLoop::new(
             AgentConfig::default(),
             registry.clone(),
             Arc::new(OpenProvider),
         );
-        assert!(open.use_streaming_llm_transport(false, 0, None));
+        assert!(use_streaming_llm_transport(&open, false, 0, None));
 
         let acp_cfg = AgentConfig {
             provider: Some("copilot-acp".to_string()),
             ..AgentConfig::default()
         };
         let acp = AgentLoop::new(acp_cfg, registry.clone(), Arc::new(OpenProvider));
-        assert!(!acp.use_streaming_llm_transport(true, 0, None));
+        assert!(!use_streaming_llm_transport(&acp, true, 0, None));
 
         let acp_url_cfg = AgentConfig {
             provider: Some("custom".to_string()),
@@ -8879,11 +8878,11 @@ mod tests {
             ..AgentConfig::default()
         };
         let acp_url = AgentLoop::new(acp_url_cfg, registry, Arc::new(OpenProvider));
-        assert!(!acp_url.use_streaming_llm_transport(true, 0, None));
+        assert!(!use_streaming_llm_transport(&acp_url, true, 0, None));
 
-        open.session_disable_streaming();
-        assert!(!open.use_streaming_llm_transport(true, 0, None));
-        assert!(!open.use_streaming_llm_transport(true, 1, None));
+        session_disable_streaming(&open);
+        assert!(!use_streaming_llm_transport(&open, true, 0, None));
+        assert!(!use_streaming_llm_transport(&open, true, 1, None));
     }
 
     #[test]
@@ -9153,7 +9152,7 @@ mod tests {
                 extra_content: None,
             },
         ];
-        let deduped = AgentLoop::deduplicate_tool_calls(&calls);
+        let deduped = deduplicate_tool_calls(&calls);
         assert_eq!(deduped.len(), 2);
         assert_eq!(deduped[0].id, "1");
         assert_eq!(deduped[1].id, "3");
@@ -10461,7 +10460,7 @@ mod tests {
         let msg = Message::assistant(
             "Proceeding with discovery now.\n<tool_call name=\"skill_view\">\n<argument name=\"skill\">contextlattice-master-router</argument>\n</tool_call>",
         );
-        let (coerced, calls, parsed_textual) = AgentLoop::coerce_textual_tool_calls(msg);
+        let (coerced, calls, parsed_textual) = coerce_textual_tool_calls(msg);
         assert!(parsed_textual);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "skill_view");
@@ -10484,7 +10483,7 @@ mod tests {
                 extra_content: None,
             }],
         );
-        let (coerced, calls, parsed_textual) = AgentLoop::coerce_textual_tool_calls(msg);
+        let (coerced, calls, parsed_textual) = coerce_textual_tool_calls(msg);
         assert!(!parsed_textual);
         assert_eq!(calls.len(), 1);
         assert_eq!(coerced.tool_calls.as_ref().map(|v| v.len()), Some(1));

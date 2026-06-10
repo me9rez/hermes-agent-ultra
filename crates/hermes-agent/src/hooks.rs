@@ -264,7 +264,7 @@ pub(crate) fn turn_end_plugin_hooks(
     );
 }
 
-pub(crate) fn session_end_hooks(
+pub fn session_end_hooks(
     agent: &AgentLoop,
     messages: &[Message],
     completed: bool,

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use hermes_agent::{agent_loop::ToolRegistry, AgentConfig, AgentLoop, InterestStore};
+use hermes_agent::{AgentConfig, AgentLoop, InterestStore, agent_loop::ToolRegistry};
 use hermes_config::InterestConfig;
 use hermes_core::{AgentError, LlmProvider, Message, ToolSchema};
 
@@ -50,25 +50,19 @@ async fn session_end_hooks_persists_rule_extracted_poi() {
     interest.per_turn_persist = false;
 
     let db_path = tmp.path().join("interest.db");
-    let store = InterestStore::open(&db_path, interest.clone())
-        .expect("open store");
+    let store = InterestStore::open(&db_path, interest.clone()).expect("open store");
     let mut cfg = AgentConfig::default();
     cfg.interest = interest.clone();
     cfg.hermes_home = Some(home.clone());
     cfg.session_id = Some("poi-session-end-test".into());
 
-    let agent = AgentLoop::new(
-        cfg,
-        Arc::new(ToolRegistry::new()),
-        Arc::new(NoopProvider),
-    )
-    .with_interest_store(Arc::new(std::sync::Mutex::new(store)));
+    let agent = AgentLoop::new(cfg, Arc::new(ToolRegistry::new()), Arc::new(NoopProvider))
+        .with_interest_store(Arc::new(std::sync::Mutex::new(store)));
 
-    let sample =
-        "Help me continue the Rust parity port in crates/hermes-parity-tests please";
+    let sample = "Help me continue the Rust parity port in crates/hermes-parity-tests please";
     let messages = vec![Message::user(sample)];
 
-    agent.session_end_hooks(&messages, false, false, 1, true);
+    hermes_agent::hooks::session_end_hooks(&agent, &messages, false, false, 1, true);
 
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 

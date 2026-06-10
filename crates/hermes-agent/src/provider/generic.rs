@@ -521,7 +521,7 @@ impl GenericProvider {
         hermes_core::sanitize_tool_schemas(Some(&formatted)).unwrap_or(formatted)
     }
 
-    pub(crate) fn chat_request_body(&self, request: ChatRequestParams<'_>) -> Value {
+    pub fn chat_request_body(&self, request: ChatRequestParams<'_>) -> Value {
         let ChatRequestParams {
             messages,
             tools,

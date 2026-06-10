@@ -19,14 +19,14 @@ use crate::tool_call_args::arguments_value_to_string;
 
 use super::{AnthropicProvider, GenericProvider, OpenAiProvider};
 
-pub(crate) struct ChatRequestParams<'a> {
-    pub(crate) messages: &'a [Message],
-    pub(crate) tools: &'a [ToolSchema],
-    pub(crate) max_tokens: Option<u32>,
-    pub(crate) temperature: Option<f64>,
-    pub(crate) effective_model: &'a str,
-    pub(crate) extra_body: Option<&'a Value>,
-    pub(crate) stream: bool,
+pub struct ChatRequestParams<'a> {
+    pub messages: &'a [Message],
+    pub tools: &'a [ToolSchema],
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f64>,
+    pub effective_model: &'a str,
+    pub extra_body: Option<&'a Value>,
+    pub stream: bool,
 }
 
 // ---------------------------------------------------------------------------

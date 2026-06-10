@@ -8,9 +8,10 @@ use std::sync::Arc;
 use futures::stream::BoxStream;
 use hermes_agent::memory_manager::build_memory_context_block;
 use hermes_agent::prompt_caching::build_cache_marker;
+use hermes_agent::provider::shared::ChatRequestParams;
 use hermes_agent::{
-    assert_dual_run_eq, canonical_messages_json, AgentConfig, AgentLoop, ApiMode, ContextManager,
-    GenericProvider, ToolRegistry,
+    AgentConfig, AgentLoop, ApiMode, ContextManager, GenericProvider, ToolRegistry,
+    assert_dual_run_eq, canonical_messages_json,
 };
 use hermes_core::{
     AgentError, FunctionCall, JsonSchema, LlmProvider, LlmResponse, Message, MessageRole,
@@ -47,7 +48,11 @@ impl LlmProvider for NoopProvider {
 }
 
 fn noop_agent(config: AgentConfig) -> AgentLoop {
-    AgentLoop::new(config, Arc::new(ToolRegistry::new()), Arc::new(NoopProvider))
+    AgentLoop::new(
+        config,
+        Arc::new(ToolRegistry::new()),
+        Arc::new(NoopProvider),
+    )
 }
 
 fn oracle(agent: &AgentLoop, ctx: &mut ContextManager) -> Vec<Message> {
@@ -184,9 +189,7 @@ fn golden_anthropic_prompt_cache_markers() {
 
     let out = oracle(&agent, &mut ctx);
     assert!(
-        out.first()
-            .and_then(|m| m.cache_control.as_ref())
-            .is_some(),
+        out.first().and_then(|m| m.cache_control.as_ref()).is_some(),
         "system should receive cache_control under anthropic policy"
     );
     let marker = build_cache_marker("1h");
@@ -206,10 +209,7 @@ fn golden_non_vision_model_strips_image_placeholder() {
     ));
 
     let out = oracle(&agent, &mut ctx);
-    let user = out
-        .iter()
-        .find(|m| m.role == MessageRole::User)
-        .unwrap();
+    let user = out.iter().find(|m| m.role == MessageRole::User).unwrap();
     let content = user.content.as_deref().unwrap_or("");
     assert!(!content.contains("data:image"));
     assert!(content.contains("does not support vision"));
@@ -244,18 +244,19 @@ fn golden_steer_drains_into_last_tool_result() {
     });
 
     let out = oracle(&agent, &mut ctx);
-    let tool = out
-        .iter()
-        .find(|m| m.role == MessageRole::Tool)
-        .unwrap();
+    let tool = out.iter().find(|m| m.role == MessageRole::Tool).unwrap();
     assert!(
-        tool
-            .content
+        tool.content
             .as_deref()
             .unwrap_or("")
             .contains("User guidance:")
     );
-    assert!(tool.content.as_deref().unwrap_or("").contains("Focus on tests only."));
+    assert!(
+        tool.content
+            .as_deref()
+            .unwrap_or("")
+            .contains("Focus on tests only.")
+    );
 }
 
 #[test]
@@ -302,7 +303,16 @@ fn golden_provider_body_from_oracle_messages() {
         description: "echo".into(),
         parameters: JsonSchema::new("object"),
     }];
-    let body = GenericProvider::oracle_chat_completions_body(&api_messages, &tools, "gpt-4o");
+    let provider = GenericProvider::new("test-key", "http://localhost", "gpt-4o");
+    let body = provider.chat_request_body(ChatRequestParams {
+        messages: &api_messages,
+        tools: &tools,
+        max_tokens: None,
+        temperature: None,
+        effective_model: "gpt-4o",
+        extra_body: None,
+        stream: false,
+    });
     assert_eq!(body["model"], "gpt-4o");
     assert!(body["messages"].is_array());
     assert!(body["tools"].is_array());

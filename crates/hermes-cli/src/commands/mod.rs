@@ -15,14 +15,12 @@ use std::{
 
 use bytes::Bytes;
 use hermes_agent::{
-    format_session_db_unavailable, RunConversationParams, plugins::PluginManifest,
-    split_messages_for_run_conversation, SessionPersistence,
+    RunConversationParams, SessionPersistence, format_session_db_unavailable,
+    plugins::PluginManifest, split_messages_for_run_conversation,
 };
 use hermes_core::AgentError;
-use hermes_intelligence::model_metadata::{get_model_context_length, get_model_info};
-use hermes_skills;
-use hermes_intelligence::models_dev::default_client;
 use hermes_intelligence::{SwarmExecutionMode, build_swarm_execution_plan, swarm_runtime_status};
+use hermes_skills;
 use hermes_tools::ToolPolicyEngine;
 use hermes_tools::tools::messaging::MessagingSessionContext;
 use regex::Regex;
@@ -47,16 +45,22 @@ use crate::alpha_runtime::{
     set_quorum_policy, summarize_objective_contract, upsert_objective_contract,
     utility_terms_from_contract,
 };
+pub(crate) mod model;
+
+// Re-export model utilities still referenced from this module
+use model::{
+    ModelCapabilityRequirements, ResolvedModelCapabilities, default_client,
+    rank_catalog_model_candidates, resolve_catalog_model_candidate, resolve_model_capabilities,
+    split_provider_model, unmet_model_requirements,
+};
+
 use crate::app::{App, PetDock, PetSettings};
 use crate::kanban::{
     KanbanActionInput, KanbanBoard, KanbanLane, NewKanbanTaskInput, add_task, archive_done,
     claim_task, create_or_select_board, ensure_board, find_task_mut, lane_counts, load_store,
     maybe_checkpoint_to_contextlattice, move_task, save_store, set_blocked,
 };
-use crate::model_switch::{
-    cached_provider_catalog_status, curated_provider_slugs, normalize_provider_model,
-    provider_model_ids,
-};
+use crate::model_switch::{curated_provider_slugs, normalize_provider_model, provider_model_ids};
 use crate::pairing_store::{PairingStatus, PairingStore};
 use crate::skin_engine::{BUILTIN_SKINS, canonical_skin_name};
 use hermes_config::{GatewayConfig, LlmProviderConfig};
@@ -108,7 +112,10 @@ fn mask_secret_value(secret: &str) -> String {
 /// All supported slash commands and their descriptions.
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/new", "Start a new session"),
-    ("/reset", "Start a new session (alias of /new; fresh session ID + history)"),
+    (
+        "/reset",
+        "Start a new session (alias of /new; fresh session ID + history)",
+    ),
     (
         "/clear",
         "Clear screen/session state and start a fresh session",
@@ -383,7 +390,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "Runtime policy profiles (`status|list|strict|standard|dev`) + live counters",
     ),
     ("/help", "Show help for available commands"),
-    ("/acp_server", "ACP server (auto-start if not running; or start|stop|status|restart|connections)"),
+    (
+        "/acp_server",
+        "ACP server (auto-start if not running; or start|stop|status|restart|connections)",
+    ),
     ("/quit", "Quit the application"),
     ("/exit", "Alias for /quit"),
     ("/onboard", "Alias for /walkthrough"),
@@ -3197,7 +3207,13 @@ fn command_subcommand_overrides(cmd: &str) -> &'static [&'static str] {
         "/qos" => &["status", "health", "autotune"],
         "/claims" => &["status", "on", "off"],
         "/curator" => &[
-            "status", "run", "pause", "resume", "pin", "unpin", "restore",
+            "status",
+            "run",
+            "pause",
+            "resume",
+            "pin",
+            "unpin",
+            "restore",
             "list-archived",
         ],
         _ => &[],
@@ -3422,12 +3438,12 @@ pub async fn handle_slash_command(
 ) -> Result<CommandResult, AgentError> {
     let (resolved_cmd, arg_storage) =
         match expand_quick_alias_command(&app.config.quick_commands, cmd, args) {
-        Ok(expanded) => expanded,
-        Err(message) => {
-            emit_command_output(app, message);
-            return Ok(CommandResult::Handled);
-        }
-    };
+            Ok(expanded) => expanded,
+            Err(message) => {
+                emit_command_output(app, message);
+                return Ok(CommandResult::Handled);
+            }
+        };
     let arg_refs: Vec<&str> = arg_storage.iter().map(|part| part.as_str()).collect();
     let args = arg_refs.as_slice();
     let cmd = resolved_cmd.as_str();
@@ -3475,7 +3491,7 @@ pub async fn handle_slash_command(
         "/heatmap" => handle_heatmap_command(app, args).await,
         "/studio" => handle_studio_command(app, args).await,
         "/ask" => handle_interactive_question_command(app, args),
-        "/model" => handle_model_command(app, args).await,
+        "/model" => model::handle_model_command(app, args).await,
         "/auth" => handle_auth_command(app, args).await,
         "/provider" => handle_provider_command(app).await,
         "/personality" => handle_personality_command(app, args),
@@ -3580,1275 +3596,6 @@ fn handle_toolcards_command(app: &mut App, args: &[&str]) -> Result<CommandResul
         _ => "Tool-card controls:\n  /toolcards export   Export current tool-card transcript".to_string(),
     };
     emit_command_output(app, msg);
-    Ok(CommandResult::Handled)
-}
-
-// ---------------------------------------------------------------------------
-// Individual command handlers
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ModelSwitchRequest {
-    PickProviderThenModel,
-    PickModelFromProvider(String),
-    SetDirect(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct ModelCapabilityRequirements {
-    require_tools: bool,
-    require_vision: bool,
-    require_reasoning: bool,
-    require_long_context: bool,
-    min_context_window: Option<u64>,
-}
-
-impl ModelCapabilityRequirements {
-    const LONG_CONTEXT_DEFAULT: u64 = 128_000;
-
-    fn is_empty(self) -> bool {
-        !self.require_tools
-            && !self.require_vision
-            && !self.require_reasoning
-            && !self.require_long_context
-            && self.min_context_window.is_none()
-    }
-
-    fn effective_min_context(self) -> Option<u64> {
-        match (self.require_long_context, self.min_context_window) {
-            (true, Some(value)) => Some(value.max(Self::LONG_CONTEXT_DEFAULT)),
-            (true, None) => Some(Self::LONG_CONTEXT_DEFAULT),
-            (false, value) => value,
-        }
-    }
-
-    fn summary(self) -> String {
-        let mut parts = Vec::new();
-        if self.require_tools {
-            parts.push("tools".to_string());
-        }
-        if self.require_vision {
-            parts.push("vision".to_string());
-        }
-        if self.require_reasoning {
-            parts.push("reasoning".to_string());
-        }
-        if let Some(min_ctx) = self.effective_min_context() {
-            parts.push(format!("context>={min_ctx}"));
-        }
-        if parts.is_empty() {
-            "none".to_string()
-        } else {
-            parts.join(", ")
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ResolvedModelCapabilities {
-    supports_tools: bool,
-    supports_vision: bool,
-    supports_reasoning: bool,
-    context_window: u64,
-}
-
-fn normalize_model_capability_name(value: &str) -> Option<&'static str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "tools" | "tool" | "function-calling" | "function_calling" => Some("tools"),
-        "vision" | "image" | "images" => Some("vision"),
-        "reasoning" | "reason" => Some("reasoning"),
-        "long-context" | "long_context" | "longcontext" | "context" => Some("long-context"),
-        _ => None,
-    }
-}
-
-fn apply_model_capability_token(
-    requirements: &mut ModelCapabilityRequirements,
-    token: &str,
-) -> Result<(), AgentError> {
-    let Some(normalized) = normalize_model_capability_name(token) else {
-        return Err(AgentError::Config(format!(
-            "Unknown model capability '{}' (expected one of: tools, vision, reasoning, long-context).",
-            token
-        )));
-    };
-    match normalized {
-        "tools" => requirements.require_tools = true,
-        "vision" => requirements.require_vision = true,
-        "reasoning" => requirements.require_reasoning = true,
-        "long-context" => requirements.require_long_context = true,
-        _ => {}
-    }
-    Ok(())
-}
-
-fn parse_model_command_args(
-    args: &[&str],
-) -> Result<(Vec<String>, ModelCapabilityRequirements, Option<String>), AgentError> {
-    let mut requirements = ModelCapabilityRequirements::default();
-    let mut positional = Vec::new();
-    let mut provider_override: Option<String> = None;
-    let mut idx = 0usize;
-
-    while idx < args.len() {
-        let token = args[idx].trim();
-        if token.is_empty() {
-            idx += 1;
-            continue;
-        }
-
-        if matches!(
-            token.to_ascii_lowercase().as_str(),
-            "--vision" | "--tools" | "--reasoning" | "--long-context" | "--long_context"
-        ) {
-            apply_model_capability_token(&mut requirements, token.trim_start_matches('-'))?;
-            idx += 1;
-            continue;
-        }
-
-        if matches!(
-            token.to_ascii_lowercase().as_str(),
-            "--cap" | "--caps" | "--require" | "--requires"
-        ) {
-            let value = args
-                .get(idx + 1)
-                .ok_or_else(|| AgentError::Config(format!("{} requires a value.", token)))?;
-            for raw in value.split(',') {
-                let candidate = raw.trim();
-                if candidate.is_empty() {
-                    continue;
-                }
-                apply_model_capability_token(&mut requirements, candidate)?;
-            }
-            idx += 2;
-            continue;
-        }
-
-        if token.eq_ignore_ascii_case("--provider") || token.eq_ignore_ascii_case("-p") {
-            let provider = args
-                .get(idx + 1)
-                .ok_or_else(|| AgentError::Config(format!("{} requires a provider slug.", token)))?
-                .trim();
-            if provider.is_empty() {
-                return Err(AgentError::Config(
-                    "provider override cannot be empty.".to_string(),
-                ));
-            }
-            provider_override = Some(provider.to_ascii_lowercase());
-            idx += 2;
-            continue;
-        }
-
-        if token.eq_ignore_ascii_case("--min-context")
-            || token.eq_ignore_ascii_case("--min_context")
-        {
-            let value = args
-                .get(idx + 1)
-                .ok_or_else(|| {
-                    AgentError::Config("--min-context requires a numeric value.".into())
-                })?
-                .trim();
-            let parsed = value.parse::<u64>().map_err(|_| {
-                AgentError::Config(format!(
-                    "Invalid --min-context value '{}'; expected integer token count.",
-                    value
-                ))
-            })?;
-            requirements.min_context_window = Some(parsed);
-            idx += 2;
-            continue;
-        }
-
-        positional.push(token.to_string());
-        idx += 1;
-    }
-
-    Ok((positional, requirements, provider_override))
-}
-
-fn resolve_model_capabilities(
-    provider: &str,
-    model_id: &str,
-    client: &hermes_intelligence::models_dev::ModelsDevClient,
-) -> ResolvedModelCapabilities {
-    if let Some(caps) = client.capabilities(provider, model_id) {
-        return ResolvedModelCapabilities {
-            supports_tools: caps.supports_tools,
-            supports_vision: caps.supports_vision,
-            supports_reasoning: caps.supports_reasoning,
-            context_window: caps.context_window.max(1),
-        };
-    }
-
-    let provider_model = format!("{}:{}", provider.trim(), model_id.trim());
-    let info = get_model_info(&provider_model).or_else(|| get_model_info(model_id));
-    ResolvedModelCapabilities {
-        supports_tools: info
-            .as_ref()
-            .map(|entry| entry.supports_tools)
-            .unwrap_or(true),
-        supports_vision: info
-            .as_ref()
-            .map(|entry| entry.supports_vision)
-            .unwrap_or(false),
-        supports_reasoning: info
-            .as_ref()
-            .map(|entry| entry.supports_reasoning)
-            .unwrap_or(false),
-        context_window: get_model_context_length(&provider_model),
-    }
-}
-
-fn model_meets_requirements(
-    capabilities: ResolvedModelCapabilities,
-    requirements: ModelCapabilityRequirements,
-) -> bool {
-    if requirements.require_tools && !capabilities.supports_tools {
-        return false;
-    }
-    if requirements.require_vision && !capabilities.supports_vision {
-        return false;
-    }
-    if requirements.require_reasoning && !capabilities.supports_reasoning {
-        return false;
-    }
-    if let Some(min_context) = requirements.effective_min_context() {
-        if capabilities.context_window < min_context {
-            return false;
-        }
-    }
-    true
-}
-
-fn unmet_model_requirements(
-    capabilities: ResolvedModelCapabilities,
-    requirements: ModelCapabilityRequirements,
-) -> Vec<String> {
-    let mut missing = Vec::new();
-    if requirements.require_tools && !capabilities.supports_tools {
-        missing.push("tools".to_string());
-    }
-    if requirements.require_vision && !capabilities.supports_vision {
-        missing.push("vision".to_string());
-    }
-    if requirements.require_reasoning && !capabilities.supports_reasoning {
-        missing.push("reasoning".to_string());
-    }
-    if let Some(min_context) = requirements.effective_min_context() {
-        if capabilities.context_window < min_context {
-            missing.push(format!(
-                "context>={} (actual={})",
-                min_context, capabilities.context_window
-            ));
-        }
-    }
-    missing
-}
-
-async fn handle_model_explain_command(
-    app: &mut App,
-    args: &[&str],
-    strict_why_not: bool,
-) -> Result<CommandResult, AgentError> {
-    let (mut positional, requirements, provider_override) = parse_model_command_args(args)?;
-    if let Some(provider) = provider_override {
-        if positional.is_empty() {
-            positional.push(provider);
-        } else if let Some(first) = positional.first().cloned() {
-            let model_id = first
-                .split_once(':')
-                .map(|(_, rhs)| rhs.to_string())
-                .unwrap_or(first);
-            positional[0] = format!("{}:{}", provider, model_id.trim());
-        }
-    }
-    let target = if positional.is_empty() {
-        app.current_model.clone()
-    } else {
-        normalize_model_target(&app.current_model, &positional[0])?
-    };
-    let (guarded, remap_note) = guard_provider_model_selection(&target).await?;
-    let (provider, model_id) = split_provider_model(&guarded);
-    let client = default_client();
-    client.fetch(false).await;
-    let capabilities = resolve_model_capabilities(provider, model_id, client);
-
-    let mut out = String::new();
-    let _ = writeln!(out, "Model capability report");
-    let _ = writeln!(out, "-----------------------");
-    let _ = writeln!(out, "target: {}", guarded);
-    let _ = writeln!(out, "provider: {}", provider.trim());
-    let _ = writeln!(out, "tools: {}", capabilities.supports_tools);
-    let _ = writeln!(out, "vision: {}", capabilities.supports_vision);
-    let _ = writeln!(out, "reasoning: {}", capabilities.supports_reasoning);
-    let _ = writeln!(out, "context_window: {}", capabilities.context_window);
-    let _ = writeln!(
-        out,
-        "acp_multimodal_parts: {}",
-        if capabilities.supports_vision {
-            "supported"
-        } else {
-            "text-only fallback"
-        }
-    );
-    if let Some(note) = remap_note.as_deref() {
-        let _ = writeln!(out, "catalog_guard: {}", note);
-    }
-
-    if !requirements.is_empty() {
-        let unmet = unmet_model_requirements(capabilities, requirements);
-        if unmet.is_empty() {
-            let _ = writeln!(out, "requirements: satisfied ({})", requirements.summary());
-        } else {
-            let _ = writeln!(out, "requirements: FAILED ({})", requirements.summary());
-            let _ = writeln!(out, "missing: {}", unmet.join(", "));
-            let catalog = provider_model_ids(provider).await;
-            let alternatives: Vec<String> = catalog
-                .into_iter()
-                .filter(|candidate| {
-                    model_meets_requirements(
-                        resolve_model_capabilities(provider, candidate, client),
-                        requirements,
-                    )
-                })
-                .take(8)
-                .collect();
-            if alternatives.is_empty() {
-                let _ = writeln!(out, "alternatives: none in provider catalog");
-            } else {
-                let _ = writeln!(
-                    out,
-                    "alternatives: {}",
-                    alternatives
-                        .iter()
-                        .map(|m| format!("{}:{}", provider, m))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-            if strict_why_not {
-                return Err(AgentError::Config(out.trim_end().to_string()));
-            }
-        }
-    } else if strict_why_not {
-        let _ = writeln!(
-            out,
-            "why-not mode requires constraints. Example: `/model why-not --cap tools,reasoning --min-context 200000`"
-        );
-    }
-
-    emit_command_output(app, out.trim_end());
-    Ok(CommandResult::Handled)
-}
-
-fn parse_model_switch_request(args: &[&str], known_providers: &[&str]) -> ModelSwitchRequest {
-    if args.is_empty() {
-        return ModelSwitchRequest::PickProviderThenModel;
-    }
-    let raw = args.join(" ");
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return ModelSwitchRequest::PickProviderThenModel;
-    }
-    if trimmed.contains(':') {
-        return ModelSwitchRequest::SetDirect(trimmed.to_string());
-    }
-    if known_providers
-        .iter()
-        .any(|p| p.eq_ignore_ascii_case(trimmed))
-    {
-        return ModelSwitchRequest::PickModelFromProvider(trimmed.to_ascii_lowercase());
-    }
-    ModelSwitchRequest::SetDirect(trimmed.to_string())
-}
-
-fn split_provider_model(provider_model: &str) -> (&str, &str) {
-    provider_model
-        .split_once(':')
-        .unwrap_or(("openai", provider_model))
-}
-
-fn model_catalog_guard_enabled() -> bool {
-    !matches!(
-        std::env::var("HERMES_MODEL_CATALOG_GUARD")
-            .ok()
-            .as_deref()
-            .map(|v| v.trim().to_ascii_lowercase()),
-        Some(v) if matches!(v.as_str(), "0" | "false" | "off" | "no")
-    )
-}
-
-fn resolve_catalog_model_candidate(requested_model: &str, catalog: &[String]) -> Option<String> {
-    if catalog.is_empty() {
-        return None;
-    }
-    let requested_trimmed = requested_model.trim();
-    if requested_trimmed.is_empty() {
-        return catalog.first().cloned();
-    }
-    if let Some(hit) = catalog
-        .iter()
-        .find(|m| m.trim().eq_ignore_ascii_case(requested_trimmed))
-    {
-        return Some(hit.clone());
-    }
-    let requested_lc = requested_trimmed.to_ascii_lowercase();
-    let slash_suffix = format!("/{requested_lc}");
-    if let Some(hit) = catalog.iter().find(|m| {
-        let lower = m.trim().to_ascii_lowercase();
-        lower.ends_with(&slash_suffix) || lower == requested_lc
-    }) {
-        return Some(hit.clone());
-    }
-    rank_catalog_model_candidates(requested_trimmed, catalog, 1)
-        .into_iter()
-        .next()
-}
-
-fn rank_catalog_model_candidates(
-    requested_model: &str,
-    catalog: &[String],
-    limit: usize,
-) -> Vec<String> {
-    if catalog.is_empty() || limit == 0 {
-        return Vec::new();
-    }
-    let requested = requested_model.trim().to_ascii_lowercase();
-    if requested.is_empty() {
-        return catalog.iter().take(limit).cloned().collect();
-    }
-    let requested_tail = requested.rsplit('/').next().unwrap_or(requested.as_str());
-    let requested_norm: String = requested
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect();
-
-    let mut scored: Vec<(usize, usize, String)> = catalog
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, candidate)| {
-            let cand_trimmed = candidate.trim();
-            if cand_trimmed.is_empty() {
-                return None;
-            }
-            let cand = cand_trimmed.to_ascii_lowercase();
-            let cand_tail = cand.rsplit('/').next().unwrap_or(cand.as_str());
-            let cand_norm: String = cand.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-            let mut score = 0usize;
-
-            if cand == requested {
-                score += 10_000;
-            }
-            if cand_tail == requested_tail {
-                score += 8_000;
-            }
-            if cand.ends_with(&format!("/{}", requested_tail)) {
-                score += 6_000;
-            }
-            if cand.contains(requested_tail) || requested_tail.contains(cand_tail) {
-                score += 2_000;
-            }
-
-            let shared_prefix = requested_norm
-                .chars()
-                .zip(cand_norm.chars())
-                .take_while(|(a, b)| a == b)
-                .count();
-            score += shared_prefix.saturating_mul(40);
-
-            let shared_chars = requested_norm
-                .chars()
-                .filter(|ch| cand_norm.contains(*ch))
-                .count();
-            score += shared_chars.saturating_mul(12);
-
-            let len_delta = requested_norm.len().abs_diff(cand_norm.len());
-            score = score.saturating_sub(len_delta.saturating_mul(4));
-            if score == 0 {
-                return None;
-            }
-            Some((score, idx, cand_trimmed.to_string()))
-        })
-        .collect();
-
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    scored
-        .into_iter()
-        .take(limit)
-        .map(|(_, _, candidate)| candidate)
-        .collect()
-}
-
-async fn guard_provider_model_selection(
-    provider_model: &str,
-) -> Result<(String, Option<String>), AgentError> {
-    if !model_catalog_guard_enabled() {
-        return Ok((provider_model.to_string(), None));
-    }
-
-    let (provider, model_id) = split_provider_model(provider_model);
-    let provider = provider.trim().to_ascii_lowercase();
-    if provider.is_empty() {
-        return Ok((provider_model.to_string(), None));
-    }
-    if matches!(provider.as_str(), "openai-codex" | "codex")
-        || (provider == "openai" && model_id.to_ascii_lowercase().contains("codex"))
-    {
-        return Ok((
-            provider_model.to_string(),
-            Some(format!(
-                "Catalog guard soft-accepted unlisted Codex model `{}`.",
-                model_id.trim()
-            )),
-        ));
-    }
-    if !curated_provider_slugs()
-        .iter()
-        .any(|slug| slug.eq_ignore_ascii_case(&provider))
-    {
-        return Ok((provider_model.to_string(), None));
-    }
-
-    let catalog = provider_model_ids(&provider).await;
-    if catalog.is_empty() {
-        return Ok((provider_model.to_string(), None));
-    }
-    let Some(candidate) = resolve_catalog_model_candidate(model_id, &catalog) else {
-        let suggestions = rank_catalog_model_candidates(model_id, &catalog, 5);
-        return Err(AgentError::Config(format!(
-            "Model '{}' is not available for provider '{}'. Close matches: {}. Use `/model {}` to pick a valid catalog entry.",
-            model_id.trim(),
-            provider,
-            if suggestions.is_empty() {
-                "(none)".to_string()
-            } else {
-                suggestions.join(", ")
-            },
-            provider,
-        )));
-    };
-    let guarded = format!("{}:{}", provider, candidate);
-    if guarded.eq_ignore_ascii_case(provider_model) {
-        return Ok((provider_model.to_string(), None));
-    }
-    Ok((
-        guarded.clone(),
-        Some(format!(
-            "Model catalog guard remapped `{}` -> `{}` based on provider catalog.",
-            provider_model, guarded
-        )),
-    ))
-}
-
-fn normalize_model_target(current_model: &str, raw: &str) -> Result<String, AgentError> {
-    let trimmed = raw.trim();
-    if trimmed.contains(':') {
-        return normalize_provider_model(trimmed);
-    }
-    let (provider, _) = split_provider_model(current_model);
-    normalize_provider_model(&format!("{}:{}", provider.trim(), trimmed))
-}
-
-/// Run `curses_select` safely from both plain CLI and active TUI sessions.
-///
-/// In TUI mode, use an embedded selector that does not toggle terminal mode.
-fn run_model_picker_select(
-    app: &App,
-    title: &str,
-    items: &[String],
-    initial_index: usize,
-) -> crate::SelectResult {
-    if app.stream_handle.is_some() {
-        crate::curses_select_embedded(title, items, initial_index)
-    } else {
-        crate::curses_select(title, items, initial_index)
-    }
-}
-
-fn persist_current_model_selection(app: &App) -> Result<PathBuf, AgentError> {
-    let cfg_path = app.state_root.join("config.yaml");
-    let mut disk = hermes_config::load_user_config_file(&cfg_path)
-        .map_err(|e| AgentError::Config(e.to_string()))?;
-    disk.model = Some(app.current_model.clone());
-    hermes_config::save_config_yaml(&cfg_path, &disk)
-        .map_err(|e| AgentError::Config(e.to_string()))?;
-    Ok(cfg_path)
-}
-
-fn format_model_persistence_note(app: &App) -> String {
-    match persist_current_model_selection(app) {
-        Ok(path) => format!("Persisted default model in {}.", path.display()),
-        Err(err) => format!(
-            "Warning: switched for this session, but failed to persist default model: {}",
-            err
-        ),
-    }
-}
-
-async fn pick_model_for_provider(
-    app: &mut App,
-    provider: &str,
-    current_model: &str,
-    requirements: ModelCapabilityRequirements,
-) -> Result<bool, AgentError> {
-    let models = provider_model_ids(provider).await;
-    if models.is_empty() {
-        emit_command_output(
-            app,
-            format!("No models available for provider '{}'.", provider),
-        );
-        return Ok(false);
-    }
-
-    let normalized_provider = provider.trim().to_ascii_lowercase();
-    let mut filtered_models = models.clone();
-    if !requirements.is_empty() {
-        let client = default_client();
-        client.fetch(false).await;
-        filtered_models = models
-            .iter()
-            .filter(|model_id| {
-                model_meets_requirements(
-                    resolve_model_capabilities(&normalized_provider, model_id, client),
-                    requirements,
-                )
-            })
-            .cloned()
-            .collect();
-    }
-
-    if filtered_models.is_empty() {
-        emit_command_output(
-            app,
-            format!(
-                "No models for provider '{}' satisfy required capabilities: {}.",
-                provider,
-                requirements.summary()
-            ),
-        );
-        return Ok(false);
-    }
-
-    let (_, current_model_id) = split_provider_model(current_model);
-    let default_index = filtered_models
-        .iter()
-        .position(|m| m.eq_ignore_ascii_case(current_model_id))
-        .unwrap_or(0);
-    let labels: Vec<String> = filtered_models.clone();
-    let title = format!("Select {} model ({} available)", provider, labels.len());
-    let pick = run_model_picker_select(app, &title, &labels, default_index);
-    if !pick.confirmed || pick.index >= filtered_models.len() {
-        emit_command_output(app, "Model switch cancelled.");
-        return Ok(false);
-    }
-    let provider_model = format!("{}:{}", provider, filtered_models[pick.index].trim());
-    let (guarded, note) = guard_provider_model_selection(&provider_model).await?;
-    app.switch_model(&guarded);
-    let mut msg = format!("Model switched to: {}", guarded);
-    if let Some(n) = note {
-        msg.push_str("\n");
-        msg.push_str(&n);
-    }
-    msg.push_str("\n");
-    msg.push_str(&format_model_persistence_note(app));
-    emit_command_output(app, msg);
-    Ok(true)
-}
-
-fn parse_failover_chain(raw: &str) -> Result<Vec<String>, AgentError> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for token in raw.split(',') {
-        let trimmed = token.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let normalized = normalize_provider_model(trimmed)?;
-        let key = normalized.to_ascii_lowercase();
-        if seen.insert(key) {
-            out.push(normalized);
-        }
-    }
-    Ok(out)
-}
-
-fn read_failover_chain_from_env() -> Vec<String> {
-    if let Ok(raw) = std::env::var("HERMES_FALLBACK_MODELS") {
-        let parsed: Vec<String> = raw
-            .split(',')
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(ToString::to_string)
-            .collect();
-        if !parsed.is_empty() {
-            return parsed;
-        }
-    }
-    if let Ok(raw) = std::env::var("HERMES_FALLBACK_MODEL") {
-        let value = raw.trim();
-        if !value.is_empty() {
-            return vec![value.to_string()];
-        }
-    }
-    Vec::new()
-}
-
-fn handle_model_failover_command(
-    app: &mut App,
-    args: &[&str],
-) -> Result<CommandResult, AgentError> {
-    let action = args
-        .first()
-        .copied()
-        .unwrap_or("status")
-        .to_ascii_lowercase();
-    match action.as_str() {
-        "status" | "show" => {
-            let chain_items = read_failover_chain_from_env();
-            let fallback = chain_items.first().map(|s| s.as_str()).unwrap_or("(none)");
-            let chain = if chain_items.is_empty() {
-                "(none)".to_string()
-            } else {
-                chain_items.join(", ")
-            };
-            emit_command_output(
-                app,
-                format!(
-                    "Failover fabric\nprimary_fallback: {}\nchain: {}\nusage: `/model failover set provider:model[,provider:model...]` or `/model failover clear`",
-                    fallback, chain
-                ),
-            );
-        }
-        "clear" | "reset" => {
-            crate::env_vars::remove_var("HERMES_FALLBACK_MODEL");
-            crate::env_vars::remove_var("HERMES_FALLBACK_MODELS");
-            let current = app.current_model.clone();
-            app.switch_model(&current);
-            emit_command_output(app, "Cleared retry failover chain.");
-        }
-        "set" => {
-            let raw = args
-                .get(1)
-                .ok_or_else(|| {
-                    AgentError::Config(
-                        "Usage: /model failover set provider:model[,provider:model...]".to_string(),
-                    )
-                })?
-                .trim();
-            let chain = parse_failover_chain(raw)?;
-            if chain.is_empty() {
-                return Err(AgentError::Config(
-                    "Failover chain cannot be empty.".to_string(),
-                ));
-            }
-            crate::env_vars::set_var("HERMES_FALLBACK_MODELS", chain.join(","));
-            if let Some(first) = chain.first() {
-                crate::env_vars::set_var("HERMES_FALLBACK_MODEL", first);
-            }
-            let current = app.current_model.clone();
-            app.switch_model(&current);
-            emit_command_output(app, format!("Failover chain set: {}", chain.join(", ")));
-        }
-        _ => {
-            emit_command_output(
-                app,
-                "Usage: /model failover [status|set provider:model[,provider:model...]|clear]",
-            );
-        }
-    }
-    Ok(CommandResult::Handled)
-}
-
-#[derive(Debug, Clone, Copy)]
-struct BackendBestPracticeProfile {
-    provider: &'static str,
-    profile: &'static str,
-    summary: &'static str,
-    launch_hint: &'static str,
-    env_overrides: &'static [(&'static str, &'static str)],
-}
-
-const VLLM_PROFILE_BALANCED_ENV: &[(&str, &str)] = &[
-    ("VLLM_GPU_MEMORY_UTILIZATION", "0.88"),
-    ("VLLM_ENABLE_PREFIX_CACHING", "1"),
-    ("VLLM_ENABLE_CHUNKED_PREFILL", "1"),
-];
-const VLLM_PROFILE_THROUGHPUT_ENV: &[(&str, &str)] = &[
-    ("VLLM_GPU_MEMORY_UTILIZATION", "0.92"),
-    ("VLLM_MAX_NUM_SEQS", "256"),
-    ("VLLM_ENABLE_PREFIX_CACHING", "1"),
-];
-const VLLM_PROFILE_RELIABILITY_ENV: &[(&str, &str)] = &[
-    ("VLLM_GPU_MEMORY_UTILIZATION", "0.80"),
-    ("VLLM_MAX_NUM_SEQS", "64"),
-    ("VLLM_ENABLE_CHUNKED_PREFILL", "0"),
-];
-const LLAMA_CPP_PROFILE_BALANCED_ENV: &[(&str, &str)] = &[
-    ("LLAMA_CPP_THREADS", "8"),
-    ("LLAMA_CPP_CTX_SIZE", "8192"),
-    ("LLAMA_CPP_BATCH", "512"),
-];
-const MLX_PROFILE_BALANCED_ENV: &[(&str, &str)] = &[
-    ("MLX_QUANT", "4bit"),
-    ("MLX_MAX_BATCH_SIZE", "16"),
-    ("MLX_ENABLE_PROMPT_CACHE", "1"),
-];
-const SGLANG_PROFILE_BALANCED_ENV: &[(&str, &str)] = &[
-    ("SGLANG_ENABLE_RADIX_CACHE", "1"),
-    ("SGLANG_MAX_RUNNING_REQUESTS", "256"),
-];
-const TGI_PROFILE_BALANCED_ENV: &[(&str, &str)] = &[
-    ("TGI_MAX_BATCH_TOTAL_TOKENS", "32768"),
-    ("TGI_WAITING_SERVED_RATIO", "0.30"),
-];
-const APPLE_ANE_PROFILE_BALANCED_ENV: &[(&str, &str)] = &[
-    ("APPLE_ANE_ENABLE_LOW_LATENCY", "1"),
-    ("APPLE_ANE_PREFILL_TOKENS", "1024"),
-];
-const MISTRAL_RS_PROFILE_BALANCED_ENV: &[(&str, &str)] = &[
-    ("MISTRAL_RS_PAGED_ATTENTION", "1"),
-    ("MISTRAL_RS_KV_CACHE_DTYPE", "fp16"),
-    ("MISTRAL_RS_SPECULATIVE_DECODING", "0"),
-];
-
-const BACKEND_BEST_PRACTICE_PROFILES: &[BackendBestPracticeProfile] = &[
-    BackendBestPracticeProfile {
-        provider: "vllm",
-        profile: "balanced",
-        summary: "Default SOTA profile for stable throughput and latency.",
-        launch_hint: "vllm serve MODEL --enable-prefix-caching --enable-chunked-prefill --gpu-memory-utilization 0.88",
-        env_overrides: VLLM_PROFILE_BALANCED_ENV,
-    },
-    BackendBestPracticeProfile {
-        provider: "vllm",
-        profile: "throughput",
-        summary: "Higher concurrency profile for heavy parallel workloads.",
-        launch_hint: "vllm serve MODEL --enable-prefix-caching --max-num-seqs 256 --gpu-memory-utilization 0.92",
-        env_overrides: VLLM_PROFILE_THROUGHPUT_ENV,
-    },
-    BackendBestPracticeProfile {
-        provider: "vllm",
-        profile: "reliability",
-        summary: "Lower-pressure profile tuned for long sessions and fewer OOM events.",
-        launch_hint: "vllm serve MODEL --max-num-seqs 64 --gpu-memory-utilization 0.80 --disable-chunked-prefill",
-        env_overrides: VLLM_PROFILE_RELIABILITY_ENV,
-    },
-    BackendBestPracticeProfile {
-        provider: "llama-cpp",
-        profile: "balanced",
-        summary: "General local GGUF serving profile with predictable latency.",
-        launch_hint: "llama-server -m MODEL.gguf -c 8192 -t 8 -b 512 --host 127.0.0.1 --port 8080",
-        env_overrides: LLAMA_CPP_PROFILE_BALANCED_ENV,
-    },
-    BackendBestPracticeProfile {
-        provider: "mlx",
-        profile: "balanced",
-        summary: "Apple Silicon profile prioritizing cache reuse and compact memory.",
-        launch_hint: "python -m mlx_lm.server --model mlx-community/Qwen3-8B-4bit --host 127.0.0.1 --port 8080",
-        env_overrides: MLX_PROFILE_BALANCED_ENV,
-    },
-    BackendBestPracticeProfile {
-        provider: "apple-ane",
-        profile: "balanced",
-        summary: "ANE-optimized low-latency settings for on-device endpoints.",
-        launch_hint: "Use your ANE OpenAI-compatible server with low-latency prefill settings.",
-        env_overrides: APPLE_ANE_PROFILE_BALANCED_ENV,
-    },
-    BackendBestPracticeProfile {
-        provider: "sglang",
-        profile: "balanced",
-        summary: "SGLang cache-first profile for sustained request loads.",
-        launch_hint: "python -m sglang.launch_server --model-path MODEL --host 127.0.0.1 --port 30000",
-        env_overrides: SGLANG_PROFILE_BALANCED_ENV,
-    },
-    BackendBestPracticeProfile {
-        provider: "tgi",
-        profile: "balanced",
-        summary: "Text-Generation-Inference profile balancing batch depth and tail latency.",
-        launch_hint: "text-generation-launcher --model-id MODEL --port 8082 --max-batch-total-tokens 32768",
-        env_overrides: TGI_PROFILE_BALANCED_ENV,
-    },
-    BackendBestPracticeProfile {
-        provider: "mistral-rs",
-        profile: "balanced",
-        summary: "mistral.rs runtime baseline for robust local serving.",
-        launch_hint: "mistralrs-server --model MODEL --port 8083 --paged-attention",
-        env_overrides: MISTRAL_RS_PROFILE_BALANCED_ENV,
-    },
-];
-
-fn normalize_backend_provider(value: &str) -> String {
-    let raw = value.trim().to_ascii_lowercase();
-    match raw.as_str() {
-        "llvm" | "ollvm" => "vllm".to_string(),
-        "llama.cpp" | "llamacpp" => "llama-cpp".to_string(),
-        "ane" => "apple-ane".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn backend_profile_lookup(
-    provider: &str,
-    profile: Option<&str>,
-) -> Option<&'static BackendBestPracticeProfile> {
-    let normalized = normalize_backend_provider(provider);
-    let profile = profile.unwrap_or("balanced").trim().to_ascii_lowercase();
-    BACKEND_BEST_PRACTICE_PROFILES.iter().find(|row| {
-        row.provider.eq_ignore_ascii_case(&normalized) && row.profile.eq_ignore_ascii_case(&profile)
-    })
-}
-
-fn render_backend_profiles(provider: Option<&str>) -> String {
-    let mut out = String::new();
-    out.push_str("Backend best-practice profiles\n");
-    out.push_str("-------------------------------\n");
-    let filtered: Vec<&BackendBestPracticeProfile> = if let Some(provider) = provider {
-        let normalized = normalize_backend_provider(provider);
-        BACKEND_BEST_PRACTICE_PROFILES
-            .iter()
-            .filter(|row| row.provider.eq_ignore_ascii_case(&normalized))
-            .collect()
-    } else {
-        BACKEND_BEST_PRACTICE_PROFILES.iter().collect()
-    };
-    if filtered.is_empty() {
-        let selected = provider.unwrap_or("(none)");
-        let _ = writeln!(out, "No backend profile presets found for '{}'.", selected);
-        return out.trim_end().to_string();
-    }
-    for row in filtered {
-        let _ = writeln!(
-            out,
-            "- {}:{}\n  {}\n  launch: {}\n  env: {}",
-            row.provider,
-            row.profile,
-            row.summary,
-            row.launch_hint,
-            row.env_overrides
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<String>>()
-                .join(", ")
-        );
-    }
-    out.push_str("\nUse `/model backend apply <provider> [profile]` to load env overrides for current runtime.");
-    out.trim_end().to_string()
-}
-
-fn persist_backend_profile_env(
-    provider: &str,
-    profile: &str,
-    env_pairs: &[(&str, &str)],
-) -> Result<PathBuf, AgentError> {
-    let dir = hermes_config::hermes_home()
-        .join("runtime")
-        .join("backend_profiles");
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        AgentError::Io(format!(
-            "Failed to create backend profile directory {}: {}",
-            dir.display(),
-            e
-        ))
-    })?;
-    let path = dir.join(format!(
-        "{}-{}.env",
-        normalize_backend_provider(provider),
-        profile.trim().to_ascii_lowercase()
-    ));
-    let mut body = String::new();
-    for (key, value) in env_pairs {
-        let _ = writeln!(body, "{}={}", key, value);
-    }
-    std::fs::write(&path, body).map_err(|e| {
-        AgentError::Io(format!(
-            "Failed to write backend profile file {}: {}",
-            path.display(),
-            e
-        ))
-    })?;
-    Ok(path)
-}
-
-fn model_current_provider_and_id(model: &str) -> (String, String) {
-    if let Some((provider, model_id)) = model.split_once(':') {
-        (
-            provider.trim().to_ascii_lowercase(),
-            model_id.trim().to_string(),
-        )
-    } else {
-        ("openai".to_string(), model.trim().to_string())
-    }
-}
-
-async fn handle_model_harness_command(
-    app: &mut App,
-    args: &[&str],
-) -> Result<CommandResult, AgentError> {
-    let (current_provider, current_model_id) = model_current_provider_and_id(&app.current_model);
-    let target = args.first().copied().unwrap_or_default().trim();
-    let (provider, requested_model) = if target.is_empty() {
-        (current_provider.clone(), current_model_id.clone())
-    } else if target.contains(':') {
-        let normalized = normalize_provider_model(target)?;
-        let (prov, model_id) = model_current_provider_and_id(&normalized);
-        (prov, model_id)
-    } else {
-        (normalize_backend_provider(target), current_model_id.clone())
-    };
-
-    let catalog = provider_model_ids(&provider).await;
-    let catalog_total = catalog.len();
-    let selected_model = requested_model.trim().to_string();
-    let selected_lc = selected_model.to_ascii_lowercase();
-    let selected_ok = catalog.iter().any(|candidate| {
-        let lower = candidate.trim().to_ascii_lowercase();
-        lower == selected_lc || lower.ends_with(&format!("/{selected_lc}"))
-    });
-    let credential_present = crate::app::provider_api_key_from_env(&provider).is_some();
-    let auth_state_present = crate::auth::read_provider_auth_state(&provider)
-        .ok()
-        .flatten()
-        .is_some();
-    let cache_status = cached_provider_catalog_status(&provider);
-    let mut out = String::new();
-    let _ = writeln!(out, "Model/provider harness");
-    let _ = writeln!(out, "provider: {}", provider);
-    let _ = writeln!(out, "selected_model: {}", selected_model);
-    let _ = writeln!(
-        out,
-        "credentials: api_key={} oauth_state={}",
-        yes_no(credential_present),
-        yes_no(auth_state_present)
-    );
-    let _ = writeln!(out, "catalog_total: {}", catalog_total);
-    let _ = writeln!(out, "selected_in_catalog: {}", yes_no(selected_ok));
-    if let Some(status) = cache_status {
-        let _ = writeln!(
-            out,
-            "catalog_cache: verified={} age_secs={}",
-            yes_no(status.verified),
-            status
-                .age_secs
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "n/a".to_string())
-        );
-    } else {
-        let _ = writeln!(out, "catalog_cache: unavailable");
-    }
-    if !selected_ok {
-        let sample = catalog
-            .iter()
-            .take(6)
-            .cloned()
-            .collect::<Vec<String>>()
-            .join(", ");
-        let _ = writeln!(
-            out,
-            "remediation: switch via `/model {} --provider {}` (or run `/model {}`)",
-            selected_model, provider, provider
-        );
-        if !sample.is_empty() {
-            let _ = writeln!(out, "catalog_sample: {}", sample);
-        }
-    }
-    if provider == "openrouter" && !credential_present && !auth_state_present {
-        let _ = writeln!(
-            out,
-            "openrouter_hint: set OPENROUTER_API_KEY or use a provider with OAuth (`/auth refresh`)."
-        );
-    }
-    if provider == "huggingface" {
-        let _ = writeln!(
-            out,
-            "huggingface_hint: prefer HF_TOKEN + HF_BASE_URL for full catalog enumeration."
-        );
-    }
-    emit_command_output(app, out.trim_end());
-    Ok(CommandResult::Handled)
-}
-
-fn handle_model_backend_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
-    let action = args.first().copied().unwrap_or("list").to_ascii_lowercase();
-    match action.as_str() {
-        "list" | "status" => {
-            let provider = args.get(1).copied();
-            emit_command_output(app, render_backend_profiles(provider));
-        }
-        "show" => {
-            let Some(provider) = args.get(1).copied() else {
-                emit_command_output(app, "Usage: /model backend show <provider> [profile]");
-                return Ok(CommandResult::Handled);
-            };
-            let profile = args.get(2).copied();
-            let Some(row) = backend_profile_lookup(provider, profile) else {
-                emit_command_output(
-                    app,
-                    format!(
-                        "No backend profile found for {}:{}.",
-                        provider,
-                        profile.unwrap_or("balanced")
-                    ),
-                );
-                return Ok(CommandResult::Handled);
-            };
-            emit_command_output(
-                app,
-                format!(
-                    "{}:{}\n{}\nlaunch: {}\nenv: {}",
-                    row.provider,
-                    row.profile,
-                    row.summary,
-                    row.launch_hint,
-                    row.env_overrides
-                        .iter()
-                        .map(|(k, v)| format!("{k}={v}"))
-                        .collect::<Vec<String>>()
-                        .join(", ")
-                ),
-            );
-        }
-        "apply" => {
-            let Some(provider) = args.get(1).copied() else {
-                emit_command_output(app, "Usage: /model backend apply <provider> [profile]");
-                return Ok(CommandResult::Handled);
-            };
-            let profile = args.get(2).copied().unwrap_or("balanced");
-            let Some(row) = backend_profile_lookup(provider, Some(profile)) else {
-                emit_command_output(
-                    app,
-                    format!("No backend profile found for {}:{}.", provider, profile),
-                );
-                return Ok(CommandResult::Handled);
-            };
-            for (key, value) in row.env_overrides {
-                crate::env_vars::set_var(key, value);
-            }
-            crate::env_vars::set_var("HERMES_LOCAL_BACKEND_PROFILE", row.profile);
-            crate::env_vars::set_var("HERMES_LOCAL_BACKEND_PROVIDER", row.provider);
-            let persisted =
-                persist_backend_profile_env(row.provider, row.profile, row.env_overrides)?;
-            let (current_provider, _) = model_current_provider_and_id(&app.current_model);
-            if current_provider == row.provider {
-                let current = app.current_model.clone();
-                app.switch_model(&current);
-            }
-            emit_command_output(
-                app,
-                format!(
-                    "Applied backend profile {}:{}.\nlaunch: {}\npersisted_env_file: {}\nUse `set -a && source {}` before launching external backend processes.",
-                    row.provider,
-                    row.profile,
-                    row.launch_hint,
-                    persisted.display(),
-                    persisted.display()
-                ),
-            );
-        }
-        _ => emit_command_output(
-            app,
-            "Usage: /model backend [list|status [provider]|show <provider> [profile]|apply <provider> [profile]]",
-        ),
-    }
-    Ok(CommandResult::Handled)
-}
-
-async fn handle_model_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
-    if let Some(sub) = args.first().map(|v| v.trim()) {
-        if sub.eq_ignore_ascii_case("failover") {
-            return handle_model_failover_command(app, &args[1..]);
-        }
-        if sub.eq_ignore_ascii_case("backend") {
-            return handle_model_backend_command(app, &args[1..]);
-        }
-        if sub.eq_ignore_ascii_case("harness") {
-            return handle_model_harness_command(app, &args[1..]).await;
-        }
-        if sub.eq_ignore_ascii_case("explain") {
-            return handle_model_explain_command(app, &args[1..], false).await;
-        }
-        if sub.eq_ignore_ascii_case("why-not")
-            || sub.eq_ignore_ascii_case("whynot")
-            || sub.eq_ignore_ascii_case("diagnose")
-        {
-            return handle_model_explain_command(app, &args[1..], true).await;
-        }
-    }
-
-    let (mut positional, requirements, provider_override) = parse_model_command_args(args)?;
-    if let Some(provider) = provider_override {
-        if positional.is_empty() {
-            positional.push(provider);
-        } else if let Some(first) = positional.first().cloned() {
-            let model_id = first
-                .split_once(':')
-                .map(|(_, rhs)| rhs.to_string())
-                .unwrap_or(first);
-            positional[0] = format!("{}:{}", provider, model_id.trim());
-        }
-    }
-    let positional_refs: Vec<&str> = positional.iter().map(String::as_str).collect();
-    let known_providers = curated_provider_slugs();
-    match parse_model_switch_request(&positional_refs, &known_providers) {
-        ModelSwitchRequest::SetDirect(raw) => {
-            let provider_model = normalize_model_target(&app.current_model, &raw)?;
-            let (guarded, note) = guard_provider_model_selection(&provider_model).await?;
-            if !requirements.is_empty() {
-                let (provider, model_id) = split_provider_model(&guarded);
-                let client = default_client();
-                client.fetch(false).await;
-                let caps = resolve_model_capabilities(provider, model_id, client);
-                if !model_meets_requirements(caps, requirements) {
-                    return Err(AgentError::Config(format!(
-                        "Requested model '{}' does not satisfy required capabilities: {}.",
-                        guarded,
-                        requirements.summary()
-                    )));
-                }
-            }
-            app.switch_model(&guarded);
-            let mut msg = format!("Model switched to: {}", guarded);
-            if let Some(n) = note {
-                msg.push_str("\n");
-                msg.push_str(&n);
-            }
-            if !requirements.is_empty() {
-                msg.push_str("\n");
-                msg.push_str(&format!(
-                    "Capability constraints satisfied: {}.",
-                    requirements.summary()
-                ));
-            }
-            msg.push_str("\n");
-            msg.push_str(&format_model_persistence_note(app));
-            emit_command_output(app, msg);
-        }
-        ModelSwitchRequest::PickModelFromProvider(provider) => {
-            let current_model = app.current_model.clone();
-            pick_model_for_provider(app, &provider, &current_model, requirements).await?;
-        }
-        ModelSwitchRequest::PickProviderThenModel => {
-            emit_command_output(app, format!("Current model: {}", app.current_model));
-            let providers: Vec<String> = known_providers.iter().map(|p| (*p).to_string()).collect();
-            if providers.is_empty() {
-                emit_command_output(app, "No providers are registered for selection.");
-                return Ok(CommandResult::Handled);
-            }
-            let (current_provider, _) = split_provider_model(&app.current_model);
-            let default_provider_index = providers
-                .iter()
-                .position(|p| p.eq_ignore_ascii_case(current_provider))
-                .unwrap_or(0);
-            let provider_pick =
-                run_model_picker_select(app, "Select provider", &providers, default_provider_index);
-            if !provider_pick.confirmed || provider_pick.index >= providers.len() {
-                emit_command_output(app, "Model switch cancelled.");
-                return Ok(CommandResult::Handled);
-            }
-            let provider = providers[provider_pick.index].as_str();
-            let current_model = app.current_model.clone();
-            pick_model_for_provider(app, provider, &current_model, requirements).await?;
-        }
-    }
     Ok(CommandResult::Handled)
 }
 
@@ -5127,14 +3874,28 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
 
             if rows.is_empty() {
                 let mut out = String::from("No agent-created skills found.\n\n");
-                out.push_str(&format!("curator: {}\n", curator_status_label(&curator_config, &state)));
-                out.push_str(&format!("  interval: every {}h\n", curator_config.interval_hours));
-                out.push_str(&format!("  stale after: {}d\n", curator_config.stale_after_days));
-                out.push_str(&format!("  archive after: {}d\n", curator_config.archive_after_days));
+                out.push_str(&format!(
+                    "curator: {}\n",
+                    curator_status_label(&curator_config, &state)
+                ));
+                out.push_str(&format!(
+                    "  interval: every {}h\n",
+                    curator_config.interval_hours
+                ));
+                out.push_str(&format!(
+                    "  stale after: {}d\n",
+                    curator_config.stale_after_days
+                ));
+                out.push_str(&format!(
+                    "  archive after: {}d\n",
+                    curator_config.archive_after_days
+                ));
                 if let Some(countdown) = next_run_countdown(&state, &curator_config) {
                     out.push_str(&format!("  next run eligible: {}\n", countdown));
                 }
-                out.push_str("\nSkills created by the agent during background review will appear here.");
+                out.push_str(
+                    "\nSkills created by the agent during background review will appear here.",
+                );
                 emit_command_output(app, &out);
             } else {
                 let mut out = format!("## Agent-created skills ({})\n\n", rows.len());
@@ -5147,13 +3908,20 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
                     out.push_str("**Most active:**\n");
                     for row in &top_active {
                         let pin_mark = if row.pinned { "📌 " } else { "  " };
-                        out.push_str(&format!("  {pin_mark}`{name}` — {activity} uses\n", name = row.name, activity = row.activity_count));
+                        out.push_str(&format!(
+                            "  {pin_mark}`{name}` — {activity} uses\n",
+                            name = row.name,
+                            activity = row.activity_count
+                        ));
                     }
                     out.push('\n');
                 }
 
                 // Least recently active top 5
-                let mut with_last: Vec<_> = rows.iter().filter(|r| r.last_activity_at.is_some()).collect();
+                let mut with_last: Vec<_> = rows
+                    .iter()
+                    .filter(|r| r.last_activity_at.is_some())
+                    .collect();
                 with_last.sort_by_key(|r| r.last_activity_at.as_deref().unwrap_or(""));
                 let least_active: Vec<_> = with_last.iter().take(5).collect();
                 if !least_active.is_empty() {
@@ -5166,7 +3934,10 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
                             _ => "",
                         };
                         let last = row.last_activity_at.as_deref().unwrap_or("never");
-                        out.push_str(&format!("  {pin_mark}`{name}`{state_tag} — last: {last}\n", name = row.name));
+                        out.push_str(&format!(
+                            "  {pin_mark}`{name}`{state_tag} — last: {last}\n",
+                            name = row.name
+                        ));
                     }
                     out.push('\n');
                 }
@@ -5191,21 +3962,35 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
 
                 // Config summary
                 out.push('\n');
-                out.push_str(&format!("curator: {}\n", curator_status_label(&curator_config, &state)));
+                out.push_str(&format!(
+                    "curator: {}\n",
+                    curator_status_label(&curator_config, &state)
+                ));
                 out.push_str(&format!("  runs: {}\n", state.run_count));
                 if let Some(ref last) = state.last_run_at {
                     out.push_str(&format!("  last run: {}\n", last));
                 }
-                out.push_str(&format!("  interval: every {}h\n", curator_config.interval_hours));
-                out.push_str(&format!("  stale after: {}d\n", curator_config.stale_after_days));
-                out.push_str(&format!("  archive after: {}d\n", curator_config.archive_after_days));
+                out.push_str(&format!(
+                    "  interval: every {}h\n",
+                    curator_config.interval_hours
+                ));
+                out.push_str(&format!(
+                    "  stale after: {}d\n",
+                    curator_config.stale_after_days
+                ));
+                out.push_str(&format!(
+                    "  archive after: {}d\n",
+                    curator_config.archive_after_days
+                ));
                 if let Some(countdown) = next_run_countdown(&state, &curator_config) {
                     out.push_str(&format!("  next run eligible: {}\n", countdown));
                 }
 
                 let pinned_count = rows.iter().filter(|r| r.pinned).count();
                 if pinned_count > 0 {
-                    out.push_str(&format!("\n📌 {pinned_count} pinned (exempt from automatic curation)"));
+                    out.push_str(&format!(
+                        "\n📌 {pinned_count} pinned (exempt from automatic curation)"
+                    ));
                 }
                 emit_command_output(app, out.trim_end());
             }
@@ -5213,10 +3998,7 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
         "pin" | "unpin" => {
             let skill_name = args.get(1).map(|s| s.trim()).unwrap_or("");
             if skill_name.is_empty() {
-                emit_command_output(
-                    app,
-                    format!("Usage: /curator {} <skill-name>", sub),
-                );
+                emit_command_output(app, format!("Usage: /curator {} <skill-name>", sub));
                 return Ok(CommandResult::Handled);
             }
             let pinned = sub == "pin";
@@ -5301,26 +4083,28 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
                 }
             }
         }
-        "pause" => {
-            match hermes_skills::set_paused(&skills_dir, true) {
-                Ok(()) => {
-                    emit_command_output(app, "✓ Curator paused. Automatic runs will be skipped until resumed.");
-                }
-                Err(e) => {
-                    emit_command_output(app, format!("Failed to pause curator: {e}"));
-                }
+        "pause" => match hermes_skills::set_paused(&skills_dir, true) {
+            Ok(()) => {
+                emit_command_output(
+                    app,
+                    "✓ Curator paused. Automatic runs will be skipped until resumed.",
+                );
             }
-        }
-        "resume" => {
-            match hermes_skills::set_paused(&skills_dir, false) {
-                Ok(()) => {
-                    emit_command_output(app, "✓ Curator resumed. Automatic runs will proceed on schedule.");
-                }
-                Err(e) => {
-                    emit_command_output(app, format!("Failed to resume curator: {e}"));
-                }
+            Err(e) => {
+                emit_command_output(app, format!("Failed to pause curator: {e}"));
             }
-        }
+        },
+        "resume" => match hermes_skills::set_paused(&skills_dir, false) {
+            Ok(()) => {
+                emit_command_output(
+                    app,
+                    "✓ Curator resumed. Automatic runs will proceed on schedule.",
+                );
+            }
+            Err(e) => {
+                emit_command_output(app, format!("Failed to resume curator: {e}"));
+            }
+        },
         "run" => {
             // Parse flags
             let mut dry_run = false;
@@ -5345,20 +4129,43 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
                 let dry_run_clone = dry_run;
                 let logs_dir = hermes_config::hermes_home().join("logs");
                 tokio::spawn(async move {
-                    let record = hermes_skills::run_curator_review::<_, std::future::Ready<Result<hermes_skills::CuratorReviewResult, hermes_skills::CuratorError>>>(
-                        &skills_dir_clone, &config_clone, dry_run_clone, None::<fn(String) -> std::future::Ready<Result<hermes_skills::CuratorReviewResult, hermes_skills::CuratorError>>>,
-                    ).await;
+                    let record = hermes_skills::run_curator_review::<
+                        _,
+                        std::future::Ready<
+                            Result<hermes_skills::CuratorReviewResult, hermes_skills::CuratorError>,
+                        >,
+                    >(
+                        &skills_dir_clone,
+                        &config_clone,
+                        dry_run_clone,
+                        None::<
+                            fn(
+                                String,
+                            ) -> std::future::Ready<
+                                Result<
+                                    hermes_skills::CuratorReviewResult,
+                                    hermes_skills::CuratorError,
+                                >,
+                            >,
+                        >,
+                    )
+                    .await;
                     if let Ok(ref record) = record {
                         // Write report
                         let report = build_curator_run_report(record, None, None);
-                        if let Ok(report_dir) = hermes_skills::write_curator_report(&report, &logs_dir) {
+                        if let Ok(report_dir) =
+                            hermes_skills::write_curator_report(&report, &logs_dir)
+                        {
                             let mut state = hermes_skills::load_curator_state(&skills_dir_clone);
                             state.last_report_path = Some(report_dir.to_string_lossy().to_string());
                             let _ = hermes_skills::save_curator_state(&skills_dir_clone, &state);
                         }
                     }
                 });
-                emit_command_output(app, "Curator LLM pass running in background — check `/curator status` later.");
+                emit_command_output(
+                    app,
+                    "Curator LLM pass running in background — check `/curator status` later.",
+                );
                 return Ok(CommandResult::Handled);
             }
 
@@ -5397,7 +4204,10 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
 
                 let _ = hermes_skills::save_curator_state(&skills_dir, &state);
                 lines.push(String::new());
-                lines.push("State updated. (LLM review pass will be available in a future update)".to_string());
+                lines.push(
+                    "State updated. (LLM review pass will be available in a future update)"
+                        .to_string(),
+                );
             } else {
                 lines.push(String::new());
                 lines.push("(dry-run: no state changes persisted)".to_string());
@@ -5406,16 +4216,14 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
             let output = lines.join("\n");
             emit_command_output(app, &output);
         }
-        "backup" => {
-            match backup_skills(&skills_dir) {
-                Ok(path) => {
-                    emit_command_output(app, format!("✅ Skills backed up to: {}", path.display()));
-                }
-                Err(e) => {
-                    emit_command_output(app, format!("Failed to backup skills: {e}"));
-                }
+        "backup" => match backup_skills(&skills_dir) {
+            Ok(path) => {
+                emit_command_output(app, format!("✅ Skills backed up to: {}", path.display()));
             }
-        }
+            Err(e) => {
+                emit_command_output(app, format!("Failed to backup skills: {e}"));
+            }
+        },
         "rollback" => {
             let backup_name = args.get(1).map(|s| s.trim()).unwrap_or("");
             if backup_name.is_empty() {
@@ -5423,7 +4231,10 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
                 match list_backups(&skills_dir) {
                     Ok(backups) => {
                         if backups.is_empty() {
-                            emit_command_output(app, "No backups found.\n\nUse `/curator backup` to create a snapshot first.");
+                            emit_command_output(
+                                app,
+                                "No backups found.\n\nUse `/curator backup` to create a snapshot first.",
+                            );
                         } else {
                             let mut out = format!("## Available backups ({})\n\n", backups.len());
                             for (name, path) in &backups {
@@ -5440,7 +4251,10 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
             } else {
                 match rollback_skills(&skills_dir, backup_name) {
                     Ok(()) => {
-                        emit_command_output(app, format!("✅ Rolled back to backup: {backup_name}"));
+                        emit_command_output(
+                            app,
+                            format!("✅ Rolled back to backup: {backup_name}"),
+                        );
                     }
                     Err(e) => {
                         emit_command_output(app, format!("Failed to rollback: {e}"));
@@ -5451,7 +4265,10 @@ async fn handle_curator_command(app: &mut App, args: &[&str]) -> Result<CommandR
         "prune" => {
             let force = args.get(1).map_or(false, |a| *a == "--force");
             if !force {
-                emit_command_output(app, "⚠️  This will permanently delete stale/archived skills.\nUse `/curator prune --force` to confirm.");
+                emit_command_output(
+                    app,
+                    "⚠️  This will permanently delete stale/archived skills.\nUse `/curator prune --force` to confirm.",
+                );
                 return Ok(CommandResult::Handled);
             }
             let result = hermes_skills::apply_automatic_transitions(&skills_dir, &curator_config);
@@ -5509,7 +4326,10 @@ fn curator_config_from_app(app: &App) -> hermes_skills::CuratorConfig {
 }
 
 /// Return a human-readable status label for the curator.
-fn curator_status_label(config: &hermes_skills::CuratorConfig, state: &hermes_skills::CuratorState) -> &'static str {
+fn curator_status_label(
+    config: &hermes_skills::CuratorConfig,
+    state: &hermes_skills::CuratorState,
+) -> &'static str {
     if state.paused {
         "PAUSED"
     } else if config.enabled {
@@ -5521,7 +4341,10 @@ fn curator_status_label(config: &hermes_skills::CuratorConfig, state: &hermes_sk
 
 /// Calculate the remaining time until the next eligible curator run.
 /// Returns `None` if the curator is paused, disabled, or has never been run.
-fn next_run_countdown(state: &hermes_skills::CuratorState, config: &hermes_skills::CuratorConfig) -> Option<String> {
+fn next_run_countdown(
+    state: &hermes_skills::CuratorState,
+    config: &hermes_skills::CuratorConfig,
+) -> Option<String> {
     if !config.enabled || state.paused {
         return None;
     }
@@ -5558,7 +4381,10 @@ fn build_curator_run_report(
         + record.auto_transitions.marked_stale
         + record.auto_transitions.archived
         + record.auto_transitions.reactivated;
-    let tool_calls_total = record.llm_review.as_ref().map_or(0, |r| r.tool_calls.len() as u64);
+    let tool_calls_total = record
+        .llm_review
+        .as_ref()
+        .map_or(0, |r| r.tool_calls.len() as u64);
 
     hermes_skills::CuratorRunReport {
         started_at: record.started_at.clone(),
@@ -5579,7 +4405,10 @@ fn build_curator_run_report(
         },
         consolidated: vec![],
         pruned: vec![],
-        tool_calls: record.llm_review.as_ref().map_or(vec![], |r| r.tool_calls.clone()),
+        tool_calls: record
+            .llm_review
+            .as_ref()
+            .map_or(vec![], |r| r.tool_calls.clone()),
         llm_error: None,
     }
 }
@@ -5633,7 +4462,10 @@ fn backup_skills(skills_dir: &std::path::Path) -> Result<std::path::PathBuf, std
         let entry = entry?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str == ".curator_backups" || name_str == ".archive" || name_str.starts_with(".curator_state") {
+        if name_str == ".curator_backups"
+            || name_str == ".archive"
+            || name_str.starts_with(".curator_state")
+        {
             continue;
         }
         let dest = backup_dir.join(&name);
@@ -5664,7 +4496,9 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
 }
 
 /// List available backups, sorted by timestamp (newest first).
-fn list_backups(skills_dir: &std::path::Path) -> Result<Vec<(String, std::path::PathBuf)>, std::io::Error> {
+fn list_backups(
+    skills_dir: &std::path::Path,
+) -> Result<Vec<(String, std::path::PathBuf)>, std::io::Error> {
     let backup_root = skills_dir.join(".curator_backups");
     if !backup_root.exists() {
         return Ok(vec![]);
@@ -5697,7 +4531,10 @@ fn rollback_skills(skills_dir: &std::path::Path, backup_name: &str) -> Result<()
         let entry = entry?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str == ".curator_backups" || name_str == ".archive" || name_str.starts_with(".curator_state") {
+        if name_str == ".curator_backups"
+            || name_str == ".archive"
+            || name_str.starts_with(".curator_state")
+        {
             continue;
         }
         if entry.path().is_dir() {
@@ -6381,7 +5218,10 @@ fn handle_compress_rules_command(
     Ok(CommandResult::Handled)
 }
 
-async fn handle_compress_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+async fn handle_compress_command(
+    app: &mut App,
+    args: &[&str],
+) -> Result<CommandResult, AgentError> {
     if args
         .first()
         .map(|v| v.eq_ignore_ascii_case("rules"))
@@ -6452,7 +5292,10 @@ fn compaction_governance_mode() -> CompactionGovernanceMode {
         .unwrap_or(CompactionGovernanceMode::Advisory)
 }
 
-async fn handle_autocompact_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+async fn handle_autocompact_command(
+    app: &mut App,
+    args: &[&str],
+) -> Result<CommandResult, AgentError> {
     let action = args
         .first()
         .map(|s| s.trim().to_ascii_lowercase())
@@ -8553,7 +7396,7 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
             );
             Ok(CommandResult::Handled)
         }
-        "model" => handle_model_command(app, &args[1..]).await,
+        "model" => model::handle_model_command(app, &args[1..]).await,
         "mode" => handle_policy_command(app, &args[1..]),
         "personality" => handle_personality_command(app, &args[1..]),
         "mouse" => handle_mouse_command(app, &args[1..]),
@@ -9348,14 +8191,7 @@ fn try_load_session_from_db(
             return Ok(None);
         }
     } else {
-        let rows = sp.list_sessions_rich(
-            None,
-            &["tool", "internal"],
-            1,
-            0,
-            1,
-            true,
-        )?;
+        let rows = sp.list_sessions_rich(None, &["tool", "internal"], 1, 0, 1, true)?;
         let Some(row) = rows.into_iter().next() else {
             return Ok(None);
         };
@@ -9418,14 +8254,7 @@ fn format_db_session_list(app: &App) -> Result<Option<String>, AgentError> {
     if sp.ensure_db().is_err() {
         return Ok(None);
     }
-    let rows = sp.list_sessions_rich(
-        None,
-        &["tool", "internal"],
-        20,
-        0,
-        0,
-        true,
-    )?;
+    let rows = sp.list_sessions_rich(None, &["tool", "internal"], 20, 0, 0, true)?;
     if rows.is_empty() {
         return Ok(None);
     }
@@ -9437,11 +8266,7 @@ fn format_db_session_list(app: &App) -> Result<Option<String>, AgentError> {
         let _ = writeln!(
             out,
             "- `{}`{} — id={} msgs={} — {}",
-            title,
-            marker,
-            row.id,
-            row.message_count,
-            preview
+            title, marker, row.id, row.message_count, preview
         );
     }
     out.push_str("\nUsage: `/load <session-title|id>` or `/resume [session-title|id]`");
@@ -9600,7 +8425,9 @@ fn handle_resume_command(app: &mut App, args: &[&str]) -> Result<CommandResult, 
     if !sessions_dir.exists() {
         emit_command_output(
             app,
-            format_session_db_unavailable("No saved sessions found and session database not available"),
+            format_session_db_unavailable(
+                "No saved sessions found and session database not available",
+            ),
         );
         return Ok(CommandResult::Handled);
     }
@@ -9608,7 +8435,9 @@ fn handle_resume_command(app: &mut App, args: &[&str]) -> Result<CommandResult, 
     if entries.is_empty() {
         emit_command_output(
             app,
-            format_session_db_unavailable("No saved sessions found and session database not available"),
+            format_session_db_unavailable(
+                "No saved sessions found and session database not available",
+            ),
         );
         return Ok(CommandResult::Handled);
     }
@@ -11300,36 +10129,8 @@ fn parse_reasoning_effort(raw: &str) -> Result<Option<&'static str>, AgentError>
     }
 }
 
-fn resolve_provider_key<'a>(cfg: &'a GatewayConfig, provider: &str) -> String {
-    cfg.llm_providers
-        .keys()
-        .find(|key| key.eq_ignore_ascii_case(provider))
-        .cloned()
-        .unwrap_or_else(|| provider.trim().to_ascii_lowercase())
-}
-
-fn gemini_thinking_level_for_effort(effort: &str) -> &'static str {
-    match effort {
-        "minimal" | "low" => "low",
-        "medium" => "medium",
-        "high" | "xhigh" => "high",
-        _ => "medium",
-    }
-}
-
-fn openai_reasoning_effort_for_level(effort: &str) -> &'static str {
-    match effort {
-        "minimal" => "low",
-        "xhigh" => "high",
-        "low" => "low",
-        "medium" => "medium",
-        "high" => "high",
-        _ => "medium",
-    }
-}
-
 fn set_provider_reasoning_effort(cfg: &mut GatewayConfig, provider: &str, effort: Option<&str>) {
-    let provider_key = resolve_provider_key(cfg, provider);
+    let provider_key = model::resolve_provider_key(cfg, provider);
     let provider_cfg = cfg
         .llm_providers
         .entry(provider_key.clone())
@@ -11351,7 +10152,7 @@ fn set_provider_reasoning_effort(cfg: &mut GatewayConfig, provider: &str, effort
                 .get("reasoning")
                 .and_then(|v| v.as_object().cloned())
                 .unwrap_or_default();
-            let mapped_reasoning = openai_reasoning_effort_for_level(level);
+            let mapped_reasoning = model::openai_reasoning_effort_for_level(level);
             reasoning_obj.insert(
                 "effort".to_string(),
                 serde_json::Value::String(mapped_reasoning.to_string()),
@@ -11362,7 +10163,7 @@ fn set_provider_reasoning_effort(cfg: &mut GatewayConfig, provider: &str, effort
             );
 
             if provider_key.contains("gemini") || provider_key == "google" {
-                let level_mapped = gemini_thinking_level_for_effort(level);
+                let level_mapped = model::gemini_thinking_level_for_effort(level);
                 let mut google_obj = body_map
                     .get("google")
                     .and_then(|v| v.as_object().cloned())
@@ -11418,7 +10219,7 @@ fn set_provider_reasoning_effort(cfg: &mut GatewayConfig, provider: &str, effort
 }
 
 fn provider_reasoning_effort(cfg: &GatewayConfig, provider: &str) -> Option<String> {
-    let provider_key = resolve_provider_key(cfg, provider);
+    let provider_key = model::resolve_provider_key(cfg, provider);
     cfg.llm_providers
         .get(&provider_key)
         .and_then(|entry| entry.extra_body.as_ref())
@@ -12253,7 +11054,8 @@ fn handle_history_command(app: &mut App) -> Result<CommandResult, AgentError> {
             hermes_core::MessageRole::System => "SYSTEM",
             hermes_core::MessageRole::Tool => "TOOL",
         };
-        let preview = hermes_agent::session_persistence::decode_content_preview(msg.content.as_deref());
+        let preview =
+            hermes_agent::session_persistence::decode_content_preview(msg.content.as_deref());
         let preview = preview.lines().next().unwrap_or("").trim();
         let clipped = if preview.chars().count() > 96 {
             let mut s: String = preview.chars().take(95).collect();
@@ -13482,7 +12284,10 @@ pub fn run_kanban_command(args: &[&str]) -> Result<String, AgentError> {
                         ),
                     },
                 );
-                return Ok(format!("Claimed {} ({})\n{}", task_id, task_ref, checkpoint.detail));
+                return Ok(format!(
+                    "Claimed {} ({})\n{}",
+                    task_id, task_ref, checkpoint.detail
+                ));
             }
             return Ok(format!("Task not found: {task_ref}"));
         }
@@ -19763,7 +18568,9 @@ pub async fn handle_cli_chat(
         let provider = crate::app::build_provider(&config, provider_model);
         let base =
             hermes_agent::AgentLoop::new(agent_config, Arc::clone(&agent_tool_registry), provider)
-                .with_async_tool_dispatch(crate::app::async_tool_dispatch_for(tool_registry.clone()))
+                .with_async_tool_dispatch(crate::app::async_tool_dispatch_for(
+                    tool_registry.clone(),
+                ))
                 .with_callbacks(callbacks);
         if query_mode {
             hermes_agent::attach_discovered_plugins(base)
@@ -21770,7 +20577,9 @@ fn run_plugins_interactive_toggle() -> Result<(), AgentError> {
         if let Ok(cwd) = std::env::current_dir() {
             println!(
                 "  - project: {}",
-                hermes_config::project_hermes_dir(&cwd).join("plugins").display()
+                hermes_config::project_hermes_dir(&cwd)
+                    .join("plugins")
+                    .display()
             );
         }
     } else {
@@ -23057,8 +21866,7 @@ pub async fn handle_cli_interest(
             } else {
                 rest.join(" ")
             };
-            let raw =
-                extract_signals_from_text(&sample, 1.0, ExtractOptions::default());
+            let raw = extract_signals_from_text(&sample, 1.0, ExtractOptions::default());
             let filtered = hermes_agent::filter_persistable_signals(raw);
             println!("POI extract preview (not persisted):");
             println!("  Sample: {sample}");
@@ -23095,9 +21903,7 @@ pub async fn handle_cli_interest(
         }
         "pin" => {
             let topic_id = rest.first().map(String::as_str).ok_or_else(|| {
-                hermes_core::AgentError::Config(
-                    "usage: hermes interest pin <topic-id>".to_string(),
-                )
+                hermes_core::AgentError::Config("usage: hermes interest pin <topic-id>".to_string())
             })?;
             let store = hermes_agent::InterestStore::open(&db_path, config.interest.clone())
                 .map_err(|e| hermes_core::AgentError::Io(e))?;
@@ -23158,7 +21964,10 @@ pub async fn handle_cli_contribute(
             println!("  Master enabled: {}", contribution.enabled);
             println!("  On session end: {}", contribution.on_session_end);
             println!("  Min evidence tier: {}", contribution.min_evidence_tier);
-            println!("  Require skill binding: {}", contribution.require_skill_binding);
+            println!(
+                "  Require skill binding: {}",
+                contribution.require_skill_binding
+            );
             println!("  Min work turns: {}", contribution.min_work_turns);
             println!("  Redacted body: {}", contribution.redacted_body);
             println!(
@@ -23191,9 +22000,8 @@ pub async fn handle_cli_contribute(
                 "  Outbox: {} pending, {} failed, {} sent",
                 counts.pending, counts.failed, counts.sent
             );
-            let install_id =
-                hermes_insights::paths::load_or_create_installation_id(&hermes_home)
-                    .unwrap_or_else(|_| "(unknown)".to_string());
+            let install_id = hermes_insights::paths::load_or_create_installation_id(&hermes_home)
+                .unwrap_or_else(|_| "(unknown)".to_string());
             println!("  Installation id: {install_id}");
             println!("  Local POI extraction: {}", config.interest.enabled);
         }
@@ -23207,7 +22015,10 @@ pub async fn handle_cli_contribute(
             hermes_config::save_config_yaml(&cfg_path, &disk)
                 .map_err(|e| hermes_core::AgentError::Config(e.to_string()))?;
             println!("Insights contribution updated.");
-            println!("  Consent version: {}", hermes_insights::INSIGHTS_CONSENT_VERSION);
+            println!(
+                "  Consent version: {}",
+                hermes_insights::INSIGHTS_CONSENT_VERSION
+            );
             println!("  Upload type: domain_work_package (POI + skill + resolution verdict).");
             println!("  Config: {}", cfg_path.display());
             if disk.insights.contribution.endpoint.trim().is_empty() {
@@ -23216,7 +22027,9 @@ pub async fn handle_cli_contribute(
                 println!("    or env HERMES_INSIGHTS_ENDPOINT");
             }
             if disk.insights.contribution.effective_token().is_none() {
-                println!("  Note: server requires Authorization Bearer (user JWT or flowy- API key):");
+                println!(
+                    "  Note: server requires Authorization Bearer (user JWT or flowy- API key):"
+                );
                 println!("    hermes config set insights.contribution.auth_token <jwt-or-api-key>");
                 println!("    or export HERMES_INSIGHTS_TOKEN=...");
                 println!("    (JWT may be hardcoded in config.yaml for now)");
@@ -23231,7 +22044,10 @@ pub async fn handle_cli_contribute(
             disk.insights.contribution.enabled = false;
             hermes_config::save_config_yaml(&cfg_path, &disk)
                 .map_err(|e| hermes_core::AgentError::Config(e.to_string()))?;
-            println!("Insights contribution settings saved to {}", cfg_path.display());
+            println!(
+                "Insights contribution settings saved to {}",
+                cfg_path.display()
+            );
         }
         "preview" => {
             let svc = hermes_insights::ContributionService::open(
@@ -23243,7 +22059,9 @@ pub async fn handle_cli_contribute(
             let json = serde_json::to_string_pretty(&batch)
                 .map_err(|e| hermes_core::AgentError::Config(e.to_string()))?;
             println!("{json}");
-            println!("\n(preview — run a session with skill_manage + domain task to populate packages)");
+            println!(
+                "\n(preview — run a session with skill_manage + domain task to populate packages)"
+            );
         }
         "flush" | "upload" => {
             if contribution.endpoint.trim().is_empty() {
@@ -23253,7 +22071,9 @@ pub async fn handle_cli_contribute(
             }
             if contribution.effective_token().is_none() {
                 println!("No Authorization Bearer configured; skipping upload.");
-                println!("Set: hermes config set insights.contribution.auth_token <jwt-or-api-key>");
+                println!(
+                    "Set: hermes config set insights.contribution.auth_token <jwt-or-api-key>"
+                );
                 println!(" or: export HERMES_INSIGHTS_TOKEN=...");
                 return Ok(());
             }
@@ -25350,11 +24170,14 @@ impl hermes_acp::AcpPromptExecutor for CliAcpPromptExecutor {
         let agent_tools = Arc::new(crate::app::bridge_tool_registry(&self.tool_registry));
         let agent = hermes_agent::attach_agent_runtime(
             hermes_agent::AgentLoop::new(agent_config, agent_tools, provider)
-                .with_async_tool_dispatch(crate::app::async_tool_dispatch_for(self.tool_registry.clone())),
+                .with_async_tool_dispatch(crate::app::async_tool_dispatch_for(
+                    self.tool_registry.clone(),
+                )),
         );
         let messages = acp_history_to_messages(history, user_text);
-        let (conversation_history, user_message) = split_messages_for_run_conversation(&messages)
-            .ok_or_else(|| "ACP prompt has no user message for run_conversation".to_string())?;
+        let (conversation_history, user_message) =
+            split_messages_for_run_conversation(&messages)
+                .ok_or_else(|| "ACP prompt has no user message for run_conversation".to_string())?;
         let task_id = Some(session.session_id.clone());
         let conv = agent
             .run_conversation(RunConversationParams {
@@ -26342,7 +25165,8 @@ mod tests {
         let usage = latest_ui_assistant_text(&app);
         assert!(usage.contains("Usage: /handoff <platform>"));
 
-        handle_handoff_command(&mut app, &["not-a-real-platform"]).expect("handoff unknown platform");
+        handle_handoff_command(&mut app, &["not-a-real-platform"])
+            .expect("handoff unknown platform");
         let unknown = latest_ui_assistant_text(&app);
         assert!(unknown.contains("Unknown platform 'not-a-real-platform'"));
     }
@@ -26792,22 +25616,6 @@ mod tests {
         assert!(telemetry.contains(&"/telemetry"));
         let runbook = autocomplete("/runb");
         assert!(runbook.contains(&"/runbook"));
-    }
-
-    #[tokio::test]
-    async fn guard_provider_model_selection_soft_accepts_unlisted_codex_models() {
-        let _guard = env_test_lock();
-        crate::env_vars::set_var("HERMES_MODEL_CATALOG_GUARD", "1");
-        let (guarded, note) = guard_provider_model_selection("openai-codex:gpt-9-codex-preview")
-            .await
-            .expect("codex soft-accept");
-        assert_eq!(guarded, "openai-codex:gpt-9-codex-preview");
-        assert!(
-            note.as_deref()
-                .unwrap_or_default()
-                .contains("soft-accepted")
-        );
-        crate::env_vars::remove_var("HERMES_MODEL_CATALOG_GUARD");
     }
 
     #[test]
@@ -27463,24 +26271,10 @@ install_command: "uv pip install -r requirements.txt"
     }
 
     #[test]
-    fn parse_model_switch_request_picks_provider_when_empty() {
-        let providers = vec!["openai", "nous", "anthropic"];
-        let req = parse_model_switch_request(&[], &providers);
-        assert_eq!(req, ModelSwitchRequest::PickProviderThenModel);
-    }
-
-    #[test]
     fn tail_text_lines_returns_last_n_lines() {
         let body = "a\nb\nc\nd\ne\n";
         assert_eq!(tail_text_lines(body, 2), "d\ne");
         assert_eq!(tail_text_lines(body, 10), "a\nb\nc\nd\ne");
-    }
-
-    #[test]
-    fn backend_profile_lookup_resolves_aliases() {
-        let row = backend_profile_lookup("llvm", Some("throughput")).expect("profile");
-        assert_eq!(row.provider, "vllm");
-        assert_eq!(row.profile, "throughput");
     }
 
     #[test]
@@ -27496,104 +26290,6 @@ install_command: "uv pip install -r requirements.txt"
         assert!(line.contains("backend=qdrant"));
         assert!(line.contains("model=text-embedding-3-large"));
         assert!(line.contains("dimension=3072"));
-    }
-
-    #[test]
-    fn parse_model_command_args_extracts_capability_flags() {
-        let (positional, requirements, provider_override) = parse_model_command_args(&[
-            "nous",
-            "--cap",
-            "vision,reasoning",
-            "--min-context",
-            "200000",
-        ])
-        .expect("parse");
-        assert_eq!(positional, vec!["nous".to_string()]);
-        assert!(requirements.require_vision);
-        assert!(requirements.require_reasoning);
-        assert!(!requirements.require_tools);
-        assert_eq!(requirements.min_context_window, Some(200_000));
-        assert!(provider_override.is_none());
-    }
-
-    #[test]
-    fn parse_model_command_args_supports_boolean_capability_switches() {
-        let (positional, requirements, provider_override) =
-            parse_model_command_args(&["openai:gpt-4o", "--tools", "--long-context"])
-                .expect("parse");
-        assert_eq!(positional, vec!["openai:gpt-4o".to_string()]);
-        assert!(requirements.require_tools);
-        assert!(requirements.require_long_context);
-        assert_eq!(
-            requirements.effective_min_context(),
-            Some(ModelCapabilityRequirements::LONG_CONTEXT_DEFAULT)
-        );
-        assert!(provider_override.is_none());
-    }
-
-    #[test]
-    fn parse_model_command_args_extracts_provider_override() {
-        let (positional, _requirements, provider_override) =
-            parse_model_command_args(&["gpt-4o", "--provider", "openai"]).expect("parse");
-        assert_eq!(positional, vec!["gpt-4o".to_string()]);
-        assert_eq!(provider_override.as_deref(), Some("openai"));
-    }
-
-    #[test]
-    fn model_meets_requirements_checks_tools_vision_reasoning_and_context() {
-        let requirements = ModelCapabilityRequirements {
-            require_tools: true,
-            require_vision: true,
-            require_reasoning: true,
-            require_long_context: false,
-            min_context_window: Some(128_000),
-        };
-        let caps = ResolvedModelCapabilities {
-            supports_tools: true,
-            supports_vision: true,
-            supports_reasoning: true,
-            context_window: 200_000,
-        };
-        assert!(model_meets_requirements(caps, requirements));
-        let weak_caps = ResolvedModelCapabilities {
-            supports_tools: true,
-            supports_vision: false,
-            supports_reasoning: true,
-            context_window: 200_000,
-        };
-        assert!(!model_meets_requirements(weak_caps, requirements));
-    }
-
-    #[test]
-    fn unmet_model_requirements_lists_missing_constraints() {
-        let requirements = ModelCapabilityRequirements {
-            require_tools: true,
-            require_vision: true,
-            require_reasoning: true,
-            require_long_context: false,
-            min_context_window: Some(256_000),
-        };
-        let caps = ResolvedModelCapabilities {
-            supports_tools: true,
-            supports_vision: false,
-            supports_reasoning: false,
-            context_window: 128_000,
-        };
-        let missing = unmet_model_requirements(caps, requirements);
-        assert!(missing.iter().any(|m| m == "vision"));
-        assert!(missing.iter().any(|m| m == "reasoning"));
-        assert!(
-            missing
-                .iter()
-                .any(|m| m.contains("context>=256000 (actual=128000)"))
-        );
-    }
-
-    #[test]
-    fn parse_model_command_args_rejects_unknown_capability() {
-        let err = parse_model_command_args(&["--cap", "telepathy"]).expect_err("expected error");
-        let message = err.to_string().to_ascii_lowercase();
-        assert!(message.contains("unknown model capability"));
     }
 
     #[test]
@@ -27633,47 +26329,6 @@ install_command: "uv pip install -r requirements.txt"
     }
 
     #[test]
-    fn parse_model_switch_request_uses_provider_picker_for_provider_arg() {
-        let providers = vec!["openai", "nous", "anthropic"];
-        let req = parse_model_switch_request(&["NOUS"], &providers);
-        assert_eq!(
-            req,
-            ModelSwitchRequest::PickModelFromProvider("nous".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_model_switch_request_accepts_direct_provider_model() {
-        let providers = vec!["openai", "nous", "anthropic"];
-        let req = parse_model_switch_request(&["openai:gpt-4o"], &providers);
-        assert_eq!(
-            req,
-            ModelSwitchRequest::SetDirect("openai:gpt-4o".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_model_switch_request_keeps_bare_model_as_direct() {
-        let providers = vec!["openai", "nous", "anthropic"];
-        let req = parse_model_switch_request(&["gpt-4o"], &providers);
-        assert_eq!(req, ModelSwitchRequest::SetDirect("gpt-4o".to_string()));
-    }
-
-    #[test]
-    fn normalize_model_target_uses_current_provider_for_bare_model() {
-        let normalized = normalize_model_target("nous:moonshotai/kimi-k2.6", "openai/gpt-5.5")
-            .expect("normalize");
-        assert_eq!(normalized, "nous:openai/gpt-5.5");
-    }
-
-    #[test]
-    fn normalize_model_target_keeps_explicit_provider_model() {
-        let normalized = normalize_model_target("nous:moonshotai/kimi-k2.6", "openai:gpt-5.4")
-            .expect("normalize");
-        assert_eq!(normalized, "openai:gpt-5.4");
-    }
-
-    #[test]
     fn parse_toggle_arg_supports_status_and_explicit_values() {
         assert_eq!(parse_toggle_arg(None, true).expect("toggle"), false);
         assert_eq!(
@@ -27703,90 +26358,6 @@ install_command: "uv pip install -r requirements.txt"
         );
         assert_eq!(parse_reasoning_effort("auto").expect("auto"), None);
         assert!(parse_reasoning_effort("turbo").is_err());
-    }
-
-    #[test]
-    fn set_provider_reasoning_effort_updates_and_clears_extra_body() {
-        let mut cfg = GatewayConfig::default();
-        set_provider_reasoning_effort(&mut cfg, "nous", Some("high"));
-        let extra = cfg
-            .llm_providers
-            .get("nous")
-            .and_then(|entry| entry.extra_body.as_ref())
-            .expect("extra body");
-        assert!(extra.get("reasoning_effort").is_none());
-        assert_eq!(
-            extra
-                .get("reasoning")
-                .and_then(|value| value.get("effort"))
-                .and_then(|value| value.as_str())
-                .expect("reasoning.effort"),
-            "high"
-        );
-
-        set_provider_reasoning_effort(&mut cfg, "nous", None);
-        let extra_after_clear = cfg
-            .llm_providers
-            .get("nous")
-            .and_then(|entry| entry.extra_body.as_ref());
-        assert!(extra_after_clear.is_none());
-    }
-
-    #[test]
-    fn set_provider_reasoning_effort_normalizes_openai_effort_levels() {
-        let mut cfg = GatewayConfig::default();
-        set_provider_reasoning_effort(&mut cfg, "nous", Some("xhigh"));
-        let extra = cfg
-            .llm_providers
-            .get("nous")
-            .and_then(|entry| entry.extra_body.as_ref())
-            .expect("extra body");
-        assert_eq!(
-            extra
-                .get("reasoning")
-                .and_then(|value| value.get("effort"))
-                .and_then(|value| value.as_str()),
-            Some("high")
-        );
-        set_provider_reasoning_effort(&mut cfg, "nous", Some("minimal"));
-        let extra = cfg
-            .llm_providers
-            .get("nous")
-            .and_then(|entry| entry.extra_body.as_ref())
-            .expect("extra body");
-        assert_eq!(
-            extra
-                .get("reasoning")
-                .and_then(|value| value.get("effort"))
-                .and_then(|value| value.as_str()),
-            Some("low")
-        );
-    }
-
-    #[test]
-    fn set_provider_reasoning_effort_sets_gemini_thinking_level() {
-        let mut cfg = GatewayConfig::default();
-        set_provider_reasoning_effort(&mut cfg, "gemini", Some("xhigh"));
-        let extra = cfg
-            .llm_providers
-            .get("gemini")
-            .and_then(|entry| entry.extra_body.as_ref())
-            .expect("extra body");
-        assert_eq!(
-            extra
-                .get("google")
-                .and_then(|value| value.get("thinking_config"))
-                .and_then(|value| value.get("thinking_level"))
-                .and_then(|value| value.as_str()),
-            Some("high")
-        );
-        assert_eq!(
-            extra
-                .get("thinking_config")
-                .and_then(|value| value.get("thinking_level"))
-                .and_then(|value| value.as_str()),
-            Some("high")
-        );
     }
 
     #[test]
@@ -27960,44 +26531,6 @@ install_command: "uv pip install -r requirements.txt"
         let masked = mask_secret_value(raw);
         assert!(!masked.contains(raw));
         assert!(masked.contains("***"));
-    }
-
-    #[test]
-    fn resolve_catalog_model_candidate_prefers_suffix_match() {
-        let catalog = vec![
-            "nousresearch/hermes-4-405b".to_string(),
-            "moonshotai/kimi-k2.6".to_string(),
-        ];
-        let chosen = resolve_catalog_model_candidate("kimi-k2.6", &catalog).expect("candidate");
-        assert_eq!(chosen, "moonshotai/kimi-k2.6");
-    }
-
-    #[test]
-    fn resolve_catalog_model_candidate_uses_relative_match_for_near_miss() {
-        let catalog = vec![
-            "qwen/qwen3.6-plus".to_string(),
-            "qwen/qwen3.6-max-preview".to_string(),
-            "moonshotai/kimi-k2.6".to_string(),
-        ];
-        let chosen = resolve_catalog_model_candidate("qwen3.6-max", &catalog).expect("candidate");
-        assert_eq!(chosen, "qwen/qwen3.6-max-preview");
-    }
-
-    #[test]
-    fn rank_catalog_model_candidates_returns_best_first() {
-        let catalog = vec![
-            "qwen/qwen3.6-plus".to_string(),
-            "qwen/qwen3.6-max-preview".to_string(),
-            "moonshotai/kimi-k2.6".to_string(),
-        ];
-        let ranked = rank_catalog_model_candidates("qwen3.6-max", &catalog, 2);
-        assert_eq!(
-            ranked,
-            vec![
-                "qwen/qwen3.6-max-preview".to_string(),
-                "qwen/qwen3.6-plus".to_string()
-            ]
-        );
     }
 
     #[test]

@@ -16,6 +16,6 @@ pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
 /// Remove a process environment variable (see [`std::env::remove_var`]).
 // SAFETY: Same as [`set_var`].
 #[inline]
-pub fn remove_var<K: AsRef<OsStr>>(key: K) {   
+pub fn remove_var<K: AsRef<OsStr>>(key: K) {
     unsafe { std::env::remove_var(key) }
 }

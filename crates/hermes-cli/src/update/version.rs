@@ -25,7 +25,10 @@ impl Channel {
         } else if pre.is_empty() {
             Channel::Stable
         } else {
-            tracing::warn!("Unknown pre-release suffix '{}', defaulting to Beta channel", pre);
+            tracing::warn!(
+                "Unknown pre-release suffix '{}', defaulting to Beta channel",
+                pre
+            );
             Channel::Beta // 未知 pre-release 默认视为 beta
         }
     }
@@ -55,12 +58,8 @@ pub enum UpdateDecision {
 
 /// 版本比较策略 trait（Strategy 模式）
 pub trait VersionPolicy: Send + Sync {
-    fn evaluate(
-        &self,
-        current: &Version,
-        available: &Version,
-        meta: &UpdateMeta,
-    ) -> UpdateDecision;
+    fn evaluate(&self, current: &Version, available: &Version, meta: &UpdateMeta)
+    -> UpdateDecision;
 
     fn name(&self) -> &str;
 }
@@ -314,7 +313,10 @@ mod tests {
         assert_eq!(Channel::from_prerelease(""), Channel::Stable);
         assert_eq!(Channel::from_prerelease("beta.1"), Channel::Beta);
         assert_eq!(Channel::from_prerelease("rc.1"), Channel::Rc);
-        assert_eq!(Channel::from_prerelease("nightly.20240101"), Channel::Nightly);
+        assert_eq!(
+            Channel::from_prerelease("nightly.20240101"),
+            Channel::Nightly
+        );
         assert_eq!(Channel::from_prerelease("alpha.1"), Channel::Beta); // unknown → beta
     }
 

@@ -5,14 +5,14 @@ use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use hermes_agent::{
-    auxiliary_config_from_gateway, build_auxiliary_client,
-    register_agent_builtin_tools_with_voice, AgentInboundPreparer, AuxiliaryBuildParams,
+    AgentInboundPreparer, AuxiliaryBuildParams, auxiliary_config_from_gateway,
+    build_auxiliary_client, register_agent_builtin_tools_with_voice,
 };
 use hermes_config::GatewayConfig;
 use hermes_core::{SkillProvider, TerminalBackend};
+use hermes_gateway::Gateway;
 use hermes_gateway::voice::VoiceManager;
 use hermes_gateway::voice_config::voice_config_from_app;
-use hermes_gateway::Gateway;
 use hermes_tools::{ToolRegistry, VoiceMediaToolConfig};
 
 /// Parse `provider:model` from config (e.g. `custom:flowy/DeepSeek-V4-Flash`).
@@ -36,11 +36,7 @@ pub async fn wire_gateway_inbound_vision(
     terminal_backend: Arc<dyn TerminalBackend>,
     skill_provider: Arc<dyn SkillProvider>,
 ) {
-    let configured = config
-        .model
-        .as_deref()
-        .unwrap_or("gpt-4o")
-        .to_string();
+    let configured = config.model.as_deref().unwrap_or("gpt-4o").to_string();
     let (primary_provider, primary_model) = split_configured_model(&configured);
 
     let (auxiliary, _summary) = build_auxiliary_client(AuxiliaryBuildParams {
@@ -170,7 +166,8 @@ pub fn make_gateway_status_callback(
             "tool_progress",
             None,
         );
-        let reuse_progress = event_type == "tool_progress" && progress_mode.as_deref() == Some("new");
+        let reuse_progress =
+            event_type == "tool_progress" && progress_mode.as_deref() == Some("new");
         let progress_id = progress_message_id.clone();
         tokio::spawn(async move {
             if reuse_progress {
@@ -253,7 +250,9 @@ pub fn make_gateway_on_thinking_callback(
         guard.delta_count = guard.delta_count.saturating_add(1);
         guard.total_chars = guard.total_chars.saturating_add(thinking.chars().count());
         let now = Instant::now();
-        if now.duration_since(guard.last_flush) >= Duration::from_millis(1000) || guard.delta_count >= 32 {
+        if now.duration_since(guard.last_flush) >= Duration::from_millis(1000)
+            || guard.delta_count >= 32
+        {
             tracing::debug!(
                 thinking_delta_count = guard.delta_count,
                 thinking_total_chars = guard.total_chars,

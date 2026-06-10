@@ -643,7 +643,7 @@ pub(crate) fn run_doctor_self_heal(cli: &crate::Cli) -> Vec<serde_json::Value> {
         }
     }
 
-    let vault_path = crate::secret_vault_path_for_cli(cli);
+    let vault_path = crate::secret_vault_path_for_cli(&crate::hermes_state_root(cli));
     if vault_path.exists() {
         #[cfg(unix)]
         {

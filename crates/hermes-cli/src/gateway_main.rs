@@ -13,14 +13,11 @@
 
 use hermes_agent::AgentLoop;
 use hermes_agent::session_persistence::SessionPersistence;
-use hermes_cli::app::{
-    async_tool_dispatch_for, build_agent_config, build_provider,
-};
+use hermes_cli::app::{async_tool_dispatch_for, build_agent_config, build_provider};
 use hermes_cli::cli::Cli;
 use hermes_cli::whatsapp_wizard;
 use hermes_config::{
-    GatewayConfig, PlatformConfig, UnauthorizedDmBehavior,
-    hermes_home, load_user_config_file,
+    GatewayConfig, PlatformConfig, UnauthorizedDmBehavior, hermes_home, load_user_config_file,
 };
 use hermes_core::AgentError;
 use hermes_core::MessageRole;
@@ -734,7 +731,8 @@ pub(crate) struct GatewayAgentCacheEntry {
     last_used: Instant,
 }
 
-pub(crate) type GatewayAgentCache = Arc<tokio::sync::Mutex<HashMap<String, GatewayAgentCacheEntry>>>;
+pub(crate) type GatewayAgentCache =
+    Arc<tokio::sync::Mutex<HashMap<String, GatewayAgentCacheEntry>>>;
 
 pub(crate) fn gateway_agent_signature(
     config: &GatewayConfig,
@@ -869,7 +867,10 @@ pub(crate) fn truncate_hook_tool_result(result: &str) -> String {
 // Gateway context & agent builder
 // ---------------------------------------------------------------------------
 
-pub(crate) fn resolve_model_for_gateway(default_model: &str, ctx: &GatewayRuntimeContext) -> String {
+pub(crate) fn resolve_model_for_gateway(
+    default_model: &str,
+    ctx: &GatewayRuntimeContext,
+) -> String {
     if let Some(model) = &ctx.model {
         if model.contains(':') {
             return model.clone();
@@ -1084,7 +1085,8 @@ pub(crate) async fn configure_platform_basic_prompts(
                 p.extra
                     .insert("port".to_string(), serde_json::Value::from(v));
             }
-            let path = super::prompt_line("WeCom callback path (default /wecom/callback): ").await?;
+            let path =
+                super::prompt_line("WeCom callback path (default /wecom/callback): ").await?;
             set_extra_string_if_nonempty(p, "path", &path);
         }
         "qqbot" => {
@@ -1162,10 +1164,9 @@ pub(crate) async fn configure_platform_basic_prompts(
                 p.extra
                     .insert("port".to_string(), serde_json::Value::from(v));
             }
-            let token = super::prompt_line(
-                "API server auth_token (required for non-loopback host): ",
-            )
-            .await?;
+            let token =
+                super::prompt_line("API server auth_token (required for non-loopback host): ")
+                    .await?;
             set_extra_string_if_nonempty(p, "auth_token", &token);
         }
         _ => {}
@@ -1245,8 +1246,7 @@ pub(crate) async fn configure_gateway_platform(
                 }
                 "3" => {
                     let ids = parse_csv_list(
-                        &super::prompt_line("Allowed Weixin group IDs (comma-separated): ")
-                            .await?,
+                        &super::prompt_line("Allowed Weixin group IDs (comma-separated): ").await?,
                     );
                     wx.extra
                         .insert("group_policy".to_string(), serde_json::json!("allowlist"));
@@ -1309,9 +1309,10 @@ pub(crate) async fn configure_gateway_platform(
             }
             apply_telegram_allowlists(tg, &allowed_users);
 
-            let group_allowed =
-                super::prompt_line("Telegram group-only allowed user IDs (comma-separated, optional): ")
-                    .await?;
+            let group_allowed = super::prompt_line(
+                "Telegram group-only allowed user IDs (comma-separated, optional): ",
+            )
+            .await?;
             let group_users = parse_csv_list(&group_allowed);
             if !group_users.is_empty() {
                 tg.extra.insert(
@@ -1952,7 +1953,11 @@ pub(crate) async fn register_gateway_adapters(
 
 /// Route one inbound message. Spawned per message so clarify replies can hit the
 /// fast-path while another route for the same chat is blocked in `wait_for`.
-pub(crate) fn spawn_gateway_route(gateway: Arc<Gateway>, incoming: GatewayIncomingMessage, platform: &str) {
+pub(crate) fn spawn_gateway_route(
+    gateway: Arc<Gateway>,
+    incoming: GatewayIncomingMessage,
+    platform: &str,
+) {
     let platform = platform.to_string();
     tokio::spawn(async move {
         if let Err(err) = gateway.route_message(&incoming).await {

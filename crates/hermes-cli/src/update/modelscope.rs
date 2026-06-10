@@ -1,16 +1,16 @@
-use async_trait::async_trait;
-use hermes_core::errors::AgentError;
-use semver::Version;
-use std::process::Command;
 use crate::update::github::{ReleaseInfo, ReleaseSource};
 use crate::update::manifest::ReleaseManifest;
 use crate::update::platform::Platform;
 use crate::update::version::Channel;
+use async_trait::async_trait;
+use hermes_core::errors::AgentError;
+use semver::Version;
+use std::process::Command;
 
 /// ModelScope Release 源
 pub struct ModelScopeSource {
-    pub repo: String,       // "flowy2025/agent"
-    pub prefix: String,     // "hermes-agent-ultra"
+    pub repo: String,   // "flowy2025/agent"
+    pub prefix: String, // "hermes-agent-ultra"
 }
 
 impl Default for ModelScopeSource {
@@ -50,13 +50,11 @@ impl ModelScopeSource {
 /// Unlike the github variant, this does NOT send a GITHUB_TOKEN header.
 fn curl_get(url: &str) -> Result<String, AgentError> {
     let mut cmd = Command::new("curl");
-    cmd.args([
-        "-sSfL",
-        "-H", "User-Agent: hermes-agent-ultra",
-    ]);
+    cmd.args(["-sSfL", "-H", "User-Agent: hermes-agent-ultra"]);
     cmd.arg(url);
 
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .map_err(|e| AgentError::Io(format!("Failed to run curl: {e}")))?;
 
     if !output.status.success() {
@@ -75,14 +73,14 @@ impl ReleaseSource for ModelScopeSource {
     }
 
     async fn fetch_latest(&self, platform: &Platform) -> Result<ReleaseInfo, AgentError> {
-        let body = curl_get(&self.latest_json_url())
-            .map_err(|e| AgentError::Io(format!("Failed to fetch latest.json from ModelScope: {e}")))?;
+        let body = curl_get(&self.latest_json_url()).map_err(|e| {
+            AgentError::Io(format!("Failed to fetch latest.json from ModelScope: {e}"))
+        })?;
 
         let manifest: ReleaseManifest = serde_json::from_str(&body)
             .map_err(|e| AgentError::Io(format!("Failed to parse manifest: {e}")))?;
 
-        let version = Version::parse(&manifest.version)
-            .unwrap_or_else(|_| Version::new(0, 0, 0));
+        let version = Version::parse(&manifest.version).unwrap_or_else(|_| Version::new(0, 0, 0));
         let channel = Channel::from_str(&manifest.channel);
 
         // 获取 artifact URL
@@ -96,7 +94,8 @@ impl ReleaseSource for ModelScopeSource {
                 self.file_download_url(&manifest.version_tag(), &artifact_name)
             } else {
                 return Err(AgentError::Io(format!(
-                    "No artifact for platform {} in manifest", platform_key
+                    "No artifact for platform {} in manifest",
+                    platform_key
                 )));
             }
         };
@@ -118,7 +117,9 @@ impl ReleaseSource for ModelScopeSource {
             checksum_url,
             release_notes: manifest.notes.clone(),
             forced: manifest.forced,
-            min_version: manifest.min_version.as_ref()
+            min_version: manifest
+                .min_version
+                .as_ref()
                 .and_then(|v| Version::parse(v).ok()),
         })
     }

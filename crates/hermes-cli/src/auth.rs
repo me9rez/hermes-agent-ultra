@@ -4,8 +4,8 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD;
 use chrono::Utc;
 use hermes_core::AgentError;
 use rand::TryRng;
@@ -575,14 +575,8 @@ fn hermes_auth_store_discovery_paths() -> Vec<PathBuf> {
     }
     candidates.push(auth_json_path());
     if let Some(home) = dirs::home_dir() {
-        candidates.push(
-            home.join(hermes_config::LEGACY_HOME_DIR)
-                .join("auth.json"),
-        );
-        candidates.push(
-            home.join(hermes_config::PRIMARY_HOME_DIR)
-                .join("auth.json"),
-        );
+        candidates.push(home.join(hermes_config::LEGACY_HOME_DIR).join("auth.json"));
+        candidates.push(home.join(hermes_config::PRIMARY_HOME_DIR).join("auth.json"));
     }
     existing_unique_paths(candidates)
 }
@@ -1735,7 +1729,9 @@ fn default_gemini_client_secret() -> String {
 
 fn build_oauth_pkce_pair() -> (String, String) {
     let mut verifier_bytes = [0u8; 32];
-    rand::rngs::SysRng.try_fill_bytes(&mut verifier_bytes).expect("rng failed");
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut verifier_bytes)
+        .expect("rng failed");
     let verifier = BASE64_URL_SAFE_NO_PAD.encode(verifier_bytes);
     let challenge = BASE64_URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     (verifier, challenge)
@@ -1743,7 +1739,9 @@ fn build_oauth_pkce_pair() -> (String, String) {
 
 fn build_oauth_state_token() -> String {
     let mut state_bytes = [0u8; 16];
-    rand::rngs::SysRng.try_fill_bytes(&mut state_bytes).expect("rng failed");
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut state_bytes)
+        .expect("rng failed");
     BASE64_URL_SAFE_NO_PAD.encode(state_bytes)
 }
 

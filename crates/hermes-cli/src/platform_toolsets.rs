@@ -209,7 +209,7 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use hermes_core::{tool_schema, JsonSchema, ToolError};
+    use hermes_core::{JsonSchema, ToolError, tool_schema};
 
     struct NoopTool {
         schema: ToolSchema,
@@ -291,10 +291,7 @@ mod tests {
 
     #[test]
     fn cross_platform_hint_for_weixin_with_feishu_tools() {
-        let tools = vec![
-            "send_message".to_string(),
-            "feishu_calendar".to_string(),
-        ];
+        let tools = vec!["send_message".to_string(), "feishu_calendar".to_string()];
         let hint = cross_platform_system_hint("weixin", &tools);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("feishu_*"));

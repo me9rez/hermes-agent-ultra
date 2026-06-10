@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use hermes_core::errors::AgentError;
+use std::path::{Path, PathBuf};
 
 /// 获取当前 binary 路径
 fn current_exe_path() -> Result<PathBuf, AgentError> {
@@ -84,7 +84,9 @@ fn windows_replace(new_binary: &Path, exe_path: &Path, _bak: &Path) -> Result<()
     // Rename running exe to .old (Windows allows renaming a running exe)
     if let Err(e) = std::fs::rename(exe_path, &old) {
         tracing::error!("Failed to rename current exe: {e}");
-        return Err(AgentError::Io(format!("Failed to rename current executable: {e}")));
+        return Err(AgentError::Io(format!(
+            "Failed to rename current executable: {e}"
+        )));
     }
 
     // Copy new binary to original path
@@ -105,7 +107,9 @@ pub fn rollback() -> Result<(), AgentError> {
     let bak = backup_path(&exe_path);
 
     if !bak.exists() {
-        return Err(AgentError::Io("No backup found. Cannot rollback.".to_string()));
+        return Err(AgentError::Io(
+            "No backup found. Cannot rollback.".to_string(),
+        ));
     }
 
     #[cfg(unix)]

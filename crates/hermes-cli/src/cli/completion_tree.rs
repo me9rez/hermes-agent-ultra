@@ -10,9 +10,7 @@ pub fn completion_command() -> Command {
     let mut cmd = globals::root_with_global_flags();
     cmd = cmd
         .subcommand(Command::new("hermes"))
-        .subcommand(
-            Command::new("setup").about("Run the interactive setup wizard"),
-        )
+        .subcommand(Command::new("setup").about("Run the interactive setup wizard"))
         .subcommand(Command::new("status").about("Show agent and gateway status"))
         .subcommand(Command::new("version").about("Print version information"));
 

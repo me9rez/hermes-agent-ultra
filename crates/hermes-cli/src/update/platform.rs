@@ -37,7 +37,11 @@ impl Platform {
 
     /// binary 文件名
     pub fn binary_name(&self) -> &'static str {
-        if self.os == "windows" { "hermes.exe" } else { "hermes" }
+        if self.os == "windows" {
+            "hermes.exe"
+        } else {
+            "hermes"
+        }
     }
 }
 
@@ -54,45 +58,69 @@ mod tests {
 
     #[test]
     fn test_artifact_name_linux_x86_64() {
-        let p = Platform { os: "linux", arch: "x86_64" };
+        let p = Platform {
+            os: "linux",
+            arch: "x86_64",
+        };
         assert_eq!(p.artifact_name(), "hermes-linux-x86_64.tar.gz");
     }
 
     #[test]
     fn test_artifact_name_linux_aarch64() {
-        let p = Platform { os: "linux", arch: "aarch64" };
+        let p = Platform {
+            os: "linux",
+            arch: "aarch64",
+        };
         assert_eq!(p.artifact_name(), "hermes-linux-aarch64.tar.gz");
     }
 
     #[test]
     fn test_artifact_name_windows() {
-        let p = Platform { os: "windows", arch: "x86_64" };
+        let p = Platform {
+            os: "windows",
+            arch: "x86_64",
+        };
         assert_eq!(p.artifact_name(), "hermes-windows-x86_64.zip");
     }
 
     #[test]
     fn test_artifact_name_macos_aarch64() {
-        let p = Platform { os: "macos", arch: "aarch64" };
+        let p = Platform {
+            os: "macos",
+            arch: "aarch64",
+        };
         assert_eq!(p.artifact_name(), "hermes-macos-aarch64.tar.gz");
     }
 
     #[test]
     fn test_artifact_name_macos_x86_64() {
-        let p = Platform { os: "macos", arch: "x86_64" };
+        let p = Platform {
+            os: "macos",
+            arch: "x86_64",
+        };
         assert_eq!(p.artifact_name(), "hermes-macos-x86_64.tar.gz");
     }
 
     #[test]
     fn test_binary_name_windows() {
-        let p = Platform { os: "windows", arch: "x86_64" };
+        let p = Platform {
+            os: "windows",
+            arch: "x86_64",
+        };
         assert_eq!(p.binary_name(), "hermes.exe");
     }
 
     #[test]
     fn test_binary_name_unix() {
-        let p = Platform { os: "linux", arch: "x86_64" };
+        let p = Platform {
+            os: "linux",
+            arch: "x86_64",
+        };
         assert_eq!(p.binary_name(), "hermes");
-        let p = Platform { os: "macos", arch: "aarch64" };
+        let p = Platform {
+            os: "macos",
+            arch: "aarch64",
+        };
         assert_eq!(p.binary_name(), "hermes");
     }
 }

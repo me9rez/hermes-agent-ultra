@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use hermes_config::{GatewayConfig, PlatformConfig};
 use hermes_gateway::platforms::whatsapp::{
-    clear_pairing_session, has_legacy_baileys_session, is_paired, mark_paired, session_db_path,
-    WhatsAppConfig, WhatsAppRustClient,
+    WhatsAppConfig, WhatsAppRustClient, clear_pairing_session, has_legacy_baileys_session,
+    is_paired, mark_paired, session_db_path,
 };
 
 /// Result of the interactive WhatsApp Web (QR) setup flow.
@@ -18,7 +18,9 @@ pub struct WhatsAppSetupResult {
 }
 
 pub fn whatsapp_session_path() -> PathBuf {
-    hermes_config::hermes_home().join("whatsapp").join("session")
+    hermes_config::hermes_home()
+        .join("whatsapp")
+        .join("session")
 }
 
 /// Menu label for `hermes gateway setup` (distinct from "configured" = enabled + paired).
@@ -49,8 +51,8 @@ fn prompt_line(label: &str) -> Result<String, hermes_core::AgentError> {
     Ok(line.trim().to_string())
 }
 
-async fn prompt_whatsapp_mode_and_allowlist(
-) -> Result<(String, Vec<String>), hermes_core::AgentError> {
+async fn prompt_whatsapp_mode_and_allowlist()
+-> Result<(String, Vec<String>), hermes_core::AgentError> {
     println!("Choose mode:");
     println!("  1) self-chat — message yourself on WhatsApp (quick test / personal)");
     println!("  2) bot — dedicated bot number (recommended for multi-user)");
@@ -63,9 +65,8 @@ async fn prompt_whatsapp_mode_and_allowlist(
 
     let mut allow_from = Vec::new();
     if mode == "bot" {
-        let users = prompt_line(
-            "Allowed users (comma-separated phone numbers, or * for open bot): ",
-        )?;
+        let users =
+            prompt_line("Allowed users (comma-separated phone numbers, or * for open bot): ")?;
         if !users.is_empty() {
             allow_from = users
                 .split(',')
@@ -130,8 +131,7 @@ pub fn apply_whatsapp_to_gateway_config(
         .entry("whatsapp".to_string())
         .or_insert_with(PlatformConfig::default);
     wa.enabled = true;
-    wa.extra
-        .insert("mode".to_string(), serde_json::json!(mode));
+    wa.extra.insert("mode".to_string(), serde_json::json!(mode));
     if mode == "self-chat" {
         wa.extra
             .insert("dm_policy".to_string(), serde_json::json!("open"));
@@ -224,10 +224,7 @@ fn persist_whatsapp_config_yaml(
 
 async fn ensure_legacy_migration_ok(session: &Path) -> Result<bool, hermes_core::AgentError> {
     if has_legacy_baileys_session(session) && !is_paired(session) {
-        println!(
-            "\nLegacy Baileys session found at {}.",
-            session.display()
-        );
+        println!("\nLegacy Baileys session found at {}.", session.display());
         println!("The Rust client uses a new SQLite session — you must re-pair.");
         let cont = prompt_line("Continue with new pairing? [Y/n]: ")?;
         if cont.eq_ignore_ascii_case("n") {
@@ -250,7 +247,10 @@ async fn prompt_existing_paired_session(
     if let Some(disk) = gateway {
         let enabled = disk.platforms.get("whatsapp").is_some_and(|p| p.enabled);
         if enabled {
-            println!("\nWhatsApp is already configured (paired session at {}).", session.display());
+            println!(
+                "\nWhatsApp is already configured (paired session at {}).",
+                session.display()
+            );
             let re_pair = prompt_line("Re-pair with a new QR code? [y/N]: ")?;
             if !re_pair.eq_ignore_ascii_case("y") {
                 return Ok(Some(WhatsAppSetupResult {
@@ -261,7 +261,10 @@ async fn prompt_existing_paired_session(
             }
             return Ok(None);
         }
-        println!("\nA paired WhatsApp session exists at {}.", session.display());
+        println!(
+            "\nA paired WhatsApp session exists at {}.",
+            session.display()
+        );
         println!("Gateway config does not have WhatsApp enabled yet.");
         let enable = prompt_line("Use this session and enable WhatsApp? [Y/n]: ")?;
         if !enable.eq_ignore_ascii_case("n") {
@@ -356,10 +359,7 @@ pub async fn whatsapp_baileys_status() -> Result<(), hermes_core::AgentError> {
     let paired = is_paired(&session);
     let legacy = has_legacy_baileys_session(&session);
     println!("  Session dir:    {}", session.display());
-    println!(
-        "  Rust paired:    {}",
-        if paired { "yes" } else { "no" }
-    );
+    println!("  Rust paired:    {}", if paired { "yes" } else { "no" });
     if legacy {
         println!("  Legacy Baileys: creds.json present (re-pair if not migrated)");
     }

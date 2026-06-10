@@ -23,8 +23,8 @@ use crate::alpha_runtime::{
     summarize_objective_contract, upsert_objective_contract, utility_terms_from_contract,
 };
 use crate::app::App;
-use crate::commands::{CommandResult, emit_command_output, truncate_chars, yes_no};
 use crate::commands::background;
+use crate::commands::{CommandResult, emit_command_output, truncate_chars, yes_no};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1217,7 +1217,10 @@ pub(crate) fn handle_objective_command(
 // /steer handler
 // ---------------------------------------------------------------------------
 
-pub(crate) fn handle_steer_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+pub(crate) fn handle_steer_command(
+    app: &mut App,
+    args: &[&str],
+) -> Result<CommandResult, AgentError> {
     if args.is_empty() {
         let message = current_session_steer(app).map_or_else(
             || "No active steering instruction. Use `/steer <instruction>`.".to_string(),
@@ -1249,7 +1252,10 @@ pub(crate) fn handle_steer_command(app: &mut App, args: &[&str]) -> Result<Comma
 // /btw handler
 // ---------------------------------------------------------------------------
 
-pub(crate) fn handle_btw_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+pub(crate) fn handle_btw_command(
+    app: &mut App,
+    args: &[&str],
+) -> Result<CommandResult, AgentError> {
     if args.is_empty() {
         emit_command_output(
             app,
@@ -1780,21 +1786,21 @@ mod tests {
         assert_eq!(set_result, CommandResult::Handled);
         assert_eq!(app.session_objective.as_deref(), Some("stabilize indexing"));
 
-        let pause_result =
-            crate::commands::handle_slash_command(&mut app, "/objective", &["pause", "manual", "hold"])
-                .await
-                .expect("pause objective");
+        let pause_result = crate::commands::handle_slash_command(
+            &mut app,
+            "/objective",
+            &["pause", "manual", "hold"],
+        )
+        .await
+        .expect("pause objective");
         assert_eq!(pause_result, CommandResult::Handled);
         assert!(app.session_objective.is_none());
         assert!(latest_ui_assistant_text(&app).contains("status=paused"));
 
-        let resume_result = crate::commands::handle_slash_command(
-            &mut app,
-            "/objective",
-            &["resume", "continue"],
-        )
-        .await
-        .expect("resume objective");
+        let resume_result =
+            crate::commands::handle_slash_command(&mut app, "/objective", &["resume", "continue"])
+                .await
+                .expect("resume objective");
         assert_eq!(resume_result, CommandResult::Handled);
         assert_eq!(app.session_objective.as_deref(), Some("stabilize indexing"));
         assert!(latest_ui_assistant_text(&app).contains("status=active"));
@@ -1815,25 +1821,19 @@ mod tests {
         .await
         .expect("set objective");
 
-        let mode_result = crate::commands::handle_slash_command(
-            &mut app,
-            "/objective",
-            &["behavior", "strict"],
-        )
-        .await
-        .expect("set behavior");
+        let mode_result =
+            crate::commands::handle_slash_command(&mut app, "/objective", &["behavior", "strict"])
+                .await
+                .expect("set behavior");
         assert_eq!(mode_result, CommandResult::Handled);
         let output = latest_ui_assistant_text(&app);
         assert!(output.contains("mode=strict"));
         assert!(output.contains("directives:"));
 
-        let mission_result = crate::commands::handle_slash_command(
-            &mut app,
-            "/objective",
-            &["behavior", "sigma"],
-        )
-        .await
-        .expect("set behavior sigma");
+        let mission_result =
+            crate::commands::handle_slash_command(&mut app, "/objective", &["behavior", "sigma"])
+                .await
+                .expect("set behavior sigma");
         assert_eq!(mission_result, CommandResult::Handled);
         let mission_output = latest_ui_assistant_text(&app);
         assert!(mission_output.contains("mode=mission"));

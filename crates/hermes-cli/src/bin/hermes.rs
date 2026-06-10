@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::{exit, Command};
+use std::process::{Command, exit};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -99,10 +99,7 @@ fn main() {
     }
 
     for target in &targets {
-        eprintln!(
-            "[INFO] hermes wrapper: trying {}",
-            target.to_string_lossy()
-        );
+        eprintln!("[INFO] hermes wrapper: trying {}", target.to_string_lossy());
     }
 
     let mut launch_errors: Vec<String> = Vec::new();

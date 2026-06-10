@@ -68,7 +68,12 @@ pub fn prefer_plain_checklist() -> bool {
     }
     std::env::var("HERMES_PLAIN_CHECKLIST")
         .ok()
-        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .is_some_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
 }
 
 /// Run an interactive multi-select checklist in the terminal.
@@ -372,13 +377,9 @@ fn numbered_fallback(
     initial_selected: &HashSet<usize>,
     status_fn: Option<&dyn Fn(&HashSet<usize>) -> String>,
 ) -> ChecklistResult {
-    numbered_fallback_with_reader(
-        title,
-        items,
-        initial_selected,
-        status_fn,
-        |prompt| read_line_prompt(prompt),
-    )
+    numbered_fallback_with_reader(title, items, initial_selected, status_fn, |prompt| {
+        read_line_prompt(prompt)
+    })
 }
 
 fn read_line_prompt(prompt: &str) -> io::Result<String> {
@@ -636,10 +637,7 @@ fn official_numbered_select(
         println!("  {marker} {:>2}. {clean}", i + 1);
     }
     println!();
-    print!(
-        " Choice [default {}]: ",
-        default_index + 1
-    );
+    print!(" Choice [default {}]: ", default_index + 1);
     io::stdout().flush().ok();
 
     let mut input = String::new();
@@ -753,8 +751,8 @@ mod tests {
     #[test]
     fn numbered_checklist_done_confirms() {
         let mut chosen = HashSet::from([0usize, 1usize]);
-        let result = apply_numbered_checklist_input("done", 2, &mut chosen)
-            .expect("done should confirm");
+        let result =
+            apply_numbered_checklist_input("done", 2, &mut chosen).expect("done should confirm");
         assert!(result.confirmed);
         assert_eq!(result.selected, HashSet::from([0usize, 1usize]));
     }
@@ -790,7 +788,7 @@ mod tests {
 
     #[test]
     fn key_event_is_actionable_ignores_release() {
-        use crossterm::event::{KeyModifiers, KeyEventKind};
+        use crossterm::event::{KeyEventKind, KeyModifiers};
         let press = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, KeyEventKind::Press);
         let release =
             KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, KeyEventKind::Release);

@@ -16704,8 +16704,6 @@ mod tests {
         assert!(latest_ui_assistant_text(&app).contains("Background queue status:"));
     }
 
-
-
     #[tokio::test]
     async fn slash_auth_status_command_is_handled() {
         let _guard = env_test_lock();
@@ -16775,8 +16773,6 @@ mod tests {
         );
         assert!(latest_ui_assistant_text(&app).contains("resumed for this runtime"));
     }
-
-
 
     #[tokio::test]
     async fn promoted_paste_command_uses_test_clipboard_override() {
@@ -16960,8 +16956,6 @@ mod tests {
         assert!(results.contains(&"/pet"));
     }
 
-
-
     #[test]
     fn test_kanban_command_is_registered_and_completable() {
         assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/kanban"));
@@ -17002,8 +16996,6 @@ mod tests {
         assert_eq!(input.description.as_deref(), Some("note"));
     }
 
-
-
     #[test]
     fn test_reset_alias_maps_to_new() {
         assert_eq!(canonical_command("/reset"), "/new");
@@ -17026,8 +17018,6 @@ mod tests {
         assert!(app.messages.is_empty());
         assert!(latest_ui_assistant_text(&app).contains("Session reset"));
     }
-
-
 
     #[test]
     fn test_mission_command_is_registered_and_completable() {

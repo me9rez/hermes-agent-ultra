@@ -1,16 +1,16 @@
-pub mod platform;
-pub mod github;
 pub mod download;
-pub mod verify;
-pub mod replace;
-pub mod modelscope;
-pub mod probe;
-pub mod version;
+pub mod github;
 pub mod manifest;
+pub mod modelscope;
+pub mod platform;
+pub mod probe;
+pub mod replace;
+pub mod verify;
+pub mod version;
 
-use hermes_core::errors::AgentError;
 use crate::update::platform::Platform;
-use crate::update::version::{ChannelPolicy, Channel, VersionPolicy, UpdateMeta, UpdateDecision};
+use crate::update::version::{Channel, ChannelPolicy, UpdateDecision, UpdateMeta, VersionPolicy};
+use hermes_core::errors::AgentError;
 
 /// 更新选项
 pub struct UpdateOptions {
@@ -27,12 +27,13 @@ pub async fn check_for_updates() -> Result<String, AgentError> {
     println!("Checking for updates from {}...", source.name());
 
     let info = source.fetch_latest(&platform).await?;
-    let current = semver::Version::parse(
-        env!("CARGO_PKG_VERSION").trim_start_matches('v')
-    ).unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION").trim_start_matches('v'))
+        .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
 
     let subscribed = Channel::Stable;
-    let policy = ChannelPolicy { subscribed_channel: subscribed };
+    let policy = ChannelPolicy {
+        subscribed_channel: subscribed,
+    };
     let meta = UpdateMeta {
         channel: info.channel,
         forced: info.forced,
@@ -41,9 +42,7 @@ pub async fn check_for_updates() -> Result<String, AgentError> {
     };
 
     match policy.evaluate(&current, &info.version, &meta) {
-        UpdateDecision::UpToDate => {
-            Ok(format!("Already up to date (v{}).", current))
-        }
+        UpdateDecision::UpToDate => Ok(format!("Already up to date (v{}).", current)),
         UpdateDecision::UpdateAvailable { forced } => {
             let mut msg = format!(
                 "New version available: v{} (current: v{})\nRun `hermes update` to upgrade.",
@@ -58,9 +57,7 @@ pub async fn check_for_updates() -> Result<String, AgentError> {
             }
             Ok(msg)
         }
-        UpdateDecision::DoNotUpdate { reason } => {
-            Ok(format!("No update available: {}", reason))
-        }
+        UpdateDecision::DoNotUpdate { reason } => Ok(format!("No update available: {}", reason)),
     }
 }
 
@@ -76,15 +73,17 @@ pub async fn perform_update(opts: UpdateOptions) -> Result<(), AgentError> {
     let info = source.fetch_latest(&platform).await?;
 
     // 3. Version comparison using ChannelPolicy
-    let current = semver::Version::parse(
-        env!("CARGO_PKG_VERSION").trim_start_matches('v')
-    ).unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION").trim_start_matches('v'))
+        .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
 
-    let subscribed = opts.channel
+    let subscribed = opts
+        .channel
         .as_deref()
         .map(Channel::from_str)
         .unwrap_or_default();
-    let policy = ChannelPolicy { subscribed_channel: subscribed };
+    let policy = ChannelPolicy {
+        subscribed_channel: subscribed,
+    };
     let meta = UpdateMeta {
         channel: info.channel,
         forced: info.forced,
@@ -126,7 +125,8 @@ pub async fn perform_update(opts: UpdateOptions) -> Result<(), AgentError> {
     if !opts.yes {
         println!("Proceed with update? [y/N] ");
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input)
+        std::io::stdin()
+            .read_line(&mut input)
             .map_err(|e| AgentError::Io(format!("Failed to read input: {e}")))?;
         if !input.trim().eq_ignore_ascii_case("y") {
             println!("Update cancelled.");
@@ -139,7 +139,8 @@ pub async fn perform_update(opts: UpdateOptions) -> Result<(), AgentError> {
         &info.artifact_url,
         &platform,
         true, // show progress
-    ).await?;
+    )
+    .await?;
 
     // 6. Verify checksum (on archive, not extracted binary)
     if let Some(ref checksum_url) = info.checksum_url {

@@ -1,22 +1,20 @@
+use hermes_core::errors::AgentError;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::Command;
-use hermes_core::errors::AgentError;
-use sha2::{Sha256, Digest};
 
 /// 从 checksums 文本中解析指定文件的哈希值（内部辅助函数）
 fn parse_checksum_for_file(checksums_text: &str, filename: &str) -> Option<String> {
-    checksums_text
-        .lines()
-        .find_map(|line| {
-            let parts: Vec<&str> = line.splitn(2, |c: char| c.is_whitespace()).collect();
-            if parts.len() == 2 {
-                let entry_filename = parts[1].trim().trim_start_matches('*');
-                if entry_filename == filename {
-                    return Some(parts[0].to_string())
-                }
+    checksums_text.lines().find_map(|line| {
+        let parts: Vec<&str> = line.splitn(2, |c: char| c.is_whitespace()).collect();
+        if parts.len() == 2 {
+            let entry_filename = parts[1].trim().trim_start_matches('*');
+            if entry_filename == filename {
+                return Some(parts[0].to_string());
             }
-            None
-        })
+        }
+        None
+    })
 }
 
 /// 计算数据的 SHA256 哈希
@@ -38,16 +36,14 @@ pub async fn verify_checksum(
 ) -> Result<(), AgentError> {
     // Download checksums file using curl (system TLS)
     let mut cmd = Command::new("curl");
-    cmd.args([
-        "-sSfL",
-        "-H", "User-Agent: hermes-agent-ultra",
-    ]);
+    cmd.args(["-sSfL", "-H", "User-Agent: hermes-agent-ultra"]);
     if let Ok(token) = std::env::var("GITHUB_TOKEN") {
         cmd.args(["-H", &format!("Authorization: Bearer {token}")]);
     }
     cmd.arg(checksum_url);
 
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .map_err(|e| AgentError::Io(format!("Failed to run curl for checksums: {e}")))?;
 
     if !output.status.success() {
@@ -61,7 +57,10 @@ pub async fn verify_checksum(
     let expected_hash = match parse_checksum_for_file(&checksums_text, expected_filename) {
         Some(h) => h,
         None => {
-            tracing::warn!("No checksum entry for '{}' in checksums file, skipping verification", expected_filename);
+            tracing::warn!(
+                "No checksum entry for '{}' in checksums file, skipping verification",
+                expected_filename
+            );
             return Ok(());
         }
     };
@@ -90,7 +89,8 @@ mod tests {
 
     #[test]
     fn test_parse_checksum_standard_format() {
-        let checksums = "abc123def456  hermes-linux-x86_64.tar.gz\n789abc  hermes-windows-x86_64.zip\n";
+        let checksums =
+            "abc123def456  hermes-linux-x86_64.tar.gz\n789abc  hermes-windows-x86_64.zip\n";
         assert_eq!(
             parse_checksum_for_file(checksums, "hermes-linux-x86_64.tar.gz"),
             Some("abc123def456".to_string())
@@ -121,20 +121,29 @@ mod tests {
 
     #[test]
     fn test_parse_checksum_empty_input() {
-        assert_eq!(parse_checksum_for_file("", "hermes-linux-x86_64.tar.gz"), None);
+        assert_eq!(
+            parse_checksum_for_file("", "hermes-linux-x86_64.tar.gz"),
+            None
+        );
     }
 
     #[test]
     fn test_compute_sha256_known_value() {
         // SHA256 of empty string
         let hash = compute_sha256(b"");
-        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
     fn test_compute_sha256_with_data() {
         let hash = compute_sha256(b"hello world");
-        assert_eq!(hash, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+        assert_eq!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
+use crate::update::platform::Platform;
+use hermes_core::errors::AgentError;
 use std::path::PathBuf;
 use std::process::Command;
-use hermes_core::errors::AgentError;
-use crate::update::platform::Platform;
 
 /// 下载 artifact 并解压出 binary
 /// 返回 (archive_path, extracted_binary_path)，archive 由调用者负责清理
@@ -20,8 +20,10 @@ pub async fn download_and_extract(
     let mut cmd = Command::new("curl");
     cmd.args([
         "-sSL",
-        "-o", &archive_path.to_string_lossy(),
-        "-H", "User-Agent: hermes-agent-ultra",
+        "-o",
+        &archive_path.to_string_lossy(),
+        "-H",
+        "User-Agent: hermes-agent-ultra",
     ]);
     // Only attach GitHub token for GitHub URLs
     if url.contains("github.com") || url.contains("githubusercontent.com") {
@@ -32,7 +34,8 @@ pub async fn download_and_extract(
     }
     cmd.arg(url);
 
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .map_err(|e| AgentError::Io(format!("Failed to run curl: {e}")))?;
 
     if !output.status.success() {
@@ -71,9 +74,14 @@ fn extract_tar_gz(
     let decoder = GzDecoder::new(file);
     let mut archive = Archive::new(decoder);
 
-    for entry in archive.entries().map_err(|e| AgentError::Io(format!("Failed to read archive: {e}")))? {
+    for entry in archive
+        .entries()
+        .map_err(|e| AgentError::Io(format!("Failed to read archive: {e}")))?
+    {
         let mut entry = entry.map_err(|e| AgentError::Io(format!("Failed to read entry: {e}")))?;
-        let path = entry.path().map_err(|e| AgentError::Io(format!("Invalid entry path: {e}")))?;
+        let path = entry
+            .path()
+            .map_err(|e| AgentError::Io(format!("Invalid entry path: {e}")))?;
 
         // Match binary by filename (may be nested in a directory)
         if path.file_name().and_then(|n| n.to_str()) == Some(binary_name) {
@@ -85,7 +93,10 @@ fn extract_tar_gz(
         }
     }
 
-    Err(AgentError::Io(format!("Binary '{}' not found in archive", binary_name)))
+    Err(AgentError::Io(format!(
+        "Binary '{}' not found in archive",
+        binary_name
+    )))
 }
 
 fn extract_zip(
@@ -99,7 +110,8 @@ fn extract_zip(
         .map_err(|e| AgentError::Io(format!("Failed to read zip archive: {e}")))?;
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)
+        let mut entry = archive
+            .by_index(i)
             .map_err(|e| AgentError::Io(format!("Failed to read zip entry: {e}")))?;
 
         let entry_name = entry.name().to_string();
@@ -113,5 +125,8 @@ fn extract_zip(
         }
     }
 
-    Err(AgentError::Io(format!("Binary '{}' not found in zip archive", binary_name)))
+    Err(AgentError::Io(format!(
+        "Binary '{}' not found in zip archive",
+        binary_name
+    )))
 }

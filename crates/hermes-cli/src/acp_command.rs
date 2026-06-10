@@ -7,16 +7,16 @@ use std::sync::Arc;
 
 use std::sync::Mutex as StdMutex;
 
+use hermes_acp::protocol::{StopReason, Usage};
 use hermes_acp_server::{
     AcpPipeServer, AcpServerConfig, AcpServerEvent, AgentInfo, ConnectionInfo, PromptExecutor,
     PromptResult, StreamContent, StreamEvent,
 };
-use hermes_acp::protocol::{StopReason, Usage};
 use hermes_agent::{AgentLoop, RunConversationParams};
 use hermes_core::{AgentError, Message, ToolSchema};
 
 use crate::app::App;
-use crate::commands::{emit_command_output, CommandResult};
+use crate::commands::{CommandResult, emit_command_output};
 
 // ---------------------------------------------------------------------------
 // HermesExecutor -- bridges ACP prompts to the agent loop
@@ -35,11 +35,11 @@ pub(crate) struct HermesExecutor {
 fn convert_acp_history_to_messages(history: &[serde_json::Value]) -> Vec<Message> {
     let mut messages = Vec::with_capacity(history.len());
     for msg in history {
-        let role = msg
-            .get("role")
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+        let content = msg
+            .get("content")
             .and_then(|v| v.as_str())
-            .unwrap_or("user");
-        let content = msg.get("content").and_then(|v| v.as_str()).map(|s| s.to_string());
+            .map(|s| s.to_string());
 
         let role_enum = match role {
             "user" => hermes_core::MessageRole::User,
@@ -48,19 +48,24 @@ fn convert_acp_history_to_messages(history: &[serde_json::Value]) -> Vec<Message
             _ => continue,
         };
 
-        let tool_calls = msg.get("tool_calls")
+        let tool_calls = msg
+            .get("tool_calls")
             .cloned()
             .and_then(|v| serde_json::from_value(v).ok());
-        let tool_call_id = msg.get("tool_call_id")
+        let tool_call_id = msg
+            .get("tool_call_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let name = msg.get("name")
+        let name = msg
+            .get("name")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let reasoning_content = msg.get("reasoning_content")
+        let reasoning_content = msg
+            .get("reasoning_content")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let cache_control = msg.get("cache_control")
+        let cache_control = msg
+            .get("cache_control")
             .cloned()
             .and_then(|v| serde_json::from_value(v).ok());
 
@@ -92,21 +97,21 @@ impl PromptExecutor for HermesExecutor {
         let tx = event_tx.clone();
         let text_acc = assistant_text.clone();
         let stream_cb: Option<Box<dyn Fn(hermes_core::StreamChunk) + Send + Sync>> =
-           Some(Box::new(move |chunk: hermes_core::StreamChunk| {
+            Some(Box::new(move |chunk: hermes_core::StreamChunk| {
                 if let Some(content) = chunk.delta.as_ref().and_then(|d| d.content.as_ref()) {
-                        let evt = StreamEvent::AgentMessageChunk {
-                            content: StreamContent::Text {
-                                text: content.clone(),
-                            },
-                        };
-                        if let Err(e) = tx.try_send(evt) {
-                            tracing::debug!("stream receiver closed, dropping chunk: {}", e);
-                            return;
-                        }
-                        let mut guard = text_acc.lock().unwrap_or_else(|e| e.into_inner());
-                        guard.push_str(content);
+                    let evt = StreamEvent::AgentMessageChunk {
+                        content: StreamContent::Text {
+                            text: content.clone(),
+                        },
+                    };
+                    if let Err(e) = tx.try_send(evt) {
+                        tracing::debug!("stream receiver closed, dropping chunk: {}", e);
+                        return;
                     }
-           }));
+                    let mut guard = text_acc.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.push_str(content);
+                }
+            }));
 
         let params = RunConversationParams {
             user_message: prompt_text.to_string(),
@@ -131,7 +136,10 @@ impl PromptExecutor for HermesExecutor {
                         "guardrail_halt" | "tool_loop_guard" => StopReason::Refusal,
                         "max_iterations_reached" => StopReason::MaxTokens,
                         other => {
-                            tracing::warn!(reason = other, "unmapped turn_exit_reason, mapping to Error");
+                            tracing::warn!(
+                                reason = other,
+                                "unmapped turn_exit_reason, mapping to Error"
+                            );
                             StopReason::Error
                         }
                     }
@@ -147,7 +155,11 @@ impl PromptExecutor for HermesExecutor {
 
                 let assistant_message = {
                     let text = assistant_text.lock().unwrap_or_else(|e| e.into_inner());
-                    if text.is_empty() { None } else { Some(text.clone()) }
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(text.clone())
+                    }
                 };
 
                 Ok(PromptResult {
@@ -161,7 +173,11 @@ impl PromptExecutor for HermesExecutor {
                 usage: None,
                 assistant_message: {
                     let text = assistant_text.lock().unwrap_or_else(|e| e.into_inner());
-                    if text.is_empty() { None } else { Some(text.clone()) }
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(text.clone())
+                    }
                 },
             }),
             Err(e) => Err(format!("agent error: {}", e)),
@@ -223,14 +239,29 @@ pub(crate) async fn handle_acp_command(
 
 fn format_acp_event(event: &AcpServerEvent) -> String {
     match event {
-        AcpServerEvent::ClientConnected { conn_id, client_name, .. } => {
+        AcpServerEvent::ClientConnected {
+            conn_id,
+            client_name,
+            ..
+        } => {
             let name = client_name.as_deref().unwrap_or("unknown");
             format!("[ACP] Client connected: {} ({})", name, conn_id)
         }
-        AcpServerEvent::PromptReceived { session_id, prompt_len, .. } => {
-            format!("[ACP] Prompt received ({}): {} chars", session_id, prompt_len)
+        AcpServerEvent::PromptReceived {
+            session_id,
+            prompt_len,
+            ..
+        } => {
+            format!(
+                "[ACP] Prompt received ({}): {} chars",
+                session_id, prompt_len
+            )
         }
-        AcpServerEvent::PromptCompleted { session_id, stop_reason, .. } => {
+        AcpServerEvent::PromptCompleted {
+            session_id,
+            stop_reason,
+            ..
+        } => {
             format!("[ACP] Prompt completed ({}): {}", session_id, stop_reason)
         }
         AcpServerEvent::ClientDisconnected { conn_id } => {
@@ -311,10 +342,7 @@ fn start_acp_server(app: &mut App) -> Result<CommandResult, AgentError> {
     app.acp_server = Some(server_arc);
     app.acp_event_buffer = Some(event_buffer);
 
-    emit_command_output(
-        app,
-        format!("[ACP server started on {}]", pipe_path),
-    );
+    emit_command_output(app, format!("[ACP server started on {}]", pipe_path));
     emit_command_output(
         app,
         "\n┌─ ACP Server Controls ───────────────────────────┐\n\
@@ -382,10 +410,7 @@ fn show_acp_status(app: &mut App) {
             emit_command_output(app, lines.join("\n"));
         }
         None => {
-            emit_command_output(
-                app,
-                "ACP Server: stopped\nUse /acp_server to start.",
-            );
+            emit_command_output(app, "ACP Server: stopped\nUse /acp_server to start.");
         }
     }
 }

@@ -498,8 +498,7 @@ pub async fn handle_cli_skills(
                 let taps_file = hermes_config::hermes_home().join("skill_taps.json");
                 let subscriptions_file = skills_dir.join("subscriptions.json");
                 let taps = super::effective_skill_taps(&taps_file, &subscriptions_file);
-                let fallback =
-                    super::search_skills_via_taps(&client, &taps, &query, 20).await?;
+                let fallback = super::search_skills_via_taps(&client, &taps, &query, 20).await?;
                 if fallback.is_empty() {
                     println!("No tap-backed matches found for \"{}\".", query);
                 } else {
@@ -519,8 +518,7 @@ pub async fn handle_cli_skills(
                     "Missing skill name. Usage: hermes skills install <name>".into(),
                 )
             })?;
-            let (skill_name, _requested_version) =
-                super::parse_skill_name_and_version(&skill_spec);
+            let (skill_name, _requested_version) = super::parse_skill_name_and_version(&skill_spec);
             println!("Installing skill: {}", skill_name);
 
             let client = reqwest::Client::new();
@@ -531,374 +529,104 @@ pub async fn handle_cli_skills(
                 super::parse_explicit_github_skill(&skill_name)
             };
 
-            let (files, install_seed, provenance) =
-                if let Some((source, key)) = registry_prefixed {
-                    match source.as_str() {
-                        "official" => {
-                            let install_key = key.clone();
-                            let resolved =
-                                super::resolve_official_skill_source(&client, &key).await?;
-                            println!(
-                                "Resolved official source: {}/{} @ {}",
-                                resolved.repo, resolved.skill_dir, resolved.branch
-                            );
-                            (
-                                super::fetch_skill_files_from_github(&client, &resolved).await?,
-                                install_key,
-                                super::SkillInstallProvenance {
-                                    source: "official".to_string(),
-                                    identifier: key.clone(),
-                                    trust_level: super::default_trust_level_for_source("official")
-                                        .to_string(),
-                                    metadata: serde_json::json!({
-                                        "repo": resolved.repo,
-                                        "branch": resolved.branch,
-                                        "skill_dir": resolved.skill_dir,
-                                    }),
-                                },
-                            )
-                        }
-                        "skills.sh" => {
-                            let install_key = key.clone();
-                            let resolved =
-                                super::resolve_skills_sh_source(&client, &key).await?;
-                            println!(
-                                "Resolved skills.sh source: {}/{} @ {}",
-                                resolved.repo, resolved.skill_dir, resolved.branch
-                            );
-                            (
-                                super::fetch_skill_files_from_github(&client, &resolved).await?,
-                                install_key,
-                                super::SkillInstallProvenance {
-                                    source: "skills.sh".to_string(),
-                                    identifier: key.clone(),
-                                    trust_level: super::default_trust_level_for_source("skills.sh")
-                                        .to_string(),
-                                    metadata: serde_json::json!({
-                                        "repo": resolved.repo,
-                                        "branch": resolved.branch,
-                                        "skill_dir": resolved.skill_dir,
-                                    }),
-                                },
-                            )
-                        }
-                        "lobehub" => {
-                            println!("Resolved lobehub source: {}", key);
-                            (
-                                super::fetch_lobehub_skill_files(&client, &key).await?,
-                                key.clone(),
-                                super::SkillInstallProvenance {
-                                    source: "lobehub".to_string(),
-                                    identifier: key,
-                                    trust_level: super::default_trust_level_for_source("lobehub")
-                                        .to_string(),
-                                    metadata: serde_json::json!({}),
-                                },
-                            )
-                        }
-                        "clawhub" => {
-                            println!("Resolved clawhub source: {}", key);
-                            (
-                                super::fetch_clawhub_skill_files(
-                                    &client,
-                                    &key,
-                                    _requested_version.as_deref(),
-                                )
-                                .await?,
-                                key.clone(),
-                                super::SkillInstallProvenance {
-                                    source: "clawhub".to_string(),
-                                    identifier: key,
-                                    trust_level: super::default_trust_level_for_source("clawhub")
-                                        .to_string(),
-                                    metadata: serde_json::json!({}),
-                                },
-                            )
-                        }
-                        "claude-marketplace" => {
-                            let install_key = key.clone();
-                            let resolved =
-                                super::resolve_claude_marketplace_skill(&client, &key).await?;
-                            println!(
-                                "Resolved claude-marketplace source: {}/{} @ {}",
-                                resolved.repo, resolved.skill_dir, resolved.branch
-                            );
-                            (
-                                super::fetch_skill_files_from_github(&client, &resolved).await?,
-                                install_key,
-                                super::SkillInstallProvenance {
-                                    source: "claude-marketplace".to_string(),
-                                    identifier: key.clone(),
-                                    trust_level: super::default_trust_level_for_source(
-                                        "claude-marketplace",
-                                    )
-                                    .to_string(),
-                                    metadata: serde_json::json!({
-                                        "repo": resolved.repo,
-                                        "branch": resolved.branch,
-                                        "skill_dir": resolved.skill_dir,
-                                    }),
-                                },
-                            )
-                        }
-                        "github" => {
-                            let (repo, maybe_branch, skill_dir) =
-                                super::parse_explicit_github_skill(&key).ok_or_else(|| {
-                                    AgentError::Config(format!(
-                                        "github/ installs require owner/repo/path, got '{}'",
-                                        key
-                                    ))
-                                })?;
-                            let branch = if let Some(branch) = maybe_branch {
-                                branch
-                            } else {
-                                super::github_default_branch(&client, &repo).await?
-                            };
-                            let resolved = super::ResolvedSkillSource {
-                                repo,
-                                branch,
-                                skill_dir,
-                            };
-                            let identifier =
-                                format!("{}/{}", resolved.repo, resolved.skill_dir);
-                            println!(
-                                "Resolved github source: {}/{} @ {}",
-                                resolved.repo, resolved.skill_dir, resolved.branch
-                            );
-                            (
-                                super::fetch_skill_files_from_github(&client, &resolved).await?,
-                                key,
-                                super::SkillInstallProvenance {
-                                    source: "github".to_string(),
-                                    identifier,
-                                    trust_level: super::default_trust_level_for_source("github")
-                                        .to_string(),
-                                    metadata: serde_json::json!({
-                                        "repo": resolved.repo,
-                                        "branch": resolved.branch,
-                                        "skill_dir": resolved.skill_dir,
-                                    }),
-                                },
-                            )
-                        }
-                        _ => {
-                            return Err(AgentError::Config(format!(
-                                "Unsupported skill registry source '{}'",
-                                source
-                            )));
-                        }
-                    }
-                } else if let Some((repo, maybe_branch, skill_dir)) = explicit {
-                    let branch = if let Some(branch) = maybe_branch {
-                        branch
-                    } else {
-                        super::github_default_branch(&client, &repo).await?
-                    };
-                    let resolved = super::ResolvedSkillSource {
-                        repo,
-                        branch,
-                        skill_dir,
-                    };
-                    let identifier = format!("{}/{}", resolved.repo, resolved.skill_dir);
-                    println!(
-                        "Resolved source: {}/{} @ {}",
-                        resolved.repo, resolved.skill_dir, resolved.branch
-                    );
-                    (
-                        super::fetch_skill_files_from_github(&client, &resolved).await?,
-                        skill_name.clone(),
-                        super::SkillInstallProvenance {
-                            source: "github".to_string(),
-                            identifier,
-                            trust_level: super::default_trust_level_for_source("github")
-                                .to_string(),
-                            metadata: serde_json::json!({
-                                "repo": resolved.repo,
-                                "branch": resolved.branch,
-                                "skill_dir": resolved.skill_dir,
-                            }),
-                        },
-                    )
-                } else if let Some(skill_hint) = _requested_version
-                    .as_deref()
-                    .filter(|_| super::looks_like_github_repo_slug(&skill_name))
-                {
-                    let resolved = super::resolve_skill_in_repo(
-                        &client,
-                        &skill_name,
-                        skill_hint,
-                        Some("skills"),
-                    )
-                    .await?;
-                    println!(
-                        "Resolved source: {}/{} @ {}",
-                        resolved.repo, resolved.skill_dir, resolved.branch
-                    );
-                    (
-                        super::fetch_skill_files_from_github(&client, &resolved).await?,
-                        skill_name.clone(),
-                        super::SkillInstallProvenance {
-                            source: "github".to_string(),
-                            identifier: format!("{}/{}", resolved.repo, resolved.skill_dir),
-                            trust_level: super::default_trust_level_for_source("github")
-                                .to_string(),
-                            metadata: serde_json::json!({
-                                "repo": resolved.repo,
-                                "branch": resolved.branch,
-                                "skill_dir": resolved.skill_dir,
-                            }),
-                        },
-                    )
-                } else {
-                    let from_index =
-                        super::resolve_skill_via_registry_index(&client, &skill_name, None)
-                            .await;
-                    if let Ok(hit) = from_index {
-                        if hit.source.eq_ignore_ascii_case("official") {
-                            let resolved =
-                                super::resolve_official_skill_source(&client, &hit.identifier)
-                                    .await?;
-                            println!(
-                                "Resolved source [official]: {}/{} @ {}",
-                                resolved.repo, resolved.skill_dir, resolved.branch
-                            );
-                            (
-                                super::fetch_skill_files_from_github(&client, &resolved).await?,
-                                hit.identifier,
-                                super::SkillInstallProvenance {
-                                    source: "official".to_string(),
-                                    identifier: format!(
-                                        "{}/{}",
-                                        resolved.repo, resolved.skill_dir
-                                    ),
-                                    trust_level: super::default_trust_level_for_source("official")
-                                        .to_string(),
-                                    metadata: serde_json::json!({
-                                        "repo": resolved.repo,
-                                        "branch": resolved.branch,
-                                        "skill_dir": resolved.skill_dir,
-                                    }),
-                                },
-                            )
-                        } else {
-                            match hit.install_source {
-                                super::RegistryInstallSource::GitHub(resolved) => {
-                                    let branch = super::github_default_branch(
-                                        &client,
-                                        &resolved.repo,
-                                    )
-                                    .await?;
-                                    let resolved =
-                                        super::ResolvedSkillSource { branch, ..resolved };
-                                    println!(
-                                        "Resolved source [{}]: {}/{} @ {}",
-                                        hit.source,
-                                        resolved.repo,
-                                        resolved.skill_dir,
-                                        resolved.branch
-                                    );
-                                    (
-                                        super::fetch_skill_files_from_github(
-                                            &client,
-                                            &resolved,
-                                        )
-                                        .await?,
-                                        hit.identifier,
-                                        super::SkillInstallProvenance {
-                                            source: hit.source,
-                                            identifier: format!(
-                                                "{}/{}",
-                                                resolved.repo, resolved.skill_dir
-                                            ),
-                                            trust_level: super::default_trust_level_for_source(
-                                                "github",
-                                            )
-                                            .to_string(),
-                                            metadata: serde_json::json!({
-                                                "repo": resolved.repo,
-                                                "branch": resolved.branch,
-                                                "skill_dir": resolved.skill_dir,
-                                            }),
-                                        },
-                                    )
-                                }
-                                super::RegistryInstallSource::LobeHub { slug } => {
-                                    println!("Resolved source [lobehub]: {}", slug);
-                                    (
-                                        super::fetch_lobehub_skill_files(&client, &slug).await?,
-                                        slug.clone(),
-                                        super::SkillInstallProvenance {
-                                            source: "lobehub".to_string(),
-                                            identifier: slug,
-                                            trust_level: super::default_trust_level_for_source(
-                                                "lobehub",
-                                            )
-                                            .to_string(),
-                                            metadata: serde_json::json!({}),
-                                        },
-                                    )
-                                }
-                                super::RegistryInstallSource::ClawHub { slug, version } => {
-                                    println!("Resolved source [clawhub]: {}", slug);
-                                    (
-                                        super::fetch_clawhub_skill_files(
-                                            &client,
-                                            &slug,
-                                            version.as_deref(),
-                                        )
-                                        .await?,
-                                        slug.clone(),
-                                        super::SkillInstallProvenance {
-                                            source: "clawhub".to_string(),
-                                            identifier: slug,
-                                            trust_level: super::default_trust_level_for_source(
-                                                "clawhub",
-                                            )
-                                            .to_string(),
-                                            metadata: serde_json::json!({
-                                                "version_hint": version
-                                            }),
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                    } else {
-                        let taps_file = hermes_config::hermes_home().join("skill_taps.json");
-                        let subscriptions_file = skills_dir.join("subscriptions.json");
-                        let taps =
-                            super::effective_skill_taps(&taps_file, &subscriptions_file);
-                        let (resolved, route) = super::resolve_install_via_fallback_router(
-                            &client,
-                            &skill_name,
-                            &taps,
-                        )
-                        .await?;
-                        match route {
-                            super::InstallFallbackSource::SkillsSh => println!(
-                                "Resolved source [skills.sh fallback]: {}/{} @ {}",
-                                resolved.repo, resolved.skill_dir, resolved.branch
-                            ),
-                            super::InstallFallbackSource::Tap => println!(
-                                "Resolved source (tap): {}/{} @ {}",
-                                resolved.repo, resolved.skill_dir, resolved.branch
-                            ),
-                        }
+            let (files, install_seed, provenance) = if let Some((source, key)) = registry_prefixed {
+                match source.as_str() {
+                    "official" => {
+                        let install_key = key.clone();
+                        let resolved = super::resolve_official_skill_source(&client, &key).await?;
+                        println!(
+                            "Resolved official source: {}/{} @ {}",
+                            resolved.repo, resolved.skill_dir, resolved.branch
+                        );
                         (
                             super::fetch_skill_files_from_github(&client, &resolved).await?,
-                            skill_name.clone(),
+                            install_key,
                             super::SkillInstallProvenance {
-                                source: match route {
-                                    super::InstallFallbackSource::SkillsSh => {
-                                        "skills.sh".to_string()
-                                    }
-                                    super::InstallFallbackSource::Tap => "tap".to_string(),
-                                },
-                                identifier: format!("{}/{}", resolved.repo, resolved.skill_dir),
-                                trust_level: super::default_trust_level_for_source(match route {
-                                    super::InstallFallbackSource::SkillsSh => "skills.sh",
-                                    super::InstallFallbackSource::Tap => "tap",
-                                })
+                                source: "official".to_string(),
+                                identifier: key.clone(),
+                                trust_level: super::default_trust_level_for_source("official")
+                                    .to_string(),
+                                metadata: serde_json::json!({
+                                    "repo": resolved.repo,
+                                    "branch": resolved.branch,
+                                    "skill_dir": resolved.skill_dir,
+                                }),
+                            },
+                        )
+                    }
+                    "skills.sh" => {
+                        let install_key = key.clone();
+                        let resolved = super::resolve_skills_sh_source(&client, &key).await?;
+                        println!(
+                            "Resolved skills.sh source: {}/{} @ {}",
+                            resolved.repo, resolved.skill_dir, resolved.branch
+                        );
+                        (
+                            super::fetch_skill_files_from_github(&client, &resolved).await?,
+                            install_key,
+                            super::SkillInstallProvenance {
+                                source: "skills.sh".to_string(),
+                                identifier: key.clone(),
+                                trust_level: super::default_trust_level_for_source("skills.sh")
+                                    .to_string(),
+                                metadata: serde_json::json!({
+                                    "repo": resolved.repo,
+                                    "branch": resolved.branch,
+                                    "skill_dir": resolved.skill_dir,
+                                }),
+                            },
+                        )
+                    }
+                    "lobehub" => {
+                        println!("Resolved lobehub source: {}", key);
+                        (
+                            super::fetch_lobehub_skill_files(&client, &key).await?,
+                            key.clone(),
+                            super::SkillInstallProvenance {
+                                source: "lobehub".to_string(),
+                                identifier: key,
+                                trust_level: super::default_trust_level_for_source("lobehub")
+                                    .to_string(),
+                                metadata: serde_json::json!({}),
+                            },
+                        )
+                    }
+                    "clawhub" => {
+                        println!("Resolved clawhub source: {}", key);
+                        (
+                            super::fetch_clawhub_skill_files(
+                                &client,
+                                &key,
+                                _requested_version.as_deref(),
+                            )
+                            .await?,
+                            key.clone(),
+                            super::SkillInstallProvenance {
+                                source: "clawhub".to_string(),
+                                identifier: key,
+                                trust_level: super::default_trust_level_for_source("clawhub")
+                                    .to_string(),
+                                metadata: serde_json::json!({}),
+                            },
+                        )
+                    }
+                    "claude-marketplace" => {
+                        let install_key = key.clone();
+                        let resolved =
+                            super::resolve_claude_marketplace_skill(&client, &key).await?;
+                        println!(
+                            "Resolved claude-marketplace source: {}/{} @ {}",
+                            resolved.repo, resolved.skill_dir, resolved.branch
+                        );
+                        (
+                            super::fetch_skill_files_from_github(&client, &resolved).await?,
+                            install_key,
+                            super::SkillInstallProvenance {
+                                source: "claude-marketplace".to_string(),
+                                identifier: key.clone(),
+                                trust_level: super::default_trust_level_for_source(
+                                    "claude-marketplace",
+                                )
                                 .to_string(),
                                 metadata: serde_json::json!({
                                     "repo": resolved.repo,
@@ -908,7 +636,246 @@ pub async fn handle_cli_skills(
                             },
                         )
                     }
+                    "github" => {
+                        let (repo, maybe_branch, skill_dir) =
+                            super::parse_explicit_github_skill(&key).ok_or_else(|| {
+                                AgentError::Config(format!(
+                                    "github/ installs require owner/repo/path, got '{}'",
+                                    key
+                                ))
+                            })?;
+                        let branch = if let Some(branch) = maybe_branch {
+                            branch
+                        } else {
+                            super::github_default_branch(&client, &repo).await?
+                        };
+                        let resolved = super::ResolvedSkillSource {
+                            repo,
+                            branch,
+                            skill_dir,
+                        };
+                        let identifier = format!("{}/{}", resolved.repo, resolved.skill_dir);
+                        println!(
+                            "Resolved github source: {}/{} @ {}",
+                            resolved.repo, resolved.skill_dir, resolved.branch
+                        );
+                        (
+                            super::fetch_skill_files_from_github(&client, &resolved).await?,
+                            key,
+                            super::SkillInstallProvenance {
+                                source: "github".to_string(),
+                                identifier,
+                                trust_level: super::default_trust_level_for_source("github")
+                                    .to_string(),
+                                metadata: serde_json::json!({
+                                    "repo": resolved.repo,
+                                    "branch": resolved.branch,
+                                    "skill_dir": resolved.skill_dir,
+                                }),
+                            },
+                        )
+                    }
+                    _ => {
+                        return Err(AgentError::Config(format!(
+                            "Unsupported skill registry source '{}'",
+                            source
+                        )));
+                    }
+                }
+            } else if let Some((repo, maybe_branch, skill_dir)) = explicit {
+                let branch = if let Some(branch) = maybe_branch {
+                    branch
+                } else {
+                    super::github_default_branch(&client, &repo).await?
                 };
+                let resolved = super::ResolvedSkillSource {
+                    repo,
+                    branch,
+                    skill_dir,
+                };
+                let identifier = format!("{}/{}", resolved.repo, resolved.skill_dir);
+                println!(
+                    "Resolved source: {}/{} @ {}",
+                    resolved.repo, resolved.skill_dir, resolved.branch
+                );
+                (
+                    super::fetch_skill_files_from_github(&client, &resolved).await?,
+                    skill_name.clone(),
+                    super::SkillInstallProvenance {
+                        source: "github".to_string(),
+                        identifier,
+                        trust_level: super::default_trust_level_for_source("github").to_string(),
+                        metadata: serde_json::json!({
+                            "repo": resolved.repo,
+                            "branch": resolved.branch,
+                            "skill_dir": resolved.skill_dir,
+                        }),
+                    },
+                )
+            } else if let Some(skill_hint) = _requested_version
+                .as_deref()
+                .filter(|_| super::looks_like_github_repo_slug(&skill_name))
+            {
+                let resolved =
+                    super::resolve_skill_in_repo(&client, &skill_name, skill_hint, Some("skills"))
+                        .await?;
+                println!(
+                    "Resolved source: {}/{} @ {}",
+                    resolved.repo, resolved.skill_dir, resolved.branch
+                );
+                (
+                    super::fetch_skill_files_from_github(&client, &resolved).await?,
+                    skill_name.clone(),
+                    super::SkillInstallProvenance {
+                        source: "github".to_string(),
+                        identifier: format!("{}/{}", resolved.repo, resolved.skill_dir),
+                        trust_level: super::default_trust_level_for_source("github").to_string(),
+                        metadata: serde_json::json!({
+                            "repo": resolved.repo,
+                            "branch": resolved.branch,
+                            "skill_dir": resolved.skill_dir,
+                        }),
+                    },
+                )
+            } else {
+                let from_index =
+                    super::resolve_skill_via_registry_index(&client, &skill_name, None).await;
+                if let Ok(hit) = from_index {
+                    if hit.source.eq_ignore_ascii_case("official") {
+                        let resolved =
+                            super::resolve_official_skill_source(&client, &hit.identifier).await?;
+                        println!(
+                            "Resolved source [official]: {}/{} @ {}",
+                            resolved.repo, resolved.skill_dir, resolved.branch
+                        );
+                        (
+                            super::fetch_skill_files_from_github(&client, &resolved).await?,
+                            hit.identifier,
+                            super::SkillInstallProvenance {
+                                source: "official".to_string(),
+                                identifier: format!("{}/{}", resolved.repo, resolved.skill_dir),
+                                trust_level: super::default_trust_level_for_source("official")
+                                    .to_string(),
+                                metadata: serde_json::json!({
+                                    "repo": resolved.repo,
+                                    "branch": resolved.branch,
+                                    "skill_dir": resolved.skill_dir,
+                                }),
+                            },
+                        )
+                    } else {
+                        match hit.install_source {
+                            super::RegistryInstallSource::GitHub(resolved) => {
+                                let branch =
+                                    super::github_default_branch(&client, &resolved.repo).await?;
+                                let resolved = super::ResolvedSkillSource { branch, ..resolved };
+                                println!(
+                                    "Resolved source [{}]: {}/{} @ {}",
+                                    hit.source, resolved.repo, resolved.skill_dir, resolved.branch
+                                );
+                                (
+                                    super::fetch_skill_files_from_github(&client, &resolved)
+                                        .await?,
+                                    hit.identifier,
+                                    super::SkillInstallProvenance {
+                                        source: hit.source,
+                                        identifier: format!(
+                                            "{}/{}",
+                                            resolved.repo, resolved.skill_dir
+                                        ),
+                                        trust_level: super::default_trust_level_for_source(
+                                            "github",
+                                        )
+                                        .to_string(),
+                                        metadata: serde_json::json!({
+                                            "repo": resolved.repo,
+                                            "branch": resolved.branch,
+                                            "skill_dir": resolved.skill_dir,
+                                        }),
+                                    },
+                                )
+                            }
+                            super::RegistryInstallSource::LobeHub { slug } => {
+                                println!("Resolved source [lobehub]: {}", slug);
+                                (
+                                    super::fetch_lobehub_skill_files(&client, &slug).await?,
+                                    slug.clone(),
+                                    super::SkillInstallProvenance {
+                                        source: "lobehub".to_string(),
+                                        identifier: slug,
+                                        trust_level: super::default_trust_level_for_source(
+                                            "lobehub",
+                                        )
+                                        .to_string(),
+                                        metadata: serde_json::json!({}),
+                                    },
+                                )
+                            }
+                            super::RegistryInstallSource::ClawHub { slug, version } => {
+                                println!("Resolved source [clawhub]: {}", slug);
+                                (
+                                    super::fetch_clawhub_skill_files(
+                                        &client,
+                                        &slug,
+                                        version.as_deref(),
+                                    )
+                                    .await?,
+                                    slug.clone(),
+                                    super::SkillInstallProvenance {
+                                        source: "clawhub".to_string(),
+                                        identifier: slug,
+                                        trust_level: super::default_trust_level_for_source(
+                                            "clawhub",
+                                        )
+                                        .to_string(),
+                                        metadata: serde_json::json!({
+                                            "version_hint": version
+                                        }),
+                                    },
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    let taps_file = hermes_config::hermes_home().join("skill_taps.json");
+                    let subscriptions_file = skills_dir.join("subscriptions.json");
+                    let taps = super::effective_skill_taps(&taps_file, &subscriptions_file);
+                    let (resolved, route) =
+                        super::resolve_install_via_fallback_router(&client, &skill_name, &taps)
+                            .await?;
+                    match route {
+                        super::InstallFallbackSource::SkillsSh => println!(
+                            "Resolved source [skills.sh fallback]: {}/{} @ {}",
+                            resolved.repo, resolved.skill_dir, resolved.branch
+                        ),
+                        super::InstallFallbackSource::Tap => println!(
+                            "Resolved source (tap): {}/{} @ {}",
+                            resolved.repo, resolved.skill_dir, resolved.branch
+                        ),
+                    }
+                    (
+                        super::fetch_skill_files_from_github(&client, &resolved).await?,
+                        skill_name.clone(),
+                        super::SkillInstallProvenance {
+                            source: match route {
+                                super::InstallFallbackSource::SkillsSh => "skills.sh".to_string(),
+                                super::InstallFallbackSource::Tap => "tap".to_string(),
+                            },
+                            identifier: format!("{}/{}", resolved.repo, resolved.skill_dir),
+                            trust_level: super::default_trust_level_for_source(match route {
+                                super::InstallFallbackSource::SkillsSh => "skills.sh",
+                                super::InstallFallbackSource::Tap => "tap",
+                            })
+                            .to_string(),
+                            metadata: serde_json::json!({
+                                "repo": resolved.repo,
+                                "branch": resolved.branch,
+                                "skill_dir": resolved.skill_dir,
+                            }),
+                        },
+                    )
+                }
+            };
 
             let install_name = super::sanitize_skill_install_name(
                 _requested_version
@@ -931,11 +898,7 @@ pub async fn handle_cli_skills(
                 &files,
                 &provenance,
             )?;
-            println!(
-                "Skill '{}' installed to {}",
-                install_name,
-                target.display()
-            );
+            println!("Skill '{}' installed to {}", install_name, target.display());
             super::maybe_run_skill_bootstrap(&install_name, &target, &files).await?;
         }
         "reset" => {
@@ -960,9 +923,7 @@ pub async fn handle_cli_skills(
                     skill_name
                 ),
             )
-            .map_err(|e| {
-                hermes_core::AgentError::Io(format!("Failed to write SKILL.md: {}", e))
-            })?;
+            .map_err(|e| hermes_core::AgentError::Io(format!("Failed to write SKILL.md: {}", e)))?;
             println!("Skill '{}' reset at {}", skill_name, target.display());
         }
         "subscribe" => {
@@ -1022,11 +983,7 @@ pub async fn handle_cli_skills(
                     .map_err(|e| hermes_core::AgentError::Io(format!("Read error: {}", e)))?;
                 println!("{}", content);
             } else {
-                println!(
-                    "Skill '{}' not found at {}",
-                    skill_name,
-                    skill_md.display()
-                );
+                println!("Skill '{}' not found at {}", skill_name, skill_md.display());
             }
         }
         "uninstall" => {
@@ -1040,8 +997,7 @@ pub async fn handle_cli_skills(
                 std::fs::remove_dir_all(&target).map_err(|e| {
                     hermes_core::AgentError::Io(format!("Failed to remove skill: {}", e))
                 })?;
-                let removed =
-                    super::record_skill_uninstall_in_hub_lock(&skills_dir, &skill_name)?;
+                let removed = super::record_skill_uninstall_in_hub_lock(&skills_dir, &skill_name)?;
                 if let Some(entry) = removed {
                     println!(
                         "Skill '{}' uninstalled (source={}, id={}).",
@@ -1083,8 +1039,7 @@ pub async fn handle_cli_skills(
                             println!("  ✗ {} — missing SKILL.md", dir_name);
                             issues += 1;
                         } else {
-                            let content =
-                                std::fs::read_to_string(&skill_md).unwrap_or_default();
+                            let content = std::fs::read_to_string(&skill_md).unwrap_or_default();
                             if content.trim().is_empty() {
                                 println!("  ⚠ {} — SKILL.md is empty", dir_name);
                                 issues += 1;
@@ -1104,8 +1059,7 @@ pub async fn handle_cli_skills(
                 } else if !skill_md.exists() {
                     println!("Skill '{}': MISSING SKILL.md", skill_name);
                 } else {
-                    let content =
-                        std::fs::read_to_string(&skill_md).unwrap_or_default();
+                    let content = std::fs::read_to_string(&skill_md).unwrap_or_default();
                     let lines = content.lines().count();
                     let has_frontmatter = content.starts_with("---");
                     println!("Skill '{}': OK", skill_name);
@@ -1146,8 +1100,7 @@ pub async fn handle_cli_skills(
 
             let taps_file = hermes_config::hermes_home().join("skill_taps.json");
             let subscriptions_file = skills_dir.join("subscriptions.json");
-            let merged_taps =
-                super::effective_skill_taps(&taps_file, &subscriptions_file);
+            let merged_taps = super::effective_skill_taps(&taps_file, &subscriptions_file);
             let client = reqwest::Client::new();
 
             struct PendingUpdate {
@@ -1158,23 +1111,14 @@ pub async fn handle_cli_skills(
             let mut pending: Vec<PendingUpdate> = Vec::new();
 
             for entry in lock.installed {
-                let local_hash =
-                    if skills_dir.join(&entry.install_path).exists() {
-                        super::hash_installed_skill_dir(
-                            &skills_dir.join(&entry.install_path),
-                        )
+                let local_hash = if skills_dir.join(&entry.install_path).exists() {
+                    super::hash_installed_skill_dir(&skills_dir.join(&entry.install_path))
                         .unwrap_or_else(|_| entry.content_hash.clone())
-                    } else {
-                        entry.content_hash.clone()
-                    };
+                } else {
+                    entry.content_hash.clone()
+                };
 
-                match super::fetch_bundle_for_lock_entry(
-                    &client,
-                    &entry,
-                    &merged_taps,
-                )
-                .await
-                {
+                match super::fetch_bundle_for_lock_entry(&client, &entry, &merged_taps).await {
                     Ok(files) => {
                         let upstream_hash = super::hash_skill_bundle(&files);
                         let status = if local_hash == upstream_hash {
@@ -1217,8 +1161,7 @@ pub async fn handle_cli_skills(
                 if apply_updates {
                     println!("\nApplying updates...");
                     for update in pending {
-                        let install_name =
-                            super::sanitize_skill_install_name(&update.entry.name);
+                        let install_name = super::sanitize_skill_install_name(&update.entry.name);
                         let target = super::install_skill_files(
                             &skills_dir,
                             &install_name,
@@ -1244,17 +1187,11 @@ pub async fn handle_cli_skills(
                             install_name,
                             &update.upstream_hash.chars().take(16).collect::<String>()
                         );
-                        super::maybe_run_skill_bootstrap(
-                            &install_name,
-                            &target,
-                            &update.files,
-                        )
-                        .await?;
+                        super::maybe_run_skill_bootstrap(&install_name, &target, &update.files)
+                            .await?;
                     }
                 } else {
-                    println!(
-                        "Run `hermes skills update --apply` to install updates."
-                    );
+                    println!("Run `hermes skills update --apply` to install updates.");
                 }
             }
         }
@@ -1328,34 +1265,23 @@ pub async fn handle_cli_skills(
             // Package skill directory into a tarball in memory
             let mut tar_buf = Vec::new();
             {
-                let enc = flate2::write::GzEncoder::new(
-                    &mut tar_buf,
-                    flate2::Compression::default(),
-                );
+                let enc =
+                    flate2::write::GzEncoder::new(&mut tar_buf, flate2::Compression::default());
                 let mut tar_builder = tar::Builder::new(enc);
                 tar_builder
                     .append_dir_all(&skill_name, &skill_path)
-                    .map_err(|e| {
-                        hermes_core::AgentError::Io(format!("Tar error: {}", e))
-                    })?;
+                    .map_err(|e| hermes_core::AgentError::Io(format!("Tar error: {}", e)))?;
                 tar_builder
                     .finish()
-                    .map_err(|e| {
-                        hermes_core::AgentError::Io(format!("Tar finish error: {}", e))
-                    })?;
+                    .map_err(|e| hermes_core::AgentError::Io(format!("Tar finish error: {}", e)))?;
             }
             println!("  ✓ Packaged {} bytes", tar_buf.len());
 
             // Read hub token
             let token_path = hermes_config::hermes_home().join("hub_token");
             if !token_path.exists() {
-                println!(
-                    "  ✗ No hub token found at {}",
-                    token_path.display()
-                );
-                println!(
-                    "    Run `hermes login hub` to authenticate with Skills Hub."
-                );
+                println!("  ✗ No hub token found at {}", token_path.display());
+                println!("    Run `hermes login hub` to authenticate with Skills Hub.");
                 return Ok(());
             }
             let hub_token = std::fs::read_to_string(&token_path)
@@ -1373,10 +1299,7 @@ pub async fn handle_cli_skills(
 
             // Upload to Skills Hub API via multipart
             let tarball_part = reqwest::multipart::Part::bytes(tar_buf)
-                .file_name(format!(
-                    "{}-{}.tar.gz",
-                    publish_name, publish_version
-                ))
+                .file_name(format!("{}-{}.tar.gz", publish_name, publish_version))
                 .mime_str("application/gzip")
                 .unwrap();
             let metadata_part = reqwest::multipart::Part::text(metadata.to_string())
@@ -1396,8 +1319,7 @@ pub async fn handle_cli_skills(
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
-                    let url =
-                        format!("https://agentskills.io/skills/{}", publish_name);
+                    let url = format!("https://agentskills.io/skills/{}", publish_name);
                     println!("  ✓ Published successfully!");
                     println!("  URL: {}", url);
                 }
@@ -1406,9 +1328,7 @@ pub async fn handle_cli_skills(
                         "  ✗ Version {} already exists on Skills Hub.",
                         publish_version
                     );
-                    println!(
-                        "    Bump the version in SKILL.md frontmatter and try again."
-                    );
+                    println!("    Bump the version in SKILL.md frontmatter and try again.");
                 }
                 Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
                     println!("  ✗ Unauthorized. Hub token may be expired.");
@@ -1440,26 +1360,16 @@ pub async fn handle_cli_skills(
                         return Ok(());
                     }
                     // Create a tar.gz archive of skills directory
-                    let tar_gz =
-                        std::fs::File::create(&output).map_err(|e| {
-                            hermes_core::AgentError::Io(format!(
-                                "Failed to create archive: {}",
-                                e
-                            ))
-                        })?;
-                    let enc = flate2::write::GzEncoder::new(
-                        tar_gz,
-                        flate2::Compression::default(),
-                    );
+                    let tar_gz = std::fs::File::create(&output).map_err(|e| {
+                        hermes_core::AgentError::Io(format!("Failed to create archive: {}", e))
+                    })?;
+                    let enc = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
                     let mut tar = tar::Builder::new(enc);
                     tar.append_dir_all("skills", &skills_dir).map_err(|e| {
                         hermes_core::AgentError::Io(format!("Failed to archive: {}", e))
                     })?;
                     tar.finish().map_err(|e| {
-                        hermes_core::AgentError::Io(format!(
-                            "Failed to finalize archive: {}",
-                            e
-                        ))
+                        hermes_core::AgentError::Io(format!("Failed to finalize archive: {}", e))
                     })?;
                     println!("Snapshot exported to: {}", output);
                 }
@@ -1472,24 +1382,15 @@ pub async fn handle_cli_skills(
                     })?;
                     println!("Importing skills snapshot from: {}", input);
                     let tar_gz = std::fs::File::open(&input).map_err(|e| {
-                        hermes_core::AgentError::Io(format!(
-                            "Failed to open archive: {}",
-                            e
-                        ))
+                        hermes_core::AgentError::Io(format!("Failed to open archive: {}", e))
                     })?;
                     let dec = flate2::read::GzDecoder::new(tar_gz);
                     let mut archive = tar::Archive::new(dec);
                     std::fs::create_dir_all(&skills_dir).map_err(|e| {
-                        hermes_core::AgentError::Io(format!(
-                            "Failed to create skills dir: {}",
-                            e
-                        ))
+                        hermes_core::AgentError::Io(format!("Failed to create skills dir: {}", e))
                     })?;
                     archive.unpack(hermes_config::hermes_home()).map_err(|e| {
-                        hermes_core::AgentError::Io(format!(
-                            "Failed to extract archive: {}",
-                            e
-                        ))
+                        hermes_core::AgentError::Io(format!("Failed to extract archive: {}", e))
                     })?;
                     println!("Snapshot imported successfully.");
                 }
@@ -1504,8 +1405,7 @@ pub async fn handle_cli_skills(
             let subscriptions_file = skills_dir.join("subscriptions.json");
             match sub {
                 "list" => {
-                    let taps =
-                        super::effective_skill_taps(&taps_file, &subscriptions_file);
+                    let taps = super::effective_skill_taps(&taps_file, &subscriptions_file);
                     if taps.is_empty() {
                         println!("No skill taps configured.");
                     } else {
@@ -1518,14 +1418,11 @@ pub async fn handle_cli_skills(
                 "add" => {
                     let url = extra.ok_or_else(|| {
                         hermes_core::AgentError::Config(
-                            "Missing tap URL. Usage: hermes skills tap add <url>"
-                                .into(),
+                            "Missing tap URL. Usage: hermes skills tap add <url>".into(),
                         )
                     })?;
                     let mut taps: Vec<String> = super::read_skill_taps(&taps_file);
-                    if super::effective_skill_taps(&taps_file, &subscriptions_file)
-                        .contains(&url)
-                    {
+                    if super::effective_skill_taps(&taps_file, &subscriptions_file).contains(&url) {
                         println!("Tap already exists: {}", url);
                     } else {
                         taps.push(url.clone());
@@ -1536,18 +1433,14 @@ pub async fn handle_cli_skills(
                 "remove" => {
                     let url = extra.ok_or_else(|| {
                         hermes_core::AgentError::Config(
-                            "Missing tap URL. Usage: hermes skills tap remove <url>"
-                                .into(),
+                            "Missing tap URL. Usage: hermes skills tap remove <url>".into(),
                         )
                     })?;
                     if super::DEFAULT_SKILL_TAPS
                         .iter()
                         .any(|default_tap| default_tap == &url.as_str())
                     {
-                        println!(
-                            "Tap '{}' is a built-in default and cannot be removed.",
-                            url
-                        );
+                        println!("Tap '{}' is a built-in default and cannot be removed.", url);
                         println!(
                             "Add custom taps with `hermes skills tap add <url>`; defaults remain active."
                         );
@@ -1572,8 +1465,7 @@ pub async fn handle_cli_skills(
         "config" => {
             let skill_name = name.ok_or_else(|| {
                 hermes_core::AgentError::Config(
-                    "Missing skill name. Usage: hermes skills config <name> [key] [value]"
-                        .into(),
+                    "Missing skill name. Usage: hermes skills config <name> [key] [value]".into(),
                 )
             })?;
             let config_file = skills_dir.join(&skill_name).join("config.json");
@@ -1588,16 +1480,12 @@ pub async fn handle_cli_skills(
                     } else {
                         serde_json::json!({})
                     };
-                    config[parts[0]] =
-                        serde_json::Value::String(parts[1].to_string());
+                    config[parts[0]] = serde_json::Value::String(parts[1].to_string());
                     let json = serde_json::to_string_pretty(&config)
                         .map_err(|e| hermes_core::AgentError::Config(e.to_string()))?;
                     std::fs::write(&config_file, json)
                         .map_err(|e| hermes_core::AgentError::Io(e.to_string()))?;
-                    println!(
-                        "Set {} = {} for skill '{}'",
-                        parts[0], parts[1], skill_name
-                    );
+                    println!("Set {} = {} for skill '{}'", parts[0], parts[1], skill_name);
                 } else {
                     // Get value
                     if config_file.exists() {
@@ -1607,10 +1495,7 @@ pub async fn handle_cli_skills(
                             serde_json::from_str(&c).unwrap_or(serde_json::json!({}));
                         match config.get(&key) {
                             Some(v) => println!("{} = {}", key, v),
-                            None => println!(
-                                "Key '{}' not found in skill config.",
-                                key
-                            ),
+                            None => println!("Key '{}' not found in skill config.", key),
                         }
                     } else {
                         println!("No config for skill '{}'.", skill_name);
@@ -1647,9 +1532,8 @@ pub async fn handle_cli_skills(
             let mut rows: Vec<SkillQualityRow> = Vec::new();
             let weak_regex = Regex::new(r"(?i)\b(todo|fixme|placeholder|stub)\b")
                 .map_err(|e| AgentError::Config(format!("quality regex error: {}", e)))?;
-            let risky_regex =
-                Regex::new(r"(?i)\b(rm\s+-rf|mkfs|dd\s+if=|eval\s*\(|exec\s*\()")
-                    .map_err(|e| AgentError::Config(format!("quality regex error: {}", e)))?;
+            let risky_regex = Regex::new(r"(?i)\b(rm\s+-rf|mkfs|dd\s+if=|eval\s*\(|exec\s*\()")
+                .map_err(|e| AgentError::Config(format!("quality regex error: {}", e)))?;
 
             if let Ok(entries) = std::fs::read_dir(&skills_dir) {
                 for entry in entries.filter_map(|e| e.ok()) {
@@ -1666,16 +1550,11 @@ pub async fn handle_cli_skills(
 
                     let mut score = 100i32;
                     let mut notes = Vec::new();
-                    let content =
-                        std::fs::read_to_string(&skill_md).unwrap_or_default();
+                    let content = std::fs::read_to_string(&skill_md).unwrap_or_default();
                     let (frontmatter, _) =
                         hermes_tools::tools::skill_utils::parse_frontmatter(&content);
                     for required in ["name", "version", "description", "category"] {
-                        if frontmatter
-                            .get(required)
-                            .and_then(|v| v.as_str())
-                            .is_none()
-                        {
+                        if frontmatter.get(required).and_then(|v| v.as_str()).is_none() {
                             score -= 8;
                             notes.push(format!("missing_frontmatter:{}", required));
                         }
@@ -1740,11 +1619,7 @@ pub async fn handle_cli_skills(
                 println!("No skills installed.");
                 return Ok(());
             }
-            rows.sort_by(|a, b| {
-                b.score
-                    .cmp(&a.score)
-                    .then_with(|| a.name.cmp(&b.name))
-            });
+            rows.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
             println!("{:28} {:>5} {:>10}  notes", "skill", "score", "tier");
             println!("{}", "-".repeat(84));
             for row in &rows {
@@ -1770,9 +1645,7 @@ pub async fn handle_cli_skills(
                     );
                 }
             } else {
-                println!(
-                    "\nFallback recommendations: none (all tracked skills >= watch tier)."
-                );
+                println!("\nFallback recommendations: none (all tracked skills >= watch tier).");
             }
         }
         "audit" => {
@@ -1802,14 +1675,8 @@ pub async fn handle_cli_skills(
                     r"(?i)\b(rm\s+-rf|mkfs|dd\s+if=)",
                     "Shell command injection (destructive command)",
                 ),
-                (
-                    r"(?i)(:\(\)\{.*;\}|fork\s+bomb)",
-                    "Fork bomb pattern",
-                ),
-                (
-                    r"(?i)\b(sudo\s+|su\s+-\s)",
-                    "Privilege escalation attempt",
-                ),
+                (r"(?i)(:\(\)\{.*;\}|fork\s+bomb)", "Fork bomb pattern"),
+                (r"(?i)\b(sudo\s+|su\s+-\s)", "Privilege escalation attempt"),
                 (
                     r"(?i)(export\s+PATH|PATH\s*=\s*/)",
                     "PATH environment manipulation",
@@ -1830,10 +1697,7 @@ pub async fn handle_cli_skills(
                 &[(r"\.\.[\\/]", "Path traversal (../)")];
 
             let network_patterns: &[(&str, &str)] = &[
-                (
-                    r"(?i)://127\.0\.0\.1",
-                    "Internal network URL (127.0.0.1)",
-                ),
+                (r"(?i)://127\.0\.0\.1", "Internal network URL (127.0.0.1)"),
                 (r"(?i)://localhost", "Internal network URL (localhost)"),
                 (
                     r"(?i)://10\.\d+\.\d+\.\d+",
@@ -1860,14 +1724,8 @@ pub async fn handle_cli_skills(
                     r#"(?i)(secret\s*=\s*['"][^'"]{3,}['"])"#,
                     "Hardcoded secret",
                 ),
-                (
-                    r"(?i)(sk-[a-zA-Z0-9]{20,})",
-                    "Exposed API key (sk-...)",
-                ),
-                (
-                    r"(?i)(ghp_[a-zA-Z0-9]{30,})",
-                    "Exposed GitHub PAT",
-                ),
+                (r"(?i)(sk-[a-zA-Z0-9]{20,})", "Exposed API key (sk-...)"),
+                (r"(?i)(ghp_[a-zA-Z0-9]{30,})", "Exposed GitHub PAT"),
             ];
 
             let base64_suspicious: &[(&str, &str)] = &[
@@ -1885,10 +1743,7 @@ pub async fn handle_cli_skills(
             let mut total_warnings = 0u32;
             let mut total_critical = 0u32;
 
-            fn scan_dir_recursive(
-                dir: &std::path::Path,
-                files: &mut Vec<std::path::PathBuf>,
-            ) {
+            fn scan_dir_recursive(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.filter_map(|e| e.ok()) {
                         let p = entry.path();
@@ -1997,14 +1852,10 @@ pub async fn handle_cli_skills(
                     if findings.is_empty() {
                         println!("  ✓ {} — clean", dir_name);
                     } else {
-                        let crit_count = findings
-                            .iter()
-                            .filter(|f| f.severity == "critical")
-                            .count();
-                        let warn_count = findings
-                            .iter()
-                            .filter(|f| f.severity == "warning")
-                            .count();
+                        let crit_count =
+                            findings.iter().filter(|f| f.severity == "critical").count();
+                        let warn_count =
+                            findings.iter().filter(|f| f.severity == "warning").count();
                         total_critical += crit_count as u32;
                         total_warnings += warn_count as u32;
 
@@ -2019,10 +1870,7 @@ pub async fn handle_cli_skills(
                             } else {
                                 "WARN"
                             };
-                            println!(
-                                "    [{}] {} — {}",
-                                sev_icon, f.file, f.pattern
-                            );
+                            println!("    [{}] {} — {}", sev_icon, f.file, f.pattern);
                         }
                     }
                 }
@@ -2035,9 +1883,7 @@ pub async fn handle_cli_skills(
             if total_critical == 0 && total_warnings == 0 {
                 println!("  Status:   All clear ✓");
             } else if total_critical > 0 {
-                println!(
-                    "  Status:   Action required — review critical findings"
-                );
+                println!("  Status:   Action required — review critical findings");
             } else {
                 println!("  Status:   Review recommended");
             }

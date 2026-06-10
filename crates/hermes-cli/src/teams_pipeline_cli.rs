@@ -4,15 +4,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
-use hermes_config::{load_config, GatewayConfig, PlatformConfig};
+use hermes_config::{GatewayConfig, PlatformConfig, load_config};
 use hermes_core::AgentError;
 use hermes_tools::{
-    default_change_type_for_resource, maintain_graph_subscriptions,
-    resolve_teams_pipeline_store_path, sync_graph_subscription_record, MicrosoftGraphClient,
-    MicrosoftGraphTeamsBackend, MicrosoftGraphTokenProvider, TeamsGraphBackend,
-    TeamsMeetingPipeline, TeamsPipelineConfig, TeamsPipelineError, TeamsPipelineStore,
+    MicrosoftGraphClient, MicrosoftGraphTeamsBackend, MicrosoftGraphTokenProvider,
+    TeamsGraphBackend, TeamsMeetingPipeline, TeamsPipelineConfig, TeamsPipelineError,
+    TeamsPipelineStore, default_change_type_for_resource, maintain_graph_subscriptions,
+    resolve_teams_pipeline_store_path, sync_graph_subscription_record,
 };
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 #[derive(Debug, Clone, Default)]
 pub struct TeamsPipelineCliOptions {

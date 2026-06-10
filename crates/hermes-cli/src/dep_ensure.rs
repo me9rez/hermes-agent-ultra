@@ -122,7 +122,10 @@ pub async fn ensure_dependency(dep: RuntimeDep, interactive: bool) -> bool {
         warn!("not a TTY, skipping install prompt for {}", dep);
         return false;
     }
-    if !prompt_yes_no(&format!("{} is not installed. Install now?", description(dep))) {
+    if !prompt_yes_no(&format!(
+        "{} is not installed. Install now?",
+        description(dep)
+    )) {
         return false;
     }
 

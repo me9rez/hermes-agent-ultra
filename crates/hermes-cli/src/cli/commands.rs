@@ -158,7 +158,10 @@ pub fn parse_kanban(args: &[OsString]) -> Result<CliCommand, clap::Error> {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "teams-pipeline", about = "Microsoft Teams meeting summary pipeline")]
+#[command(
+    name = "teams-pipeline",
+    about = "Microsoft Teams meeting summary pipeline"
+)]
 struct TeamsPipelineArgs {
     action: Option<String>,
     id: Option<String>,
@@ -265,7 +268,10 @@ pub fn parse_doctor(args: &[OsString]) -> Result<CliCommand, clap::Error> {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "update", about = "Check for updates or perform OTA self-update")]
+#[command(
+    name = "update",
+    about = "Check for updates or perform OTA self-update"
+)]
 struct UpdateArgs {
     /// Only check for updates without installing
     #[arg(long)]

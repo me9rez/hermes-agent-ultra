@@ -2753,11 +2753,7 @@ fn run_command_capture(cwd: &Path, bin: &str, args: &[&str]) -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn collect_repo_drift(
@@ -3576,10 +3572,12 @@ mod tests {
                 canonical_objective_behavior_mode(&mission.behavior_mode),
                 "mission"
             );
-            assert!(mission
-                .behavior_directives
-                .iter()
-                .any(|line| line.contains("closed-loop objective cycles")));
+            assert!(
+                mission
+                    .behavior_directives
+                    .iter()
+                    .any(|line| line.contains("closed-loop objective cycles"))
+            );
 
             let same = upsert_objective_contract("stabilize runtime telemetry", false)
                 .expect("upsert same objective");
@@ -3733,10 +3731,11 @@ mod tests {
         };
         let gate = collect_env_provenance(&spec);
         assert!(!gate.passed);
-        assert!(gate
-            .conflicting_keys
-            .iter()
-            .any(|k| k == "REAL_ALGOTRADER_WS_BUY_GATE_ENABLED"));
+        assert!(
+            gate.conflicting_keys
+                .iter()
+                .any(|k| k == "REAL_ALGOTRADER_WS_BUY_GATE_ENABLED")
+        );
     }
 
     #[test]

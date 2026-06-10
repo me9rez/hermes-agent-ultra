@@ -206,7 +206,7 @@ pub fn load_mcp_config_if_exists(path: &Path) -> Result<Option<McpConfig>, Agent
 
 #[cfg(test)]
 mod tests {
-    use super::{load_mcp_config, parse_mcp_config_json, McpTransportKind};
+    use super::{McpTransportKind, load_mcp_config, parse_mcp_config_json};
 
     #[test]
     fn parses_object_config_and_warns_when_url_and_command_conflict() {
@@ -226,11 +226,12 @@ mod tests {
         assert_eq!(entry.transport_display(), "https://example.com/mcp");
         assert!(entry.supports_parallel_tool_calls);
         assert_eq!(cfg.warnings().count(), 1);
-        assert!(cfg
-            .warnings()
-            .next()
-            .expect("warning")
-            .contains("Using HTTP transport"));
+        assert!(
+            cfg.warnings()
+                .next()
+                .expect("warning")
+                .contains("Using HTTP transport")
+        );
     }
 
     #[test]

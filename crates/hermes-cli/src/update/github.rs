@@ -1,11 +1,11 @@
+use crate::update::platform::Platform;
+use crate::update::version::Channel;
 use async_trait::async_trait;
 use hermes_core::errors::AgentError;
 use semver::Version;
 use serde::Deserialize;
 use std::process::Command;
 use tracing::debug;
-use crate::update::platform::Platform;
-use crate::update::version::Channel;
 
 /// Release 信息
 pub struct ReleaseInfo {
@@ -96,16 +96,14 @@ struct GitHubAsset {
 /// with corporate VPN/proxy certificates.
 fn curl_get(url: &str) -> Result<String, AgentError> {
     let mut cmd = Command::new("curl");
-    cmd.args([
-        "-sSfL",
-        "-H", "User-Agent: hermes-agent-ultra",
-    ]);
+    cmd.args(["-sSfL", "-H", "User-Agent: hermes-agent-ultra"]);
     if let Ok(token) = std::env::var("GITHUB_TOKEN") {
         cmd.args(["-H", &format!("Authorization: Bearer {token}")]);
     }
     cmd.arg(url);
 
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .map_err(|e| AgentError::Io(format!("Failed to run curl: {e}")))?;
 
     if !output.status.success() {
@@ -138,7 +136,8 @@ impl ReleaseSource for GitHubSource {
             .map(|a| a.browser_download_url.clone())
             .ok_or_else(|| {
                 AgentError::Io(format!(
-                    "No artifact '{}' found in release {}", artifact_name, release.tag_name
+                    "No artifact '{}' found in release {}",
+                    artifact_name, release.tag_name
                 ))
             })?;
 
@@ -149,11 +148,11 @@ impl ReleaseSource for GitHubSource {
             .map(|a| a.browser_download_url.clone());
 
         let version_str = release.tag_name.trim_start_matches('v');
-        let version = Version::parse(version_str)
-            .unwrap_or_else(|_| Version::new(0, 0, 0));
+        let version = Version::parse(version_str).unwrap_or_else(|_| Version::new(0, 0, 0));
         let channel = Channel::from_prerelease(&version.pre.to_string());
 
-        let (forced, min_version) = release.body
+        let (forced, min_version) = release
+            .body
             .as_deref()
             .map(parse_release_meta)
             .unwrap_or((false, None));
@@ -196,13 +195,20 @@ mod tests {
 
     #[test]
     fn test_api_url() {
-        let source = GitHubSource { repo: "owner/repo".to_string() };
-        assert_eq!(source.api_url(), "https://api.github.com/repos/owner/repo/releases/latest");
+        let source = GitHubSource {
+            repo: "owner/repo".to_string(),
+        };
+        assert_eq!(
+            source.api_url(),
+            "https://api.github.com/repos/owner/repo/releases/latest"
+        );
     }
 
     #[test]
     fn test_download_base_url() {
-        let source = GitHubSource { repo: "owner/repo".to_string() };
+        let source = GitHubSource {
+            repo: "owner/repo".to_string(),
+        };
         assert_eq!(
             source.download_base_url("v1.2.3"),
             "https://github.com/owner/repo/releases/download/v1.2.3"

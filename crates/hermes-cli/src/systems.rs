@@ -9,7 +9,7 @@ use std::sync::Arc;
 use chrono::{SecondsFormat, Utc};
 use hermes_core::AgentError;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::providers::{known_providers, provider_capability_for};
 
@@ -720,7 +720,7 @@ fn serve_agent_card(host: &str, port: u16, once: bool) -> Result<(), AgentError>
             Err(err) => {
                 return Err(AgentError::Io(format!(
                     "accept agent-card connection: {err}"
-                )))
+                )));
             }
         }
         if once {
@@ -1251,24 +1251,30 @@ mod tests {
     async fn mcp_conformance_report_passes_core_methods() {
         let report = build_mcp_conformance_report().await;
         assert!(report.passed, "report should pass: {report:#?}");
-        assert!(report
-            .checks
-            .iter()
-            .any(|check| check.method == "resources/read"));
-        assert!(report
-            .checks
-            .iter()
-            .any(|check| check.method == "prompts/get"));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.method == "resources/read")
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.method == "prompts/get")
+        );
     }
 
     #[tokio::test]
     async fn acp_conformance_report_passes_core_methods() {
         let report = build_acp_conformance_report().await;
         assert!(report.passed, "report should pass: {report:#?}");
-        assert!(report
-            .checks
-            .iter()
-            .any(|check| check.method == "session/new"));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.method == "session/new")
+        );
         assert!(report.checks.iter().any(|check| check.method == "prompt"));
     }
 
@@ -1297,24 +1303,30 @@ mod tests {
         fs::write(dir.join("session-platform.json"), "{}\n").expect("write handoff request");
         let report = build_handoff_report(temp.path()).expect("report");
         assert_eq!(report.pending_requests, 1);
-        assert!(report
-            .contract
-            .pointer("/contract/evidence_required")
-            .and_then(Value::as_array)
-            .is_some_and(|items| !items.is_empty()));
+        assert!(
+            report
+                .contract
+                .pointer("/contract/evidence_required")
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+        );
     }
 
     #[test]
     fn provenance_report_detects_release_signing_workflow() {
         let temp = tempfile::tempdir().expect("tempdir");
         let report = build_provenance_report(temp.path());
-        assert!(report
-            .release_workflow
-            .ends_with(".github/workflows/release.yml"));
+        assert!(
+            report
+                .release_workflow
+                .ends_with(".github/workflows/release.yml")
+        );
         assert!(report.release_workflow_signs_artifacts);
-        assert!(report
-            .commands
-            .iter()
-            .any(|command| command.contains("verify-provenance")));
+        assert!(
+            report
+                .commands
+                .iter()
+                .any(|command| command.contains("verify-provenance"))
+        );
     }
 }

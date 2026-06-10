@@ -6,14 +6,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use hermes_core::ToolHandler;
 use hermes_cron::{CronScheduler, ScheduledCronjobBackend};
+use hermes_gateway::Gateway;
 use hermes_gateway::tool_backends::{
     ChannelClarifyBackend, ClarifyDispatcher, GatewayMessagingBackend,
 };
-use hermes_gateway::Gateway;
+use hermes_tools::ToolRegistry;
 use hermes_tools::tools::clarify::{ClarifyBackend, ClarifyHandler};
 use hermes_tools::tools::cronjob::CronjobHandler;
 use hermes_tools::tools::messaging::{MessagingSessionContext, SendMessageHandler};
-use hermes_tools::ToolRegistry;
 use serde_json::json;
 
 fn register_runtime_tool(
@@ -49,8 +49,10 @@ pub fn wire_gateway_messaging_backend(
     session_context: Arc<MessagingSessionContext>,
 ) {
     let backend = Arc::new(GatewayMessagingBackend::new(gateway));
-    let handler: Arc<dyn ToolHandler> =
-        Arc::new(SendMessageHandler::with_session_context(backend, session_context));
+    let handler: Arc<dyn ToolHandler> = Arc::new(SendMessageHandler::with_session_context(
+        backend,
+        session_context,
+    ));
     register_runtime_tool(
         tool_registry,
         "send_message",
@@ -227,7 +229,7 @@ mod tests {
 
     use hermes_core::{GatewayError, ParseMode, PlatformAdapter};
     use hermes_cron::{CronRunner, FileJobPersistence, MinimalCronLlm};
-    use hermes_gateway::{gateway::GatewayConfig, DmManager, SessionManager};
+    use hermes_gateway::{DmManager, SessionManager, gateway::GatewayConfig};
     use tempfile::TempDir;
 
     struct RecordingAdapter {

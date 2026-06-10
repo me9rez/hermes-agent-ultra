@@ -10,11 +10,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Stdout, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
+use crossterm::ExecutableCommand;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -22,9 +23,9 @@ use crossterm::event::{
 };
 use crossterm::style::ResetColor;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::ExecutableCommand;
+use ratatui::Frame;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -32,7 +33,6 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
-use ratatui::Frame;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tui_textarea::{CursorMove, TextArea};
@@ -2752,10 +2752,7 @@ fn fence_open_at(text: &str, end: usize) -> bool {
     let mut i = 0usize;
 
     while i < end {
-        let line_end = text[i..end]
-            .find('\n')
-            .map(|off| i + off)
-            .unwrap_or(end);
+        let line_end = text[i..end].find('\n').map(|off| i + off).unwrap_or(end);
         let line = text[i..line_end].trim();
 
         if line_toggles_code_fence(line) {
@@ -3955,7 +3952,11 @@ fn render_completions_popup(
         .skip(start)
         .take(end.saturating_sub(start))
         .map(|(i, cmd)| {
-            let active = selected.or(if completions.is_empty() { None } else { Some(0) });
+            let active = selected.or(if completions.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
             let style = if active == Some(i) {
                 Style::default()
                     .fg(Color::Black)
@@ -5320,8 +5321,7 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
                                         tool, result_preview
                                     ));
                                     if !failed {
-                                        let file_hints =
-                                            extract_file_like_hints(result_preview, 3);
+                                        let file_hints = extract_file_like_hints(result_preview, 3);
                                         if !file_hints.is_empty() {
                                             state.push_activity(format!(
                                                 "Δfiles {}",
@@ -6203,10 +6203,12 @@ mod tests {
         assert!(matches!(modal.kind, PickerKind::Skin));
         assert!(modal.items.iter().any(|item| item.value == "ultra-neon"));
         assert!(modal.items.iter().any(|item| item.value == "neon-glow"));
-        assert!(modal
-            .items
-            .iter()
-            .any(|item| item.value == "hyper-ultra-hyper-saturated"));
+        assert!(
+            modal
+                .items
+                .iter()
+                .any(|item| item.value == "hyper-ultra-hyper-saturated")
+        );
     }
 
     #[test]
@@ -6223,14 +6225,18 @@ mod tests {
             state.push_activity(format!("event-{i}"));
         }
         assert_eq!(state.recent_activity.len(), 16);
-        assert!(state
-            .recent_activity
-            .first()
-            .is_some_and(|line| line.ends_with("event-14")));
-        assert!(state
-            .recent_activity
-            .last()
-            .is_some_and(|line| line.ends_with("event-29")));
+        assert!(
+            state
+                .recent_activity
+                .first()
+                .is_some_and(|line| line.ends_with("event-14"))
+        );
+        assert!(
+            state
+                .recent_activity
+                .last()
+                .is_some_and(|line| line.ends_with("event-29"))
+        );
     }
 
     #[test]
@@ -6261,10 +6267,12 @@ mod tests {
         assert_eq!(state.stream_chunk_count, 0);
         assert_eq!(state.stream_char_count, 0);
         assert!(state.processing_started_at.is_some());
-        assert!(state
-            .recent_activity
-            .last()
-            .is_some_and(|line| line.contains("dispatching request")));
+        assert!(
+            state
+                .recent_activity
+                .last()
+                .is_some_and(|line| line.contains("dispatching request"))
+        );
 
         state.stream_chunk_count = 7;
         state.stream_char_count = 1234;
@@ -6274,10 +6282,12 @@ mod tests {
         assert_eq!(state.stream_chunk_count, 0);
         assert_eq!(state.stream_char_count, 0);
         assert!(state.processing_started_at.is_none());
-        assert!(state
-            .recent_activity
-            .last()
-            .is_some_and(|line| line.contains("✔ completed in")));
+        assert!(
+            state
+                .recent_activity
+                .last()
+                .is_some_and(|line| line.contains("✔ completed in"))
+        );
     }
 
     #[test]
@@ -6289,10 +6299,12 @@ mod tests {
         let before = state.recent_activity.len();
         state.maybe_emit_progress_pulse();
         assert!(state.recent_activity.len() > before);
-        assert!(state
-            .recent_activity
-            .last()
-            .is_some_and(|line| line.contains("working")));
+        assert!(
+            state
+                .recent_activity
+                .last()
+                .is_some_and(|line| line.contains("working"))
+        );
     }
 
     #[test]
@@ -6318,10 +6330,12 @@ mod tests {
         assert_eq!(state.processing_phase, "retrieval");
         assert_eq!(state.processing_phase_label, "collecting evidence");
         assert_eq!(state.processing_phase_progress, 42);
-        assert!(state
-            .recent_activity
-            .last()
-            .is_some_and(|line| line.contains("phase 42%")));
+        assert!(
+            state
+                .recent_activity
+                .last()
+                .is_some_and(|line| line.contains("phase 42%"))
+        );
     }
 
     #[test]
@@ -6831,7 +6845,10 @@ mod tests {
 
     #[test]
     fn test_find_stable_boundary_no_blank_line() {
-        assert_eq!(find_stable_boundary("partial line with no newline yet"), None);
+        assert_eq!(
+            find_stable_boundary("partial line with no newline yet"),
+            None
+        );
         assert_eq!(find_stable_boundary("line one\nline two\nline three"), None);
         assert_eq!(find_stable_boundary(""), None);
     }
@@ -6866,16 +6883,14 @@ mod tests {
         let mut cache = StreamMarkdownCache::default();
 
         let text_a = "first paragraph\n\nsecond";
-        let lines_a = render_streaming_assistant_markdown_lines(
-            &mut cache, text_a, &styles, &colors, 80,
-        );
+        let lines_a =
+            render_streaming_assistant_markdown_lines(&mut cache, text_a, &styles, &colors, 80);
         assert!(!lines_a.is_empty());
         assert_eq!(cache.stable_prefix, "first paragraph\n\n");
 
         let text_b = "first paragraph\n\nsecond paragraph\n\nthird";
-        let lines_b = render_streaming_assistant_markdown_lines(
-            &mut cache, text_b, &styles, &colors, 80,
-        );
+        let lines_b =
+            render_streaming_assistant_markdown_lines(&mut cache, text_b, &styles, &colors, 80);
         assert!(lines_b.len() >= lines_a.len());
         assert_eq!(
             cache.stable_prefix,

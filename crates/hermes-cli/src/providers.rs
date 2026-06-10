@@ -134,8 +134,8 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        canonical_provider_id, known_providers, oauth_capable_providers, provider_capability_for,
-        MODELS_DEV_MERGED_PROVIDERS,
+        MODELS_DEV_MERGED_PROVIDERS, canonical_provider_id, known_providers,
+        oauth_capable_providers, provider_capability_for,
     };
 
     #[derive(Debug, Deserialize)]

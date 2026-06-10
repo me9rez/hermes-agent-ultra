@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use hermes_core::AgentError;
-use hermes_intelligence::models_dev::{default_client, ModelsDevClient};
-use hmac::{Hmac, Mac, KeyInit};
+use hermes_intelligence::models_dev::{ModelsDevClient, default_client};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::TryRng;
 use serde_json::Value;
 use sha2::{Digest, Sha256};

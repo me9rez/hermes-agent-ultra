@@ -8,222 +8,222 @@ pub enum ShallowCommand {
     #[command(name = "hermes")]
     Hermes,
     #[command(disable_help_flag = true)]
-    Model    {
+    Model {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Tools    {
+    Tools {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Config    {
+    Config {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Gateway    {
+    Gateway {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Doctor    {
+    Doctor {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Update    {
+    Update {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(name = "elite-check", disable_help_flag = true)]
-    EliteCheck    {
+    EliteCheck {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(name = "verify-provenance", disable_help_flag = true)]
-    VerifyProvenance    {
+    VerifyProvenance {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(name = "rotate-provenance-key", disable_help_flag = true)]
-    RotateProvenanceKey    {
+    RotateProvenanceKey {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(name = "route-learning", disable_help_flag = true)]
-    RouteLearning    {
+    RouteLearning {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(name = "route-health", disable_help_flag = true)]
-    RouteHealth    {
+    RouteHealth {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(name = "route-autotune", disable_help_flag = true)]
-    RouteAutotune    {
+    RouteAutotune {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(name = "incident-pack", disable_help_flag = true)]
-    IncidentPack    {
+    IncidentPack {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Dashboard    {
+    Dashboard {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Debug    {
+    Debug {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Logs    {
+    Logs {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Profile    {
+    Profile {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Auth    {
+    Auth {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Secrets    {
+    Secrets {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Cron    {
+    Cron {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Webhook    {
+    Webhook {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Chat    {
+    Chat {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Skills    {
+    Skills {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Plugins    {
+    Plugins {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Memory    {
+    Memory {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Meeting    {
+    Meeting {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Interest    {
+    Interest {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Contribute    {
+    Contribute {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Mcp    {
+    Mcp {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Sessions    {
+    Sessions {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Resume    {
+    Resume {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Insights    {
+    Insights {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Login    {
+    Login {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Logout    {
+    Logout {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Whatsapp    {
+    Whatsapp {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Pairing    {
+    Pairing {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Claw    {
+    Claw {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Acp    {
+    Acp {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Backup    {
+    Backup {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Import    {
+    Import {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Dump    {
+    Dump {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Completion    {
+    Completion {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Uninstall    {
+    Uninstall {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
     #[command(disable_help_flag = true)]
-    Lumio    {
+    Lumio {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },

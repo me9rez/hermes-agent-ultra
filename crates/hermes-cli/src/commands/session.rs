@@ -32,9 +32,7 @@ pub(crate) fn handle_save_command(
 // Snapshot enumeration
 // ---------------------------------------------------------------------------
 
-pub(crate) fn enumerate_saved_sessions(
-    sessions_dir: &Path,
-) -> Vec<(String, PathBuf, SystemTime)> {
+pub(crate) fn enumerate_saved_sessions(sessions_dir: &Path) -> Vec<(String, PathBuf, SystemTime)> {
     let mut entries: Vec<(String, PathBuf, SystemTime)> = std::fs::read_dir(sessions_dir)
         .ok()
         .into_iter()
@@ -171,14 +169,8 @@ pub(crate) fn resolve_saved_session_entry<'a>(
 }
 
 pub(crate) fn message_from_snapshot_entry(entry: &serde_json::Value) -> hermes_core::Message {
-    let role_str = entry
-        .get("role")
-        .and_then(|r| r.as_str())
-        .unwrap_or("User");
-    let content_str = entry
-        .get("content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("");
+    let role_str = entry.get("role").and_then(|r| r.as_str()).unwrap_or("User");
+    let content_str = entry.get("content").and_then(|c| c.as_str()).unwrap_or("");
     match role_str {
         "Assistant" => hermes_core::Message::assistant(content_str),
         "System" => hermes_core::Message::system(content_str),
@@ -1015,10 +1007,7 @@ pub(crate) fn handle_branch_command(
                 match resolve_saved_session_entry(&entries, right_name) {
                     Ok(entry) => entry,
                     Err(err) if err.starts_with("not_found:") => {
-                        emit_command_output(
-                            app,
-                            format!("Snapshot '{}' not found.", right_name),
-                        );
+                        emit_command_output(app, format!("Snapshot '{}' not found.", right_name));
                         return Ok(CommandResult::Handled);
                     }
                     Err(err) => {
@@ -1077,10 +1066,7 @@ pub(crate) fn handle_branch_command(
                 let target_entry = match resolve_saved_session_entry(&entries, target_name) {
                     Ok(entry) => entry,
                     Err(err) if err.starts_with("not_found:") => {
-                        emit_command_output(
-                            app,
-                            format!("Snapshot '{}' not found.", target_name),
-                        );
+                        emit_command_output(app, format!("Snapshot '{}' not found.", target_name));
                         return Ok(CommandResult::Handled);
                     }
                     Err(err) => {
@@ -1100,8 +1086,7 @@ pub(crate) fn handle_branch_command(
             }
 
             let source_messages = load_messages_from_snapshot(&source_entry.1)?;
-            let mut seen: HashSet<String> =
-                merged_messages.iter().map(message_signature).collect();
+            let mut seen: HashSet<String> = merged_messages.iter().map(message_signature).collect();
             let mut appended = 0usize;
             for msg in source_messages {
                 let sig = message_signature(&msg);
@@ -1180,8 +1165,7 @@ pub(crate) fn handle_session_compat_command(
                     ),
                 }
             } else {
-                match session_db(app).set_session_title(&app.session_id, Some(arg_joined.trim()))
-                {
+                match session_db(app).set_session_title(&app.session_id, Some(arg_joined.trim())) {
                     Ok(true) => format!("Session title set to: {}", arg_joined.trim()),
                     Ok(false) => "Session not found in state.db.".to_string(),
                     Err(e) => format!("Failed to set title: {e}"),
@@ -1302,10 +1286,7 @@ mod tests {
         assert_eq!(result, CommandResult::Handled);
 
         let output = latest_ui_assistant_text(&app);
-        assert!(
-            output.contains("Session snapshots:")
-                || output.contains("No snapshots found in")
-        );
+        assert!(output.contains("Session snapshots:") || output.contains("No snapshots found in"));
     }
 
     #[tokio::test]

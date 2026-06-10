@@ -146,7 +146,7 @@ pub(crate) async fn prepare_turn(
             &format!("💬 Starting conversation: '{short}{suffix}'"),
         );
     }
-    agent.memory_on_turn_start(user_turn_count, &original_user_message);
+    crate::tool_executor::memory_on_turn_start(agent, user_turn_count, &original_user_message);
 
     agent.apply_turn_prep_infrastructure_hooks();
     crate::skill_provenance::set_current_write_origin("assistant_tool");
@@ -552,7 +552,7 @@ async fn run_with_message_prelude(
         "session_start",
         serde_json::json!({
             "session_id": session_id,
-            "mode": if agent.use_streaming_llm_transport(ui_streaming, 0, None) {
+            "mode": if crate::llm_caller::use_streaming_llm_transport(agent, ui_streaming, 0, None) {
                 "stream"
             } else {
                 "run"
@@ -601,11 +601,12 @@ async fn run_with_message_prelude(
     let mut tool_guardrails = crate::tool_guardrails::ToolGuardrailController::new();
     let mut file_mutation =
         crate::file_mutation_tracker::FileMutationTracker::new(agent.config().checkpoints_enabled);
-    let mut stream_scrubber = if agent.use_streaming_llm_transport(ui_streaming, 0, None) {
-        Some(crate::stream_scrubber::ThinkBlockScrubber::new())
-    } else {
-        None
-    };
+    let mut stream_scrubber =
+        if crate::llm_caller::use_streaming_llm_transport(agent, ui_streaming, 0, None) {
+            Some(crate::stream_scrubber::ThinkBlockScrubber::new())
+        } else {
+            None
+        };
     let mut checkpoint_mgr = hermes_tools::CheckpointManager::new(
         agent.config().checkpoints_enabled,
         agent.config().hermes_home.as_deref().map(Path::new),

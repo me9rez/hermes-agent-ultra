@@ -121,7 +121,7 @@ pub(crate) use crate::loop_exit::LoopExit;
 pub(crate) use crate::window_stats::{push_window_f64, push_window_u64};
 
 pub(crate) const CONVERSATIONAL_SUPPORT_GUIDANCE: &str = "# Conversational support protocol\nWhen users share personal stress, emotions, or difficult decisions, start with a brief non-judgmental acknowledgment, ask one clarifying question if context is missing, then offer practical options with trade-offs. Keep factual or technical requests direct and do not force emotional language where it does not fit. Do not present yourself as a therapist or crisis service; when safety risk appears, urge the user to seek immediate professional or emergency help.";
-const OAUTH_REFRESH_BACKOFF_SECS: u64 = 60;
+pub(crate) const OAUTH_REFRESH_BACKOFF_SECS: u64 = 60;
 const SESSION_OBJECTIVE_PREFIX: &str = "[SESSION_OBJECTIVE] ";
 const OBJECTIVE_PATCH_TAG: &str = "PATCH_VERIFIED:";
 const OBJECTIVE_ANALYTICS_TAG: &str = "ANALYTICS_VERIFIED:";
@@ -520,6 +520,73 @@ pub(crate) enum StreamCollectOutcome {
     Interrupted(LlmResponse),
 }
 
+/// Build a PrimaryRuntime from agent config (no runtime snapshot).
+/// Extracted as a free function so it can be called from `runtime_provider`.
+pub(crate) fn primary_runtime_from_config(config: &AgentConfig) -> PrimaryRuntime {
+    let provider = config
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let base_url = provider
+        .as_ref()
+        .and_then(|p| config.runtime_providers.get(p))
+        .and_then(|c| {
+            c.base_url
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+    let mut command = config
+        .acp_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let mut args: Vec<String> = config
+        .acp_args
+        .iter()
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .collect();
+    if let Some(provider) = provider.as_deref() {
+        if let Some(cfg) = config.runtime_providers.get(provider) {
+            if let Some(cmd) = cfg
+                .command
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                command = Some(cmd.to_string());
+            }
+            if !cfg.args.is_empty() {
+                args = cfg
+                    .args
+                    .iter()
+                    .map(|a| a.trim().to_string())
+                    .filter(|a| !a.is_empty())
+                    .collect();
+            }
+        }
+    }
+    let provider_key = provider.as_deref().unwrap_or("");
+    let api_mode = crate::smart_model_routing::maybe_apply_codex_app_server_runtime(
+        provider_key,
+        config.api_mode.clone(),
+        config.openai_runtime.as_deref(),
+    );
+    PrimaryRuntime {
+        model: config.model.clone(),
+        provider,
+        base_url,
+        api_mode,
+        command,
+        args,
+        credential_pool: None,
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RepoReviewBudgetState {
     pub(crate) last_discovery_signature: Option<String>,
@@ -903,7 +970,7 @@ pub struct AgentLoop {
     /// Rolling per-route performance state for online smart-routing adaptation.
     route_learning: Arc<Mutex<HashMap<String, RouteLearningStats>>>,
     /// Frozen primary runtime at session start (Python `_primary_runtime`).
-    stored_primary_runtime: PrimaryRuntime,
+    pub(crate) stored_primary_runtime: PrimaryRuntime,
     /// When set, tool calls use this async path instead of sync `ToolRegistry` handlers
     /// (avoids `block_in_place` + `block_on` from inside `JoinSet` tasks on the gateway).
     pub(crate) async_tool_dispatch: Option<AsyncToolDispatch>,
@@ -914,9 +981,10 @@ pub struct AgentLoop {
     /// Reused SQLite persistence handle for this agent (Python `SessionDB._conn` parity).
     shared_session_persistence: std::sync::OnceLock<Arc<SessionPersistence>>,
     /// Per-turn cache for OpenAI-compat provider message/tool JSON serialization.
-    provider_serialize_cache: Arc<crate::provider_serialize_cache::ProviderSerializeCache>,
+    pub(crate) provider_serialize_cache:
+        Arc<crate::provider_serialize_cache::ProviderSerializeCache>,
     /// Python `_disable_streaming` — set after "stream not supported" for the rest of the session.
-    disable_streaming: Arc<AtomicBool>,
+    pub(crate) disable_streaming: Arc<AtomicBool>,
     /// Per-turn vision capability (Python `_vision_supported`; reset each `prepare_turn`).
     pub(crate) vision_supported: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -1230,68 +1298,7 @@ impl AgentLoop {
     }
 
     fn primary_runtime_from_config(config: &AgentConfig) -> PrimaryRuntime {
-        let provider = config
-            .provider
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let base_url = provider
-            .as_ref()
-            .and_then(|p| config.runtime_providers.get(p))
-            .and_then(|c| {
-                c.base_url
-                    .as_ref()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            });
-        let mut command = config
-            .acp_command
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let mut args: Vec<String> = config
-            .acp_args
-            .iter()
-            .map(|a| a.trim().to_string())
-            .filter(|a| !a.is_empty())
-            .collect();
-        if let Some(provider) = provider.as_deref() {
-            if let Some(cfg) = config.runtime_providers.get(provider) {
-                if let Some(cmd) = cfg
-                    .command
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    command = Some(cmd.to_string());
-                }
-                if !cfg.args.is_empty() {
-                    args = cfg
-                        .args
-                        .iter()
-                        .map(|a| a.trim().to_string())
-                        .filter(|a| !a.is_empty())
-                        .collect();
-                }
-            }
-        }
-        let provider_key = provider.as_deref().unwrap_or("");
-        let api_mode = crate::smart_model_routing::maybe_apply_codex_app_server_runtime(
-            provider_key,
-            config.api_mode.clone(),
-            config.openai_runtime.as_deref(),
-        );
-        PrimaryRuntime {
-            model: config.model.clone(),
-            provider,
-            base_url,
-            api_mode,
-            command,
-            args,
-            credential_pool: None,
-        }
+        crate::agent_loop::primary_runtime_from_config(config)
     }
 
     /// Restore primary model/provider at the start of a new turn (Python `run_conversation` prelude).
@@ -1330,48 +1337,7 @@ impl AgentLoop {
     }
 
     pub(crate) fn primary_runtime_for_failover_model(&self, model_id: &str) -> PrimaryRuntime {
-        let cfg = self.config_snapshot();
-        let mut rt = Self::primary_runtime_from_config(&cfg);
-        let (provider, _) = self.extract_provider_and_model(model_id);
-        rt.model = model_id.trim().to_string();
-        if !provider.is_empty() {
-            rt.provider = Some(provider);
-        }
-        if let Some(p) = rt.provider.as_deref() {
-            if let Some(rcfg) = cfg.runtime_providers.get(p) {
-                if let Some(url) = rcfg
-                    .base_url
-                    .as_ref()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                {
-                    rt.base_url = Some(url);
-                }
-                if let Some(cmd) = rcfg
-                    .command
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    rt.command = Some(cmd.to_string());
-                }
-                if !rcfg.args.is_empty() {
-                    rt.args = rcfg
-                        .args
-                        .iter()
-                        .map(|a| a.trim().to_string())
-                        .filter(|a| !a.is_empty())
-                        .collect();
-                }
-            }
-        }
-        if let Some(url) = rt.base_url.as_deref() {
-            if let Some(mode) = detect_api_mode_for_url(url) {
-                rt.api_mode = mode;
-            }
-        }
-        rt.credential_pool = self.primary_credential_pool.clone();
-        rt
+        crate::runtime_provider::primary_runtime_for_failover_model(self, model_id)
     }
 
     /// Build an LLM provider from a full [`PrimaryRuntime`] snapshot (failover / fallback).
@@ -1379,26 +1345,7 @@ impl AgentLoop {
         &self,
         runtime: &PrimaryRuntime,
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
-        let (inferred_provider, model_name) =
-            self.extract_provider_and_model(runtime.model.as_str());
-        let provider = runtime
-            .provider
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(inferred_provider.as_str());
-        let pool = runtime
-            .credential_pool
-            .as_ref()
-            .or(self.primary_credential_pool.as_ref());
-        self.build_runtime_provider(
-            provider,
-            model_name,
-            runtime.base_url.as_deref(),
-            None,
-            None,
-            Some(&runtime.api_mode),
-            pool,
-        )
+        crate::runtime_provider::build_llm_provider_for_runtime(self, runtime)
     }
 
     fn runtime_provider_api_mode(&self, provider: &str) -> Option<ApiMode> {
@@ -1447,68 +1394,26 @@ impl AgentLoop {
         route_base_url: Option<&str>,
         explicit_api_key: Option<&str>,
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
-        let api_mode = self
-            .runtime_provider_api_mode(provider)
-            .or_else(|| route_base_url.and_then(detect_api_mode_for_url));
-        self.build_runtime_provider(
+        crate::runtime_provider::build_delegation_runtime_provider(
+            self,
             provider,
             model_name,
             route_base_url,
-            None,
             explicit_api_key,
-            api_mode.as_ref(),
-            self.primary_credential_pool.as_ref(),
         )
     }
 
     /// Effective provider for API calls: rebuild from active runtime when fallback is active.
     pub(crate) fn effective_llm_provider(&self) -> Arc<dyn LlmProvider> {
-        let fallback_active = self
-            .state
-            .lock()
-            .map(|state| state.turn_fallback.is_fallback_activated())
-            .unwrap_or(false);
-        if fallback_active {
-            if let Ok(state) = self.state.lock() {
-                if let Ok(provider) = self.build_llm_provider_for_runtime(&state.active_runtime) {
-                    return provider;
-                }
-            }
-        }
-        self.llm_provider.clone()
+        crate::runtime_provider::effective_llm_provider(self)
     }
 
     pub(crate) fn note_primary_rate_limited_if_applicable(&self) {
-        let already = self
-            .state
-            .lock()
-            .map(|state| state.turn_fallback.is_fallback_activated())
-            .unwrap_or(false);
-        let primary_prov = self
-            .stored_primary_runtime
-            .provider
-            .as_deref()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let active_prov = self
-            .primary_runtime_snapshot()
-            .provider
-            .as_deref()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if already && !primary_prov.is_empty() && active_prov != primary_prov {
-            return;
-        }
-        if let Ok(mut state) = self.state.lock() {
-            state.turn_fallback.note_primary_rate_limited();
-        }
+        crate::runtime_provider::note_primary_rate_limited_if_applicable(self)
     }
 
     pub(crate) fn active_model(&self) -> String {
-        self.state
-            .lock()
-            .map(|state| state.active_runtime.model.clone())
-            .unwrap_or_else(|_| self.config_snapshot().model)
+        crate::runtime_provider::active_model(self)
     }
 
     /// Try switching to a configured fallback model (Nous guard, billing, rate limit).
@@ -1683,88 +1588,11 @@ impl AgentLoop {
     }
 
     pub(crate) fn build_turn_api_messages(&self, ctx: &mut ContextManager) -> Arc<[Message]> {
-        self.prepare_ctx_for_api_call(ctx);
-        let key = self.api_messages_cache_key(ctx);
-        if let Ok(state) = self.state.lock() {
-            if let Some((cached_key, arc)) = state.turn_api_messages_cache.as_ref() {
-                if *cached_key == key {
-                    return Arc::clone(arc);
-                }
-            }
-        }
-
-        let cfg = self.config();
-        let prefetch = self
-            .state
-            .lock()
-            .map(|state| state.turn_ext_prefetch_cache.clone())
-            .unwrap_or_default();
-        let ephemeral = cfg
-            .ephemeral_system_prompt
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        let force_strip_images = !self
-            .vision_supported
-            .load(std::sync::atomic::Ordering::Acquire);
-        let provider = cfg.provider.as_deref().unwrap_or("");
-        let base_url = self
-            .resolve_runtime_base_url(provider, None)
-            .unwrap_or_default();
-        let messages = crate::api_messages::assemble_api_messages_from_ctx(
-            ctx.get_messages(),
-            &prefetch,
-            ephemeral,
-            self.active_model().as_str(),
-            cfg.cache_ttl.as_str(),
-            cfg.use_prompt_caching,
-            cfg.use_native_cache_layout,
-            force_strip_images,
-        );
-        let messages = agent_runtime_helpers::prepare_wire_messages_for_api(
-            messages,
-            provider,
-            self.active_model().as_str(),
-            base_url.as_str(),
-        );
-        let arc: Arc<[Message]> = messages.into();
-
-        if let Ok(mut state) = self.state.lock() {
-            state.turn_api_messages_cache = Some((key, Arc::clone(&arc)));
-        }
-        arc
+        crate::llm_caller::build_turn_api_messages(self, ctx)
     }
 
     pub(crate) fn build_api_messages_legacy(&self, ctx: &mut ContextManager) -> Vec<Message> {
-        self.prepare_ctx_for_api_call(ctx);
-        let mut messages = ctx.get_messages().to_vec();
-        let prefetch = self
-            .state
-            .lock()
-            .map(|state| state.turn_ext_prefetch_cache.clone())
-            .unwrap_or_default();
-        crate::api_messages::apply_prefetch_to_last_user(&mut messages, &prefetch);
-        if let Some(ephemeral) = self
-            .config()
-            .ephemeral_system_prompt
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            messages.push(Message::system(ephemeral));
-        }
-        let cfg = self.config();
-        if !messages.is_empty() && cfg.use_prompt_caching {
-            crate::prompt_caching::apply_anthropic_cache_control_in_place(
-                &mut messages,
-                cfg.cache_ttl.as_str(),
-                cfg.use_native_cache_layout,
-            );
-        }
-        crate::vision_message_prepare::strip_images_for_non_vision_model(
-            &messages,
-            self.active_model().as_str(),
-        )
+        crate::llm_caller::build_api_messages_legacy(self, ctx)
     }
 
     /// Golden harness entry for `messages_for_api_call` (zero-copy migration oracle).
@@ -2594,28 +2422,7 @@ impl AgentLoop {
     }
 
     pub(crate) fn notify_memory_writes(&self, tool_calls: &[ToolCall], results: &[ToolResult]) {
-        if self.config().skip_memory {
-            return;
-        }
-        let Some(ref mm) = self.memory_manager else {
-            return;
-        };
-        let Ok(mut mm) = mm.lock() else {
-            return;
-        };
-        for result in results {
-            if result.is_error {
-                continue;
-            }
-            let Some(tc) = tool_calls.iter().find(|tc| tc.id == result.tool_call_id) else {
-                continue;
-            };
-            let Some((action, target, content)) = Self::memory_write_event_from_tool_call(tc)
-            else {
-                continue;
-            };
-            mm.on_memory_write(&action, &target, &content);
-        }
+        crate::tool_executor::notify_memory_writes(self, tool_calls, results)
     }
 
     fn delegation_event_from_tool_result(
@@ -2648,45 +2455,15 @@ impl AgentLoop {
     }
 
     pub(crate) fn notify_delegations(&self, tool_calls: &[ToolCall], results: &[ToolResult]) {
-        if self.config().skip_memory {
-            return;
-        }
-        let Some(ref mm) = self.memory_manager else {
-            return;
-        };
-        let Ok(mm) = mm.lock() else {
-            return;
-        };
-        for result in results {
-            let Some(tc) = tool_calls.iter().find(|tc| tc.id == result.tool_call_id) else {
-                continue;
-            };
-            let Some((task, sub_agent_id)) = Self::delegation_event_from_tool_result(tc, result)
-            else {
-                continue;
-            };
-            mm.on_delegation(&task, &sub_agent_id);
-        }
+        crate::tool_executor::notify_delegations(self, tool_calls, results)
     }
 
     pub(crate) fn memory_on_turn_start(&self, turn: u32, message: &str) {
-        if let Some(ref mm) = self.memory_manager {
-            if let Ok(mut mm) = mm.lock() {
-                mm.on_turn_start(turn, message);
-            }
-        }
+        crate::tool_executor::memory_on_turn_start(self, turn, message)
     }
 
     pub(crate) fn memory_system_prompt(&self) -> String {
-        if self.config().skip_memory {
-            return String::new();
-        }
-        if let Some(ref mm) = self.memory_manager {
-            if let Ok(mm) = mm.lock() {
-                return mm.build_system_prompt();
-            }
-        }
-        String::new()
+        crate::tool_executor::memory_system_prompt(self)
     }
 
     fn memory_pre_compress_note(&self, messages: &[Message]) -> Option<String> {
@@ -2855,7 +2632,7 @@ impl AgentLoop {
         }
     }
 
-    fn openrouter_provider_preferences(&self) -> Option<Value> {
+    pub(crate) fn openrouter_provider_preferences(&self) -> Option<Value> {
         let cfg = self.config();
         let mut prefs = serde_json::Map::new();
         if !cfg.providers_allowed.is_empty() {
@@ -3337,34 +3114,7 @@ impl AgentLoop {
         provider: &str,
         route_base_url: Option<&str>,
     ) -> Option<String> {
-        if let Some(b) = route_base_url.map(str::trim).filter(|s| !s.is_empty()) {
-            return Some(b.to_string());
-        }
-        self.config()
-            .runtime_providers
-            .get(provider)
-            .and_then(|c| c.base_url.as_ref())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                if provider == "copilot-acp" {
-                    std::env::var("COPILOT_ACP_BASE_URL")
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .or_else(|| Some("acp://copilot".to_string()))
-                } else if provider == "openai-codex" || provider == "codex" {
-                    Some("https://api.openai.com/v1".to_string())
-                } else if provider == "qwen-oauth" {
-                    Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string())
-                } else if provider == "google-gemini-cli" {
-                    Some("cloudcode-pa://google".to_string())
-                } else if provider == "stepfun" {
-                    Some("https://api.stepfun.ai/step_plan/v1".to_string())
-                } else {
-                    None
-                }
-            })
+        crate::runtime_provider::resolve_runtime_base_url(self, provider, route_base_url)
     }
 
     fn resolve_oauth_store_api_key(&self, provider: &str) -> Option<String> {
@@ -3395,17 +3145,7 @@ impl AgentLoop {
     }
 
     pub(crate) async fn refresh_oauth_store_tokens_if_needed(&self) {
-        // Keep this list explicit so behavior is deterministic and parity-scoped.
-        self.refresh_single_oauth_store_token_if_needed("openai")
-            .await;
-        self.refresh_single_oauth_store_token_if_needed("openai-codex")
-            .await;
-        self.refresh_single_oauth_store_token_if_needed("nous")
-            .await;
-        self.refresh_single_oauth_store_token_if_needed("qwen-oauth")
-            .await;
-        self.refresh_single_oauth_store_token_if_needed("anthropic")
-            .await;
+        crate::runtime_provider::refresh_oauth_store_tokens_if_needed(self).await
     }
 
     async fn refresh_single_oauth_store_token_if_needed(&self, provider_key: &str) {
@@ -3857,188 +3597,28 @@ impl AgentLoop {
         api_mode: Option<&ApiMode>,
         credential_pool: Option<&Arc<CredentialPool>>,
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
-        let api_key = self
-            .resolve_runtime_api_key(provider, api_key_env_override, explicit_api_key)
-            .ok_or_else(|| {
-                AgentError::Config(format!(
-                    "No API key configured for runtime-routed provider '{}'",
-                    provider
-                ))
-            })?;
-        let base_url = self.resolve_runtime_base_url(provider, route_base_url);
-        let request_timeout_seconds = self.resolve_runtime_request_timeout_seconds(provider);
-        let cfg_api_mode = self.config().api_mode.clone();
-        let mode = api_mode.unwrap_or(&cfg_api_mode);
-        let normalized_model_name =
-            crate::model_normalize::normalize_model_for_provider(model_name, provider);
-        let model_name = normalized_model_name.as_str();
-
-        let provider_obj: Arc<dyn LlmProvider> = match provider {
-            "openai" | "codex" | "openai-codex" => {
-                if matches!(mode, ApiMode::CodexResponses) {
-                    let mut p = CodexProvider::new(&api_key)
-                        .with_model(model_name)
-                        .with_serialize_cache(Arc::clone(&self.provider_serialize_cache))
-                        .with_optional_request_timeout_seconds(request_timeout_seconds);
-                    if let Some(ref url) = base_url {
-                        p = p.with_base_url(url.clone());
-                    }
-                    if let Some(pool) = credential_pool {
-                        p = p.with_credential_pool(pool.clone());
-                    }
-                    Arc::new(p)
-                } else {
-                    let mut p = OpenAiProvider::new(&api_key)
-                        .with_model(model_name)
-                        .with_serialize_cache(Arc::clone(&self.provider_serialize_cache))
-                        .with_optional_request_timeout_seconds(request_timeout_seconds);
-                    if let Some(url) = base_url {
-                        p = p.with_base_url(url);
-                    }
-                    if let Some(pool) = credential_pool {
-                        p = p.with_credential_pool(pool.clone());
-                    }
-                    Arc::new(p)
-                }
-            }
-            "anthropic" => {
-                let mut p = AnthropicProvider::new(&api_key)
-                    .with_model(model_name)
-                    .with_serialize_cache(Arc::clone(&self.provider_serialize_cache))
-                    .with_optional_request_timeout_seconds(request_timeout_seconds);
-                if let Some(url) = base_url {
-                    p = p.with_base_url(url);
-                }
-                if let Some(pool) = credential_pool {
-                    p = p.with_credential_pool(pool.clone());
-                }
-                Arc::new(p)
-            }
-            "openrouter" => {
-                let mut p = OpenRouterProvider::new(&api_key)
-                    .with_model(model_name)
-                    .with_serialize_cache(Arc::clone(&self.provider_serialize_cache))
-                    .with_optional_request_timeout_seconds(request_timeout_seconds);
-                if let Some(url) = base_url {
-                    p = p.with_base_url(url);
-                }
-                if let Some(pool) = credential_pool {
-                    p = p.with_credential_pool(pool.clone());
-                }
-                Arc::new(p)
-            }
-            "qwen" | "qwen-oauth" => {
-                let mut p = QwenProvider::new(&api_key)
-                    .with_model(model_name)
-                    .with_serialize_cache(Arc::clone(&self.provider_serialize_cache))
-                    .with_optional_request_timeout_seconds(request_timeout_seconds);
-                if let Some(url) = base_url {
-                    p = p.with_base_url(url);
-                }
-                Arc::new(p)
-            }
-            "kimi" | "moonshot" => {
-                let mut p = KimiProvider::new(&api_key)
-                    .with_model(model_name)
-                    .with_serialize_cache(Arc::clone(&self.provider_serialize_cache))
-                    .with_optional_request_timeout_seconds(request_timeout_seconds);
-                if let Some(url) = base_url {
-                    p = p.with_base_url(url);
-                }
-                Arc::new(p)
-            }
-            "minimax" => {
-                let mut p = MiniMaxProvider::new(&api_key)
-                    .with_model(model_name)
-                    .with_serialize_cache(Arc::clone(&self.provider_serialize_cache))
-                    .with_optional_request_timeout_seconds(request_timeout_seconds);
-                if let Some(url) = base_url {
-                    p = p.with_base_url(url);
-                }
-                Arc::new(p)
-            }
-            "stepfun" => {
-                let url =
-                    base_url.unwrap_or_else(|| "https://api.stepfun.ai/step_plan/v1".to_string());
-                Arc::new(
-                    self.runtime_generic_provider(
-                        GenericProvider::new(url, &api_key, model_name)
-                            .with_optional_request_timeout_seconds(request_timeout_seconds)
-                            .with_provider_profile(provider),
-                    ),
-                )
-            }
-            "nous" => {
-                let mut p = NousProvider::new(&api_key)
-                    .with_model(model_name)
-                    .with_serialize_cache(Arc::clone(&self.provider_serialize_cache))
-                    .with_optional_request_timeout_seconds(request_timeout_seconds);
-                if let Some(url) = base_url {
-                    p = p.with_base_url(url);
-                }
-                Arc::new(p)
-            }
-            "copilot" | "copilot-acp" => {
-                let p = CopilotProvider::new(
-                    base_url.unwrap_or_else(|| "https://api.github.com/copilot".to_string()),
-                    &api_key,
-                )
-                .with_model(model_name)
-                .with_serialize_cache(Arc::clone(&self.provider_serialize_cache))
-                .with_optional_request_timeout_seconds(request_timeout_seconds);
-                Arc::new(p)
-            }
-            "bedrock" | "aws" | "aws-bedrock" | "amazon-bedrock" | "amazon" => {
-                let mut p = BedrockProvider::new()
-                    .with_region(resolve_bedrock_region())
-                    .with_model(model_name);
-                if let Some(url) = base_url {
-                    p = p.with_base_url(url);
-                }
-                Arc::new(p)
-            }
-            _ => {
-                let url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-                let mut g = self.runtime_generic_provider(
-                    GenericProvider::new(url, &api_key, model_name)
-                        .with_serialize_cache(Arc::clone(&self.provider_serialize_cache))
-                        .with_optional_request_timeout_seconds(request_timeout_seconds)
-                        .with_provider_profile(provider),
-                );
-                if let Some(pool) = credential_pool {
-                    g = g.with_credential_pool(pool.clone());
-                }
-                Arc::new(g)
-            }
-        };
-        Ok(provider_obj)
+        crate::runtime_provider::build_runtime_provider(
+            self,
+            provider,
+            model_name,
+            route_base_url,
+            api_key_env_override,
+            explicit_api_key,
+            api_mode,
+            credential_pool,
+        )
     }
 
     pub(crate) fn credential_pool_for_route<'a>(
         &'a self,
         rt: &'a TurnRuntimeRoute,
     ) -> Option<&'a Arc<CredentialPool>> {
-        if rt.credential_pool_fallback {
-            rt.credential_pool
-                .as_ref()
-                .or(self.primary_credential_pool.as_ref())
-        } else {
-            rt.credential_pool.as_ref()
-        }
+        crate::runtime_provider::credentials_pool_for_route(self, rt)
     }
 
     /// Recompute prompt-cache policy from current route (Python `_anthropic_prompt_cache_policy`).
     pub fn refresh_prompt_cache_policy(&self, provider: &str, base_url: &str, api_mode: &str) {
-        let (should_cache, native) = agent_runtime_helpers::anthropic_prompt_cache_policy(
-            provider,
-            base_url,
-            api_mode,
-            &self.config().model,
-        );
-        if let Ok(mut cfg) = self.config_runtime.write() {
-            cfg.use_prompt_caching = should_cache;
-            cfg.use_native_cache_layout = native;
-        }
+        crate::runtime_provider::refresh_prompt_cache_policy(self, provider, base_url, api_mode)
     }
 
     async fn context_compression_should_run(&self, ctx: &ContextManager) -> bool {
@@ -4429,7 +4009,7 @@ impl AgentLoop {
         }
     }
 
-    fn emit_reasoning_from_message(&self, message: &Message) {
+    pub(crate) fn emit_reasoning_from_message(&self, message: &Message) {
         if let Some(reasoning) = message.reasoning_content.as_deref() {
             self.emit_thinking_delta(reasoning);
         }
@@ -4442,12 +4022,7 @@ impl AgentLoop {
         attempt: u32,
         max_attempts: u32,
     ) {
-        self.emit_reasoning_from_message(message);
-        tracing::debug!(
-            "reasoning-only assistant response; prefill continuation ({}/{})",
-            attempt,
-            max_attempts
-        );
+        crate::llm_caller::handle_reasoning_only_prefill(self, message, attempt, max_attempts)
     }
 
     pub(crate) fn should_emit_context_pressure_warning(
@@ -4500,25 +4075,7 @@ impl AgentLoop {
     }
 
     pub(crate) fn coerce_textual_tool_calls(mut m: Message) -> (Message, Vec<ToolCall>, bool) {
-        let declared = m.tool_calls.clone().unwrap_or_default();
-        if !declared.is_empty() {
-            return (m, declared, false);
-        }
-        let Some(content) = m.content.as_deref() else {
-            return (m, Vec::new(), false);
-        };
-        let (plain_text, parsed_calls) = separate_text_and_calls(content);
-        if parsed_calls.is_empty() {
-            return (m, Vec::new(), false);
-        }
-        m.tool_calls = Some(parsed_calls.clone());
-        let trimmed = plain_text.trim();
-        m.content = if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        };
-        (m, parsed_calls, true)
+        crate::tool_executor::coerce_textual_tool_calls(m)
     }
 
     pub(crate) fn assistant_has_reasoning(m: &Message) -> bool {
@@ -4540,33 +4097,13 @@ impl AgentLoop {
         history_includes_tool: bool,
         route: Option<&TurnRuntimeRoute>,
     ) -> Option<String> {
-        let finish_reason = response.finish_reason.as_deref();
-        let active_model = self.active_model();
-        let (provider, model) = self.extract_provider_and_model(active_model.as_str());
-        let cfg = self.config();
-        let api_mode = route
-            .and_then(|rt| rt.api_mode.as_ref())
-            .unwrap_or(&cfg.api_mode);
-        let base_url = self.resolve_runtime_base_url(
-            provider.as_str(),
-            route.and_then(|rt| rt.base_url.as_deref()),
-        );
-        if should_treat_stop_as_truncated(
-            finish_reason,
-            assistant.content.as_deref(),
+        crate::llm_caller::effective_finish_reason(
+            self,
+            response,
+            assistant,
             history_includes_tool,
-            Self::api_mode_as_hook_str(api_mode),
-            model,
-            provider.as_str(),
-            base_url.as_deref(),
-        ) {
-            self.emit_status(
-                "lifecycle",
-                "Treating suspicious Ollama/GLM stop response as truncated",
-            );
-            return Some("length".to_string());
-        }
-        response.finish_reason.clone()
+            route,
+        )
     }
 
     pub(crate) fn build_finalization_signals(
@@ -4576,28 +4113,13 @@ impl AgentLoop {
         message: &Message,
         finish_reason: Option<&str>,
     ) -> FinalizationSignals {
-        let has_tool_calls = message.tool_calls.as_ref().map_or(false, |v| !v.is_empty());
-        let has_visible_text = Self::assistant_visible_text(message);
-        let has_visible_text_after_think = Self::assistant_visible_text_after_think_blocks(message);
-        let has_reasoning = Self::assistant_has_reasoning(message);
-        let continuation_required = Self::finish_reason_requires_continuation(finish_reason);
-        let ack_detected = !has_tool_calls
-            && !continuation_required
-            && agent_runtime_helpers::looks_like_codex_intermediate_ack(
-                task_hint,
-                message.content.as_deref().unwrap_or(""),
-                messages,
-            );
-
-        FinalizationSignals {
-            finish_reason: finish_reason.map(str::to_string),
-            has_tool_calls,
-            has_visible_text,
-            has_visible_text_after_think,
-            has_reasoning,
-            continuation_required,
-            ack_detected,
-        }
+        crate::llm_caller::build_finalization_signals(
+            self,
+            task_hint,
+            messages,
+            message,
+            finish_reason,
+        )
     }
 
     pub(crate) fn normalize_tool_call_arguments(tc: &mut ToolCall) -> Result<(), String> {
@@ -4610,15 +4132,7 @@ impl AgentLoop {
     }
 
     pub(crate) fn upgrade_finish_reason_for_truncated_tool_args(response: &mut LlmResponse) {
-        let truncated = response
-            .message
-            .tool_calls
-            .as_ref()
-            .map(|calls| calls.iter().any(Self::tool_call_arguments_look_truncated))
-            .unwrap_or(false);
-        if truncated {
-            response.finish_reason = Some("length".to_string());
-        }
+        crate::llm_caller::upgrade_finish_reason_for_truncated_tool_args(response)
     }
 
     pub(crate) fn extra_body_for_api_mode(&self, api_mode: &ApiMode) -> Option<Value> {
@@ -4733,266 +4247,20 @@ impl AgentLoop {
         max_tokens_override: Option<u32>,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
         api_call_count: &mut u32,
-        mut stream_scrubber: Option<&mut crate::stream_scrubber::ThinkBlockScrubber>,
+        stream_scrubber: Option<&mut crate::stream_scrubber::ThinkBlockScrubber>,
     ) -> Result<StreamCollectOutcome, AgentError> {
-        let api_messages = self.build_turn_api_messages(ctx);
-        let (_, active_model_name) = self.extract_provider_and_model(active_model);
-        let (active_provider, _) = self.extract_provider_and_model(active_model);
-        let default_api_mode = self.primary_runtime_snapshot().api_mode.clone();
-        let default_extra_body = self.extra_body_for_api_mode(&default_api_mode);
-        let effective_max_tokens = max_tokens_override.or(self.config().max_tokens);
-        let max_stream_retries = std::env::var("HERMES_STREAM_RETRIES")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .map(|v| v.min(10))
-            .unwrap_or(self.config().stream_read_max_retries.min(10));
-
-        let mut recovered_stream_text = String::new();
-
-        'stream_attempt: for stream_attempt in 0..=max_stream_retries {
-            *api_call_count = api_call_count.saturating_add(1);
-            let hook_api_mode = route
-                .and_then(|rt| rt.api_mode.as_ref())
-                .unwrap_or(&default_api_mode);
-            let hook_base_url = self.resolve_runtime_base_url(
-                active_provider.as_str(),
-                route.and_then(|rt| rt.base_url.as_deref()),
-            );
-            self.invoke_pre_api_request_hook(
-                *api_call_count,
-                &api_messages,
-                tool_schemas.len(),
-                active_model,
-                active_provider.as_str(),
-                hook_base_url.as_deref(),
-                hook_api_mode,
-                effective_max_tokens,
-            );
-            let mut stream = if let Some(rt) = route {
-                let (provider_name, model_name) = self.extract_provider_and_model(active_model);
-                let mode = rt.api_mode.as_ref().unwrap_or(&default_api_mode);
-                let extra_body_for_call = self.extra_body_for_api_mode(mode);
-                let pool = self.credential_pool_for_route(rt);
-                match self.build_runtime_provider(
-                    rt.provider.as_deref().unwrap_or(provider_name.as_str()),
-                    model_name,
-                    rt.base_url.as_deref(),
-                    rt.api_key_env.as_deref(),
-                    None,
-                    Some(mode),
-                    pool,
-                ) {
-                    Ok(provider) => provider.chat_completion_stream(
-                        &api_messages,
-                        tool_schemas,
-                        effective_max_tokens,
-                        self.config().temperature,
-                        Some(model_name),
-                        extra_body_for_call.as_ref(),
-                    ),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Runtime route unavailable (reason={:?}) for stream, falling back to primary runtime: {}",
-                            rt.routing_reason,
-                            e
-                        );
-                        self.llm_provider.chat_completion_stream(
-                            &api_messages,
-                            tool_schemas,
-                            effective_max_tokens,
-                            self.config().temperature,
-                            Some(
-                                self.extract_provider_and_model(self.active_model().as_str())
-                                    .1,
-                            ),
-                            default_extra_body.as_ref(),
-                        )
-                    }
-                }
-            } else {
-                self.llm_provider.chat_completion_stream(
-                    &api_messages,
-                    tool_schemas,
-                    effective_max_tokens,
-                    self.config().temperature,
-                    Some(active_model_name),
-                    default_extra_body.as_ref(),
-                )
-            };
-
-            let mut content = String::new();
-            let mut reasoning_content = String::new();
-            let mut tool_calls: Vec<ToolCall> = Vec::new();
-            let mut last_usage: Option<UsageStats> = None;
-            let mut finish_reason: Option<String> = None;
-            let mut deltas_were_sent = false;
-
-            while let Some(chunk_result) = stream.next().await {
-                if self.interrupt.take_interrupt_graceful().is_some() {
-                    let message = Self::assemble_stream_assistant_message(
-                        &content,
-                        &reasoning_content,
-                        &tool_calls,
-                    );
-                    return Ok(StreamCollectOutcome::Interrupted(LlmResponse {
-                        message,
-                        usage: last_usage.clone(),
-                        model: active_model.to_string(),
-                        finish_reason: Some("interrupted".to_string()),
-                        ..Default::default()
-                    }));
-                }
-
-                let chunk = match chunk_result {
-                    Ok(chunk) => chunk,
-                    Err(err) => {
-                        let partial_tool_in_flight =
-                            partial_stream_tool_calls_in_flight(&tool_calls);
-                        let should_retry_for_partial_tool = deltas_were_sent
-                            && partial_tool_in_flight
-                            && is_transient_stream_error(&err)
-                            && stream_attempt < max_stream_retries;
-                        let should_retry_before_deltas = !deltas_were_sent
-                            && is_transient_stream_error(&err)
-                            && stream_attempt < max_stream_retries;
-
-                        if should_retry_for_partial_tool || should_retry_before_deltas {
-                            let next_attempt = stream_attempt + 2;
-                            let total_attempts = max_stream_retries + 1;
-                            if should_retry_for_partial_tool {
-                                on_chunk(StreamChunk {
-                                    delta: Some(hermes_core::StreamDelta {
-                                        content: Some(
-                                            "\n\n[connection dropped mid tool-call; reconnecting...]\n\n"
-                                                .to_string(),
-                                        ),
-                                        tool_calls: None,
-                                        extra: None,
-                                    }),
-                                    finish_reason: None,
-                                    usage: None,
-                                });
-                                self.emit_status(
-                                    "lifecycle",
-                                    &format!(
-                                        "Connection dropped mid tool-call; reconnecting (attempt {}/{})",
-                                        next_attempt, total_attempts
-                                    ),
-                                );
-                                tracing::warn!(
-                                    "Streaming attempt {}/{} failed after partial tool-call data; retrying: {}",
-                                    stream_attempt + 1,
-                                    total_attempts,
-                                    err
-                                );
-                            } else {
-                                tracing::warn!(
-                                    "Streaming attempt {}/{} failed before deltas; retrying: {}",
-                                    stream_attempt + 1,
-                                    total_attempts,
-                                    err
-                                );
-                            }
-                            continue 'stream_attempt;
-                        }
-                        if deltas_were_sent || !recovered_stream_text.is_empty() {
-                            return Ok(Self::partial_stream_stub_outcome(
-                                &recovered_stream_text,
-                                &tool_calls,
-                                last_usage.clone(),
-                                active_model,
-                                on_chunk,
-                                &err,
-                            ));
-                        }
-                        self.note_stream_not_supported(&err);
-                        return Err(err);
-                    }
-                };
-
-                if let Some(ref delta) = chunk.delta {
-                    if let Some(ref text) = delta.content {
-                        deltas_were_sent = true;
-                        let scrubbed = if let Some(scrubber) = stream_scrubber.as_deref_mut() {
-                            scrubber.scrub(text)
-                        } else {
-                            text.clone()
-                        };
-                        content.push_str(&scrubbed);
-                        recovered_stream_text.push_str(&scrubbed);
-                        if let Some(ref cb) = self.callbacks.on_stream_delta {
-                            cb(&scrubbed);
-                        }
-                    }
-                    if let Some(ref extra) = delta.extra {
-                        if let Some(thinking) = extra.get("thinking").and_then(|v| v.as_str()) {
-                            deltas_were_sent = true;
-                            reasoning_content.push_str(thinking);
-                            if let Some(ref cb) = self.callbacks.on_thinking {
-                                cb(thinking);
-                            }
-                        }
-                    }
-                    if let Some(ref tc_deltas) = delta.tool_calls {
-                        for tcd in tc_deltas {
-                            let idx = tcd.index as usize;
-                            while tool_calls.len() <= idx {
-                                tool_calls.push(ToolCall {
-                                    id: String::new(),
-                                    function: hermes_core::FunctionCall {
-                                        name: String::new(),
-                                        arguments: String::new(),
-                                    },
-                                    extra_content: None,
-                                });
-                            }
-                            if let Some(ref id) = tcd.id {
-                                tool_calls[idx].id = id.clone();
-                            }
-                            if let Some(ref fc) = tcd.function {
-                                if let Some(ref name) = fc.name {
-                                    tool_calls[idx].function.name = name.clone();
-                                }
-                                if let Some(ref args) = fc.arguments {
-                                    tool_calls[idx].function.arguments.push_str(args);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if let Some(ref usage) = chunk.usage {
-                    last_usage = Some(usage.clone());
-                }
-                if let Some(ref fr) = chunk.finish_reason {
-                    finish_reason = Some(fr.clone());
-                }
-
-                on_chunk(chunk);
-            }
-
-            if tool_calls
-                .iter()
-                .any(Self::tool_call_arguments_look_truncated)
-            {
-                finish_reason = Some("length".to_string());
-            }
-
-            let message =
-                Self::assemble_stream_assistant_message(&content, &reasoning_content, &tool_calls);
-
-            return Ok(StreamCollectOutcome::Complete(LlmResponse {
-                message,
-                usage: last_usage,
-                model: active_model.to_string(),
-                finish_reason,
-                ..Default::default()
-            }));
-        }
-
-        Err(AgentError::LlmApi(
-            "streaming failed after retry budget exhausted".to_string(),
-        ))
+        crate::llm_caller::collect_stream_llm_response(
+            self,
+            ctx,
+            tool_schemas,
+            route,
+            active_model,
+            max_tokens_override,
+            on_chunk,
+            api_call_count,
+            stream_scrubber,
+        )
+        .await
     }
 
     /// Expand `@file:` / `@diff` / … tokens in user messages before the LLM sees them.
@@ -5049,75 +4317,18 @@ impl AgentLoop {
 
     /// Remove duplicate tool calls that share the same function name and arguments.
     pub(crate) fn deduplicate_tool_calls(calls: &[ToolCall]) -> Vec<ToolCall> {
-        let mut seen = HashSet::new();
-        let mut deduped = Vec::new();
-        for tc in calls {
-            let key = format!("{}:{}", tc.function.name, tc.function.arguments);
-            if seen.insert(key) {
-                deduped.push(tc.clone());
-            } else {
-                tracing::warn!("Deduplicated tool call: {}", tc.function.name);
-            }
-        }
-        deduped
+        crate::tool_executor::deduplicate_tool_calls(calls)
     }
 
     /// Try to repair an unknown tool name via case-insensitive or substring matching.
     /// Returns `true` if the tool call was repaired.
     pub(crate) fn repair_tool_call(&self, tc: &mut ToolCall) -> bool {
-        if self.tool_registry.get(&tc.function.name).is_some() {
-            return false;
-        }
-        let names = self.tool_registry.names();
-        let Some(fixed) = agent_runtime_helpers::repair_tool_name(&tc.function.name, &names) else {
-            return false;
-        };
-        tracing::info!("Repaired tool call: '{}' → '{}'", tc.function.name, fixed);
-        tc.function.name = fixed;
-        true
+        crate::tool_executor::repair_tool_call(self, tc)
     }
 
     /// Inject current session id into `session_search` calls when absent.
     pub(crate) fn hydrate_session_search_args(&self, tc: &mut ToolCall) {
-        if tc.function.name != "session_search" {
-            return;
-        }
-        let Some(session_id) = self
-            .config()
-            .session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-        else {
-            return;
-        };
-        let session_id = session_id.as_str();
-        if session_id.is_empty() {
-            return;
-        }
-
-        let mut args: Value =
-            serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| serde_json::json!({}));
-        let Some(obj) = args.as_object_mut() else {
-            return;
-        };
-        let has_current = obj
-            .get("current_session_id")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_some();
-        if has_current {
-            return;
-        }
-        obj.insert(
-            "current_session_id".to_string(),
-            Value::String(session_id.to_string()),
-        );
-        if let Ok(updated) = serde_json::to_string(&args) {
-            tc.function.arguments = updated;
-        }
+        crate::tool_executor::hydrate_session_search_args(self, tc)
     }
 
     fn latest_user_text<'a>(&self, messages: &'a [Message]) -> Option<&'a str> {
@@ -5142,7 +4353,7 @@ impl AgentLoop {
 
     /// Python `_has_stream_consumers()` for this turn.
     pub(crate) fn has_stream_consumers(&self, turn_stream_callback: bool) -> bool {
-        turn_stream_callback || self.callbacks.on_stream_delta.is_some()
+        crate::llm_caller::has_stream_consumers(self, turn_stream_callback)
     }
 
     fn route_blocks_llm_streaming(route: &TurnRuntimeRoute) -> bool {
@@ -5153,15 +4364,7 @@ impl AgentLoop {
     }
 
     pub(crate) fn provider_blocks_llm_streaming(&self) -> bool {
-        let rt = self.primary_runtime_snapshot();
-        let cfg = self.config();
-        let prov = rt
-            .provider
-            .as_deref()
-            .or(cfg.provider.as_deref())
-            .unwrap_or("");
-        let url = rt.base_url.as_deref().unwrap_or("");
-        is_copilot_acp_transport(prov, url)
+        crate::llm_caller::provider_blocks_llm_streaming(self)
     }
 
     /// Python `_use_streaming` gate for the first LLM attempt in a turn (`inner_attempt == 0`).
@@ -5171,40 +4374,20 @@ impl AgentLoop {
         inner_attempt: u32,
         route: Option<&TurnRuntimeRoute>,
     ) -> bool {
-        if inner_attempt > 0 {
-            return false;
-        }
-        if self.disable_streaming.load(Ordering::Acquire) {
-            return false;
-        }
-        if route.is_some_and(Self::route_blocks_llm_streaming)
-            || self.provider_blocks_llm_streaming()
-        {
-            return false;
-        }
-        if !self.has_stream_consumers(turn_stream_callback) {
-            return !self.llm_provider.prefers_non_streaming_transport();
-        }
-        true
+        crate::llm_caller::use_streaming_llm_transport(
+            self,
+            turn_stream_callback,
+            inner_attempt,
+            route,
+        )
     }
 
     pub(crate) fn session_disable_streaming(&self) {
-        self.disable_streaming.store(true, Ordering::Release);
+        crate::llm_caller::session_disable_streaming(self)
     }
 
     pub(crate) fn note_stream_not_supported(&self, err: &AgentError) {
-        if !is_stream_not_supported_error(err) {
-            return;
-        }
-        self.session_disable_streaming();
-        if !self.config().quiet_mode {
-            self.emit_status(
-                "lifecycle",
-                "Streaming is not supported for this model/provider. Switching to non-streaming. \
-                 Set display.streaming: false in config.yaml to skip this probe.",
-            );
-        }
-        tracing::info!(error = %err, "streaming disabled for remainder of agent session");
+        crate::llm_caller::note_stream_not_supported(self, err)
     }
 
     pub(crate) fn turn_route_cost_guard(&self, model: String) -> TurnRuntimeRoute {
@@ -5685,62 +4868,17 @@ impl AgentLoop {
     pub(crate) fn tool_result_from_dispatch_output(
         output: String,
     ) -> Result<String, hermes_core::ToolError> {
-        if let Ok(value) = serde_json::from_str::<Value>(&output) {
-            if let Some(err) = value.get("error").and_then(|v| v.as_str()) {
-                return Err(hermes_core::ToolError::ExecutionFailed(err.to_string()));
-            }
-        }
-        Ok(output)
+        crate::tool_executor::tool_result_from_dispatch_output(output)
     }
 
     /// Execute a batch of tool calls in parallel using a JoinSet.
     pub(crate) fn resolve_max_delegate_depth(&self) -> u32 {
-        std::env::var("HERMES_MAX_DELEGATE_DEPTH")
-            .ok()
-            .and_then(|v| parse_delegate_depth(&v))
-            .unwrap_or_else(|| normalize_delegate_depth(self.config().max_delegate_depth))
+        crate::tool_executor::resolve_max_delegate_depth(self)
     }
 
     /// Cap concurrent delegate_task calls based on config.
     pub(crate) fn cap_delegates(&self, tool_calls: &mut Vec<ToolCall>) {
-        if delegation_spawning_paused() {
-            let delegate_count = tool_calls
-                .iter()
-                .filter(|tc| tc.function.name == "delegate_task")
-                .count();
-            if delegate_count > 0 {
-                tracing::warn!(
-                    "Dropping {} delegate_task call(s): delegation spawning is paused",
-                    delegate_count
-                );
-                tool_calls.retain(|tc| tc.function.name != "delegate_task");
-            }
-            return;
-        }
-        let delegate_count = tool_calls
-            .iter()
-            .filter(|tc| tc.function.name == "delegate_task")
-            .count() as u32;
-        if delegate_count > self.config().max_concurrent_delegates {
-            tracing::warn!(
-                "Capping delegate_task calls from {} to {}",
-                delegate_count,
-                self.config().max_concurrent_delegates
-            );
-            let mut kept_delegates = 0u32;
-            tool_calls.retain(|tc| {
-                if tc.function.name == "delegate_task" {
-                    if kept_delegates < self.config().max_concurrent_delegates {
-                        kept_delegates += 1;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    true
-                }
-            });
-        }
+        crate::tool_executor::cap_delegates(self, tool_calls)
     }
 
     pub(crate) fn emit_background_review_metrics(&self, turn: u32, ctx: &ContextManager) {

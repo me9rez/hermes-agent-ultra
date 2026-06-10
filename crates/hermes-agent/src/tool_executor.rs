@@ -5,13 +5,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use hermes_core::{ToolCall, ToolError, ToolResult};
-use tokio::task::JoinSet;
+use hermes_core::{Message, ToolCall, ToolError, ToolResult};
 use serde_json::Value;
+use tokio::task::JoinSet;
 
 use crate::agent_loop::{
-    inject_runtime_tool_params, is_contextlattice_shell_invocation, looks_like_tool_error_output,
-    AgentLoop,
+    AgentLoop, inject_runtime_tool_params, is_contextlattice_shell_invocation,
+    looks_like_tool_error_output,
 };
 
 impl AgentLoop {
@@ -33,7 +33,7 @@ impl AgentLoop {
             1
         };
         let mut results = Vec::with_capacity(tool_calls.len());
-        let max_delegate_depth = self.resolve_max_delegate_depth();
+        let max_delegate_depth = crate::tool_executor::resolve_max_delegate_depth(self);
         let current_delegate_depth = self.delegate_depth;
         let orchestrator = self.sub_agent_orchestrator.clone();
         let async_tool_dispatch = self.async_tool_dispatch.clone();
@@ -422,5 +422,347 @@ impl AgentLoop {
 
         results
     }
+}
 
+// ---------------------------------------------------------------------------
+// Tool helper functions (extracted from `impl AgentLoop` in agent_loop.rs)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn tool_result_from_dispatch_output(
+    output: String,
+) -> Result<String, hermes_core::ToolError> {
+    if let Ok(value) = serde_json::from_str::<Value>(&output) {
+        if let Some(err) = value.get("error").and_then(|v| v.as_str()) {
+            return Err(hermes_core::ToolError::ExecutionFailed(err.to_string()));
+        }
+    }
+    Ok(output)
+}
+
+/// Remove duplicate tool calls that share the same function name and arguments.
+pub(crate) fn deduplicate_tool_calls(calls: &[ToolCall]) -> Vec<ToolCall> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for tc in calls {
+        let key = format!("{}:{}", tc.function.name, tc.function.arguments);
+        if seen.insert(key) {
+            deduped.push(tc.clone());
+        } else {
+            tracing::warn!("Deduplicated tool call: {}", tc.function.name);
+        }
+    }
+    deduped
+}
+
+/// Try to repair an unknown tool name via case-insensitive or substring matching.
+/// Returns `true` if the tool call was repaired.
+pub(crate) fn repair_tool_call(agent: &AgentLoop, tc: &mut ToolCall) -> bool {
+    if agent.tool_registry.get(&tc.function.name).is_some() {
+        return false;
+    }
+    let names = agent.tool_registry.names();
+    let Some(fixed) = crate::agent_runtime_helpers::repair_tool_name(&tc.function.name, &names)
+    else {
+        return false;
+    };
+    tracing::info!("Repaired tool call: '{}' → '{}'", tc.function.name, fixed);
+    tc.function.name = fixed;
+    true
+}
+
+/// Inject current session id into `session_search` calls when absent.
+pub(crate) fn hydrate_session_search_args(agent: &AgentLoop, tc: &mut ToolCall) {
+    if tc.function.name != "session_search" {
+        return;
+    }
+    let Some(session_id) = agent
+        .config()
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let session_id = session_id.as_str();
+    if session_id.is_empty() {
+        return;
+    }
+
+    let mut args: Value =
+        serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| serde_json::json!({}));
+    let Some(obj) = args.as_object_mut() else {
+        return;
+    };
+    let has_current = obj
+        .get("current_session_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
+    if has_current {
+        return;
+    }
+    obj.insert(
+        "current_session_id".to_string(),
+        Value::String(session_id.to_string()),
+    );
+    if let Ok(updated) = serde_json::to_string(&args) {
+        tc.function.arguments = updated;
+    }
+}
+
+/// Cap concurrent delegate_task calls based on config.
+pub(crate) fn cap_delegates(agent: &AgentLoop, tool_calls: &mut Vec<ToolCall>) {
+    fn delegation_spawning_paused() -> bool {
+        std::env::var("HERMES_DELEGATION_PAUSED")
+            .ok()
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
+    if delegation_spawning_paused() {
+        let delegate_count = tool_calls
+            .iter()
+            .filter(|tc| tc.function.name == "delegate_task")
+            .count();
+        if delegate_count > 0 {
+            tracing::warn!(
+                "Dropping {} delegate_task call(s): delegation spawning is paused",
+                delegate_count
+            );
+            tool_calls.retain(|tc| tc.function.name != "delegate_task");
+        }
+        return;
+    }
+    let delegate_count = tool_calls
+        .iter()
+        .filter(|tc| tc.function.name == "delegate_task")
+        .count() as u32;
+    if delegate_count > agent.config().max_concurrent_delegates {
+        tracing::warn!(
+            "Capping delegate_task calls from {} to {}",
+            delegate_count,
+            agent.config().max_concurrent_delegates
+        );
+        let mut kept_delegates = 0u32;
+        tool_calls.retain(|tc| {
+            if tc.function.name == "delegate_task" {
+                if kept_delegates < agent.config().max_concurrent_delegates {
+                    kept_delegates += 1;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                true
+            }
+        });
+    }
+}
+
+/// Execute a batch of tool calls in parallel using a JoinSet.
+pub(crate) fn resolve_max_delegate_depth(agent: &AgentLoop) -> u32 {
+    fn normalize_delegate_depth(value: u32) -> u32 {
+        value.max(1)
+    }
+    fn parse_delegate_depth(raw: &str) -> Option<u32> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        trimmed.parse().ok().map(normalize_delegate_depth)
+    }
+    std::env::var("HERMES_MAX_DELEGATE_DEPTH")
+        .ok()
+        .and_then(|v| parse_delegate_depth(&v))
+        .unwrap_or_else(|| normalize_delegate_depth(agent.config().max_delegate_depth))
+}
+
+pub(crate) fn coerce_textual_tool_calls(mut m: Message) -> (Message, Vec<ToolCall>, bool) {
+    let declared = m.tool_calls.clone().unwrap_or_default();
+    if !declared.is_empty() {
+        return (m, declared, false);
+    }
+    let Some(content) = m.content.as_deref() else {
+        return (m, Vec::new(), false);
+    };
+    let (plain_text, parsed_calls) = hermes_core::separate_text_and_calls(content);
+    if parsed_calls.is_empty() {
+        return (m, Vec::new(), false);
+    }
+    m.tool_calls = Some(parsed_calls.clone());
+    let trimmed = plain_text.trim();
+    m.content = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    (m, parsed_calls, true)
+}
+
+fn memory_write_event_from_tool_call(tc: &ToolCall) -> Option<(String, String, String)> {
+    if tc.function.name != "memory" {
+        return None;
+    }
+    let args: Value = serde_json::from_str(&tc.function.arguments).ok()?;
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("")
+        .to_lowercase();
+    if action != "add" && action != "replace" && action != "remove" {
+        return None;
+    }
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("memory")
+        .to_string();
+    let content = if action == "remove" {
+        args.get("old_text")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    } else {
+        args.get("content")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+    Some((action, target, content))
+}
+
+fn delegation_event_from_tool_result(
+    tc: &ToolCall,
+    result: &hermes_core::ToolResult,
+) -> Option<(String, String)> {
+    if tc.function.name != "delegate_task" || result.is_error {
+        return None;
+    }
+    let args: Value = serde_json::from_str(&tc.function.arguments).ok()?;
+    let task = args
+        .get("task")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+
+    let sub_agent_id = serde_json::from_str::<Value>(&result.content)
+        .ok()
+        .and_then(|v| {
+            v.get("sub_agent_id")
+                .and_then(|id| id.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_default();
+
+    Some((task, sub_agent_id))
+}
+
+pub(crate) fn notify_memory_writes(
+    agent: &AgentLoop,
+    tool_calls: &[ToolCall],
+    results: &[hermes_core::ToolResult],
+) {
+    if agent.config().skip_memory {
+        return;
+    }
+    let Some(ref mm) = agent.memory_manager else {
+        return;
+    };
+    let Ok(mut mm) = mm.lock() else {
+        return;
+    };
+    for result in results {
+        if result.is_error {
+            continue;
+        }
+        let Some(tc) = tool_calls.iter().find(|tc| tc.id == result.tool_call_id) else {
+            continue;
+        };
+        let Some((action, target, content)) = memory_write_event_from_tool_call(tc) else {
+            continue;
+        };
+        mm.on_memory_write(&action, &target, &content);
+    }
+}
+
+pub(crate) fn notify_delegations(
+    agent: &AgentLoop,
+    tool_calls: &[ToolCall],
+    results: &[hermes_core::ToolResult],
+) {
+    if agent.config().skip_memory {
+        return;
+    }
+    let Some(ref mm) = agent.memory_manager else {
+        return;
+    };
+    let Ok(mm) = mm.lock() else {
+        return;
+    };
+    for result in results {
+        let Some(tc) = tool_calls.iter().find(|tc| tc.id == result.tool_call_id) else {
+            continue;
+        };
+        let Some((task, sub_agent_id)) = delegation_event_from_tool_result(tc, result) else {
+            continue;
+        };
+        mm.on_delegation(&task, &sub_agent_id);
+    }
+}
+
+pub(crate) fn memory_on_turn_start(agent: &AgentLoop, turn: u32, message: &str) {
+    if let Some(ref mm) = agent.memory_manager {
+        if let Ok(mut mm) = mm.lock() {
+            mm.on_turn_start(turn, message);
+        }
+    }
+}
+
+pub(crate) fn memory_system_prompt(agent: &AgentLoop) -> String {
+    if agent.config().skip_memory {
+        return String::new();
+    }
+    if let Some(ref mm) = agent.memory_manager {
+        if let Ok(mm) = mm.lock() {
+            return mm.build_system_prompt();
+        }
+    }
+    String::new()
+}
+
+pub(crate) fn memory_pre_compress_note(agent: &AgentLoop, messages: &[Message]) -> Option<String> {
+    if agent.config().skip_memory {
+        return None;
+    }
+    let Some(ref mm) = agent.memory_manager else {
+        return None;
+    };
+    let Ok(mm) = mm.lock() else {
+        return None;
+    };
+    let as_values: Vec<Value> = messages
+        .iter()
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    let note = mm.on_pre_compress(&as_values);
+    if note.trim().is_empty() {
+        None
+    } else {
+        Some(note)
+    }
 }

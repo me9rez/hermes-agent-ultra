@@ -408,7 +408,7 @@ async fn turn_prefetch(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
     }
 
     // Refresh oauth-backed runtime credentials before routing/provider selection.
-    agent.refresh_oauth_store_tokens_if_needed().await;
+    crate::runtime_provider::refresh_oauth_store_tokens_if_needed(agent).await;
 
     // Skill nudge counter
     if agent.config().skill_creation_nudge_interval > 0
@@ -603,23 +603,24 @@ async fn turn_call_llm(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
                 tc.api_call_count,
             )));
         }
-        let r = if agent.use_streaming_llm_transport(
+        let r = if crate::llm_caller::use_streaming_llm_transport(
+            agent,
             tc.ui_streaming,
             inner_attempt,
             turn_runtime_route.as_ref(),
         ) {
-            match agent
-                .collect_stream_llm_response(
-                    &mut tc.ctx,
-                    &tc.active_tool_schemas,
-                    turn_runtime_route.as_ref(),
-                    active_model,
-                    llm_governor.max_tokens,
-                    tc.stream_chunk_sink.as_ref(),
-                    &mut tc.api_call_count,
-                    tc.stream_scrubber.as_mut(),
-                )
-                .await
+            match crate::llm_caller::collect_stream_llm_response(
+                agent,
+                &mut tc.ctx,
+                &tc.active_tool_schemas,
+                turn_runtime_route.as_ref(),
+                active_model,
+                llm_governor.max_tokens,
+                tc.stream_chunk_sink.as_ref(),
+                &mut tc.api_call_count,
+                tc.stream_scrubber.as_mut(),
+            )
+            .await
             {
                 Ok(StreamCollectOutcome::Complete(resp)) => resp,
                 Ok(StreamCollectOutcome::Interrupted(partial)) => {
@@ -715,7 +716,8 @@ async fn turn_call_llm(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
             && inner_thinking < agent.config().thinking_prefill_max_retries
         {
             inner_thinking += 1;
-            agent.handle_reasoning_only_prefill(
+            crate::llm_caller::handle_reasoning_only_prefill(
+                agent,
                 &r.message,
                 inner_thinking,
                 agent.config().thinking_prefill_max_retries,
@@ -946,13 +948,15 @@ async fn turn_process_output(agent: &AgentLoop, tc: &mut TurnContext) -> TurnSta
         .collect();
 
     if tool_calls.is_empty() {
-        let effective_finish_reason = agent.effective_finish_reason(
+        let effective_finish_reason = crate::llm_caller::effective_finish_reason(
+            agent,
             &response,
             &assistant_msg,
             history_includes_tool,
             turn_runtime_route.as_ref(),
         );
-        let finalization_signals = agent.build_finalization_signals(
+        let finalization_signals = crate::llm_caller::build_finalization_signals(
+            agent,
             &tc.task_hint,
             tc.ctx.get_messages(),
             &assistant_msg,
@@ -1280,10 +1284,10 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
     );
 
     // Deduplicate tool calls
-    tool_calls = AgentLoop::deduplicate_tool_calls(&tool_calls);
+    tool_calls = crate::tool_executor::deduplicate_tool_calls(&tool_calls);
     for tc_ in &mut tool_calls {
-        agent.repair_tool_call(tc_);
-        agent.hydrate_session_search_args(tc_);
+        crate::tool_executor::repair_tool_call(agent, tc_);
+        crate::tool_executor::hydrate_session_search_args(agent, tc_);
     }
 
     if let Some(note) =
@@ -1470,7 +1474,7 @@ async fn turn_execute_tools(agent: &AgentLoop, tc: &mut TurnContext) -> TurnStat
     }
 
     // Cap concurrent delegate_task calls
-    agent.cap_delegates(&mut tool_calls);
+    crate::tool_executor::cap_delegates(agent, &mut tool_calls);
 
     // Web research
     let deferred_web_budget_results = if let Some(ref mut ctrl) = tc.web_research_ctrl {
@@ -1791,8 +1795,8 @@ async fn turn_post_tool(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
             .record_tool_result(&tc_.function.name, &args, &res.content, res.is_error);
     }
 
-    agent.notify_memory_writes(&tool_calls, &results);
-    agent.notify_delegations(&tool_calls, &results);
+    crate::tool_executor::notify_memory_writes(agent, &tool_calls, &results);
+    crate::tool_executor::notify_delegations(agent, &tool_calls, &results);
 
     // Enforce budget
     budget::enforce_budget(&mut results, &agent.config().budget);

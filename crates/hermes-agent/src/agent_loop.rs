@@ -7321,9 +7321,8 @@ pub(crate) fn merge_usage(existing: Option<UsageStats>, new: &UsageStats) -> Usa
 }
 
 // ---------------------------------------------------------------------------
-// Forwarding methods — delegate to ConversationLoop so callers can
-// continue using `agent.run(...)`, `agent.current_task_id()`, etc.
-// without constructing ConversationLoop themselves.
+// Forwarding methods — delegate to free functions in conversation_loop
+// so callers can continue using `agent.run(...)`, `agent.current_task_id()`, etc.
 // ---------------------------------------------------------------------------
 
 impl AgentLoop {
@@ -7333,9 +7332,7 @@ impl AgentLoop {
         messages: Vec<Message>,
         tools: Option<Vec<ToolSchema>>,
     ) -> Result<AgentResult, AgentError> {
-        crate::conversation_loop::ConversationLoop { agent: self }
-            .run(messages, tools)
-            .await
+        crate::conversation_loop::run_agent_loop(self, messages, tools).await
     }
 
     /// Run one full user turn (Python `run_conversation`).
@@ -7343,9 +7340,7 @@ impl AgentLoop {
         &self,
         params: crate::conversation_loop::RunConversationParams,
     ) -> Result<crate::conversation_loop::ConversationResult, AgentError> {
-        crate::conversation_loop::ConversationLoop { agent: self }
-            .run_conversation(params)
-            .await
+        crate::conversation_loop::run_conversation(self, params).await
     }
 
     /// Active task id for this turn (Python `agent._current_task_id`).
@@ -7362,8 +7357,7 @@ impl AgentLoop {
         task_hint: &str,
         tool_schemas: &[ToolSchema],
     ) -> (String, bool) {
-        crate::conversation_loop::ConversationLoop { agent: self }
-            .active_cached_system_prompt(task_hint, tool_schemas)
+        crate::conversation_loop::active_cached_system_prompt(self, task_hint, tool_schemas)
     }
 
     /// Returns `(prompt, restored_from_storage)` — restored prompts skip fresh `build_system_prompt`.
@@ -7372,8 +7366,7 @@ impl AgentLoop {
         task_hint: &str,
         tool_schemas: &[ToolSchema],
     ) -> (String, bool) {
-        crate::conversation_loop::ConversationLoop { agent: self }
-            .resolve_initial_system_prompt(task_hint, tool_schemas)
+        crate::conversation_loop::resolve_initial_system_prompt(self, task_hint, tool_schemas)
     }
 }
 

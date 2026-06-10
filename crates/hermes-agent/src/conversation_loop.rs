@@ -24,678 +24,639 @@ use hermes_core::{
     AgentError, AgentResult, Message, MessageRole, StreamChunk, ToolSchema, UsageStats,
 };
 
-/// Orchestrates a single conversation run by borrowing an `AgentLoop`.
-///
-/// Owns `TurnContext` and dispatches the turn state machine.  This struct
-/// exists to keep conversation-level state **out** of `AgentLoop`, which
-/// is a long-lived session handle.
-///
-/// # Lifetime
-///
-/// Created on every `run()` / `run_conversation()` call and dropped when
-/// the run completes.  The borrow is safe because the agent loop outlives
-/// any single turn execution.
-pub(crate) struct ConversationLoop<'a> {
-    pub(crate) agent: &'a AgentLoop,
+/// Non-streaming variant; see [`run_with_message_prelude`] for the shared core.
+pub async fn run_agent_loop(
+    agent: &AgentLoop,
+    messages: Vec<Message>,
+    tools: Option<Vec<ToolSchema>>,
+) -> Result<AgentResult, AgentError> {
+    run_with_message_prelude(agent, messages, tools, None, false).await
 }
 
-impl ConversationLoop<'_> {
-    /// Non-streaming variant; see [`Self::run_with_message_prelude`] for the shared core.
-    pub async fn run(
-        &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolSchema>>,
-    ) -> Result<AgentResult, AgentError> {
-        self.run_with_message_prelude(messages, tools, None, false)
-            .await
+/// Run one full user turn (Python `run_conversation`).
+pub async fn run_conversation(
+    agent: &AgentLoop,
+    params: RunConversationParams,
+) -> Result<ConversationResult, AgentError> {
+    let prepared = prepare_turn(agent, &params).await?;
+    let tools = params.tools;
+    let stream_callback = params.stream_callback;
+    let loop_result = run_with_message_prelude(
+        agent,
+        prepared.messages.clone(),
+        tools,
+        stream_callback,
+        true,
+    )
+    .await?;
+    Ok(finalize_turn(agent, loop_result, &prepared.meta))
+}
+
+/// Build message list and apply per-turn prelude.
+pub(crate) async fn prepare_turn(
+    agent: &AgentLoop,
+    params: &RunConversationParams,
+) -> Result<PreparedTurn, AgentError> {
+    // Sanitize surrogate characters from user input.  Clipboard paste from
+    // rich-text editors (Google Docs, Word, etc.) can inject lone surrogates
+    // that are invalid UTF-8 and crash JSON serialization in the OpenAI SDK.
+    let mut user_message = params.user_message.clone();
+    user_message = sanitize_surrogates(&user_message).into_owned();
+
+    let persist_override = params
+        .persist_user_message
+        .as_ref()
+        .map(|s| sanitize_surrogates(s).into_owned());
+
+    let original_user_message = persist_override
+        .clone()
+        .unwrap_or_else(|| user_message.clone());
+
+    {
+        let mut cfg = agent
+            .config_runtime
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        cfg.persist_user_message = persist_override;
     }
 
-    /// Run one full user turn (Python `run_conversation`).
-    pub async fn run_conversation(
-        &self,
-        params: RunConversationParams,
-    ) -> Result<ConversationResult, AgentError> {
-        let prepared = self.prepare_turn(&params).await?;
-        let tools = params.tools;
-        let stream_callback = params.stream_callback;
-        let loop_result = self
-            .run_with_message_prelude(prepared.messages.clone(), tools, stream_callback, true)
-            .await?;
-        Ok(self.finalize_turn(loop_result, &prepared.meta))
+    let task_id = params
+        .task_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if let Ok(mut state) = agent.state.lock() {
+        state.current_task_id = Some(task_id.clone());
     }
 
-    /// build message list and apply per-turn prelude.
-    pub(crate) async fn prepare_turn(
-        &self,
-        params: &RunConversationParams,
-    ) -> Result<PreparedTurn, AgentError> {
-        // Sanitize surrogate characters from user input.  Clipboard paste from
-        // rich-text editors (Google Docs, Word, etc.) can inject lone surrogates
-        // that are invalid UTF-8 and crash JSON serialization in the OpenAI SDK.
-        let mut user_message = params.user_message.clone();
-        user_message = sanitize_surrogates(&user_message).into_owned();
-
-        let persist_override = params
-            .persist_user_message
-            .as_ref()
-            .map(|s| sanitize_surrogates(s).into_owned());
-
-        let original_user_message = persist_override
-            .clone()
-            .unwrap_or_else(|| user_message.clone());
-
-        {
-            let mut cfg = self
-                .agent
-                .config_runtime
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            cfg.persist_user_message = persist_override;
-        }
-
-        let task_id = params
-            .task_id
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        if let Ok(mut state) = self.agent.state.lock() {
-            state.current_task_id = Some(task_id.clone());
-        }
-
-        let conversation_history = strip_system_messages_from_history(&params.conversation_history);
-        self.hydrate_memory_nudge_counters_from_history(&conversation_history);
-        let user_turn_count = {
-            if let Ok(mut state) = self.agent.state.lock() {
-                state.evolution_counters.user_turn_count =
-                    state.evolution_counters.user_turn_count.saturating_add(1);
-                state.evolution_counters.user_turn_count
-            } else {
-                1
-            }
-        };
-
-        let inbound_user_message = user_message.clone();
-        let history_len = conversation_history.len();
-
-        let mut messages: Vec<Message> = conversation_history;
-        messages.push(Message::user(user_message));
-
-        self.agent.apply_turn_message_prelude(&mut messages).await;
-
-        crate::session_log::set_session_context(self.agent.config().session_id.as_deref());
-        self.agent.replay_compression_warning_at_turn_start().await;
-        self.agent.reset_vision_supported_for_turn();
-        self.agent.cleanup_dead_connections_at_turn_start().await;
-
-        let preview_text = summarize_user_message_for_log_str(&inbound_user_message);
-        let msg_preview = if preview_text.chars().count() > 80 {
-            format!("...{}", preview_text.chars().take(80).collect::<String>())
+    let conversation_history = strip_system_messages_from_history(&params.conversation_history);
+    hydrate_memory_nudge_counters_from_history(agent, &conversation_history);
+    let user_turn_count = {
+        if let Ok(mut state) = agent.state.lock() {
+            state.evolution_counters.user_turn_count =
+                state.evolution_counters.user_turn_count.saturating_add(1);
+            state.evolution_counters.user_turn_count
         } else {
-            preview_text.clone()
+            1
+        }
+    };
+
+    let inbound_user_message = user_message.clone();
+    let history_len = conversation_history.len();
+
+    let mut messages: Vec<Message> = conversation_history;
+    messages.push(Message::user(user_message));
+
+    agent.apply_turn_message_prelude(&mut messages).await;
+
+    crate::session_log::set_session_context(agent.config().session_id.as_deref());
+    agent.replay_compression_warning_at_turn_start().await;
+    agent.reset_vision_supported_for_turn();
+    agent.cleanup_dead_connections_at_turn_start().await;
+
+    let preview_text = summarize_user_message_for_log_str(&inbound_user_message);
+    let msg_preview = if preview_text.chars().count() > 80 {
+        format!("...{}", preview_text.chars().take(80).collect::<String>())
+    } else {
+        preview_text.clone()
+    };
+    let msg_preview = msg_preview.replace('\n', " ");
+    let rt = agent.primary_runtime_snapshot();
+    tracing::info!(
+        session_id = %crate::session_log::current_session_tag(),
+        task_id = %task_id,
+        user_turn = user_turn_count,
+        model = %agent.active_model(),
+        provider = rt.provider.as_deref().unwrap_or("unknown"),
+        platform = %agent.config().platform.as_deref().unwrap_or("unknown"),
+        history_len = history_len,
+        msg = %msg_preview,
+        "conversation turn"
+    );
+    if !agent.config().quiet_mode {
+        let print_preview = summarize_user_message_for_log_str(&inbound_user_message);
+        let suffix = if print_preview.chars().count() > 60 {
+            "..."
+        } else {
+            ""
         };
-        let msg_preview = msg_preview.replace('\n', " ");
-        let rt = self.agent.primary_runtime_snapshot();
-        tracing::info!(
-            session_id = %crate::session_log::current_session_tag(),
-            task_id = %task_id,
-            user_turn = user_turn_count,
-            model = %self.agent.active_model(),
-            provider = rt.provider.as_deref().unwrap_or("unknown"),
-            platform = %self.agent.config().platform.as_deref().unwrap_or("unknown"),
-            history_len = history_len,
-            msg = %msg_preview,
-            "conversation turn"
+        let short: String = print_preview.chars().take(60).collect();
+        agent.emit_status(
+            "lifecycle",
+            &format!("💬 Starting conversation: '{short}{suffix}'"),
         );
-        if !self.agent.config().quiet_mode {
-            let print_preview = summarize_user_message_for_log_str(&inbound_user_message);
-            let suffix = if print_preview.chars().count() > 60 {
-                "..."
-            } else {
-                ""
-            };
-            let short: String = print_preview.chars().take(60).collect();
-            self.agent.emit_status(
-                "lifecycle",
-                &format!("💬 Starting conversation: '{short}{suffix}'"),
-            );
+    }
+    agent.memory_on_turn_start(user_turn_count, &original_user_message);
+
+    agent.apply_turn_prep_infrastructure_hooks();
+    crate::skill_provenance::set_current_write_origin("assistant_tool");
+
+    Ok(PreparedTurn {
+        meta: TurnFinalizeMeta {
+            inbound_user_message,
+            original_user_message,
+            task_id,
+            persist_session: params.persist_session,
+        },
+        messages,
+    })
+}
+
+/// Turn-level hooks + [`ConversationResult`] + optional session persist.
+pub(crate) fn finalize_turn(
+    agent: &AgentLoop,
+    mut loop_result: AgentResult,
+    meta: &TurnFinalizeMeta,
+) -> ConversationResult {
+    let messages = loop_result.messages.clone();
+    let mut final_response = extract_last_assistant_reply(&messages);
+    let last_reasoning = extract_last_reasoning_current_turn(&messages);
+    let interrupted = loop_result.interrupted;
+    let max_iterations =
+        effective_max_turns(agent.config().max_turns).unwrap_or(agent.config().max_turns);
+    let completed = final_response.is_some()
+        && !loop_result.failed
+        && !interrupted
+        && loop_result.api_calls < max_iterations;
+
+    if let Some(ref mut text) = final_response {
+        if !interrupted {
+            *text = apply_turn_level_output_hooks(agent, text, meta, &messages);
         }
-        self.agent
-            .memory_on_turn_start(user_turn_count, &original_user_message);
-
-        self.agent.apply_turn_prep_infrastructure_hooks();
-        crate::skill_provenance::set_current_write_origin("assistant_tool");
-
-        Ok(PreparedTurn {
-            meta: TurnFinalizeMeta {
-                inbound_user_message,
-                original_user_message,
-                task_id,
-                persist_session: params.persist_session,
-            },
-            messages,
-        })
     }
 
-    /// turn-level hooks + [`ConversationResult`] + optional session persist.
-    pub(crate) fn finalize_turn(
-        &self,
-        mut loop_result: AgentResult,
-        meta: &TurnFinalizeMeta,
-    ) -> ConversationResult {
-        let messages = loop_result.messages.clone();
-        let mut final_response = extract_last_assistant_reply(&messages);
-        let last_reasoning = extract_last_reasoning_current_turn(&messages);
-        let interrupted = loop_result.interrupted;
-        let max_iterations = effective_max_turns(self.agent.config().max_turns)
-            .unwrap_or(self.agent.config().max_turns);
-        let completed = final_response.is_some()
-            && !loop_result.failed
-            && !interrupted
-            && loop_result.api_calls < max_iterations;
+    let mut messages = messages;
+    agent.apply_turn_finalize_infrastructure_hooks(meta, &mut messages, &loop_result, completed);
+    agent.log_turn_exit_diagnostic(&loop_result, &messages);
 
-        if let Some(ref mut text) = final_response {
-            if !interrupted {
-                *text = self.apply_turn_level_output_hooks(text, meta, &messages);
+    agent.sync_external_memory_for_turn(
+        &meta.original_user_message,
+        final_response.as_deref(),
+        interrupted,
+    );
+
+    // Python `_persist_session` always runs at turn end; `persist_turn_session` no-ops without session_id.
+    persist_turn_session(agent, &messages, &loop_result);
+
+    loop_result.messages = messages;
+    loop_result.messages.shrink_to_fit();
+    let loop_result = agent.finalize_agent_result(loop_result);
+    hermes_telemetry::record_agent_turn();
+    crate::session_log::clear_session_context();
+
+    ConversationResult {
+        final_response,
+        last_reasoning,
+        completed,
+        loop_result,
+    }
+}
+
+fn hydrate_memory_nudge_counters_from_history(agent: &AgentLoop, history: &[Message]) {
+    if history.is_empty() {
+        return;
+    }
+    let interval = agent.config().memory_nudge_interval;
+    if interval == 0 {
+        return;
+    }
+    let prior_user_turns = history
+        .iter()
+        .filter(|m| m.role == MessageRole::User)
+        .count();
+    if prior_user_turns == 0 {
+        return;
+    }
+    if let Ok(mut state) = agent.state.lock() {
+        if state.evolution_counters.user_turn_count == 0 {
+            state.evolution_counters.user_turn_count = prior_user_turns as u32;
+        }
+        if state.evolution_counters.turns_since_memory == 0 {
+            state.evolution_counters.turns_since_memory =
+                (prior_user_turns % interval as usize) as u32;
+        }
+    }
+}
+
+fn apply_turn_level_output_hooks(
+    agent: &AgentLoop,
+    response: &str,
+    meta: &TurnFinalizeMeta,
+    messages: &[Message],
+) -> String {
+    let history_json: Vec<serde_json::Value> = messages
+        .iter()
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    let hook_ctx = serde_json::json!({
+        "session_id": agent.config().session_id,
+        "user_message": meta.original_user_message,
+        "assistant_response": response,
+        "conversation_history": history_json,
+        "model": agent.active_model(),
+        "platform": agent.config().platform,
+        "task_id": meta.task_id,
+    });
+    let results = agent.invoke_hook(HookType::PostLlmCall, &hook_ctx);
+    let mut out = response.to_string();
+    for r in results {
+        if let HookResult::TransformLlmOutput(next) = r {
+            if !next.is_empty() {
+                out = next;
             }
         }
+    }
+    out
+}
 
-        let mut messages = messages;
-        self.agent.apply_turn_finalize_infrastructure_hooks(
-            meta,
-            &mut messages,
-            &loop_result,
-            completed,
+fn persist_turn_session(agent: &AgentLoop, messages: &[Message], inner: &AgentResult) {
+    let cfg = agent.config();
+    let Some(ref sid) = cfg.session_id else {
+        return;
+    };
+    if sid.trim().is_empty() {
+        return;
+    }
+    let Some(sp) = agent.session_persistence() else {
+        return;
+    };
+    let transcript = strip_system_messages_from_history(messages);
+    let sys = leading_system_prompt_for_persist(messages);
+    let platform = cfg.platform.as_deref();
+    let model = agent.active_model();
+    let mut cursor = agent
+        .state
+        .lock()
+        .map(|mut state| std::mem::take(&mut state.session_db_flush))
+        .unwrap_or_default();
+    let result = sp.persist_session(
+        sid,
+        &transcript,
+        &mut cursor,
+        Some(model.as_str()),
+        platform,
+        None,
+        sys.as_deref(),
+    );
+    if let Ok(mut state) = agent.state.lock() {
+        state.session_db_flush = cursor;
+    }
+    if let Err(err) = result {
+        tracing::warn!(session_id = %sid, "persist_session after run_conversation: {}", err);
+        return;
+    }
+
+    if let Some(ref usage) = inner.usage {
+        let update = hermes_tools::state_db::TokenCountUpdate::increment(
+            i64::try_from(usage.prompt_tokens).unwrap_or(i64::MAX),
+            i64::try_from(usage.completion_tokens).unwrap_or(i64::MAX),
+            Some(model.clone()),
+            usage.estimated_cost.or(inner.session_cost_usd),
         );
-        self.agent.log_turn_exit_diagnostic(&loop_result, &messages);
-
-        self.agent.sync_external_memory_for_turn(
-            &meta.original_user_message,
-            final_response.as_deref(),
-            interrupted,
-        );
-
-        // Python `_persist_session` always runs at turn end; `persist_turn_session` no-ops without session_id.
-        self.persist_turn_session(&messages, &loop_result);
-
-        loop_result.messages = messages;
-        loop_result.messages.shrink_to_fit();
-        let loop_result = self.agent.finalize_agent_result(loop_result);
-        hermes_telemetry::record_agent_turn();
-        crate::session_log::clear_session_context();
-
-        ConversationResult {
-            final_response,
-            last_reasoning,
-            completed,
-            loop_result,
+        if let Err(err) = sp.update_token_counts(sid, &update) {
+            tracing::warn!(session_id = %sid, "update_token_counts after run_conversation: {}", err);
         }
     }
+}
 
-    fn hydrate_memory_nudge_counters_from_history(&self, history: &[Message]) {
-        if history.is_empty() {
-            return;
-        }
-        let interval = self.agent.config().memory_nudge_interval;
-        if interval == 0 {
-            return;
-        }
-        let prior_user_turns = history
-            .iter()
-            .filter(|m| m.role == MessageRole::User)
-            .count();
-        if prior_user_turns == 0 {
-            return;
-        }
-        if let Ok(mut state) = self.agent.state.lock() {
-            if state.evolution_counters.user_turn_count == 0 {
-                state.evolution_counters.user_turn_count = prior_user_turns as u32;
-            }
-            if state.evolution_counters.turns_since_memory == 0 {
-                state.evolution_counters.turns_since_memory =
-                    (prior_user_turns % interval as usize) as u32;
+/// Returns `(prompt, restored_from_storage)` using session-level cache when warm.
+pub(crate) fn active_cached_system_prompt(
+    agent: &AgentLoop,
+    task_hint: &str,
+    tool_schemas: &[ToolSchema],
+) -> (String, bool) {
+    if let Ok(state) = agent.state.lock() {
+        if let Some(ref cached) = state.cached_system_prompt {
+            if !cached.trim().is_empty() {
+                return (cached.clone(), true);
             }
         }
     }
-
-    fn apply_turn_level_output_hooks(
-        &self,
-        response: &str,
-        meta: &TurnFinalizeMeta,
-        messages: &[Message],
-    ) -> String {
-        let history_json: Vec<serde_json::Value> = messages
-            .iter()
-            .filter_map(|m| serde_json::to_value(m).ok())
-            .collect();
-        let hook_ctx = serde_json::json!({
-            "session_id": self.agent.config().session_id,
-            "user_message": meta.original_user_message,
-            "assistant_response": response,
-            "conversation_history": history_json,
-            "model": self.agent.active_model(),
-            "platform": self.agent.config().platform,
-            "task_id": meta.task_id,
-        });
-        let results = self.agent.invoke_hook(HookType::PostLlmCall, &hook_ctx);
-        let mut out = response.to_string();
-        for r in results {
-            if let HookResult::TransformLlmOutput(next) = r {
-                if !next.is_empty() {
-                    out = next;
-                }
-            }
-        }
-        out
+    let (prompt, restored) = resolve_initial_system_prompt(agent, task_hint, tool_schemas);
+    if let Ok(mut state) = agent.state.lock() {
+        state.cached_system_prompt = Some(prompt.clone());
     }
+    (prompt, restored)
+}
 
-    fn persist_turn_session(&self, messages: &[Message], inner: &AgentResult) {
-        let cfg = self.agent.config();
-        let Some(ref sid) = cfg.session_id else {
-            return;
-        };
-        if sid.trim().is_empty() {
-            return;
-        }
-        let Some(sp) = self.agent.session_persistence() else {
-            return;
-        };
-        let transcript = strip_system_messages_from_history(messages);
-        let sys = leading_system_prompt_for_persist(messages);
-        let platform = cfg.platform.as_deref();
-        let model = self.agent.active_model();
-        let mut cursor = self
-            .agent
-            .state
-            .lock()
-            .map(|mut state| std::mem::take(&mut state.session_db_flush))
-            .unwrap_or_default();
-        let result = sp.persist_session(
-            sid,
-            &transcript,
-            &mut cursor,
-            Some(model.as_str()),
-            platform,
-            None,
-            sys.as_deref(),
-        );
-        if let Ok(mut state) = self.agent.state.lock() {
-            state.session_db_flush = cursor;
-        }
-        if let Err(err) = result {
-            tracing::warn!(session_id = %sid, "persist_session after run_conversation: {}", err);
-            return;
-        }
-
-        if let Some(ref usage) = inner.usage {
-            let update = hermes_tools::state_db::TokenCountUpdate::increment(
-                i64::try_from(usage.prompt_tokens).unwrap_or(i64::MAX),
-                i64::try_from(usage.completion_tokens).unwrap_or(i64::MAX),
-                Some(model.clone()),
-                usage.estimated_cost.or(inner.session_cost_usd),
-            );
-            if let Err(err) = sp.update_token_counts(sid, &update) {
-                tracing::warn!(session_id = %sid, "update_token_counts after run_conversation: {}", err);
-            }
+/// Returns `(prompt, restored_from_storage)` - restored prompts skip fresh `build_system_prompt`.
+pub(crate) fn resolve_initial_system_prompt(
+    agent: &AgentLoop,
+    task_hint: &str,
+    tool_schemas: &[ToolSchema],
+) -> (String, bool) {
+    if let Some(ref s) = agent.config().stored_system_prompt {
+        let t = s.trim();
+        if !t.is_empty() {
+            return (s.clone(), true);
         }
     }
+    (
+        agent.build_system_prompt(task_hint, tool_schemas, &agent.active_model()),
+        false,
+    )
+}
 
-    /// Returns `(prompt, restored_from_storage)` using session-level cache when warm.
-    pub(crate) fn active_cached_system_prompt(
-        &self,
-        task_hint: &str,
-        tool_schemas: &[ToolSchema],
-    ) -> (String, bool) {
-        if let Ok(state) = self.agent.state.lock() {
-            if let Some(ref cached) = state.cached_system_prompt {
-                if !cached.trim().is_empty() {
-                    return (cached.clone(), true);
-                }
-            }
-        }
-        let (prompt, restored) = self.resolve_initial_system_prompt(task_hint, tool_schemas);
-        if let Ok(mut state) = self.agent.state.lock() {
-            state.cached_system_prompt = Some(prompt.clone());
-        }
-        (prompt, restored)
+#[inline]
+pub(crate) fn emit_stream_chunk(
+    emit: Option<&(dyn Fn(StreamChunk) + Send + Sync)>,
+    chunk: StreamChunk,
+) {
+    if let Some(f) = emit {
+        f(chunk);
     }
+}
 
-    /// Returns `(prompt, restored_from_storage)` - restored prompts skip fresh `build_system_prompt`.
-    pub(crate) fn resolve_initial_system_prompt(
-        &self,
-        task_hint: &str,
-        tool_schemas: &[ToolSchema],
-    ) -> (String, bool) {
-        if let Some(ref s) = self.agent.config().stored_system_prompt {
-            let t = s.trim();
-            if !t.is_empty() {
-                return (s.clone(), true);
-            }
-        }
-        (
-            self.agent
-                .build_system_prompt(task_hint, tool_schemas, &self.agent.active_model()),
-            false,
-        )
-    }
-
-    #[inline]
-    pub(crate) fn emit_stream_chunk(
-        emit: Option<&(dyn Fn(StreamChunk) + Send + Sync)>,
-        chunk: StreamChunk,
-    ) {
-        if let Some(f) = emit {
-            f(chunk);
-        }
-    }
-
-    async fn run_with_message_prelude(
-        &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolSchema>>,
-        on_chunk: Option<Box<dyn Fn(StreamChunk) + Send + Sync>>,
-        skip_message_prelude: bool,
-    ) -> Result<AgentResult, AgentError> {
-        // Python `_has_stream_consumers` (UI) vs `_use_streaming` (transport) ? see `use_streaming_llm_transport`.
-        let ui_streaming = on_chunk.is_some();
-        let stream_mute = ui_streaming.then(|| Arc::new(AtomicBool::new(false)));
-        let stream_needs_break = ui_streaming.then(|| Arc::new(AtomicBool::new(false)));
-        let stream_chunk_sink: Box<dyn Fn(StreamChunk) + Send + Sync> =
-            if let Some(raw_emit) = on_chunk {
-                let stream_mute = stream_mute.clone().expect("streaming");
-                let break_for_emit = stream_needs_break.clone().expect("streaming");
-                Box::new(move |chunk: StreamChunk| {
-                    let StreamChunk {
-                        delta,
-                        finish_reason,
-                        usage,
-                    } = chunk;
-                    if let Some(delta_val) = delta {
-                        if let Some(content) = delta_val.content.clone() {
-                            if stream_mute.load(Ordering::Acquire) {
-                                return;
-                            }
-                            let mut out = content;
-                            if break_for_emit.swap(false, Ordering::AcqRel) {
-                                out = format!("\n\n{}", out);
-                            }
-                            raw_emit(StreamChunk {
-                                delta: Some(hermes_core::StreamDelta {
-                                    content: Some(out),
-                                    tool_calls: delta_val.tool_calls,
-                                    extra: delta_val.extra,
-                                }),
-                                finish_reason,
-                                usage,
-                            });
-                            return;
-                        }
-                        raw_emit(StreamChunk {
-                            delta: Some(delta_val),
-                            finish_reason,
-                            usage,
-                        });
+async fn run_with_message_prelude(
+    agent: &AgentLoop,
+    messages: Vec<Message>,
+    tools: Option<Vec<ToolSchema>>,
+    on_chunk: Option<Box<dyn Fn(StreamChunk) + Send + Sync>>,
+    skip_message_prelude: bool,
+) -> Result<AgentResult, AgentError> {
+    // Python `_has_stream_consumers` (UI) vs `_use_streaming` (transport) ? see `use_streaming_llm_transport`.
+    let ui_streaming = on_chunk.is_some();
+    let stream_mute = ui_streaming.then(|| Arc::new(AtomicBool::new(false)));
+    let stream_needs_break = ui_streaming.then(|| Arc::new(AtomicBool::new(false)));
+    let stream_chunk_sink: Box<dyn Fn(StreamChunk) + Send + Sync> = if let Some(raw_emit) = on_chunk
+    {
+        let stream_mute = stream_mute.clone().expect("streaming");
+        let break_for_emit = stream_needs_break.clone().expect("streaming");
+        Box::new(move |chunk: StreamChunk| {
+            let StreamChunk {
+                delta,
+                finish_reason,
+                usage,
+            } = chunk;
+            if let Some(delta_val) = delta {
+                if let Some(content) = delta_val.content.clone() {
+                    if stream_mute.load(Ordering::Acquire) {
                         return;
                     }
+                    let mut out = content;
+                    if break_for_emit.swap(false, Ordering::AcqRel) {
+                        out = format!("\n\n{}", out);
+                    }
                     raw_emit(StreamChunk {
-                        delta: None,
+                        delta: Some(hermes_core::StreamDelta {
+                            content: Some(out),
+                            tool_calls: delta_val.tool_calls,
+                            extra: delta_val.extra,
+                        }),
                         finish_reason,
                         usage,
                     });
-                })
-            } else {
-                Box::new(|_| ())
-            };
-
-        let mut ctx = ContextManager::for_model(self.agent.active_model().as_str());
-        let mut tool_errors: Vec<hermes_core::ToolErrorRecord> = Vec::new();
-        let session_id_owned = self.agent.config().session_id.clone().unwrap_or_default();
-        let session_id = session_id_owned.as_str();
-        let mut messages = messages;
-        if !skip_message_prelude {
-            self.agent.apply_turn_message_prelude(&mut messages).await;
-        }
-
-        let task_hint = messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.role, hermes_core::MessageRole::User))
-            .and_then(|m| m.content.clone())
-            .unwrap_or_default();
-
-        // Determine which tools to expose
-        let tool_schemas: Arc<[ToolSchema]> = match tools {
-            Some(v) => Arc::from(v),
-            None => self.agent.tool_registry.schemas(),
-        };
-        // Build and inject system prompt (or reuse session-level cache for prefix stability)
-        let (system_content, restored_system) =
-            self.resolve_initial_system_prompt(&task_hint, &tool_schemas);
-        ctx.add_message(Message::system(&system_content));
-
-        let mut session_started_hooks_fired = false;
-        if !restored_system {
-            let hook_ctx = serde_json::json!({
-                "session_id": self.agent.config().session_id,
-                "model": self.agent.active_model(),
-            });
-            let _results = self.agent.invoke_hook(HookType::OnSessionStart, &hook_ctx);
-            self.agent.inject_hook_context(&_results, &mut ctx);
-            session_started_hooks_fired = true;
-        }
-
-        let prefill_start = ctx.get_messages().len();
-        for msg in &self.agent.config().prefill_messages {
-            ctx.add_message(msg.clone());
-        }
-        let prefill_end = ctx.get_messages().len();
-        let prefill_range = (prefill_end > prefill_start).then_some(prefill_start..prefill_end);
-
-        // Add initial messages
-        for msg in messages {
-            ctx.add_message(msg);
-        }
-        self.agent.interest_sync_user_messages(ctx.get_messages());
-        self.agent.hydrate_todo_store(&ctx);
-        if let Some(hint) = contextlattice_connect_system_hint(ctx.get_messages()) {
-            ctx.add_message(Message::system(hint));
-        }
-        if let Some(hint) = exploratory_problem_solving_system_hint(ctx.get_messages()) {
-            ctx.add_message(Message::system(hint));
-        }
-        if let Some(hint) = objective_mode_system_hint(ctx.get_messages()) {
-            ctx.add_message(Message::system(hint));
-        }
-        if let Some(hint) =
-            contextlattice_intelligence_system_hint(ctx.get_messages(), &tool_schemas)
-        {
-            ctx.add_message(Message::system(hint));
-        }
-
-        let persist_user_idx = if self.agent.config().persist_user_message.is_some() {
-            ctx.get_messages()
-                .iter()
-                .enumerate()
-                .filter(|(_, m)| m.role == MessageRole::User)
-                .last()
-                .map(|(i, _)| i)
-        } else {
-            None
-        };
-        let mut codex_ack_continuations: u32 = 0;
-
-        let mut review_memory_at_end = false;
-        if self.agent.config().memory_nudge_interval > 0
-            && self
-                .agent
-                .tool_registry
-                .names()
-                .iter()
-                .any(|n| n == "memory")
-        {
-            if let Ok(mut state) = self.agent.state.lock() {
-                state.evolution_counters.turns_since_memory = state
-                    .evolution_counters
-                    .turns_since_memory
-                    .saturating_add(1);
-                if state.evolution_counters.turns_since_memory
-                    >= self.agent.config().memory_nudge_interval
-                {
-                    review_memory_at_end = true;
-                    state.evolution_counters.turns_since_memory = 0;
+                    return;
                 }
+                raw_emit(StreamChunk {
+                    delta: Some(delta_val),
+                    finish_reason,
+                    usage,
+                });
+                return;
             }
-        }
-        let mut api_call_count: u32 = 0;
+            raw_emit(StreamChunk {
+                delta: None,
+                finish_reason,
+                usage,
+            });
+        })
+    } else {
+        Box::new(|_| ())
+    };
 
-        // Memory prefetch
-        let first_user = ctx
-            .get_messages()
+    let mut ctx = ContextManager::for_model(agent.active_model().as_str());
+    let mut tool_errors: Vec<hermes_core::ToolErrorRecord> = Vec::new();
+    let session_id_owned = agent.config().session_id.clone().unwrap_or_default();
+    let session_id = session_id_owned.as_str();
+    let mut messages = messages;
+    if !skip_message_prelude {
+        agent.apply_turn_message_prelude(&mut messages).await;
+    }
+
+    let task_hint = messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, hermes_core::MessageRole::User))
+        .and_then(|m| m.content.clone())
+        .unwrap_or_default();
+
+    // Determine which tools to expose
+    let tool_schemas: Arc<[ToolSchema]> = match tools {
+        Some(v) => Arc::from(v),
+        None => agent.tool_registry.schemas(),
+    };
+    // Build and inject system prompt (or reuse session-level cache for prefix stability)
+    let (system_content, restored_system) =
+        resolve_initial_system_prompt(agent, &task_hint, &tool_schemas);
+    ctx.add_message(Message::system(&system_content));
+
+    let mut session_started_hooks_fired = false;
+    if !restored_system {
+        let hook_ctx = serde_json::json!({
+            "session_id": agent.config().session_id,
+            "model": agent.active_model(),
+        });
+        let _results = agent.invoke_hook(HookType::OnSessionStart, &hook_ctx);
+        agent.inject_hook_context(&_results, &mut ctx);
+        session_started_hooks_fired = true;
+    }
+
+    let prefill_start = ctx.get_messages().len();
+    for msg in &agent.config().prefill_messages {
+        ctx.add_message(msg.clone());
+    }
+    let prefill_end = ctx.get_messages().len();
+    let prefill_range = (prefill_end > prefill_start).then_some(prefill_start..prefill_end);
+
+    // Add initial messages
+    for msg in messages {
+        ctx.add_message(msg);
+    }
+    agent.interest_sync_user_messages(ctx.get_messages());
+    agent.hydrate_todo_store(&ctx);
+    if let Some(hint) = contextlattice_connect_system_hint(ctx.get_messages()) {
+        ctx.add_message(Message::system(hint));
+    }
+    if let Some(hint) = exploratory_problem_solving_system_hint(ctx.get_messages()) {
+        ctx.add_message(Message::system(hint));
+    }
+    if let Some(hint) = objective_mode_system_hint(ctx.get_messages()) {
+        ctx.add_message(Message::system(hint));
+    }
+    if let Some(hint) = contextlattice_intelligence_system_hint(ctx.get_messages(), &tool_schemas) {
+        ctx.add_message(Message::system(hint));
+    }
+
+    let persist_user_idx = if agent.config().persist_user_message.is_some() {
+        ctx.get_messages()
             .iter()
-            .filter(|m| matches!(m.role, hermes_core::MessageRole::User))
+            .enumerate()
+            .filter(|(_, m)| m.role == MessageRole::User)
             .last()
-            .and_then(|m| m.content.clone())
-            .unwrap_or_default();
-        let mem_ctx_raw = self.agent.memory_prefetch(&first_user, session_id);
-        self.agent.set_turn_ext_prefetch_cache(mem_ctx_raw);
+            .map(|(i, _)| i)
+    } else {
+        None
+    };
+    let mut codex_ack_continuations: u32 = 0;
 
-        self.agent
-            .apply_pre_llm_call_hooks_once(&mut ctx, &first_user, session_id);
-
-        if self.agent.api_mode_is_codex_app_server() {
-            let loop_messages: Vec<Message> = ctx.get_messages().to_vec();
-            let loop_result = self
-                .agent
-                .run_codex_app_server_turn(
-                    &first_user,
-                    loop_messages,
-                    review_memory_at_end,
-                    session_started_hooks_fired,
-                )
-                .await;
-            return Ok(loop_result);
-        }
-
-        if self.agent.config().preflight_context_compress {
-            self.agent
-                .preflight_context_compress_with_status(&mut ctx)
-                .await;
-        }
-        let replay = ReplayRecorder::for_session(&self.agent.config(), session_id);
-        let max_turns_limit = effective_max_turns(self.agent.config().max_turns);
-        replay.record(
-            "session_start",
-            serde_json::json!({
-                "session_id": session_id,
-                "mode": if self.agent.use_streaming_llm_transport(ui_streaming, 0, None) {
-                    "stream"
-                } else {
-                    "run"
-                },
-                "model": self.agent.active_model(),
-                "max_turns": self.agent.config().max_turns,
-                "max_turns_effective": max_turns_limit,
-                "max_turns_unlimited": max_turns_limit.is_none(),
-            }),
-        );
-
-        let mut total_turns: u32 = 0;
-        let mut _total_api_time_ms: u64 = 0;
-        let mut _total_tool_time_ms: u64 = 0;
-        let mut accumulated_usage: Option<UsageStats> = None;
-        let mut session_cost_usd: f64 = 0.0;
-        let mut cost_warned = false;
-        let mut forced_runtime_route: Option<TurnRuntimeRoute> = None;
-        let mut last_checkpoint_messages: Option<Vec<Message>> = None;
-        let mut invalid_tool_retries: u32 = 0;
-        let mut invalid_json_retries: u32 = 0;
-        let mut truncated_tool_call_retries: u32 = 0;
-        let mut continuation_retries: u32 = 0;
-        let mut last_content_with_tools: Option<String> = None;
-        let mut continuation_trigger_count: u32 = 0;
-        let mut ack_trigger_count: u32 = 0;
-        let mut premature_finalize_suspected_count: u32 = 0;
-        let mut context_pressure_warned_at: f64 = 0.0;
-        let mut context_pressure_last_warn_at: Option<Instant> = None;
-        let mut context_pressure_last_warn_percent: f64 = 0.0;
-        let mut governor_llm_latency_window: VecDeque<u64> = VecDeque::new();
-        let mut governor_tool_error_window: VecDeque<f64> = VecDeque::new();
-        let mut governor_consecutive_error_turns: u32 = 0;
-        let mut web_tool_calls_used: u32 = 0;
-        let mut web_search_calls_used: u32 = 0;
-        let mut web_tool_consecutive_error_turns: u32 = 0;
-        let mut repo_review_budget_state = RepoReviewBudgetState::default();
-        let mut objective_guard_retries: u32 = 0;
-        let mut finalizer_evidence_retries: u32 = 0;
-        let mut finalizer_output_quality_retries: u32 = 0;
-        let mut finalizer_action_execution_retries: u32 = 0;
-        let mut clarify_tool_retries: u32 = 0;
-        let governor_window_limit = governor_window_size();
-        let budget_cap = max_turns_limit.unwrap_or(self.agent.config().max_turns);
-        let mut iteration_budget = crate::iteration_budget::IterationBudget::new(budget_cap);
-        let mut tool_guardrails = crate::tool_guardrails::ToolGuardrailController::new();
-        let mut file_mutation = crate::file_mutation_tracker::FileMutationTracker::new(
-            self.agent.config().checkpoints_enabled,
-        );
-        let mut stream_scrubber = if self
-            .agent
-            .use_streaming_llm_transport(ui_streaming, 0, None)
-        {
-            Some(crate::stream_scrubber::ThinkBlockScrubber::new())
-        } else {
-            None
-        };
-        let mut checkpoint_mgr = hermes_tools::CheckpointManager::new(
-            self.agent.config().checkpoints_enabled,
-            self.agent.config().hermes_home.as_deref().map(Path::new),
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        );
-
-        let web_research_cfg = self.agent.config().web_research.clone();
-        let web_auxiliary = if web_research_cfg.enabled
-            && (web_research_cfg.planner_enabled || web_research_cfg.evaluator_enabled)
-        {
-            Some(build_auxiliary_arc_for_config(&self.agent.config()))
-        } else {
-            None
-        };
-        let mut web_research_ctrl = web_research_cfg
-            .enabled
-            .then(|| WebResearchController::new(web_research_cfg));
-        let mut active_tool_schemas = tool_schemas.clone();
-        let mut web_finalize_hint_injected = false;
-
-        // Enter the turn state machine
-        let max_turns_limit = effective_max_turns(self.agent.config().max_turns);
-        let budget_cap = max_turns_limit.unwrap_or(self.agent.config().max_turns);
-        let mut turn_ctx = TurnContext::new(
-            ctx,
-            system_content,
-            tool_schemas,
-            ui_streaming,
-            stream_mute,
-            stream_needs_break,
-            stream_chunk_sink,
-            session_id_owned,
-            session_started_hooks_fired,
-            prefill_range,
-            persist_user_idx,
-            replay,
-            task_hint,
-            first_user,
-            review_memory_at_end,
-            budget_cap,
-            self.agent.config().checkpoints_enabled,
-            self.agent.config().hermes_home.clone(),
-            web_research_ctrl,
-            web_auxiliary,
-            stream_scrubber,
-        );
-        let mut state = TurnState::Guard;
-        loop {
-            match state {
-                TurnState::Done(result) => return result,
-                _ => state = state.transition(self, &mut turn_ctx).await,
+    let mut review_memory_at_end = false;
+    if agent.config().memory_nudge_interval > 0
+        && agent.tool_registry.names().iter().any(|n| n == "memory")
+    {
+        if let Ok(mut state) = agent.state.lock() {
+            state.evolution_counters.turns_since_memory = state
+                .evolution_counters
+                .turns_since_memory
+                .saturating_add(1);
+            if state.evolution_counters.turns_since_memory >= agent.config().memory_nudge_interval {
+                review_memory_at_end = true;
+                state.evolution_counters.turns_since_memory = 0;
             }
+        }
+    }
+    let mut api_call_count: u32 = 0;
+
+    // Memory prefetch
+    let first_user = ctx
+        .get_messages()
+        .iter()
+        .filter(|m| matches!(m.role, hermes_core::MessageRole::User))
+        .last()
+        .and_then(|m| m.content.clone())
+        .unwrap_or_default();
+    let mem_ctx_raw = agent.memory_prefetch(&first_user, session_id);
+    agent.set_turn_ext_prefetch_cache(mem_ctx_raw);
+
+    agent.apply_pre_llm_call_hooks_once(&mut ctx, &first_user, session_id);
+
+    if agent.api_mode_is_codex_app_server() {
+        let loop_messages: Vec<Message> = ctx.get_messages().to_vec();
+        let loop_result = agent
+            .run_codex_app_server_turn(
+                &first_user,
+                loop_messages,
+                review_memory_at_end,
+                session_started_hooks_fired,
+            )
+            .await;
+        return Ok(loop_result);
+    }
+
+    if agent.config().preflight_context_compress {
+        agent.preflight_context_compress_with_status(&mut ctx).await;
+    }
+    let replay = ReplayRecorder::for_session(&agent.config(), session_id);
+    let max_turns_limit = effective_max_turns(agent.config().max_turns);
+    replay.record(
+        "session_start",
+        serde_json::json!({
+            "session_id": session_id,
+            "mode": if agent.use_streaming_llm_transport(ui_streaming, 0, None) {
+                "stream"
+            } else {
+                "run"
+            },
+            "model": agent.active_model(),
+            "max_turns": agent.config().max_turns,
+            "max_turns_effective": max_turns_limit,
+            "max_turns_unlimited": max_turns_limit.is_none(),
+        }),
+    );
+
+    let mut total_turns: u32 = 0;
+    let mut _total_api_time_ms: u64 = 0;
+    let mut _total_tool_time_ms: u64 = 0;
+    let mut accumulated_usage: Option<UsageStats> = None;
+    let mut session_cost_usd: f64 = 0.0;
+    let mut cost_warned = false;
+    let mut forced_runtime_route: Option<TurnRuntimeRoute> = None;
+    let mut last_checkpoint_messages: Option<Vec<Message>> = None;
+    let mut invalid_tool_retries: u32 = 0;
+    let mut invalid_json_retries: u32 = 0;
+    let mut truncated_tool_call_retries: u32 = 0;
+    let mut continuation_retries: u32 = 0;
+    let mut last_content_with_tools: Option<String> = None;
+    let mut continuation_trigger_count: u32 = 0;
+    let mut ack_trigger_count: u32 = 0;
+    let mut premature_finalize_suspected_count: u32 = 0;
+    let mut context_pressure_warned_at: f64 = 0.0;
+    let mut context_pressure_last_warn_at: Option<Instant> = None;
+    let mut context_pressure_last_warn_percent: f64 = 0.0;
+    let mut governor_llm_latency_window: VecDeque<u64> = VecDeque::new();
+    let mut governor_tool_error_window: VecDeque<f64> = VecDeque::new();
+    let mut governor_consecutive_error_turns: u32 = 0;
+    let mut web_tool_calls_used: u32 = 0;
+    let mut web_search_calls_used: u32 = 0;
+    let mut web_tool_consecutive_error_turns: u32 = 0;
+    let mut repo_review_budget_state = RepoReviewBudgetState::default();
+    let mut objective_guard_retries: u32 = 0;
+    let mut finalizer_evidence_retries: u32 = 0;
+    let mut finalizer_output_quality_retries: u32 = 0;
+    let mut finalizer_action_execution_retries: u32 = 0;
+    let mut clarify_tool_retries: u32 = 0;
+    let governor_window_limit = governor_window_size();
+    let budget_cap = max_turns_limit.unwrap_or(agent.config().max_turns);
+    let mut iteration_budget = crate::iteration_budget::IterationBudget::new(budget_cap);
+    let mut tool_guardrails = crate::tool_guardrails::ToolGuardrailController::new();
+    let mut file_mutation =
+        crate::file_mutation_tracker::FileMutationTracker::new(agent.config().checkpoints_enabled);
+    let mut stream_scrubber = if agent.use_streaming_llm_transport(ui_streaming, 0, None) {
+        Some(crate::stream_scrubber::ThinkBlockScrubber::new())
+    } else {
+        None
+    };
+    let mut checkpoint_mgr = hermes_tools::CheckpointManager::new(
+        agent.config().checkpoints_enabled,
+        agent.config().hermes_home.as_deref().map(Path::new),
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    );
+
+    let web_research_cfg = agent.config().web_research.clone();
+    let web_auxiliary = if web_research_cfg.enabled
+        && (web_research_cfg.planner_enabled || web_research_cfg.evaluator_enabled)
+    {
+        Some(build_auxiliary_arc_for_config(&agent.config()))
+    } else {
+        None
+    };
+    let mut web_research_ctrl = web_research_cfg
+        .enabled
+        .then(|| WebResearchController::new(web_research_cfg));
+    let mut active_tool_schemas = tool_schemas.clone();
+    let mut web_finalize_hint_injected = false;
+
+    // Enter the turn state machine
+    let max_turns_limit = effective_max_turns(agent.config().max_turns);
+    let budget_cap = max_turns_limit.unwrap_or(agent.config().max_turns);
+    let mut turn_ctx = TurnContext::new(
+        ctx,
+        system_content,
+        tool_schemas,
+        ui_streaming,
+        stream_mute,
+        stream_needs_break,
+        stream_chunk_sink,
+        session_id_owned,
+        session_started_hooks_fired,
+        prefill_range,
+        persist_user_idx,
+        replay,
+        task_hint,
+        first_user,
+        review_memory_at_end,
+        budget_cap,
+        agent.config().checkpoints_enabled,
+        agent.config().hermes_home.clone(),
+        web_research_ctrl,
+        web_auxiliary,
+        stream_scrubber,
+    );
+    let mut state = TurnState::Guard;
+    loop {
+        match state {
+            TurnState::Done(result) => return result,
+            _ => state = state.transition(agent, &mut turn_ctx).await,
         }
     }
 }
@@ -813,7 +774,7 @@ pub struct TurnFinalizeMeta {
     pub persist_session: bool,
 }
 
-/// Output of B-segment [`ConversationLoop::prepare_turn`].
+/// Output of B-segment [`prepare_turn`].
 #[derive(Debug, Clone)]
 pub struct PreparedTurn {
     pub meta: TurnFinalizeMeta,
@@ -939,9 +900,9 @@ mod tests {
             Arc::new(ToolRegistry::new()),
             Arc::new(StopProvider),
         );
-        let conv = ConversationLoop { agent: &agent };
-        let prepared = conv
-            .prepare_turn(&RunConversationParams {
+        let prepared = prepare_turn(
+            &agent,
+            &RunConversationParams {
                 user_message: "current".into(),
                 conversation_history: vec![Message::user("prior")],
                 task_id: Some("task-x".into()),
@@ -949,11 +910,12 @@ mod tests {
                 persist_user_message: None,
                 tools: None,
                 persist_session: false,
-            })
-            .await
-            .expect("prepare");
+            },
+        )
+        .await
+        .expect("prepare");
         assert_eq!(prepared.meta.task_id, "task-x");
-        assert_eq!(conv.agent.current_task_id().as_deref(), Some("task-x"));
+        assert_eq!(agent.current_task_id().as_deref(), Some("task-x"));
         assert_eq!(prepared.messages.len(), 2);
     }
 
@@ -1007,10 +969,9 @@ mod tests {
             Arc::new(ToolRegistry::new()),
             Arc::new(StopProvider),
         );
-        let conv = ConversationLoop { agent: &agent };
         let history: Vec<Message> = (0..5).map(|i| Message::user(format!("u{i}"))).collect();
-        conv.hydrate_memory_nudge_counters_from_history(&history);
-        let counters = &conv.agent.state.lock().expect("lock").evolution_counters;
+        hydrate_memory_nudge_counters_from_history(&agent, &history);
+        let counters = &agent.state.lock().expect("lock").evolution_counters;
         assert_eq!(counters.turns_since_memory, 1);
         assert_eq!(counters.user_turn_count, 5);
     }
@@ -1062,11 +1023,10 @@ mod tests {
             Arc::new(ToolRegistry::new()),
             Arc::new(StopProvider),
         );
-        let conv = ConversationLoop { agent: &agent };
         let history: Vec<Message> = (0..3).map(|i| Message::user(format!("u{i}"))).collect();
-        conv.hydrate_memory_nudge_counters_from_history(&history);
+        hydrate_memory_nudge_counters_from_history(&agent, &history);
         assert_eq!(
-            conv.agent
+            agent
                 .state
                 .lock()
                 .expect("lock")

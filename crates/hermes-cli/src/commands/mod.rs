@@ -45,8 +45,8 @@ use crate::alpha_runtime::{
     set_quorum_policy, summarize_objective_contract, upsert_objective_contract,
     utility_terms_from_contract,
 };
-pub(crate) mod model;
 pub(crate) mod compress;
+pub(crate) mod model;
 
 // Re-export model utilities still referenced from this module
 use model::{
@@ -4909,7 +4909,7 @@ fn parse_sync_report_metadata(path: &Path) -> (std::collections::HashMap<String,
     (meta, pending_commit_lines)
 }
 
-fn yes_no(flag: bool) -> &'static str {
+pub(crate) fn yes_no(flag: bool) -> &'static str {
     if flag { "yes" } else { "no" }
 }
 
@@ -6795,7 +6795,7 @@ async fn handle_ops_command(app: &mut App, args: &[&str]) -> Result<CommandResul
     }
 }
 
-fn background_job_counts() -> (usize, usize, usize, usize) {
+pub(crate) fn background_job_counts() -> (usize, usize, usize, usize) {
     let jobs_dir = hermes_config::hermes_home().join("background_jobs");
     let mut queued = 0usize;
     let mut running = 0usize;
@@ -6948,7 +6948,7 @@ fn tail_file_lines(path: &Path, limit: usize) -> Result<String, AgentError> {
     Ok(tail_text_lines(&body, limit))
 }
 
-fn render_background_status(limit: usize) -> String {
+pub(crate) fn render_background_status(limit: usize) -> String {
     let (queued, running, completed, failed) = background_job_counts();
     let rows = collect_background_jobs(limit);
     let mut out = String::new();
@@ -8082,7 +8082,7 @@ async fn handle_browser_command(app: &mut App, args: &[&str]) -> Result<CommandR
     }
 }
 
-struct QueuedBackgroundJob {
+pub(crate) struct QueuedBackgroundJob {
     id: String,
     task: String,
     status_path: PathBuf,
@@ -8899,7 +8899,7 @@ fn handle_trigger_triage_command(
     Ok(CommandResult::Handled)
 }
 
-fn queue_background_job(task: &str) -> Result<QueuedBackgroundJob, AgentError> {
+pub(crate) fn queue_background_job(task: &str) -> Result<QueuedBackgroundJob, AgentError> {
     let task = task.trim();
     if task.is_empty() {
         return Err(AgentError::Config(
@@ -8948,7 +8948,10 @@ fn queue_background_job(task: &str) -> Result<QueuedBackgroundJob, AgentError> {
     })
 }
 
-fn handle_background_command(app: &mut App, args: &[&str]) -> Result<CommandResult, AgentError> {
+pub(crate) fn handle_background_command(
+    app: &mut App,
+    args: &[&str],
+) -> Result<CommandResult, AgentError> {
     if args.is_empty() {
         emit_command_output(
             app,
@@ -10436,7 +10439,7 @@ fn handle_history_command(app: &mut App) -> Result<CommandResult, AgentError> {
     Ok(CommandResult::Handled)
 }
 
-fn truncate_chars(input: &str, max_len: usize) -> String {
+pub(crate) fn truncate_chars(input: &str, max_len: usize) -> String {
     if max_len == 0 {
         return String::new();
     }

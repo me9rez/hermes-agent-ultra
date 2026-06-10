@@ -236,12 +236,12 @@ pub(crate) async fn run_doctor(
         std::env::var(key)
             .ok()
             .is_some_and(|v| !v.trim().is_empty())
-            || crate::read_env_key(&env_file, key)
+            || crate::setup::read_env_key(&env_file, key)
                 .map(|v| !v.trim().is_empty())
                 .unwrap_or(false)
             || project_env_file
                 .as_ref()
-                .and_then(|p| crate::read_env_key(p, key))
+                .and_then(|p| crate::setup::read_env_key(p, key))
                 .map(|v| !v.trim().is_empty())
                 .unwrap_or(false)
     };
@@ -360,13 +360,13 @@ pub(crate) async fn run_doctor(
             .and_then(|cfg| cfg.llm_providers.get(provider))
             .and_then(|entry| entry.base_url.clone())
             .filter(|value| !value.trim().is_empty());
-        let env_override = crate::local_backend_base_url_env_var(provider)
+        let env_override = crate::setup::local_backend_base_url_env_var(provider)
             .and_then(|name| std::env::var(name).ok())
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let base_url = configured
-            .or(env_override)
-            .or_else(|| crate::setup_provider_default_base_url(provider).map(ToString::to_string));
+        let base_url = configured.or(env_override).or_else(|| {
+            crate::setup::setup_provider_default_base_url(provider).map(ToString::to_string)
+        });
 
         let (reachable, probed_url) = if let Some(url) = base_url.clone() {
             let models_url = format!("{}/models", url.trim_end_matches('/'));

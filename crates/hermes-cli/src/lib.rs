@@ -38,7 +38,6 @@ pub mod platform_toolsets;
 pub mod profiles;
 pub mod providers;
 pub mod runtime_tool_wiring;
-pub mod setup;
 pub mod skills_config;
 pub mod skin_engine;
 pub mod startup_metrics;

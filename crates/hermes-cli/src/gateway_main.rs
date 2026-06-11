@@ -952,7 +952,8 @@ pub(crate) fn build_agent_for_gateway_context(
     }
     hermes_agent::attach_agent_runtime(
         AgentLoop::new(agent_config, agent_tools, provider)
-            .with_async_tool_dispatch(async_tool_dispatch_for(runtime_tools)),
+            .with_async_tool_dispatch(async_tool_dispatch_for(runtime_tools.clone()))
+            .with_synced_tools_registry(runtime_tools),
     )
 }
 

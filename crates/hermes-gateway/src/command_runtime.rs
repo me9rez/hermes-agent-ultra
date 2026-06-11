@@ -115,6 +115,10 @@ pub(crate) async fn apply_command(
             apply_background(gw, incoming, session_key, result).await
         }
 
+        GatewayCommandResult::PlanMode { args } => {
+            apply_plan_mode(gw, incoming, session_key, args).await
+        }
+
         // ── tool ──────────────────────────────────────────────────────────
         result @ (GatewayCommandResult::ListTools { .. }
         | GatewayCommandResult::EnableTool { .. }
@@ -131,6 +135,29 @@ pub(crate) async fn apply_command(
         | GatewayCommandResult::CuratorRestore { .. }
         | GatewayCommandResult::CuratorListArchived) => apply_curator(gw, incoming, result).await,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Plan mode
+// ---------------------------------------------------------------------------
+
+async fn apply_plan_mode(
+    gw: &Gateway,
+    incoming: &IncomingMessage,
+    session_key: &str,
+    args: String,
+) -> Result<bool, GatewayError> {
+    if let Some(handler) = gw.plan_mode_slash_handler.read().await.clone() {
+        handler(incoming.clone(), session_key.to_string(), args).await?;
+    } else {
+        gw.send_incoming_reply(
+            incoming,
+            "Plan mode is not available on this gateway runtime.",
+            None,
+        )
+        .await?;
+    }
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

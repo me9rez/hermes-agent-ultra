@@ -25,6 +25,7 @@ use crate::gateway_main::{
     GatewayAgentCache, extract_last_assistant_reply, get_or_build_gateway_cached_agent,
     resolve_model_for_gateway, truncate_hook_tool_result,
 };
+use crate::gateway_plan_mode::{GatewayPlanTurnPrep, finalize_gateway_agent_reply, prepare_gateway_plan_turn};
 
 fn gateway_conversation_reply(conv: &hermes_agent::ConversationResult) -> String {
     conv.final_response
@@ -483,6 +484,14 @@ pub(crate) async fn gateway_handle_message_non_streaming(
     prepend_clarify_user_request_hint(&user_message, &tool_schemas, &mut history);
     let task_id = Some(ctx.session_key.clone());
     let mut agent = agent.lock().await;
+    let mut user_message = user_message;
+    match prepare_gateway_plan_turn(&agent, &user_message) {
+        GatewayPlanTurnPrep::Run { user_message: um } => user_message = um,
+        GatewayPlanTurnPrep::ReplyOnly { text } => {
+            drop(agent);
+            return Ok(text);
+        }
+    }
     agent.callbacks = Arc::new(callbacks);
     let conv = agent
         .run_conversation(RunConversationParams {
@@ -498,11 +507,11 @@ pub(crate) async fn gateway_handle_message_non_streaming(
         .map_err(|e| GatewayError::Platform(e.to_string()))?;
     let usage_display = agent.session_usage_display();
     let session_key = ctx.session_key.clone();
+    let reply = finalize_gateway_agent_reply(&agent, &conv);
     drop(agent);
     gateway_for_review
         .sync_session_token_usage(&session_key, usage_display)
         .await;
-    let reply = gateway_conversation_reply(&conv);
     log_gateway_conversation_finished(
         &ctx.platform,
         &ctx.chat_id,
@@ -820,6 +829,14 @@ pub(crate) async fn gateway_handle_message_streaming(
     prepend_clarify_user_request_hint(&user_message, &tool_schemas, &mut history);
     let task_id = Some(ctx.session_key.clone());
     let mut agent = agent.lock().await;
+    let mut user_message = user_message;
+    match prepare_gateway_plan_turn(&agent, &user_message) {
+        GatewayPlanTurnPrep::Run { user_message: um } => user_message = um,
+        GatewayPlanTurnPrep::ReplyOnly { text } => {
+            drop(agent);
+            return Ok(text);
+        }
+    }
     agent.callbacks = Arc::new(callbacks);
     let conv = agent
         .run_conversation(RunConversationParams {
@@ -835,11 +852,11 @@ pub(crate) async fn gateway_handle_message_streaming(
         .map_err(|e| GatewayError::Platform(e.to_string()))?;
     let usage_display = agent.session_usage_display();
     let session_key = ctx.session_key.clone();
+    let reply = finalize_gateway_agent_reply(&agent, &conv);
     drop(agent);
     gateway_for_review
         .sync_session_token_usage(&session_key, usage_display)
         .await;
-    let reply = gateway_conversation_reply(&conv);
     log_gateway_conversation_finished(
         &ctx.platform,
         &ctx.chat_id,

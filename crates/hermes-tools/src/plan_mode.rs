@@ -1,7 +1,7 @@
 //! Plan-then-execute mode: read-only planning phase, user approval, then write execution.
 //!
-//! **Scope (v1):** CLI/TUI only (`--plan`, `/plan-mode`). Messaging Gateway sessions keep
-//! [`PlanPhase::Off`] until P1 adds channel approval UI.
+//! **Scope:** CLI/TUI (`--plan`, `/plan-mode`) and messaging Gateway channels
+//! (WeCom, Weixin, Telegram, etc.) via `/plan-mode` slash commands and text approval replies.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 

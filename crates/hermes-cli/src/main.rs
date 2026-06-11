@@ -10,6 +10,7 @@ mod dispatch;
 mod doctor;
 mod gateway_handlers;
 mod gateway_main;
+mod gateway_plan_mode;
 mod gateway_process;
 mod gateway_runtime;
 mod interactive_lock;

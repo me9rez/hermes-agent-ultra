@@ -276,6 +276,7 @@ pub(crate) async fn run_gateway(
                 gateway_agent_cache: gateway_agent_cache.clone(),
             };
             let handler_deps_stream = handler_deps.clone();
+            let handler_deps_plan_mode = handler_deps.clone();
             gateway
                 .set_session_teardown_handler(
                     gateway_handlers::make_gateway_session_teardown_handler(handler_deps.clone()),
@@ -295,6 +296,23 @@ pub(crate) async fn run_gateway(
                     Box::pin(gateway_handlers::gateway_handle_message_streaming(
                         messages, ctx, on_chunk, deps,
                     ))
+                }))
+                .await;
+            let gateway_for_plan_mode = gateway.clone();
+            gateway
+                .set_plan_mode_slash_handler(Arc::new(move |incoming, session_key, args| {
+                    let gw = gateway_for_plan_mode.clone();
+                    let deps = handler_deps_plan_mode.clone();
+                    Box::pin(async move {
+                        crate::gateway_plan_mode::execute_plan_mode_slash_command(
+                            gw,
+                            &incoming,
+                            &session_key,
+                            &args,
+                            deps,
+                        )
+                        .await
+                    })
                 }))
                 .await;
             drop(_p8);

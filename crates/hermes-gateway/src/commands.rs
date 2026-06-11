@@ -98,6 +98,8 @@ pub enum GatewayCommandResult {
     CuratorRestore { name: String },
     /// Curator list archived skills.
     CuratorListArchived,
+    /// Plan-then-execute mode (`/plan-mode` on messaging channels).
+    PlanMode { args: String },
     /// Unknown command.
     Unknown(String),
     /// No-op (command handled internally).
@@ -204,6 +206,12 @@ pub fn all_commands() -> Vec<CommandInfo> {
             aliases: &[],
             description: "Toggle auto-approve mode",
             usage: "/yolo",
+        },
+        CommandInfo {
+            name: "/plan-mode",
+            aliases: &["/plan_mode"],
+            description: "Plan-then-execute mode (read-only until approved)",
+            usage: "/plan-mode <task> | on | approve | reject | edit",
         },
         CommandInfo {
             name: "/sethome",
@@ -638,6 +646,7 @@ pub fn handle_command(input: &str) -> GatewayCommandResult {
         "/yolo" => GatewayCommandResult::ToggleYolo(
             "🤠 YOLO mode toggled. Auto-approving all actions.".to_string(),
         ),
+        "/plan-mode" | "/plan_mode" => GatewayCommandResult::PlanMode { args },
         "/sethome" => {
             if args.is_empty() {
                 GatewayCommandResult::Reply("Usage: /sethome <path>".to_string())

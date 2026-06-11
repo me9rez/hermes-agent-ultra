@@ -18,7 +18,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex as TokioMutex, mpsc};
+use tokio::sync::{Mutex as TokioMutex, RwLock, mpsc};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, warn};
 
@@ -294,6 +294,17 @@ pub(crate) struct CompressionOutcome {
 // Gateway
 // ---------------------------------------------------------------------------
 
+/// Handle `/plan-mode` on messaging channels (wired from `hermes-cli`).
+pub type PlanModeSlashHandler = Arc<
+    dyn Fn(
+            IncomingMessage,
+            String,
+            String,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), GatewayError>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Central orchestrator for all platform adapters.
 ///
 /// State is partitioned into four sub-systems; `Gateway` itself is a thin
@@ -308,6 +319,8 @@ pub struct Gateway {
     /// Optional extensions: hooks, voice/STT, inbound preparer, clarify.
     pub(crate) extensions: ExtensionBus,
     pub(crate) config: GatewayConfig,
+    /// Optional `/plan-mode` handler (requires agent cache from `hermes-cli`).
+    pub(crate) plan_mode_slash_handler: RwLock<Option<PlanModeSlashHandler>>,
 }
 
 pub(crate) fn inbound_text_log_fields(text: &str) -> (usize, String, String) {
@@ -367,7 +380,40 @@ impl Gateway {
             delivery: DeliveryLayer::new(config.streaming.clone()),
             extensions: ExtensionBus::new(),
             config,
+            plan_mode_slash_handler: RwLock::new(None),
         }
+    }
+
+    /// Wire `/plan-mode` slash handling for messaging channels.
+    pub async fn set_plan_mode_slash_handler(&self, handler: PlanModeSlashHandler) {
+        *self.plan_mode_slash_handler.write().await = Some(handler);
+    }
+
+    /// Build runtime context for agent/tool wiring on this inbound route.
+    pub async fn runtime_context_for_route(
+        &self,
+        incoming: &IncomingMessage,
+        session_key: &str,
+    ) -> GatewayRuntimeContext {
+        self.build_runtime_context(incoming, session_key).await
+    }
+
+    /// Append a synthetic user turn and run the foreground agent route (slash flows).
+    pub async fn append_user_message_and_route(
+        &self,
+        incoming: &IncomingMessage,
+        session_key: &str,
+        user_text: String,
+    ) -> Result<(), GatewayError> {
+        let mut messages = self.session_manager().get_messages(session_key).await;
+        messages.push(Message::user(user_text));
+        self.session_manager()
+            .replace_messages(session_key, messages.clone())
+            .await;
+        let route_id = Self::route_correlation_id(incoming, session_key);
+        self.route_non_streaming(incoming, Arc::new(messages), session_key, &route_id)
+            .await?;
+        Ok(())
     }
 
     /// Wire the shared clarify dispatcher so inbound IM replies can fulfill an

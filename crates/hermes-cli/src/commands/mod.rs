@@ -1,4 +1,4 @@
-﻿//! Slash command handler (Requirement 9.2).
+//! Slash command handler (Requirement 9.2).
 //!
 //! Defines and dispatches all supported `/` commands in the interactive
 //! REPL, and provides auto-completion suggestions.
@@ -11,6 +11,7 @@ mod autocomplete;
 mod catalog;
 mod cli_handlers;
 mod slash_dispatch;
+mod slash_registry;
 
 pub(crate) mod approval;
 pub(crate) mod auth_cmd;
@@ -30,11 +31,11 @@ pub(crate) mod plan;
 pub(crate) mod policy;
 pub(crate) mod quorum;
 pub(crate) mod runtime_ui;
-pub(crate) mod studio_ops;
-pub(crate) mod swarm;
 pub(crate) mod session;
 pub mod skills;
 pub(crate) mod skills_infra;
+pub(crate) mod studio_ops;
+pub(crate) mod swarm;
 
 pub(crate) use approval::{handle_approve_command, handle_deny_command, handle_gquota_command};
 pub(crate) use diagnostics::{
@@ -51,8 +52,7 @@ pub use slash_dispatch::handle_slash_command;
 
 pub(crate) use autocomplete::canonical_command;
 pub(crate) use catalog::{
-    detect_repo_root_from_cwd, feedback_log_path, handle_feedback_command,
-    provider_health_snapshot,
+    detect_repo_root_from_cwd, feedback_log_path, handle_feedback_command, provider_health_snapshot,
 };
 
 pub use background::recover_queued_background_jobs;
@@ -212,16 +212,16 @@ pub(crate) fn truncate_chars(input: &str, max_len: usize) -> String {
     out
 }
 
+pub(crate) use cli_handlers::{
+    discover_plugin_surface, query_mode_tools_enabled, render_plugin_surface_table,
+    whatsapp_cloud_setup_impl,
+};
 pub use cli_handlers::{
     handle_cli_acp, handle_cli_backup, handle_cli_chat, handle_cli_claw, handle_cli_contribute,
     handle_cli_external_plugin_subcommand, handle_cli_import, handle_cli_insights,
     handle_cli_interest, handle_cli_login, handle_cli_logout, handle_cli_mcp, handle_cli_meeting,
     handle_cli_memory, handle_cli_pairing, handle_cli_plugins, handle_cli_sessions,
     handle_cli_version, handle_cli_whatsapp,
-};
-pub(crate) use cli_handlers::{
-    discover_plugin_surface, query_mode_tools_enabled, render_plugin_surface_table,
-    whatsapp_cloud_setup_impl,
 };
 
 #[cfg(test)]

@@ -49,6 +49,9 @@ use crate::commands;
 use crate::theme::Theme;
 use crate::tool_preview::{build_tool_preview_from_value, tool_emoji};
 
+mod ui_phase;
+use ui_phase::{ComposerState, InputPaintSnapshot, ProcessingState, UiPhase};
+
 trait TuiReadHost:
     SessionRuntime + ModelRuntime + TranscriptRuntime + UiChromeRuntime + AgentCoordinator
 {
@@ -140,7 +143,7 @@ pub enum ActivityLaneMode {
 }
 
 #[derive(Debug, Clone)]
-enum PickerKind {
+pub(crate) enum PickerKind {
     ModelProvider,
     ModelForProvider { provider: String },
     Personality,
@@ -149,14 +152,14 @@ enum PickerKind {
 }
 
 #[derive(Debug, Clone)]
-struct PickerItem {
+pub(crate) struct PickerItem {
     label: String,
     detail: String,
     value: String,
 }
 
 #[derive(Debug, Clone)]
-struct PickerModal {
+pub(super) struct PickerModal {
     kind: PickerKind,
     title: String,
     query: String,
@@ -315,7 +318,7 @@ impl Default for TranscriptCache {
 
 /// Cached stable-prefix markdown for in-flight assistant streaming (Python `StreamingMd` parity).
 #[derive(Debug, Clone, Default)]
-struct StreamMarkdownCache {
+pub(super) struct StreamMarkdownCache {
     stable_prefix: String,
     stable_lines: Vec<Line<'static>>,
     cached_width: u16,
@@ -606,59 +609,21 @@ async fn shutdown_signal_bridge(bridge: SignalBridge) {
 // TuiState — holds the mutable state of the TUI between frames
 // ---------------------------------------------------------------------------
 
-/// Snapshot of composer state used to skip redundant clears/cursor updates.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct InputPaintSnapshot {
-    input: String,
-    cursor_position: usize,
-    mode: InputMode,
-    history_search_active: bool,
-}
-
 /// Mutable state for the TUI rendering loop.
 pub struct TuiState {
-    /// Current input mode.
-    pub mode: InputMode,
-    /// Current input buffer (supports multi-line).
-    pub input: String,
-    /// Cursor position within the input buffer (byte offset).
-    pub cursor_position: usize,
-    /// Auto-completion suggestions (populated in Command mode).
-    pub completions: Vec<String>,
-    /// Currently selected completion index (if any).
-    pub completion_index: Option<usize>,
+    phase: UiPhase,
     /// Scroll offset from newest transcript content (0 = newest).
     pub scroll_offset: usize,
     /// Keep transcript pinned to newest content unless user scrolls away.
     auto_follow_transcript: bool,
-    /// Whether the agent is currently processing.
-    pub processing: bool,
-    /// Buffer for streaming agent output.
-    pub stream_buffer: String,
-    /// Whether post-response deltas are currently muted.
-    pub stream_muted: bool,
-    /// Whether the next visible token should be prefixed by a paragraph break.
-    pub stream_needs_break: bool,
     /// Status message shown in the status bar.
     pub status_message: String,
-    /// Selection anchor for text selection (byte offset, None if no selection).
-    pub selection_anchor: Option<usize>,
-    /// Message history index for browsing previous messages.
-    pub message_browse_index: Option<usize>,
-    /// Whether we are in history search mode (Ctrl+R).
-    pub history_search_active: bool,
-    /// Current history search query.
-    pub history_search_query: String,
     /// Spinner frame counter for tool execution indicator.
     pub spinner_frame: usize,
     /// Tool output sections with fold state (tool_name, output, is_expanded).
     pub tool_outputs: Vec<ToolOutputSection>,
     /// Recent lifecycle/activity rows (newest at end).
     pub recent_activity: Vec<String>,
-    /// Active tool names currently running.
-    pub active_tools: Vec<String>,
-    /// Live thinking preview accumulated during stream.
-    pub live_thinking: String,
     /// Last known token usage (prompt, completion, total).
     pub last_usage: Option<(u64, u64, u64)>,
     /// Last total-token value emitted into activity lane.
@@ -677,42 +642,14 @@ pub struct TuiState {
     pub show_timestamps: bool,
     /// Transcript density mode.
     pub view_density: ViewDensity,
-    /// Active picker modal state.
-    modal: Option<PickerModal>,
     /// Cached transcript render to reduce full rebuild churn.
     transcript_cache: TranscriptCache,
-    /// Incremental markdown cache for `stream_buffer` (stable prefix + tail re-parse).
-    stream_md_cache: StreamMarkdownCache,
     /// Expand state for tool cards by transcript key.
     expanded_tool_cards: HashSet<String>,
     /// Stable timestamp labels keyed by message fingerprint.
     message_time_labels: HashMap<u64, String>,
     /// Animation frame index for companion pet rendering.
     pet_frame: usize,
-    /// When the current processing cycle started.
-    processing_started_at: Option<Instant>,
-    /// Last time we emitted a progress heartbeat row.
-    last_progress_pulse_at: Option<Instant>,
-    /// Count of streaming chunks seen in current cycle.
-    stream_chunk_count: usize,
-    /// Count of visible streaming chars seen in current cycle.
-    stream_char_count: usize,
-    /// Whether first response token has been observed in this cycle.
-    saw_first_token: bool,
-    /// Current structured phase name for active processing cycle.
-    processing_phase: String,
-    /// Current structured phase label for active processing cycle.
-    processing_phase_label: String,
-    /// Current structured phase progress percentage (0..=100).
-    processing_phase_progress: u8,
-    /// Whether the current cycle used fallback/remediation paths.
-    processing_degraded: bool,
-    /// Degraded lifecycle notes captured during current cycle.
-    degraded_notes: Vec<String>,
-    /// Stream finished, waiting for `AgentRunComplete` to commit transcript.
-    awaiting_run_complete: bool,
-    /// Last composer snapshot painted to the terminal.
-    last_input_paint: Option<InputPaintSnapshot>,
 }
 
 /// A section of tool output that can be folded/expanded.
@@ -760,27 +697,13 @@ impl ToolOutputSection {
 impl Default for TuiState {
     fn default() -> Self {
         Self {
-            mode: InputMode::Insert,
-            input: String::new(),
-            cursor_position: 0,
-            completions: Vec::new(),
-            completion_index: None,
+            phase: UiPhase::idle_default(),
             scroll_offset: 0,
             auto_follow_transcript: true,
-            processing: false,
-            stream_buffer: String::new(),
-            stream_muted: false,
-            stream_needs_break: false,
             status_message: String::new(),
-            selection_anchor: None,
-            message_browse_index: None,
-            history_search_active: false,
-            history_search_query: String::new(),
             spinner_frame: 0,
             tool_outputs: Vec::new(),
             recent_activity: Vec::new(),
-            active_tools: Vec::new(),
-            live_thinking: String::new(),
             last_usage: None,
             last_usage_total_emitted: None,
             timeline_seq: 0,
@@ -790,40 +713,21 @@ impl Default for TuiState {
             activity_lane_mode: ActivityLaneMode::Live,
             show_timestamps: false,
             view_density: ViewDensity::Detailed,
-            modal: None,
             transcript_cache: TranscriptCache::default(),
-            stream_md_cache: StreamMarkdownCache::default(),
             expanded_tool_cards: HashSet::new(),
             message_time_labels: HashMap::new(),
             pet_frame: 0,
-            processing_started_at: None,
-            last_progress_pulse_at: None,
-            stream_chunk_count: 0,
-            stream_char_count: 0,
-            saw_first_token: false,
-            processing_phase: String::new(),
-            processing_phase_label: String::new(),
-            processing_phase_progress: 0,
-            processing_degraded: false,
-            degraded_notes: Vec::new(),
-            awaiting_run_complete: false,
-            last_input_paint: None,
         }
     }
 }
 
 impl TuiState {
     fn input_paint_snapshot(&self) -> InputPaintSnapshot {
-        InputPaintSnapshot {
-            input: self.input.clone(),
-            cursor_position: self.cursor_position,
-            mode: self.mode,
-            history_search_active: self.history_search_active,
-        }
+        self.phase.composer().input_paint_snapshot()
     }
 
     fn reset_input_paint_cache(&mut self) {
-        self.last_input_paint = None;
+        self.phase.composer_mut().reset_input_paint_cache();
     }
 
     fn scroll_history_up(&mut self, lines: u16) {
@@ -869,13 +773,14 @@ impl TuiState {
         if chunk.is_empty() {
             return;
         }
-        if !self.live_thinking.is_empty() {
-            self.live_thinking.push(' ');
+        let processing = self.phase.processing_mut().expect("processing");
+        if !processing.live_thinking.is_empty() {
+            processing.live_thinking.push(' ');
         }
-        self.live_thinking.push_str(chunk);
+        processing.live_thinking.push_str(chunk);
         const MAX_CHARS: usize = 260;
-        if self.live_thinking.chars().count() > MAX_CHARS {
-            let tail: String = self
+        if processing.live_thinking.chars().count() > MAX_CHARS {
+            let tail: String = processing
                 .live_thinking
                 .chars()
                 .rev()
@@ -884,31 +789,34 @@ impl TuiState {
                 .chars()
                 .rev()
                 .collect();
-            self.live_thinking = format!("…{}", tail);
+            processing.live_thinking = format!("…{}", tail);
         }
     }
 
     fn begin_processing_cycle(&mut self, model: &str) {
-        self.processing = true;
-        self.awaiting_run_complete = true;
-        self.processing_started_at = Some(Instant::now());
-        self.last_progress_pulse_at = None;
-        self.stream_chunk_count = 0;
-        self.stream_char_count = 0;
-        self.saw_first_token = false;
-        self.processing_degraded = false;
-        self.degraded_notes.clear();
-        self.stream_buffer.clear();
-        self.stream_md_cache.clear();
-        self.stream_muted = false;
-        self.stream_needs_break = false;
-        self.active_tools.clear();
         self.last_usage_total_emitted = None;
         self.timeline_seq = 0;
-        self.live_thinking.clear();
-        self.processing_phase = "preflight".to_string();
-        self.processing_phase_label = "preparing request".to_string();
-        self.processing_phase_progress = 0;
+        if !self.phase.begin_processing(model) {
+            return;
+        }
+        let processing = self.phase.processing_mut().expect("processing started");
+        processing.awaiting_run_complete = true;
+        processing.started_at = Some(Instant::now());
+        processing.last_progress_pulse_at = None;
+        processing.stream_chunk_count = 0;
+        processing.stream_char_count = 0;
+        processing.saw_first_token = false;
+        processing.processing_degraded = false;
+        processing.degraded_notes.clear();
+        processing.stream_buffer.clear();
+        processing.stream_md_cache.clear();
+        processing.stream_muted = false;
+        processing.stream_needs_break = false;
+        processing.active_tools.clear();
+        processing.live_thinking.clear();
+        processing.processing_phase = "preflight".to_string();
+        processing.processing_phase_label = "preparing request".to_string();
+        processing.processing_phase_progress = 0;
         self.push_activity(format!("⟳ dispatching request to {model}"));
     }
 
@@ -917,108 +825,131 @@ impl TuiState {
         if label.is_empty() {
             return;
         }
-        self.processing_phase = "command".to_string();
-        self.processing_phase_label = label.clone();
-        self.processing_phase_progress = self.processing_phase_progress.max(5);
+        self.phase
+            .processing_mut()
+            .expect("processing")
+            .processing_phase = "command".to_string();
+        self.phase
+            .processing_mut()
+            .expect("processing")
+            .processing_phase_label = label.clone();
+        self.phase
+            .processing_mut()
+            .expect("processing")
+            .processing_phase_progress = self
+            .phase
+            .processing_mut()
+            .expect("processing")
+            .processing_phase_progress
+            .max(5);
         self.push_activity(format!("◈ {}", label));
         self.maybe_emit_progress_pulse();
     }
 
     fn finish_processing_cycle(&mut self, label: &str) {
-        if !self.processing {
+        if !self.phase.is_processing() {
             return;
         }
-        let resolved_label = if self.processing_degraded && label.starts_with('✔') {
-            "⚠ completed with fallback in"
-        } else {
-            label
+        let summary = {
+            let processing = self.phase.processing().expect("processing");
+            let resolved_label = if processing.processing_degraded && label.starts_with('✔') {
+                "⚠ completed with fallback in"
+            } else {
+                label
+            };
+            let elapsed = processing
+                .started_at
+                .map(|t| t.elapsed().as_secs_f64())
+                .unwrap_or_default();
+            let activity = format!(
+                "{} {:.2}s • {} chunks • {} chars",
+                resolved_label,
+                elapsed,
+                processing.stream_chunk_count,
+                processing.stream_char_count
+            );
+            let fallback =
+                if processing.processing_degraded && !processing.degraded_notes.is_empty() {
+                    Some(format!(
+                        "fallback notes: {}",
+                        truncate_chars(&processing.degraded_notes.join(" | "), 220)
+                    ))
+                } else {
+                    None
+                };
+            (activity, fallback)
         };
-        let elapsed = self
-            .processing_started_at
-            .map(|t| t.elapsed().as_secs_f64())
-            .unwrap_or_default();
-        self.push_activity(format!(
-            "{} {:.2}s • {} chunks • {} chars",
-            resolved_label, elapsed, self.stream_chunk_count, self.stream_char_count
-        ));
-        if self.processing_degraded && !self.degraded_notes.is_empty() {
-            self.push_activity(format!(
-                "fallback notes: {}",
-                truncate_chars(&self.degraded_notes.join(" | "), 220)
-            ));
+        self.phase.finish_processing();
+        self.push_activity(summary.0);
+        if let Some(note) = summary.1 {
+            self.push_activity(note);
         }
-        self.processing = false;
-        self.processing_started_at = None;
-        self.last_progress_pulse_at = None;
-        self.stream_chunk_count = 0;
-        self.stream_char_count = 0;
-        self.saw_first_token = false;
-        self.processing_phase.clear();
-        self.processing_phase_label.clear();
-        self.processing_phase_progress = 0;
-        self.processing_degraded = false;
-        self.degraded_notes.clear();
-        self.awaiting_run_complete = false;
         self.jump_to_latest();
     }
 
     fn maybe_emit_progress_pulse(&mut self) {
-        if !self.processing {
+        if !self.phase.is_processing() {
             return;
         }
         let now = Instant::now();
         let should_emit = self
-            .last_progress_pulse_at
+            .phase
+            .processing()
+            .and_then(|processing| processing.last_progress_pulse_at)
             .map(|t| now.duration_since(t) >= Duration::from_millis(1250))
             .unwrap_or(true);
         if !should_emit {
             return;
         }
         let elapsed = self
-            .processing_started_at
+            .phase
+            .processing()
+            .and_then(|processing| processing.started_at)
             .map(|t| t.elapsed().as_secs_f64())
             .unwrap_or_default();
-        let tool_state = if self.active_tools.is_empty() {
+        let processing = self.phase.processing_mut().expect("processing");
+        let tool_state = if processing.active_tools.is_empty() {
             "no active tools".to_string()
         } else {
-            format!("{} active tool(s)", self.active_tools.len())
+            format!("{} active tool(s)", processing.active_tools.len())
         };
-        let phase_state = if self.processing_phase_label.is_empty() {
+        let phase_state = if processing.processing_phase_label.is_empty() {
             "phase: n/a".to_string()
         } else {
             format!(
                 "phase: {} ({}%)",
-                truncate_chars(&self.processing_phase_label, 64),
-                self.processing_phase_progress
+                truncate_chars(&processing.processing_phase_label, 64),
+                processing.processing_phase_progress
             )
         };
+        let chunk_count = processing.stream_chunk_count;
+        let char_count = processing.stream_char_count;
+        processing.last_progress_pulse_at = Some(now);
         self.push_activity(format!(
             "… working {:.1}s • {} chunks • {} chars • {} • {}",
-            elapsed, self.stream_chunk_count, self.stream_char_count, tool_state, phase_state
+            elapsed, chunk_count, char_count, tool_state, phase_state
         ));
-        self.last_progress_pulse_at = Some(now);
     }
 
     fn processing_elapsed(&self) -> Duration {
-        self.processing_started_at
-            .map(|started| started.elapsed())
-            .unwrap_or_default()
+        self.phase.processing_elapsed()
     }
 
     fn processing_stage_label(&self) -> &'static str {
-        if !self.processing {
+        if !self.phase.is_processing() {
             return "idle";
         }
-        if !self.processing_phase_label.is_empty() {
+        let processing = self.phase.processing().expect("processing");
+        if !processing.processing_phase_label.is_empty() {
             return "phase-driven";
         }
-        if !self.saw_first_token {
-            if self.active_tools.is_empty() {
+        if !processing.saw_first_token {
+            if processing.active_tools.is_empty() {
                 "awaiting first token"
             } else {
                 "running tools (pre-token)"
             }
-        } else if self.active_tools.is_empty() {
+        } else if processing.active_tools.is_empty() {
             "streaming response"
         } else {
             "running tools + streaming"
@@ -1026,7 +957,7 @@ impl TuiState {
     }
 
     fn update_processing_phase(&mut self, phase: &str, label: &str, progress_pct: Option<u8>) {
-        if !self.processing {
+        if !self.phase.is_processing() {
             return;
         }
         let phase = phase.trim().to_ascii_lowercase();
@@ -1034,24 +965,23 @@ impl TuiState {
         if phase.is_empty() && label.is_empty() && progress_pct.is_none() {
             return;
         }
+        let processing = self.phase.processing_mut().expect("processing");
         if !phase.is_empty() {
-            self.processing_phase = phase;
+            processing.processing_phase = phase;
         }
         if !label.is_empty() {
-            self.processing_phase_label = truncate_chars(label, 120);
+            processing.processing_phase_label = truncate_chars(label, 120);
         }
         if let Some(progress) = progress_pct {
-            self.processing_phase_progress = progress.min(100);
+            processing.processing_phase_progress = progress.min(100);
         }
-        let activity_label = if self.processing_phase_label.is_empty() {
-            self.processing_phase.as_str()
+        let activity_label = if processing.processing_phase_label.is_empty() {
+            processing.processing_phase.clone()
         } else {
-            self.processing_phase_label.as_str()
+            processing.processing_phase_label.clone()
         };
-        self.push_activity(format!(
-            "◈ phase {}% • {}",
-            self.processing_phase_progress, activity_label
-        ));
+        let progress = processing.processing_phase_progress;
+        self.push_activity(format!("◈ phase {}% • {}", progress, activity_label));
     }
 
     fn refresh_sticky_prompt(&mut self, app: &impl TranscriptRuntime) {
@@ -1075,21 +1005,20 @@ impl TuiState {
     }
 
     fn open_modal(&mut self, modal: PickerModal) {
-        self.modal = Some(modal);
-        self.mode = InputMode::Insert;
+        self.phase.open_modal(modal);
     }
 
     fn close_modal(&mut self) {
-        self.modal = None;
+        self.phase.close_modal();
     }
 
     fn modal_active(&self) -> bool {
-        self.modal.is_some()
+        self.phase.modal_active()
     }
 
     fn handle_modal_key(&mut self, key: KeyEvent) -> ModalAction {
         use crossterm::event::{KeyCode, KeyModifiers};
-        let Some(modal) = self.modal.as_mut() else {
+        let Some(modal) = self.phase.modal_mut() else {
             return ModalAction::None;
         };
         let is_interactive_question = matches!(modal.kind, PickerKind::InteractiveQuestion { .. });
@@ -1176,7 +1105,7 @@ impl TuiState {
 
     /// Handle a key event and return whether the app should quit.
     pub fn handle_key(&mut self, key: KeyEvent, app: &mut impl SessionRuntime) -> bool {
-        match self.mode {
+        match self.phase.composer_mut().mode {
             InputMode::Normal => self.handle_normal_key(key, app),
             InputMode::Insert => self.handle_insert_key(key, app),
             InputMode::Command => self.handle_command_key(key, app),
@@ -1199,12 +1128,12 @@ impl TuiState {
                 self.jump_to_latest();
             }
             KeyCode::Char('i') => {
-                self.mode = InputMode::Insert;
+                self.phase.composer_mut().mode = InputMode::Insert;
             }
             KeyCode::Char(':') => {
-                self.mode = InputMode::Command;
-                self.input.clear();
-                self.cursor_position = 0;
+                self.phase.composer_mut().mode = InputMode::Command;
+                self.phase.composer_mut().input.clear();
+                self.phase.composer_mut().cursor_position = 0;
             }
             KeyCode::Char('q') | KeyCode::Esc => {
                 return true; // quit
@@ -1279,9 +1208,9 @@ impl TuiState {
                 _ => {}
             }
         }
-        let completion_nav_active = self.input.starts_with('/')
-            && !self.completions.is_empty()
-            && !self.history_search_active;
+        let completion_nav_active = self.phase.composer_mut().input.starts_with('/')
+            && !self.phase.composer_mut().completions.is_empty()
+            && !self.phase.composer_mut().history_search_active;
 
         if completion_nav_active && mods.is_empty() {
             match key.code {
@@ -1302,12 +1231,13 @@ impl TuiState {
                     return false;
                 }
                 KeyCode::Home => {
-                    self.completion_index = Some(0);
+                    self.phase.composer_mut().completion_index = Some(0);
                     return false;
                 }
                 KeyCode::End => {
-                    if !self.completions.is_empty() {
-                        self.completion_index = Some(self.completions.len() - 1);
+                    if !self.phase.composer_mut().completions.is_empty() {
+                        self.phase.composer_mut().completion_index =
+                            Some(self.phase.composer_mut().completions.len() - 1);
                     }
                     return false;
                 }
@@ -1369,94 +1299,102 @@ impl TuiState {
             // Explicit multiline shortcuts.
             KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) => {
                 self.insert_newline_at_cursor();
-                self.selection_anchor = None;
+                self.phase.composer_mut().selection_anchor = None;
                 self.refresh_completions();
                 false
             }
             KeyCode::Char('j') if mods.contains(KeyModifiers::CONTROL) => {
                 self.insert_newline_at_cursor();
-                self.selection_anchor = None;
+                self.phase.composer_mut().selection_anchor = None;
                 self.refresh_completions();
                 false
             }
             // Submit shortcuts are handled in the run-loop after key handling.
-            _ if is_submit_shortcut(&key, &self.input) => false,
+            _ if is_submit_shortcut(&key, &self.phase.composer_mut().input) => false,
             KeyCode::Tab => {
                 // Accept completion
                 self.accept_completion();
-                self.completions.clear();
-                self.completion_index = None;
+                self.phase.composer_mut().completions.clear();
+                self.phase.composer_mut().completion_index = None;
                 false
             }
             // Ctrl+R toggles reverse-search across message input history.
             KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => {
-                self.history_search_active = !self.history_search_active;
-                if !self.history_search_active {
-                    self.history_search_query.clear();
+                self.phase.composer_mut().history_search_active =
+                    !self.phase.composer_mut().history_search_active;
+                if !self.phase.composer_mut().history_search_active {
+                    self.phase.composer_mut().history_search_query.clear();
                 }
                 false
             }
-            KeyCode::Char(c) if self.history_search_active => {
-                self.history_search_query.push(c);
+            KeyCode::Char(c) if self.phase.composer_mut().history_search_active => {
+                self.phase.composer_mut().history_search_query.push(c);
                 if let Some(found) = app
                     .input_history()
                     .iter()
                     .rev()
-                    .find(|h| h.contains(&self.history_search_query))
+                    .find(|h| h.contains(&self.phase.composer_mut().history_search_query))
                 {
-                    self.input = found.clone();
-                    self.cursor_position = self.input.len();
+                    self.phase.composer_mut().input = found.clone();
+                    self.phase.composer_mut().cursor_position =
+                        self.phase.composer_mut().input.len();
                 }
                 false
             }
-            KeyCode::Backspace if self.history_search_active => {
-                self.history_search_query.pop();
+            KeyCode::Backspace if self.phase.composer_mut().history_search_active => {
+                self.phase.composer_mut().history_search_query.pop();
                 false
             }
             // On single-line inputs without completion menus, Up/Down browse previous prompts.
             KeyCode::Up
-                if !self.input.contains('\n') && !completion_nav_active && mods.is_empty() =>
+                if !self.phase.composer_mut().input.contains('\n')
+                    && !completion_nav_active
+                    && mods.is_empty() =>
             {
                 if let Some(prev) = app.history_prev() {
-                    self.input = prev.to_string();
-                    self.cursor_position = self.input.len();
+                    self.phase.composer_mut().input = prev.to_string();
+                    self.phase.composer_mut().cursor_position =
+                        self.phase.composer_mut().input.len();
                 }
                 self.refresh_completions();
                 false
             }
             KeyCode::Down
-                if !self.input.contains('\n') && !completion_nav_active && mods.is_empty() =>
+                if !self.phase.composer_mut().input.contains('\n')
+                    && !completion_nav_active
+                    && mods.is_empty() =>
             {
                 if let Some(next) = app.history_next() {
-                    self.input = next.to_string();
-                    self.cursor_position = self.input.len();
+                    self.phase.composer_mut().input = next.to_string();
+                    self.phase.composer_mut().cursor_position =
+                        self.phase.composer_mut().input.len();
                 }
                 self.refresh_completions();
                 false
             }
             KeyCode::Esc => {
-                if self.history_search_active {
-                    self.history_search_active = false;
-                    self.history_search_query.clear();
+                if self.phase.composer_mut().history_search_active {
+                    self.phase.composer_mut().history_search_active = false;
+                    self.phase.composer_mut().history_search_query.clear();
                     return false;
                 }
-                if !self.input.is_empty() {
-                    self.input.clear();
-                    self.cursor_position = 0;
-                    self.selection_anchor = None;
+                if !self.phase.composer_mut().input.is_empty() {
+                    self.phase.composer_mut().input.clear();
+                    self.phase.composer_mut().cursor_position = 0;
+                    self.phase.composer_mut().selection_anchor = None;
                 }
-                self.completions.clear();
-                self.completion_index = None;
+                self.phase.composer_mut().completions.clear();
+                self.phase.composer_mut().completion_index = None;
                 if self.scroll_offset > 0 {
                     self.jump_to_latest();
                 }
                 // Keep insert mode so Esc never appears to "freeze" typing.
-                self.mode = InputMode::Insert;
+                self.phase.composer_mut().mode = InputMode::Insert;
                 false
             }
             _ => {
                 self.apply_textarea_input(key);
-                self.selection_anchor = None;
+                self.phase.composer_mut().selection_anchor = None;
                 self.refresh_completions();
                 false
             }
@@ -1467,32 +1405,36 @@ impl TuiState {
         use crossterm::event::KeyCode;
         match key.code {
             KeyCode::Enter => {
-                let input = std::mem::take(&mut self.input);
-                self.cursor_position = 0;
-                self.mode = InputMode::Insert;
-                self.completions.clear();
-                self.completion_index = None;
+                let input = std::mem::take(&mut self.phase.composer_mut().input);
+                self.phase.composer_mut().cursor_position = 0;
+                self.phase.composer_mut().mode = InputMode::Insert;
+                self.phase.composer_mut().completions.clear();
+                self.phase.composer_mut().completion_index = None;
                 let _ = input; // Processed outside
                 false
             }
             KeyCode::Esc => {
-                self.mode = InputMode::Insert;
-                self.input.clear();
-                self.cursor_position = 0;
-                self.completions.clear();
-                self.completion_index = None;
+                self.phase.composer_mut().mode = InputMode::Insert;
+                self.phase.composer_mut().input.clear();
+                self.phase.composer_mut().cursor_position = 0;
+                self.phase.composer_mut().completions.clear();
+                self.phase.composer_mut().completion_index = None;
                 false
             }
             KeyCode::Tab => {
                 // Cycle through completions
-                if !self.completions.is_empty() {
+                if !self.phase.composer_mut().completions.is_empty() {
                     let idx = self
+                        .phase
+                        .composer_mut()
                         .completion_index
-                        .map(|i| (i + 1) % self.completions.len())
+                        .map(|i| (i + 1) % self.phase.composer_mut().completions.len())
                         .unwrap_or(0);
-                    self.completion_index = Some(idx);
-                    self.input = self.completions[idx].clone();
-                    self.cursor_position = self.input.len();
+                    self.phase.composer_mut().completion_index = Some(idx);
+                    self.phase.composer_mut().input =
+                        self.phase.composer_mut().completions[idx].clone();
+                    self.phase.composer_mut().cursor_position =
+                        self.phase.composer_mut().input.len();
                 }
                 false
             }
@@ -1505,25 +1447,27 @@ impl TuiState {
 
     /// Update auto-completion suggestions based on current input.
     fn update_completions(&mut self) {
-        if self.input.starts_with('/') {
-            self.completions = commands::autocomplete_contextual(&self.input);
-            self.completion_index = if self.completions.is_empty() {
-                None
-            } else {
-                Some(0)
-            };
+        if self.phase.composer_mut().input.starts_with('/') {
+            self.phase.composer_mut().completions =
+                commands::autocomplete_contextual(&self.phase.composer_mut().input);
+            self.phase.composer_mut().completion_index =
+                if self.phase.composer_mut().completions.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                };
         } else {
-            self.completions.clear();
-            self.completion_index = None;
+            self.phase.composer_mut().completions.clear();
+            self.phase.composer_mut().completion_index = None;
         }
     }
 
     fn refresh_completions(&mut self) {
-        if self.input.starts_with('/') {
+        if self.phase.composer_mut().input.starts_with('/') {
             self.update_completions();
         } else {
-            self.completions.clear();
-            self.completion_index = None;
+            self.phase.composer_mut().completions.clear();
+            self.phase.composer_mut().completion_index = None;
         }
     }
 
@@ -1574,13 +1518,18 @@ impl TuiState {
     }
 
     fn textarea_from_input(&self) -> TextArea<'static> {
-        let lines: Vec<String> = if self.input.is_empty() {
+        let composer = self.phase.composer();
+        let lines: Vec<String> = if composer.input.is_empty() {
             vec![String::new()]
         } else {
-            self.input.split('\n').map(ToString::to_string).collect()
+            composer
+                .input
+                .split('\n')
+                .map(ToString::to_string)
+                .collect()
         };
         let mut textarea = TextArea::from(lines);
-        let (row, col) = Self::cursor_row_col(&self.input, self.cursor_position);
+        let (row, col) = Self::cursor_row_col(&composer.input, composer.cursor_position);
         let row_u16 = row.min(u16::MAX as usize) as u16;
         let col_u16 = col.min(u16::MAX as usize) as u16;
         textarea.move_cursor(CursorMove::Jump(row_u16, col_u16));
@@ -1588,9 +1537,10 @@ impl TuiState {
     }
 
     fn sync_from_textarea(&mut self, textarea: &TextArea<'_>) {
-        self.input = textarea.lines().join("\n");
+        self.phase.composer_mut().input = textarea.lines().join("\n");
         let (row, col) = textarea.cursor();
-        self.cursor_position = Self::row_col_to_byte_offset(&self.input, row, col);
+        self.phase.composer_mut().cursor_position =
+            Self::row_col_to_byte_offset(&self.phase.composer_mut().input, row, col);
     }
 
     fn apply_textarea_input(&mut self, key: KeyEvent) {
@@ -1600,9 +1550,10 @@ impl TuiState {
     }
 
     fn insert_newline_at_cursor(&mut self) {
-        let at = Self::clamp_char_boundary(&self.input, self.cursor_position);
-        self.input.insert(at, '\n');
-        self.cursor_position = at.saturating_add(1);
+        let composer = self.phase.composer_mut();
+        let at = Self::clamp_char_boundary(&composer.input, composer.cursor_position);
+        composer.input.insert(at, '\n');
+        composer.cursor_position = at.saturating_add(1);
     }
 
     fn insert_paste_at_cursor(&mut self, pasted: &str) {
@@ -1610,22 +1561,25 @@ impl TuiState {
         if normalized.is_empty() {
             return;
         }
-        let at = Self::clamp_char_boundary(&self.input, self.cursor_position);
-        self.input.insert_str(at, &normalized);
-        self.cursor_position = at.saturating_add(normalized.len());
-        self.selection_anchor = None;
+        let composer = self.phase.composer_mut();
+        let at = Self::clamp_char_boundary(&composer.input, composer.cursor_position);
+        composer.input.insert_str(at, &normalized);
+        composer.cursor_position = at.saturating_add(normalized.len());
+        composer.selection_anchor = None;
         self.refresh_completions();
     }
 
     fn move_cursor_word_left(&mut self) {
-        if self.cursor_position == 0 || self.input.is_empty() {
-            self.cursor_position = 0;
+        if self.phase.composer_mut().cursor_position == 0
+            || self.phase.composer_mut().input.is_empty()
+        {
+            self.phase.composer_mut().cursor_position = 0;
             return;
         }
-        let chars: Vec<(usize, char)> = self.input.char_indices().collect();
+        let chars: Vec<(usize, char)> = self.phase.composer_mut().input.char_indices().collect();
         let mut idx = chars
             .iter()
-            .position(|(byte, _)| *byte >= self.cursor_position)
+            .position(|(byte, _)| *byte >= self.phase.composer_mut().cursor_position)
             .unwrap_or(chars.len());
         if idx > 0 && chars[idx - 1].1.is_whitespace() {
             while idx > 0 && chars[idx - 1].1.is_whitespace() {
@@ -1635,18 +1589,18 @@ impl TuiState {
         while idx > 0 && !chars[idx - 1].1.is_whitespace() {
             idx -= 1;
         }
-        self.cursor_position = chars.get(idx).map(|(b, _)| *b).unwrap_or(0);
+        self.phase.composer_mut().cursor_position = chars.get(idx).map(|(b, _)| *b).unwrap_or(0);
     }
 
     fn move_cursor_word_right(&mut self) {
-        if self.input.is_empty() {
-            self.cursor_position = 0;
+        if self.phase.composer_mut().input.is_empty() {
+            self.phase.composer_mut().cursor_position = 0;
             return;
         }
-        let chars: Vec<(usize, char)> = self.input.char_indices().collect();
+        let chars: Vec<(usize, char)> = self.phase.composer_mut().input.char_indices().collect();
         let mut idx = chars
             .iter()
-            .position(|(byte, _)| *byte > self.cursor_position)
+            .position(|(byte, _)| *byte > self.phase.composer_mut().cursor_position)
             .unwrap_or(chars.len());
         while idx < chars.len() && chars[idx].1.is_whitespace() {
             idx += 1;
@@ -1654,39 +1608,40 @@ impl TuiState {
         while idx < chars.len() && !chars[idx].1.is_whitespace() {
             idx += 1;
         }
-        self.cursor_position = if idx >= chars.len() {
-            self.input.len()
+        self.phase.composer_mut().cursor_position = if idx >= chars.len() {
+            self.phase.composer_mut().input.len()
         } else {
             chars[idx].0
         };
     }
 
     fn move_completion_selection(&mut self, delta: isize) {
-        if self.completions.is_empty() {
-            self.completion_index = None;
+        if self.phase.composer_mut().completions.is_empty() {
+            self.phase.composer_mut().completion_index = None;
             return;
         }
-        let len = self.completions.len() as isize;
-        let current = self.completion_index.unwrap_or(0) as isize;
+        let len = self.phase.composer_mut().completions.len() as isize;
+        let current = self.phase.composer_mut().completion_index.unwrap_or(0) as isize;
         let mut next = current + delta;
         while next < 0 {
             next += len;
         }
         next %= len;
-        self.completion_index = Some(next as usize);
+        self.phase.composer_mut().completion_index = Some(next as usize);
     }
 
     fn accept_completion(&mut self) {
-        if let Some(idx) = self.completion_index {
-            if idx < self.completions.len() {
-                self.input = self.completions[idx].clone();
-                self.cursor_position = self.input.len();
+        if let Some(idx) = self.phase.composer_mut().completion_index {
+            if idx < self.phase.composer_mut().completions.len() {
+                self.phase.composer_mut().input =
+                    self.phase.composer_mut().completions[idx].clone();
+                self.phase.composer_mut().cursor_position = self.phase.composer_mut().input.len();
                 return;
             }
         }
-        if let Some(first) = self.completions.first() {
-            self.input = first.clone();
-            self.cursor_position = self.input.len();
+        if let Some(first) = self.phase.composer_mut().completions.first() {
+            self.phase.composer_mut().input = first.clone();
+            self.phase.composer_mut().cursor_position = self.phase.composer_mut().input.len();
         }
     }
 
@@ -1697,22 +1652,22 @@ impl TuiState {
     /// skip submit). Returns `false` when the input already matches the selected
     /// completion and Enter should proceed to submit.
     fn try_accept_completion_on_enter(&mut self) -> bool {
-        let completion_nav_active = self.input.starts_with('/')
-            && !self.completions.is_empty()
-            && !self.history_search_active;
+        let completion_nav_active = self.phase.composer_mut().input.starts_with('/')
+            && !self.phase.composer_mut().completions.is_empty()
+            && !self.phase.composer_mut().history_search_active;
         if !completion_nav_active {
             return false;
         }
-        let idx = self.completion_index.unwrap_or(0);
-        if idx >= self.completions.len() {
+        let idx = self.phase.composer_mut().completion_index.unwrap_or(0);
+        if idx >= self.phase.composer_mut().completions.len() {
             return false;
         }
-        let selected = self.completions[idx].clone();
-        if self.input.trim() == selected.trim() {
+        let selected = self.phase.composer_mut().completions[idx].clone();
+        if self.phase.composer_mut().input.trim() == selected.trim() {
             return false;
         }
-        self.input = selected;
-        self.cursor_position = self.input.len();
+        self.phase.composer_mut().input = selected;
+        self.phase.composer_mut().cursor_position = self.phase.composer_mut().input.len();
         self.refresh_completions();
         true
     }
@@ -1906,7 +1861,7 @@ pub fn render(frame: &mut Frame, app: &impl TuiReadHost, state: &mut TuiState, t
 
     // Layout: header, body, input, status bar
     let header_height = 1;
-    let composer_lines = state.input.matches('\n').count() as u16 + 1;
+    let composer_lines = state.phase.composer_mut().input.matches('\n').count() as u16 + 1;
     let input_height = (composer_lines + 2).clamp(3, 12);
     let status_height = 1;
 
@@ -1958,17 +1913,18 @@ pub fn render(frame: &mut Frame, app: &impl TuiReadHost, state: &mut TuiState, t
 
     // --- Render completions as popup above composer ---
     if should_render_completions_popup(state) {
+        let composer = state.phase.composer();
         render_completions_popup(
             frame,
-            &state.completions,
-            state.completion_index,
+            &composer.completions,
+            composer.completion_index,
             messages_area,
             input_area,
             &colors,
         );
     }
 
-    if let Some(modal) = state.modal.as_ref() {
+    if let Some(modal) = state.phase.modal().as_ref() {
         render_picker_modal(frame, modal, &colors);
     }
 
@@ -1997,13 +1953,13 @@ fn stream_event_completes_background_task(event: &Event) -> bool {
 }
 
 fn should_render_completions_popup(state: &TuiState) -> bool {
-    state.mode != InputMode::Normal
-        && !state.processing
-        && state.modal.is_none()
-        && state.input.starts_with('/')
-        && !state.input.contains('\n')
-        && !state.history_search_active
-        && !state.completions.is_empty()
+    state.phase.composer().mode != InputMode::Normal
+        && !state.phase.is_processing()
+        && !state.phase.modal_active()
+        && state.phase.composer().input.starts_with('/')
+        && !state.phase.composer().input.contains('\n')
+        && !state.phase.composer().history_search_active
+        && !state.phase.composer().completions.is_empty()
 }
 
 fn should_route_prompt_via_managed_agent(quorum_armed_once: bool, messages: &[Message]) -> bool {
@@ -2090,7 +2046,7 @@ fn render_live_details(
                     .bg(colors.background),
             ),
             Span::styled(
-                if state.processing {
+                if state.phase.is_processing() {
                     format!(
                         "processing ({:.1}s)",
                         state.processing_elapsed().as_secs_f64()
@@ -2200,7 +2156,8 @@ fn render_live_details(
         return;
     }
 
-    if state.processing {
+    if state.phase.is_processing() {
+        let processing = state.phase.processing().expect("processing");
         let elapsed = state.processing_elapsed().as_secs_f64();
         rows.push(Line::from(vec![
             Span::styled(
@@ -2228,25 +2185,25 @@ fn render_live_details(
             format!(
                 " [{}] chunks:{} chars:{} phase:{}% {}",
                 animated_processing_bar(state.spinner_frame, 18),
-                state.stream_chunk_count,
-                state.stream_char_count,
-                state.processing_phase_progress,
+                processing.stream_chunk_count,
+                processing.stream_char_count,
+                processing.processing_phase_progress,
                 truncate_chars(
-                    if state.processing_phase_label.is_empty() {
-                        state.processing_phase.as_str()
+                    if processing.processing_phase_label.is_empty() {
+                        processing.processing_phase.as_str()
                     } else {
-                        state.processing_phase_label.as_str()
+                        processing.processing_phase_label.as_str()
                     },
                     38
                 )
             ),
             Style::default().fg(colors.accent).bg(colors.background),
         )]));
-        if state.processing_degraded {
+        if processing.processing_degraded {
             rows.push(Line::from(vec![Span::styled(
                 format!(
                     " ⚠ fallback active: {}",
-                    truncate_chars(&state.degraded_notes.join(" | "), 120)
+                    truncate_chars(&processing.degraded_notes.join(" | "), 120)
                 ),
                 Style::default()
                     .fg(colors.status_bar_warn)
@@ -2255,7 +2212,9 @@ fn render_live_details(
         }
     }
 
-    if !state.active_tools.is_empty() {
+    if let Some(processing) = state.phase.processing()
+        && !processing.active_tools.is_empty()
+    {
         rows.push(Line::from(vec![
             Span::styled(
                 " tools: ",
@@ -2264,14 +2223,14 @@ fn render_live_details(
                     .bg(colors.background),
             ),
             Span::styled(
-                truncate_chars(&state.active_tools.join(", "), 120),
+                truncate_chars(&processing.active_tools.join(", "), 120),
                 Style::default()
                     .fg(colors.status_bar_strong)
                     .bg(colors.background)
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
-    } else if state.processing {
+    } else if state.phase.is_processing() {
         rows.push(Line::from(vec![Span::styled(
             " tools: awaiting tool events…",
             Style::default()
@@ -2280,7 +2239,9 @@ fn render_live_details(
         )]));
     }
 
-    if !state.live_thinking.is_empty() {
+    if let Some(processing) = state.phase.processing()
+        && !processing.live_thinking.is_empty()
+    {
         rows.push(Line::from(vec![
             Span::styled(
                 " thinking: ",
@@ -2289,7 +2250,7 @@ fn render_live_details(
                     .bg(colors.background),
             ),
             Span::styled(
-                truncate_chars(&state.live_thinking, 140),
+                truncate_chars(&processing.live_thinking, 140),
                 Style::default().fg(colors.accent).bg(colors.background),
             ),
         ]));
@@ -2613,7 +2574,12 @@ fn transcript_fingerprint(messages: &[hermes_core::Message], state: &TuiState, w
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     width.hash(&mut hasher);
-    state.stream_buffer.hash(&mut hasher);
+    let stream_buffer = state
+        .phase
+        .processing()
+        .map(|processing| processing.stream_buffer.as_str())
+        .unwrap_or("");
+    stream_buffer.hash(&mut hasher);
     state.show_timestamps.hash(&mut hasher);
     state.view_density.hash(&mut hasher);
     let mut expanded = state.expanded_tool_cards.iter().collect::<Vec<_>>();
@@ -3568,7 +3534,11 @@ fn build_transcript_lines(
     }
 
     // Streaming buffer (partial assistant response)
-    if !state.stream_buffer.is_empty() {
+    if state
+        .phase
+        .processing()
+        .is_some_and(|processing| !processing.stream_buffer.is_empty())
+    {
         if !lines.is_empty() {
             lines.push(Line::from(String::new()));
         }
@@ -3582,9 +3552,10 @@ fn build_transcript_lines(
                 styles.assistant_response.add_modifier(Modifier::BOLD),
             ),
         ]));
+        let processing = state.phase.processing_mut().expect("processing");
         let stream_lines = render_streaming_assistant_markdown_lines(
-            &mut state.stream_md_cache,
-            &state.stream_buffer,
+            &mut processing.stream_md_cache,
+            &processing.stream_buffer,
             styles,
             colors,
             content_width,
@@ -3689,7 +3660,10 @@ fn render_messages(
     {
         let cache = &state.transcript_cache;
         let can_incremental_append = !cache.had_streaming
-            && state.stream_buffer.is_empty()
+            && state
+                .phase
+                .processing()
+                .is_none_or(|processing| processing.stream_buffer.is_empty())
             && cache.width == wrap_width
             && cache.total_messages > 0
             && transcript.len() > cache.total_messages
@@ -3777,7 +3751,10 @@ fn render_messages(
                 message_fingerprints,
                 show_timestamps: state.show_timestamps,
                 view_density: state.view_density,
-                had_streaming: !state.stream_buffer.is_empty(),
+                had_streaming: state
+                    .phase
+                    .processing()
+                    .is_some_and(|processing| !processing.stream_buffer.is_empty()),
                 lines: new_lines,
             };
         }
@@ -4232,19 +4209,20 @@ fn render_input(
     area: Rect,
     colors: &crate::theme::RatatuiColors,
 ) {
-    let paint_snapshot = state.input_paint_snapshot();
-    let input_changed = state.last_input_paint.as_ref() != Some(&paint_snapshot);
-    let mode_label = match state.mode {
+    let paint_snapshot = state.phase.composer_mut().input_paint_snapshot();
+    let input_changed =
+        state.phase.composer_mut().last_input_paint.as_ref() != Some(&paint_snapshot);
+    let mode_label = match state.phase.composer_mut().mode {
         InputMode::Normal => "NORMAL",
         InputMode::Insert => "INSERT",
         InputMode::Command => "COMMAND",
     };
-    let mode_color = match state.mode {
+    let mode_color = match state.phase.composer_mut().mode {
         InputMode::Normal => colors.status_bar_dim,
         InputMode::Insert => colors.status_bar_good,
         InputMode::Command => colors.accent,
     };
-    let line_count = state.input.matches('\n').count() + 1;
+    let line_count = state.phase.composer_mut().input.matches('\n').count() + 1;
 
     let mut block = Block::default()
         .borders(Borders::ALL)
@@ -4261,11 +4239,11 @@ fn render_input(
         ]))
         .style(Style::default().bg(colors.background))
         .border_style(Style::default().fg(colors.status_bar_strong));
-    if state.history_search_active {
+    if state.phase.composer_mut().history_search_active {
         block = block.title_bottom(Line::from(Span::styled(
             format!(
                 " reverse-i-search: `{}` (Ctrl+R to exit) ",
-                state.history_search_query
+                state.phase.composer_mut().history_search_query
             ),
             Style::default()
                 .fg(colors.status_bar_warn)
@@ -4284,7 +4262,10 @@ fn render_input(
             .add_modifier(Modifier::BOLD),
     );
     textarea.set_cursor_line_style(Style::default().bg(colors.background));
-    if state.input.is_empty() && state.mode == InputMode::Insert && !state.history_search_active {
+    if state.phase.composer_mut().input.is_empty()
+        && state.phase.composer_mut().mode == InputMode::Insert
+        && !state.phase.composer_mut().history_search_active
+    {
         textarea.set_placeholder_text(
             "Type a message (Enter sends, Shift+Enter/Ctrl+J inserts newline)",
         );
@@ -4302,7 +4283,7 @@ fn render_input(
         frame.render_widget(Clear, area);
     }
     frame.render_widget(&textarea, area);
-    state.last_input_paint = Some(paint_snapshot);
+    state.phase.composer_mut().last_input_paint = Some(paint_snapshot);
 }
 
 /// Render the status bar at the bottom of the screen.
@@ -4331,7 +4312,7 @@ fn render_status(
     area: Rect,
     colors: &crate::theme::RatatuiColors,
 ) {
-    let processing_indicator = if state.processing {
+    let processing_indicator = if state.phase.is_processing() {
         format!("⟳{}", state.spinner_char())
     } else {
         "✓".to_string()
@@ -4352,7 +4333,7 @@ fn render_status(
         .fg(colors.status_bar_text)
         .bg(colors.status_bar_bg);
 
-    let mut status_text = if state.processing {
+    let mut status_text = if state.phase.is_processing() {
         let elapsed = state.processing_elapsed().as_secs_f64();
         format!(
             "{} PROCESSING {:.1}s [{}] {} | {} | {} msgs | {}",
@@ -4360,14 +4341,18 @@ fn render_status(
             elapsed,
             animated_processing_bar(state.spinner_frame, 12),
             state.processing_stage_label(),
-            state.mode,
+            state.phase.composer().mode,
             msg_count,
             session
         )
     } else {
         format!(
             "{} {} | {} | {} msgs | {}",
-            processing_indicator, state.mode, model, msg_count, session
+            processing_indicator,
+            state.phase.composer().mode,
+            model,
+            msg_count,
+            session
         )
     };
     status_text.push_str(match state.view_density {
@@ -4412,9 +4397,11 @@ fn render_status(
         status_text.push_str(&state.status_message);
         status_text.push_str(&scroll_hint);
     }
-    if let Some(frame_token) =
-        pet_frame_token(app.pet_settings(), state.pet_frame, state.processing)
-    {
+    if let Some(frame_token) = pet_frame_token(
+        app.pet_settings(),
+        state.pet_frame,
+        state.phase.is_processing(),
+    ) {
         if matches!(app.pet_settings().dock, crate::app::PetDock::Left) {
             status_text = format!("{frame_token} | {status_text}");
         } else {
@@ -5039,7 +5026,7 @@ async fn process_modal_disconnect(
     state: &mut TuiState,
     app: &mut (impl SlashCommandHost + ModelRuntime),
 ) -> Result<(), AgentError> {
-    let Some(modal) = state.modal.clone() else {
+    let Some(modal) = state.phase.modal().clone() else {
         return Ok(());
     };
     let Some(item) = modal.selected_item().cloned() else {
@@ -5079,14 +5066,14 @@ async fn process_modal_confirm(
     state: &mut TuiState,
     app: &mut (impl SlashCommandHost + ModelRuntime + UiChromeRuntime),
 ) -> Result<(), AgentError> {
-    let Some(modal) = state.modal.clone() else {
+    let Some(modal) = state.phase.modal().clone() else {
         return Ok(());
     };
     let Some(item) = modal.selected_item().cloned() else {
         state.status_message = "Nothing selected".to_string();
         return Ok(());
     };
-    match modal.kind {
+    match &modal.kind {
         PickerKind::ModelProvider => {
             open_provider_model_modal(state, app, &item.value).await;
             state.status_message = format!("Provider selected: {}", item.value);
@@ -5116,8 +5103,8 @@ async fn process_modal_confirm(
         }
         PickerKind::InteractiveQuestion { prompt } => {
             let chosen = item.value.trim().to_string();
-            state.input = format!("{prompt}\nAnswer: {chosen}");
-            state.cursor_position = state.input.len();
+            state.phase.composer_mut().input = format!("{prompt}\nAnswer: {chosen}");
+            state.phase.composer_mut().cursor_position = state.phase.composer_mut().input.len();
             state.close_modal();
             state.status_message = "Interactive answer inserted. Press Enter to send.".to_string();
             state.refresh_completions();
@@ -5160,12 +5147,39 @@ fn handle_agent_run_complete(
             app.push_ui_assistant(format!("Error: {}", err));
         }
     }
-    state.stream_buffer.clear();
-    state.stream_md_cache.clear();
-    state.stream_muted = false;
-    state.stream_needs_break = false;
-    state.active_tools.clear();
-    state.awaiting_run_complete = false;
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .stream_buffer
+        .clear();
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .stream_md_cache
+        .clear();
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .stream_muted = false;
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .stream_needs_break = false;
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .active_tools
+        .clear();
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .awaiting_run_complete = false;
 }
 
 fn handle_managed_app_run_complete(
@@ -5188,12 +5202,39 @@ fn handle_managed_app_run_complete(
             app.push_ui_assistant(format!("Error: {}", err));
         }
     }
-    state.stream_buffer.clear();
-    state.stream_md_cache.clear();
-    state.stream_muted = false;
-    state.stream_needs_break = false;
-    state.active_tools.clear();
-    state.awaiting_run_complete = false;
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .stream_buffer
+        .clear();
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .stream_md_cache
+        .clear();
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .stream_muted = false;
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .stream_needs_break = false;
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .active_tools
+        .clear();
+    state
+        .phase
+        .processing_mut()
+        .expect("processing")
+        .awaiting_run_complete = false;
 }
 
 fn extract_file_like_hints(text: &str, limit: usize) -> Vec<String> {
@@ -5258,41 +5299,71 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
     match event {
         Event::StreamDelta(delta) => {
             if !delta.is_empty() {
-                state.stream_chunk_count = state.stream_chunk_count.saturating_add(1);
-                state.stream_char_count = state
+                let processing = state.phase.processing_mut().expect("processing");
+                processing.stream_chunk_count = processing.stream_chunk_count.saturating_add(1);
+                processing.stream_char_count = processing
                     .stream_char_count
                     .saturating_add(delta.chars().count());
-                if !state.saw_first_token {
-                    state.saw_first_token = true;
-                    let first_token_ms = state
-                        .processing_started_at
+                if !processing.saw_first_token {
+                    processing.saw_first_token = true;
+                    let first_token_ms = processing
+                        .started_at
                         .map(|t| t.elapsed().as_millis())
                         .unwrap_or_default();
                     state.push_activity(format!("↧ first token in {}ms", first_token_ms));
                 }
             }
-            state.stream_buffer.push_str(&delta);
+            state
+                .phase
+                .processing_mut()
+                .expect("processing")
+                .stream_buffer
+                .push_str(&delta);
             true
         }
         Event::StreamChunk(chunk) => {
             if stream_chunk_has_progress(&chunk) {
-                state.stream_chunk_count = state.stream_chunk_count.saturating_add(1);
+                state
+                    .phase
+                    .processing_mut()
+                    .expect("processing")
+                    .stream_chunk_count = state
+                    .phase
+                    .processing_mut()
+                    .expect("processing")
+                    .stream_chunk_count
+                    .saturating_add(1);
             }
             if let Some(delta) = chunk.delta {
                 if let Some(content) = delta.content.as_ref().filter(|text| !text.is_empty()) {
-                    state.stream_char_count = state
+                    state
+                        .phase
+                        .processing_mut()
+                        .expect("processing")
+                        .stream_char_count = state
+                        .phase
+                        .processing_mut()
+                        .expect("processing")
                         .stream_char_count
                         .saturating_add(content.chars().count());
                 }
                 if let Some(extra) = delta.extra.as_ref() {
                     if let Some(control) = extra.get("control").and_then(|v| v.as_str()) {
                         if control == "mute_post_response" {
-                            state.stream_muted = extra
+                            state
+                                .phase
+                                .processing_mut()
+                                .expect("processing")
+                                .stream_muted = extra
                                 .get("enabled")
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false);
                         } else if control == "stream_break" {
-                            state.stream_needs_break = true;
+                            state
+                                .phase
+                                .processing_mut()
+                                .expect("processing")
+                                .stream_needs_break = true;
                         }
                     }
                     if let Some(ui_event) = extra.get("ui_event").and_then(|v| v.as_str()) {
@@ -5305,9 +5376,20 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
                                     .trim()
                                     .to_string();
                                 if !tool.is_empty()
-                                    && !state.active_tools.iter().any(|t| t == &tool)
+                                    && !state
+                                        .phase
+                                        .processing_mut()
+                                        .expect("processing")
+                                        .active_tools
+                                        .iter()
+                                        .any(|t| t == &tool)
                                 {
-                                    state.active_tools.push(tool.clone());
+                                    state
+                                        .phase
+                                        .processing_mut()
+                                        .expect("processing")
+                                        .active_tools
+                                        .push(tool.clone());
                                 }
                                 let args_preview = extra
                                     .get("args_preview")
@@ -5319,10 +5401,12 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
                                 } else {
                                     state.push_activity(format!("▶ {} {}", tool, args_preview));
                                 }
-                                state.push_activity(format!(
-                                    "Δtools active={}",
-                                    state.active_tools.len()
-                                ));
+                                let active_count = state
+                                    .phase
+                                    .processing()
+                                    .map(|processing| processing.active_tools.len())
+                                    .unwrap_or(0);
+                                state.push_activity(format!("Δtools active={active_count}"));
                             }
                             "tool_complete" => {
                                 let tool = extra
@@ -5331,10 +5415,20 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
                                     .unwrap_or("tool")
                                     .trim()
                                     .to_string();
-                                if let Some(idx) =
-                                    state.active_tools.iter().position(|t| t == &tool)
+                                if let Some(idx) = state
+                                    .phase
+                                    .processing_mut()
+                                    .expect("processing")
+                                    .active_tools
+                                    .iter()
+                                    .position(|t| t == &tool)
                                 {
-                                    state.active_tools.remove(idx);
+                                    state
+                                        .phase
+                                        .processing_mut()
+                                        .expect("processing")
+                                        .active_tools
+                                        .remove(idx);
                                 }
                                 let result_preview = extra
                                     .get("result_preview")
@@ -5404,11 +5498,38 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
                                         || lower.contains("retrying")
                                         || lower.contains("fallback")
                                     {
-                                        state.processing_degraded = true;
-                                        state.degraded_notes.push(truncate_chars(message, 120));
-                                        if state.degraded_notes.len() > 4 {
-                                            let drop_count = state.degraded_notes.len() - 4;
-                                            state.degraded_notes.drain(0..drop_count);
+                                        state
+                                            .phase
+                                            .processing_mut()
+                                            .expect("processing")
+                                            .processing_degraded = true;
+                                        state
+                                            .phase
+                                            .processing_mut()
+                                            .expect("processing")
+                                            .degraded_notes
+                                            .push(truncate_chars(message, 120));
+                                        if state
+                                            .phase
+                                            .processing_mut()
+                                            .expect("processing")
+                                            .degraded_notes
+                                            .len()
+                                            > 4
+                                        {
+                                            let drop_count = state
+                                                .phase
+                                                .processing_mut()
+                                                .expect("processing")
+                                                .degraded_notes
+                                                .len()
+                                                - 4;
+                                            state
+                                                .phase
+                                                .processing_mut()
+                                                .expect("processing")
+                                                .degraded_notes
+                                                .drain(0..drop_count);
                                         }
                                     }
                                 }
@@ -5426,19 +5547,39 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
                     }
                 }
                 if let Some(content) = delta.content {
-                    if !state.stream_muted {
-                        if state.stream_needs_break {
-                            state.stream_buffer.push_str("\n\n");
-                            state.stream_needs_break = false;
+                    if !state
+                        .phase
+                        .processing_mut()
+                        .expect("processing")
+                        .stream_muted
+                    {
+                        if state
+                            .phase
+                            .processing_mut()
+                            .expect("processing")
+                            .stream_needs_break
+                        {
+                            state
+                                .phase
+                                .processing_mut()
+                                .expect("processing")
+                                .stream_buffer
+                                .push_str("\n\n");
+                            state
+                                .phase
+                                .processing_mut()
+                                .expect("processing")
+                                .stream_needs_break = false;
                         }
-                        state.stream_buffer.push_str(&content);
-                        state.stream_char_count = state
+                        let processing = state.phase.processing_mut().expect("processing");
+                        processing.stream_buffer.push_str(&content);
+                        processing.stream_char_count = processing
                             .stream_char_count
                             .saturating_add(content.chars().count());
-                        if !state.saw_first_token {
-                            state.saw_first_token = true;
-                            let first_token_ms = state
-                                .processing_started_at
+                        if !processing.saw_first_token {
+                            processing.saw_first_token = true;
+                            let first_token_ms = processing
+                                .started_at
                                 .map(|t| t.elapsed().as_millis())
                                 .unwrap_or_default();
                             state.push_activity(format!("↧ first token in {}ms", first_token_ms));
@@ -5473,16 +5614,44 @@ fn process_stream_lane_event(app: &mut App, state: &mut TuiState, event: Event) 
             true
         }
         Event::AgentDone => {
-            if state.awaiting_run_complete {
+            if state
+                .phase
+                .processing_mut()
+                .expect("processing")
+                .awaiting_run_complete
+            {
                 state.push_activity("finalizing transcript writeback…".to_string());
                 state.status_message = "Finalizing response…".to_string();
             } else {
                 state.finish_processing_cycle("✔ completed in");
-                state.stream_buffer.clear();
-                state.stream_md_cache.clear();
-                state.stream_muted = false;
-                state.stream_needs_break = false;
-                state.active_tools.clear();
+                state
+                    .phase
+                    .processing_mut()
+                    .expect("processing")
+                    .stream_buffer
+                    .clear();
+                state
+                    .phase
+                    .processing_mut()
+                    .expect("processing")
+                    .stream_md_cache
+                    .clear();
+                state
+                    .phase
+                    .processing_mut()
+                    .expect("processing")
+                    .stream_muted = false;
+                state
+                    .phase
+                    .processing_mut()
+                    .expect("processing")
+                    .stream_needs_break = false;
+                state
+                    .phase
+                    .processing_mut()
+                    .expect("processing")
+                    .active_tools
+                    .clear();
                 state.status_message.clear();
             }
             true
@@ -5573,7 +5742,7 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                         // Ctrl+C always exits back to parent terminal. If work is in flight,
                         // emit interrupt first so in-progress tools can stop gracefully.
                         if is_ctrl_c(&key) {
-                            if state.processing {
+                            if state.phase.is_processing() {
                                 app.interrupt_controller_mut().interrupt(None);
                                 abort_and_join_task(&mut active_agent_task).await;
                                 tui.event_sender().send(Event::Interrupt).ok();
@@ -5608,25 +5777,25 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                             break;
                         }
 
-                        let is_submit = is_submit_shortcut(&key, &state.input);
+                        let is_submit = is_submit_shortcut(&key, &state.phase.composer_mut().input);
 
                         if is_submit {
                             if state.try_accept_completion_on_enter() {
                                 needs_redraw = true;
                                 continue;
                             }
-                            if state.processing {
+                            if state.phase.is_processing() {
                                 state.status_message =
                                     "Still processing previous request… wait for completion."
                                         .to_string();
                                 needs_redraw = true;
                                 continue;
                             }
-                            let input = state.input.clone();
-                            state.input.clear();
-                            state.cursor_position = 0;
-                            state.completions.clear();
-                            state.completion_index = None;
+                            let input = state.phase.composer_mut().input.clone();
+                            state.phase.composer_mut().input.clear();
+                            state.phase.composer_mut().cursor_position = 0;
+                            state.phase.composer_mut().completions.clear();
+                            state.phase.composer_mut().completion_index = None;
                             state.jump_to_latest();
 
                             if !input.is_empty() {
@@ -5712,8 +5881,8 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                                             app.push_ui_assistant("Goodbye!");
                                             app.set_running(false);
                                             state.status_message.clear();
-                                            state.completions.clear();
-                                            state.completion_index = None;
+                                            state.phase.composer_mut().completions.clear();
+                                            state.phase.composer_mut().completion_index = None;
                                             needs_redraw = true;
                                             continue;
                                         }
@@ -5730,9 +5899,9 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                                                 if let Some(prefill) =
                                                     app.take_pending_input_prefill()
                                                 {
-                                                    state.input = prefill;
-                                                    state.cursor_position =
-                                                        state.input.chars().count();
+                                                    state.phase.composer_mut().input = prefill;
+                                                    state.phase.composer_mut().cursor_position =
+                                                        state.phase.composer_mut().input.chars().count();
                                                     state.status_message =
                                                         "Prompt restored for editing. Press Enter to send."
                                                             .to_string();
@@ -5944,11 +6113,11 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                     Some(Event::Interrupt) => {
                         abort_and_join_task(&mut active_agent_task).await;
                         state.finish_processing_cycle("⏹ interrupted after");
-                        state.stream_buffer.clear();
-                        state.stream_md_cache.clear();
-                        state.stream_muted = false;
-                        state.stream_needs_break = false;
-                        state.active_tools.clear();
+                        state.phase.processing_mut().expect("processing").stream_buffer.clear();
+                        state.phase.processing_mut().expect("processing").stream_md_cache.clear();
+                        state.phase.processing_mut().expect("processing").stream_muted = false;
+                        state.phase.processing_mut().expect("processing").stream_needs_break = false;
+                        state.phase.processing_mut().expect("processing").active_tools.clear();
                         app.set_running(false);
                         break;
                     }
@@ -5956,11 +6125,11 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                         app.interrupt_controller_mut().interrupt(None);
                         abort_and_join_task(&mut active_agent_task).await;
                         state.finish_processing_cycle("⏹ interrupted after");
-                        state.stream_buffer.clear();
-                        state.stream_md_cache.clear();
-                        state.stream_muted = false;
-                        state.stream_needs_break = false;
-                        state.active_tools.clear();
+                        state.phase.processing_mut().expect("processing").stream_buffer.clear();
+                        state.phase.processing_mut().expect("processing").stream_md_cache.clear();
+                        state.phase.processing_mut().expect("processing").stream_muted = false;
+                        state.phase.processing_mut().expect("processing").stream_needs_break = false;
+                        state.phase.processing_mut().expect("processing").active_tools.clear();
                         app.set_running(false);
                         break;
                     }
@@ -5979,7 +6148,7 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                         stream_event_completes_background_task(&first);
                     let mut redraw = process_stream_lane_event(&mut app, &mut state, first);
                     let (drain_cap, drain_budget) =
-                        stream_lane_budget(state.processing, state.stream_chunk_count);
+                        stream_lane_budget(state.phase.is_processing(), state.phase.processing_mut().expect("processing").stream_chunk_count);
                     let drain_started = Instant::now();
                     for _ in 0..drain_cap {
                         match tui.stream_events.try_recv() {
@@ -5999,7 +6168,7 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                     }
                     if redraw {
                         if should_redraw_stream_while_composing(
-                            !state.input.is_empty(),
+                            !state.phase.composer_mut().input.is_empty(),
                             &mut last_compose_stream_redraw,
                         ) {
                             needs_redraw = true;
@@ -6013,12 +6182,12 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                     state.background_jobs_running = app.running_background_job_count();
                     last_jobs_refresh = Instant::now();
                 }
-                if state.processing {
+                if state.phase.is_processing() {
                     state.tick_spinner();
                     state.maybe_emit_progress_pulse();
                     // While the user is drafting in the composer, skip spinner-only
                     // redraws so stream/spinner ticks don't flash the input box.
-                    if state.input.is_empty() {
+                    if state.phase.composer_mut().input.is_empty() {
                         needs_redraw = true;
                     }
                 }
@@ -6102,13 +6271,13 @@ mod tests {
     #[test]
     fn test_tui_state_default() {
         let state = TuiState::default();
-        assert_eq!(state.mode, InputMode::Insert);
-        assert!(state.input.is_empty());
-        assert_eq!(state.cursor_position, 0);
-        assert!(state.completions.is_empty());
-        assert!(!state.processing);
-        assert!(state.selection_anchor.is_none());
-        assert!(!state.history_search_active);
+        assert_eq!(state.phase.composer().mode, InputMode::Insert);
+        assert!(state.phase.composer().input.is_empty());
+        assert_eq!(state.phase.composer().cursor_position, 0);
+        assert!(state.phase.composer().completions.is_empty());
+        assert!(!state.phase.is_processing());
+        assert!(state.phase.composer().selection_anchor.is_none());
+        assert!(!state.phase.composer().history_search_active);
     }
 
     #[test]
@@ -6135,56 +6304,68 @@ mod tests {
     #[test]
     fn test_tui_state_completions_update() {
         let mut state = TuiState::default();
-        state.input = "/mod".to_string();
+        state.phase.composer_mut().input = "/mod".to_string();
         state.update_completions();
-        assert!(state.completions.contains(&"/model".to_string()));
-        assert_eq!(state.completion_index, Some(0));
+        assert!(
+            state
+                .phase
+                .composer_mut()
+                .completions
+                .contains(&"/model".to_string())
+        );
+        assert_eq!(state.phase.composer_mut().completion_index, Some(0));
     }
 
     #[test]
     fn test_enter_accepts_slash_completion_instead_of_submit() {
         let mut state = TuiState::default();
-        state.input = "/mod".to_string();
+        state.phase.composer_mut().input = "/mod".to_string();
         state.update_completions();
         assert!(state.try_accept_completion_on_enter());
-        assert_eq!(state.input, "/model");
-        assert!(state.completions.contains(&"/model".to_string()));
+        assert_eq!(state.phase.composer_mut().input, "/model");
+        assert!(
+            state
+                .phase
+                .composer_mut()
+                .completions
+                .contains(&"/model".to_string())
+        );
     }
 
     #[test]
     fn test_enter_submits_when_slash_completion_already_matches_input() {
         let mut state = TuiState::default();
-        state.input = "/model".to_string();
+        state.phase.composer_mut().input = "/model".to_string();
         state.update_completions();
         assert!(!state.try_accept_completion_on_enter());
-        assert_eq!(state.input, "/model");
+        assert_eq!(state.phase.composer_mut().input, "/model");
     }
 
     #[test]
     fn test_completion_popup_hidden_when_slash_deleted() {
         let mut state = TuiState::default();
-        state.input = "/model".to_string();
+        state.phase.composer_mut().input = "/model".to_string();
         state.update_completions();
         assert!(should_render_completions_popup(&state));
 
-        state.input.clear();
+        state.phase.composer_mut().input.clear();
         state.refresh_completions();
         assert!(!should_render_completions_popup(&state));
-        assert!(state.completions.is_empty());
+        assert!(state.phase.composer_mut().completions.is_empty());
     }
 
     #[test]
     fn test_completion_popup_hidden_when_modal_or_processing_active() {
         let mut state = TuiState::default();
-        state.input = "/model".to_string();
+        state.phase.composer_mut().input = "/model".to_string();
         state.update_completions();
         assert!(should_render_completions_popup(&state));
 
-        state.processing = true;
+        state.begin_processing_cycle("nous:test-model");
         assert!(!should_render_completions_popup(&state));
-        state.processing = false;
+        state.finish_processing_cycle("done");
 
-        state.modal = Some(PickerModal::new(
+        state.open_modal(PickerModal::new(
             PickerKind::Personality,
             "personality",
             vec![PickerItem {
@@ -6229,8 +6410,8 @@ mod tests {
     fn test_open_skin_modal_populates_builtin_skin_items() {
         let mut state = TuiState::default();
         open_skin_modal(&mut state);
-        let modal = state.modal.as_ref().expect("skin modal");
-        assert!(matches!(modal.kind, PickerKind::Skin));
+        let modal = state.phase.modal().expect("skin modal");
+        assert!(matches!(&modal.kind, PickerKind::Skin));
         assert!(modal.items.iter().any(|item| item.value == "ultra-neon"));
         assert!(modal.items.iter().any(|item| item.value == "neon-glow"));
         assert!(
@@ -6283,20 +6464,58 @@ mod tests {
     #[test]
     fn test_append_live_thinking_is_capped() {
         let mut state = TuiState::default();
+        state.begin_processing_cycle("nous:test-model");
         let long = "x".repeat(400);
         state.append_live_thinking(&long);
-        assert!(state.live_thinking.chars().count() <= 260);
-        assert!(state.live_thinking.starts_with('…'));
+        assert!(
+            state
+                .phase
+                .processing_mut()
+                .expect("processing")
+                .live_thinking
+                .chars()
+                .count()
+                <= 260
+        );
+        assert!(
+            state
+                .phase
+                .processing_mut()
+                .expect("processing")
+                .live_thinking
+                .starts_with('…')
+        );
     }
 
     #[test]
     fn test_processing_cycle_tracks_and_resets_stats() {
         let mut state = TuiState::default();
         state.begin_processing_cycle("nous:test-model");
-        assert!(state.processing);
-        assert_eq!(state.stream_chunk_count, 0);
-        assert_eq!(state.stream_char_count, 0);
-        assert!(state.processing_started_at.is_some());
+        assert!(state.phase.is_processing());
+        assert_eq!(
+            state
+                .phase
+                .processing_mut()
+                .expect("processing")
+                .stream_chunk_count,
+            0
+        );
+        assert_eq!(
+            state
+                .phase
+                .processing_mut()
+                .expect("processing")
+                .stream_char_count,
+            0
+        );
+        assert!(
+            state
+                .phase
+                .processing()
+                .expect("processing")
+                .started_at
+                .is_some()
+        );
         assert!(
             state
                 .recent_activity
@@ -6304,14 +6523,19 @@ mod tests {
                 .is_some_and(|line| line.contains("dispatching request"))
         );
 
-        state.stream_chunk_count = 7;
-        state.stream_char_count = 1234;
+        state
+            .phase
+            .processing_mut()
+            .expect("processing")
+            .stream_chunk_count = 7;
+        state
+            .phase
+            .processing_mut()
+            .expect("processing")
+            .stream_char_count = 1234;
         state.finish_processing_cycle("✔ completed in");
 
-        assert!(!state.processing);
-        assert_eq!(state.stream_chunk_count, 0);
-        assert_eq!(state.stream_char_count, 0);
-        assert!(state.processing_started_at.is_none());
+        assert!(!state.phase.is_processing());
         assert!(
             state
                 .recent_activity
@@ -6324,8 +6548,13 @@ mod tests {
     fn test_progress_pulse_emits_activity_row() {
         let mut state = TuiState::default();
         state.begin_processing_cycle("nous:test-model");
-        state.processing_started_at = Some(Instant::now() - Duration::from_secs(2));
-        state.last_progress_pulse_at = None;
+        state.phase.processing_mut().expect("processing").started_at =
+            Some(Instant::now() - Duration::from_secs(2));
+        state
+            .phase
+            .processing_mut()
+            .expect("processing")
+            .last_progress_pulse_at = None;
         let before = state.recent_activity.len();
         state.maybe_emit_progress_pulse();
         assert!(state.recent_activity.len() > before);
@@ -6343,12 +6572,31 @@ mod tests {
         assert_eq!(state.processing_stage_label(), "idle");
         state.begin_processing_cycle("nous:test-model");
         assert_eq!(state.processing_stage_label(), "phase-driven");
-        state.processing_phase_label.clear();
-        state.active_tools.push("terminal".to_string());
+        state
+            .phase
+            .processing_mut()
+            .expect("processing")
+            .processing_phase_label
+            .clear();
+        state
+            .phase
+            .processing_mut()
+            .expect("processing")
+            .active_tools
+            .push("terminal".to_string());
         assert_eq!(state.processing_stage_label(), "running tools (pre-token)");
-        state.saw_first_token = true;
+        state
+            .phase
+            .processing_mut()
+            .expect("processing")
+            .saw_first_token = true;
         assert_eq!(state.processing_stage_label(), "running tools + streaming");
-        state.active_tools.clear();
+        state
+            .phase
+            .processing_mut()
+            .expect("processing")
+            .active_tools
+            .clear();
         assert_eq!(state.processing_stage_label(), "streaming response");
     }
 
@@ -6357,9 +6605,30 @@ mod tests {
         let mut state = TuiState::default();
         state.begin_processing_cycle("nous:test-model");
         state.update_processing_phase("retrieval", "collecting evidence", Some(42));
-        assert_eq!(state.processing_phase, "retrieval");
-        assert_eq!(state.processing_phase_label, "collecting evidence");
-        assert_eq!(state.processing_phase_progress, 42);
+        assert_eq!(
+            state
+                .phase
+                .processing()
+                .expect("processing")
+                .processing_phase,
+            "retrieval"
+        );
+        assert_eq!(
+            state
+                .phase
+                .processing()
+                .expect("processing")
+                .processing_phase_label,
+            "collecting evidence"
+        );
+        assert_eq!(
+            state
+                .phase
+                .processing()
+                .expect("processing")
+                .processing_phase_progress,
+            42
+        );
         assert!(
             state
                 .recent_activity
@@ -6453,16 +6722,25 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut state = TuiState::default();
-        state.input = "before  after".to_string();
-        state.cursor_position = "before ".len();
+        state.phase.composer_mut().input = "before  after".to_string();
+        state.phase.composer_mut().cursor_position = "before ".len();
 
         state.insert_paste_at_cursor("line1\r\nline2\rline3");
 
-        assert_eq!(state.input, "before line1\nline2\nline3 after");
-        assert_eq!(state.cursor_position, "before line1\nline2\nline3".len());
+        assert_eq!(
+            state.phase.composer_mut().input,
+            "before line1\nline2\nline3 after"
+        );
+        assert_eq!(
+            state.phase.composer_mut().cursor_position,
+            "before line1\nline2\nline3".len()
+        );
 
         let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
-        assert!(!is_submit_shortcut(&shift_enter, &state.input));
+        assert!(!is_submit_shortcut(
+            &shift_enter,
+            &state.phase.composer_mut().input
+        ));
     }
 
     #[test]
@@ -6499,21 +6777,21 @@ mod tests {
     #[test]
     fn test_insert_newline_at_cursor_updates_input_and_cursor() {
         let mut state = TuiState::default();
-        state.input = "hello".to_string();
-        state.cursor_position = 5;
+        state.phase.composer_mut().input = "hello".to_string();
+        state.phase.composer_mut().cursor_position = 5;
         state.insert_newline_at_cursor();
-        assert_eq!(state.input, "hello\n");
-        assert_eq!(state.cursor_position, 6);
+        assert_eq!(state.phase.composer_mut().input, "hello\n");
+        assert_eq!(state.phase.composer_mut().cursor_position, 6);
     }
 
     #[test]
     fn test_insert_newline_at_cursor_clamps_non_char_boundary() {
         let mut state = TuiState::default();
-        state.input = "éx".to_string();
-        state.cursor_position = 1; // interior byte of 'é'
+        state.phase.composer_mut().input = "éx".to_string();
+        state.phase.composer_mut().cursor_position = 1; // interior byte of 'é'
         state.insert_newline_at_cursor();
-        assert_eq!(state.input, "\néx");
-        assert_eq!(state.cursor_position, 1);
+        assert_eq!(state.phase.composer_mut().input, "\néx");
+        assert_eq!(state.phase.composer_mut().cursor_position, 1);
     }
 
     #[test]
@@ -6774,9 +7052,9 @@ mod tests {
     #[test]
     fn test_input_paint_snapshot_detects_composer_changes() {
         let mut state = TuiState::default();
-        let first = state.input_paint_snapshot();
-        state.input.push('a');
-        let second = state.input_paint_snapshot();
+        let first = state.phase.composer_mut().input_paint_snapshot();
+        state.phase.composer_mut().input.push('a');
+        let second = state.phase.composer_mut().input_paint_snapshot();
         assert_ne!(first, second);
     }
 
@@ -6822,10 +7100,6 @@ mod tests {
         let fp_a = transcript_fingerprint(&messages, &state_a, 80);
         let fp_b = transcript_fingerprint(&messages, &state_b, 80);
         assert_ne!(fp_a, fp_b);
-
-        // keep borrow-checker happy and ensure states are still usable
-        state_a.stream_buffer.clear();
-        state_b.stream_buffer.clear();
     }
 
     #[test]

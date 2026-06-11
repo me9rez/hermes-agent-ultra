@@ -90,8 +90,8 @@ fn config_defaults_include_sogou_and_bing_cn() {
         cfg.cn_engines,
         vec![CnEngineKind::Sogou, CnEngineKind::BingCn]
     );
-    assert_eq!(cfg.cn_timeout_secs, 8);
-    assert_eq!(cfg.global_timeout_secs, 12);
+    assert_eq!(cfg.cn_timeout_secs, 12);
+    assert_eq!(cfg.global_timeout_secs, 20);
 }
 
 #[test]

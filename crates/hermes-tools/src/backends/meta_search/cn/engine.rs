@@ -6,7 +6,7 @@ use reqwest::Client;
 use tracing::debug;
 
 use crate::backends::meta_search::{ParseError, SearchHit};
-use crate::backends::meta_search::http_client::{BROWSER_ACCEPT_HTML, MAX_CN_HTML_BYTES};
+use crate::backends::meta_search::http_client::{cn_request_headers, max_cn_html_bytes};
 use hermes_core::ToolError;
 
 /// HTML search engine with separated fetch and parse for testability.
@@ -28,10 +28,15 @@ pub trait CnHtmlEngine: Send + Sync {
     }
 }
 
-pub async fn fetch_cn_html(client: &Client, url: &str) -> Result<String, ToolError> {
+pub async fn fetch_cn_html(
+    client: &Client,
+    url: &str,
+    engine_id: &str,
+) -> Result<String, ToolError> {
+    let cap = max_cn_html_bytes();
     let resp = client
         .get(url)
-        .header(reqwest::header::ACCEPT, BROWSER_ACCEPT_HTML)
+        .headers(cn_request_headers(engine_id))
         .send()
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("CN search HTTP failed: {e}")))?;
@@ -45,15 +50,14 @@ pub async fn fetch_cn_html(client: &Client, url: &str) -> Result<String, ToolErr
         .bytes()
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("CN search read body failed: {e}")))?;
-    let slice = if bytes.len() > MAX_CN_HTML_BYTES {
-        // Sogou/Bing HTML can exceed the cap while still containing parseable results
-        // in the head of the document; failing the whole engine was dropping CN results.
+    let slice = if bytes.len() > cap {
         tracing::warn!(
             bytes = bytes.len(),
-            cap = MAX_CN_HTML_BYTES,
+            cap,
+            engine = engine_id,
             "CN search HTML truncated before parse"
         );
-        &bytes[..MAX_CN_HTML_BYTES]
+        &bytes[..cap]
     } else {
         &bytes
     };
@@ -72,7 +76,7 @@ pub async fn run_cn_engine(
     let started = Instant::now();
     let url = engine.build_url(query, base_override);
     debug!(engine = engine.id(), url = %url, "cn engine fetch start");
-    let html = fetch_cn_html(client, &url).await?;
+    let html = fetch_cn_html(client, &url, engine.id()).await?;
     let mut hits = engine
         .parse_html(&html)
         .map_err(|e| ToolError::ExecutionFailed(format!("{} parse failed: {e}", engine.id())))?;

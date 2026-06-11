@@ -38,8 +38,8 @@ impl Default for MetaSearchConfig {
     fn default() -> Self {
         Self {
             cn_engines: vec![CnEngineKind::Sogou, CnEngineKind::BingCn],
-            cn_timeout_secs: 8,
-            global_timeout_secs: 12,
+            cn_timeout_secs: 12,
+            global_timeout_secs: 20,
             cn_weight: 1.25,
             cn_base_url_override: None,
         }
@@ -137,8 +137,8 @@ mod tests {
             cfg.cn_engines,
             vec![CnEngineKind::Sogou, CnEngineKind::BingCn]
         );
-        assert_eq!(cfg.cn_timeout_secs, 8);
-        assert_eq!(cfg.global_timeout_secs, 12);
+        assert_eq!(cfg.cn_timeout_secs, 12);
+        assert_eq!(cfg.global_timeout_secs, 20);
     }
 
     #[test]

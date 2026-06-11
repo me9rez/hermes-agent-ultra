@@ -100,6 +100,107 @@ pub fn format_gateway_thinking_message(text: &str) -> String {
     format!("🧠 {preview}")
 }
 
+/// Web-tool status lines (search / extract / browser) that should coalesce into one chat bubble.
+pub fn is_coalescable_web_tool_status(event_type: &str, message: &str) -> bool {
+    if event_type != "tool_progress" && event_type != "tool_failure" {
+        return false;
+    }
+    let m = message.trim();
+    m.contains("检索网络")
+        || m.contains("网络搜索较慢")
+        || m.contains("网络检索次数")
+        || m.contains("重复检索请求")
+        || m.contains("网页拒绝自动抓取")
+        || m.contains("网页抓取次数")
+        || m.contains("网页读取多次失败")
+        || m.contains("正在启动浏览器")
+        || m.contains("浏览器启动较慢")
+        || m.contains("web_search")
+        || m.contains("web_extract")
+        || m.contains("browser_navigate")
+}
+
+fn platform_supports_status_message_edit(platform: &str) -> bool {
+    !matches!(
+        platform.trim().to_ascii_lowercase().as_str(),
+        "wecom" | "weixin" | "whatsapp"
+    )
+}
+
+fn push_coalesced_status_line(lines: &mut Vec<String>, line: &str) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if lines.last().map(String::as_str) == Some(trimmed) {
+        return;
+    }
+    lines.push(trimmed.to_string());
+}
+
+fn format_coalesced_web_tool_status(lines: &[String]) -> String {
+    lines.join("\n")
+}
+
+const WEB_TOOL_STATUS_DEBOUNCE_MS: u64 = 1_000;
+
+struct WebToolStatusCoalescer {
+    lines: Vec<String>,
+    anchor_message_id: Option<String>,
+    debounce_gen: u64,
+}
+
+impl WebToolStatusCoalescer {
+    fn push_line(&mut self, line: &str) {
+        push_coalesced_status_line(&mut self.lines, line);
+    }
+
+    fn combined_text(&self) -> String {
+        format_coalesced_web_tool_status(&self.lines)
+    }
+
+    fn clear_after_send(&mut self, clear_lines: bool) {
+        if clear_lines {
+            self.lines.clear();
+        }
+        self.debounce_gen = self.debounce_gen.saturating_add(1);
+    }
+}
+
+async fn deliver_coalesced_web_tool_status(
+    gateway: &Gateway,
+    platform: &str,
+    chat_id: &str,
+    coalescer: &Arc<StdMutex<WebToolStatusCoalescer>>,
+    combined: &str,
+) {
+    if combined.trim().is_empty() {
+        return;
+    }
+    let edit_capable = platform_supports_status_message_edit(platform);
+    if edit_capable {
+        let existing = coalescer.lock().unwrap().anchor_message_id.clone();
+        if let Some(mid) = existing {
+            if gateway
+                .edit_message(platform, chat_id, &mid, combined)
+                .await
+                .is_ok()
+            {
+                return;
+            }
+        }
+        if let Ok(Some(mid)) = gateway
+            .send_message_with_id(platform, chat_id, combined, None)
+            .await
+        {
+            coalescer.lock().unwrap().anchor_message_id = Some(mid);
+            return;
+        }
+    }
+    let _ = gateway.send_message(platform, chat_id, combined, None).await;
+    coalescer.lock().unwrap().clear_after_send(!edit_capable);
+}
+
 /// Suppress noisy lifecycle lines that duplicate streamed thinking output.
 ///
 /// Compression / context-pressure status is still emitted to `agent:status` hooks
@@ -144,6 +245,11 @@ pub fn make_gateway_status_callback(
     session_id: String,
 ) -> Arc<dyn Fn(&str, &str) + Send + Sync> {
     let progress_message_id: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+    let web_status_coalescer = Arc::new(StdMutex::new(WebToolStatusCoalescer {
+        lines: Vec::new(),
+        anchor_message_id: None,
+        debounce_gen: 0,
+    }));
     Arc::new(move |event_type: &str, message: &str| {
         if !gateway_status_message_visible(event_type, message) {
             return;
@@ -156,43 +262,92 @@ pub fn make_gateway_status_callback(
         if outbound.trim().is_empty() {
             return;
         }
-        let gw = gateway.clone();
-        let platform_msg = platform.clone();
-        let chat_id_msg = chat_id.clone();
-        let msg = outbound;
         let progress_mode = hermes_gateway::display_config::resolve_display_setting(
             None,
-            &platform_msg,
+            &platform,
             "tool_progress",
             None,
         );
-        let reuse_progress =
-            event_type == "tool_progress" && progress_mode.as_deref() == Some("new");
-        let progress_id = progress_message_id.clone();
-        tokio::spawn(async move {
-            if reuse_progress {
-                let existing = progress_id.lock().unwrap().clone();
-                if let Some(mid) = existing {
-                    if gw
-                        .edit_message(&platform_msg, &chat_id_msg, &mid, &msg)
+        if progress_mode.as_deref() == Some("off")
+            && (event_type == "tool_progress" || is_coalescable_web_tool_status(event_type, message))
+        {
+            // Hooks still fire below; skip chat delivery.
+        } else if is_coalescable_web_tool_status(event_type, message) {
+            let gw = gateway.clone();
+            let platform_msg = platform.clone();
+            let chat_id_msg = chat_id.clone();
+            let coalescer = web_status_coalescer.clone();
+            let msg = outbound.clone();
+            tokio::spawn(async move {
+                let (combined, generation, edit_capable) = {
+                    let mut guard = coalescer.lock().unwrap();
+                    guard.push_line(&msg);
+                    guard.debounce_gen = guard.debounce_gen.saturating_add(1);
+                    (
+                        guard.combined_text(),
+                        guard.debounce_gen,
+                        platform_supports_status_message_edit(&platform_msg),
+                    )
+                };
+                if edit_capable {
+                    deliver_coalesced_web_tool_status(
+                        &gw,
+                        &platform_msg,
+                        &chat_id_msg,
+                        &coalescer,
+                        &combined,
+                    )
+                    .await;
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(WEB_TOOL_STATUS_DEBOUNCE_MS)).await;
+                let still_current = coalescer.lock().unwrap().debounce_gen == generation;
+                if !still_current {
+                    return;
+                }
+                let combined = coalescer.lock().unwrap().combined_text();
+                deliver_coalesced_web_tool_status(
+                    &gw,
+                    &platform_msg,
+                    &chat_id_msg,
+                    &coalescer,
+                    &combined,
+                )
+                .await;
+            });
+        } else {
+            let gw = gateway.clone();
+            let platform_msg = platform.clone();
+            let chat_id_msg = chat_id.clone();
+            let msg = outbound;
+            let reuse_progress =
+                event_type == "tool_progress" && progress_mode.as_deref() == Some("new");
+            let progress_id = progress_message_id.clone();
+            tokio::spawn(async move {
+                if reuse_progress {
+                    let existing = progress_id.lock().unwrap().clone();
+                    if let Some(mid) = existing {
+                        if gw
+                            .edit_message(&platform_msg, &chat_id_msg, &mid, &msg)
+                            .await
+                            .is_ok()
+                        {
+                            return;
+                        }
+                    }
+                    if let Ok(Some(mid)) = gw
+                        .send_message_with_id(&platform_msg, &chat_id_msg, &msg, None)
                         .await
-                        .is_ok()
                     {
+                        *progress_id.lock().unwrap() = Some(mid);
                         return;
                     }
                 }
-                if let Ok(Some(mid)) = gw
-                    .send_message_with_id(&platform_msg, &chat_id_msg, &msg, None)
-                    .await
-                {
-                    *progress_id.lock().unwrap() = Some(mid);
-                    return;
-                }
-            }
-            let _ = gw
-                .send_message(&platform_msg, &chat_id_msg, &msg, None)
-                .await;
-        });
+                let _ = gw
+                    .send_message(&platform_msg, &chat_id_msg, &msg, None)
+                    .await;
+            });
+        }
         let gw_hook = gateway.clone();
         let platform_hook = platform.clone();
         let user_id = user_id.clone();
@@ -321,5 +476,40 @@ mod tests {
             "lifecycle",
             "会话上下文仍超过窗口容量（约 90%）。请发送 /new"
         ));
+    }
+
+    #[test]
+    fn coalescable_web_tool_status_detects_search_progress_and_failure() {
+        assert!(is_coalescable_web_tool_status(
+            "tool_progress",
+            "正在检索网络数据（第 1 步，工具 web_search）…"
+        ));
+        assert!(is_coalescable_web_tool_status(
+            "tool_failure",
+            "网络搜索较慢，正在尝试其他搜索引擎…"
+        ));
+        assert!(!is_coalescable_web_tool_status(
+            "lifecycle",
+            "会话上下文仍超过窗口容量（约 90%）。请发送 /new"
+        ));
+    }
+
+    #[test]
+    fn coalesced_web_status_merges_lines_and_dedupes() {
+        let mut lines = Vec::new();
+        push_coalesced_status_line(&mut lines, "正在检索网络数据（第 1 步，工具 web_search）…");
+        push_coalesced_status_line(&mut lines, "网络搜索较慢，正在尝试其他搜索引擎…");
+        push_coalesced_status_line(&mut lines, "网络搜索较慢，正在尝试其他搜索引擎…");
+        assert_eq!(lines.len(), 2);
+        let merged = format_coalesced_web_tool_status(&lines);
+        assert!(merged.contains("正在检索网络数据"));
+        assert!(merged.contains("网络搜索较慢"));
+        assert_eq!(merged.matches('\n').count(), 1);
+    }
+
+    #[test]
+    fn wecom_does_not_support_status_edit() {
+        assert!(!platform_supports_status_message_edit("wecom"));
+        assert!(platform_supports_status_message_edit("telegram"));
     }
 }

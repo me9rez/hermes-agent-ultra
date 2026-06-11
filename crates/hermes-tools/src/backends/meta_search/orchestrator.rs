@@ -32,51 +32,7 @@ pub async fn meta_search(query: &str, num_results: usize) -> Result<String, Tool
     }
 
     let global_timeout = Duration::from_secs(cfg.global_timeout_secs.max(1));
-    let client = build_meta_search_client(cfg.cn_timeout_secs);
-    let base_override = cfg.cn_base_url_override.as_deref();
-    let query_owned = query.to_string();
-
-    let work = async move {
-        let mut set = JoinSet::new();
-        if !ddgs_disabled() {
-            let q = query_owned.clone();
-            set.spawn(async move {
-                run_ddgs_task(q, limit).await
-            });
-        }
-
-        for kind in cfg.cn_engines {
-            let client = client.clone();
-            let query = query_owned.clone();
-            let cn_timeout = Duration::from_secs(cfg.cn_timeout_secs);
-            let base = base_override.map(str::to_string);
-            set.spawn(async move {
-                run_cn_task(kind, client, &query, limit, cn_timeout, base.as_deref()).await
-            });
-        }
-
-        let mut outcomes: Vec<EngineOutcome> = Vec::new();
-        while let Some(joined) = set.join_next().await {
-            match joined {
-                Ok(outcome) => outcomes.push(outcome),
-                Err(e) => {
-                    debug!(error = %e, "meta_search task panic");
-                }
-            }
-        }
-        outcomes
-    };
-
-    let outcomes = match tokio::time::timeout(global_timeout, work).await {
-        Ok(v) => v,
-        Err(_) => {
-            debug!(
-                timeout_secs = global_timeout.as_secs(),
-                "meta_search global deadline exceeded"
-            );
-            Vec::new()
-        }
-    };
+    let outcomes = run_parallel_cjk_engines(&cfg, query, limit, global_timeout).await;
 
     let attempts: Vec<EngineAttempt> = outcomes.iter().map(|o| o.attempt.clone()).collect();
     let batches: Vec<Vec<SearchHit>> = outcomes.into_iter().map(|o| o.hits).collect();
@@ -240,6 +196,22 @@ fn serialize_success(query: &str, hits: Vec<SearchHit>, attempts: Vec<EngineAtte
     .unwrap_or_else(|_| r#"{"success":false,"error":"serialize failed"}"#.into())
 }
 
+/// Whether DDGS participates in the CJK parallel batch (default off; opt in via env).
+fn ddgs_runs_on_cjk() -> bool {
+    if ddgs_disabled() {
+        return false;
+    }
+    std::env::var("HERMES_META_SEARCH_DDGS_ON_CJK")
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn ddgs_disabled() -> bool {
     std::env::var("HERMES_META_SEARCH_DDGS_DISABLED")
         .ok()
@@ -252,10 +224,111 @@ fn ddgs_disabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Run CN engines (and optional DDGS) in parallel; keep partial results on deadline.
+async fn run_parallel_cjk_engines(
+    cfg: &MetaSearchConfig,
+    query: &str,
+    limit: usize,
+    global_timeout: Duration,
+) -> Vec<EngineOutcome> {
+    let client = build_meta_search_client(cfg.cn_timeout_secs);
+    let base_override = cfg.cn_base_url_override.as_deref();
+    let query_owned = query.to_string();
+
+    let mut set = JoinSet::new();
+    if ddgs_runs_on_cjk() {
+        let q = query_owned.clone();
+        set.spawn(async move { run_ddgs_task(q, limit).await });
+    }
+
+    for kind in &cfg.cn_engines {
+        let client = client.clone();
+        let query = query_owned.clone();
+        let cn_timeout = Duration::from_secs(cfg.cn_timeout_secs);
+        let kind = *kind;
+        let base = base_override.map(str::to_string);
+        set.spawn(async move {
+            run_cn_task(kind, client, &query, limit, cn_timeout, base.as_deref()).await
+        });
+    }
+
+    if set.is_empty() {
+        return Vec::new();
+    }
+
+    let deadline = tokio::time::Instant::now() + global_timeout;
+    let mut outcomes = Vec::new();
+
+    while !set.is_empty() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            debug!(
+                timeout_secs = global_timeout.as_secs(),
+                kept_outcomes = outcomes.len(),
+                pending_tasks = set.len(),
+                "meta_search global deadline exceeded; keeping partial engine results"
+            );
+            set.abort_all();
+            break;
+        }
+
+        tokio::select! {
+            joined = set.join_next() => {
+                match joined {
+                    Some(Ok(outcome)) => outcomes.push(outcome),
+                    Some(Err(e)) => debug!(error = %e, "meta_search task panic"),
+                    None => break,
+                }
+            }
+            _ = tokio::time::sleep(remaining) => {
+                debug!(
+                    timeout_secs = global_timeout.as_secs(),
+                    kept_outcomes = outcomes.len(),
+                    pending_tasks = set.len(),
+                    "meta_search global deadline exceeded; keeping partial engine results"
+                );
+                set.abort_all();
+                break;
+            }
+        }
+    }
+
+    outcomes
+}
+
 fn truncate_err(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
         format!("{}…", s.chars().take(max).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ddgs_off_by_default_on_cjk() {
+        hermes_core::test_env::remove_var("HERMES_META_SEARCH_DDGS_DISABLED");
+        hermes_core::test_env::remove_var("HERMES_META_SEARCH_DDGS_ON_CJK");
+        assert!(!ddgs_runs_on_cjk());
+    }
+
+    #[test]
+    fn ddgs_on_cjk_when_opt_in() {
+        hermes_core::test_env::remove_var("HERMES_META_SEARCH_DDGS_DISABLED");
+        hermes_core::test_env::set_var("HERMES_META_SEARCH_DDGS_ON_CJK", "1");
+        assert!(ddgs_runs_on_cjk());
+        hermes_core::test_env::remove_var("HERMES_META_SEARCH_DDGS_ON_CJK");
+    }
+
+    #[test]
+    fn ddgs_disabled_env_wins_over_cjk_opt_in() {
+        hermes_core::test_env::set_var("HERMES_META_SEARCH_DDGS_DISABLED", "1");
+        hermes_core::test_env::set_var("HERMES_META_SEARCH_DDGS_ON_CJK", "1");
+        assert!(!ddgs_runs_on_cjk());
+        hermes_core::test_env::remove_var("HERMES_META_SEARCH_DDGS_DISABLED");
+        hermes_core::test_env::remove_var("HERMES_META_SEARCH_DDGS_ON_CJK");
     }
 }

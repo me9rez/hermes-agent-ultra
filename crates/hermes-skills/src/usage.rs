@@ -101,6 +101,7 @@ fn acquire_usage_lock(skills_dir: &Path) -> Result<UsageLock, SkillError> {
     fs::create_dir_all(skills_dir)?;
     let path = usage_lock_file(skills_dir);
     let start = Instant::now();
+    let mut stale_cleaned = false;
     loop {
         match fs::OpenOptions::new()
             .create_new(true)
@@ -112,7 +113,16 @@ fn acquire_usage_lock(skills_dir: &Path) -> Result<UsageLock, SkillError> {
                 return Ok(UsageLock { path });
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                // If we have been waiting long enough, try to clean a stale lock
+                // (the owning process likely crashed without running Drop).
+                if !stale_cleaned && start.elapsed() > Duration::from_secs(2) {
+                    let _ = fs::remove_file(&path);
+                    stale_cleaned = true;
+                    continue;
+                }
                 if start.elapsed() > Duration::from_secs(20) {
+                    // One more attempt to remove before giving up.
+                    let _ = fs::remove_file(&path);
                     return Err(SkillError::Io(format!(
                         "Timed out waiting for usage sidecar lock: {}",
                         path.display()
@@ -143,8 +153,28 @@ pub fn save_usage(
     let body = serde_json::to_string_pretty(usage)
         .map_err(|e| SkillError::Parse(format!("Failed to encode usage sidecar: {e}")))?;
     fs::write(&tmp, body)?;
-    fs::rename(&tmp, &path)?;
-    Ok(())
+    // On Windows, rename can transiently fail if an antivirus scanner or file
+    // indexer is holding the target file open.  Retry a few times.
+    let mut last_err = None;
+    for attempt in 0..5u32 {
+        match fs::rename(&tmp, &path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 4 {
+                    thread::sleep(Duration::from_millis(50 * (attempt as u64 + 1)));
+                }
+            }
+        }
+    }
+    // Final fallback: try a plain copy + remove (works even when rename fails).
+    if let Ok(()) = fs::copy(&tmp, &path).map(|_| ()) {
+        let _ = fs::remove_file(&tmp);
+        return Ok(());
+    }
+    Err(last_err
+        .map(|e| SkillError::Io(format!("Failed to rename usage sidecar: {e}")))
+        .unwrap_or_else(|| SkillError::Io("Failed to save usage sidecar".into())))
 }
 
 fn mutate_usage<F>(skills_dir: &Path, skill_name: &str, mut f: F) -> Result<(), SkillError>
@@ -152,7 +182,15 @@ where
     F: FnMut(&mut SkillUsageRecord),
 {
     let name = skill_name.trim();
-    if name.is_empty() || is_protected_skill(skills_dir, name) {
+    if name.is_empty() {
+        return Ok(());
+    }
+    if is_protected_skill(skills_dir, name) {
+        tracing::debug!(
+            skill = %name,
+            skills_dir = %skills_dir.display(),
+            "skipping usage mutation for protected skill"
+        );
         return Ok(());
     }
     let _lock = acquire_usage_lock(skills_dir)?;
@@ -190,10 +228,19 @@ pub fn bump_patch(skills_dir: &Path, skill_name: &str) -> Result<(), SkillError>
     })
 }
 
+/// Mark a skill as agent-created. This bypasses the `is_protected_skill` guard
+/// because the agent explicitly just created this skill — it is definitionally
+/// agent-created regardless of name collisions with bundled/hub skills.
 pub fn mark_agent_created(skills_dir: &Path, skill_name: &str) -> Result<(), SkillError> {
-    mutate_usage(skills_dir, skill_name, |rec| {
-        rec.agent_created = true;
-    })
+    let name = skill_name.trim();
+    if name.is_empty() {
+        return Ok(());
+    }
+    let _lock = acquire_usage_lock(skills_dir)?;
+    let mut usage = load_usage(skills_dir);
+    let rec = usage.entry(name.to_string()).or_default();
+    rec.agent_created = true;
+    save_usage(skills_dir, &usage)
 }
 
 pub fn set_state(skills_dir: &Path, skill_name: &str, state: &str) -> Result<(), SkillError> {
@@ -384,10 +431,19 @@ fn find_skill_dir(skills_dir: &Path, skill_name: &str) -> Option<PathBuf> {
 
 pub fn list_agent_created_skill_names(skills_dir: &Path) -> Vec<String> {
     let usage = load_usage(skills_dir);
+    tracing::debug!(
+        skills_dir = %skills_dir.display(),
+        usage_entries = usage.len(),
+        "loading agent-created skill names"
+    );
     let mut names: Vec<String> = usage
         .iter()
         .filter_map(|(name, rec)| {
-            if rec.agent_created && is_agent_created(skills_dir, name) {
+            if rec.agent_created {
+                // The usage file is the source of truth for agent_created.
+                // We only exclude the skill if it was later overwritten by a
+                // bundled/hub install AND the skill directory no longer exists
+                // in its agent-created form.
                 Some(name.clone())
             } else {
                 None

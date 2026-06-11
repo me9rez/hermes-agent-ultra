@@ -642,6 +642,17 @@ impl ToolHandler for SkillManageHandler {
 
                 hermes_insights::notify_skill_changed(&skill_dir, hermes_insights::SkillChangeKind::Agent);
 
+                // Mark as agent-created in usage tracking so curator can find it.
+                let usage_dir = self.user_skills_dir();
+                if let Err(e) = hermes_skills::mark_agent_created(&usage_dir, name) {
+                    tracing::warn!(
+                        skill = %name,
+                        dir = %usage_dir.display(),
+                        error = %e,
+                        "failed to mark skill as agent-created in usage sidecar"
+                    );
+                }
+
                 let mut result = json!({
                     "success": true,
                     "message": format!("Skill '{name}' created."),
@@ -987,7 +998,10 @@ impl ToolHandler for SkillManageHandler {
             "skill_manage",
             "Manage skills (create, edit, patch, delete, write_file, remove_file). \
              Skills are procedural memory — reusable approaches for recurring task types. \
-             New skills are created in ~/.hermes-agent-ultra/skills/; existing skills can be modified wherever they live.",
+             This is the ONLY tool for creating new skills — never create skill files \
+             directly with write_file or other file tools. New skills are created in the \
+             user skills directory with automatic validation and usage tracking; existing \
+             skills can be modified wherever they live.",
             JsonSchema::object(props, vec!["action".into(), "name".into()]),
         )
     }

@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
@@ -99,7 +99,7 @@ fn incoming(platform: &str, user_id: &str, text: &str) -> IncomingMessage {
         is_dm: true,
         interaction_id: None,
         interaction_token: None,
-    role_ids: vec![],
+        role_ids: vec![],
         ..Default::default()
     }
 }
@@ -481,19 +481,23 @@ async fn contract_runtime_commands_preserve_session_and_usage_state() {
 
     let sent = state.sent_texts.lock().unwrap().clone();
     assert!(sent.iter().any(|m| m.contains("Model switched to: gpt-4o")));
-    assert!(sent
-        .iter()
-        .any(|m| m.contains("Provider switched to: openai")));
+    assert!(
+        sent.iter()
+            .any(|m| m.contains("Provider switched to: openai"))
+    );
     assert!(sent.iter().any(|m| m.contains("Profile switched to: prod")));
-    assert!(sent
-        .iter()
-        .any(|m| m.contains("Branch context switched to: feature/gateway-contracts")));
-    assert!(sent
-        .iter()
-        .any(|m| m.contains("Usage budget set to 42.0000")));
-    assert!(sent
-        .iter()
-        .any(|m| m.contains("Usage") && m.contains("user messages")));
+    assert!(
+        sent.iter()
+            .any(|m| m.contains("Branch context switched to: feature/gateway-contracts"))
+    );
+    assert!(
+        sent.iter()
+            .any(|m| m.contains("Usage budget set to 42.0000"))
+    );
+    assert!(
+        sent.iter()
+            .any(|m| m.contains("Usage") && m.contains("user messages"))
+    );
     let status = sent
         .iter()
         .rev()
@@ -507,9 +511,10 @@ async fn contract_runtime_commands_preserve_session_and_usage_state() {
     assert!(sent.iter().any(|m| m.contains("Session title set")));
     assert!(sent.iter().any(|m| m.contains("Resume state")));
     assert!(sent.iter().any(|m| m.contains("Voice mode status")));
-    assert!(sent
-        .iter()
-        .any(|m| m.contains("Update available: Hermes latest")));
+    assert!(
+        sent.iter()
+            .any(|m| m.contains("Update available: Hermes latest"))
+    );
     assert!(sent.iter().any(|m| m.contains("Rolled back 2 message")));
 }
 
@@ -550,6 +555,7 @@ async fn contract_request_runtime_overrides_reach_context_handler() {
             text: "run request".to_string(),
             message_id: None,
             is_dm: true,
+            ..Default::default()
         })
         .await
         .expect("request override turn should route");

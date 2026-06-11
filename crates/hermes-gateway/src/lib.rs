@@ -19,8 +19,10 @@ pub mod channel_directory;
 pub mod clarify_session;
 pub mod commands;
 pub mod delivery;
+pub mod delivery_layer;
 pub mod display_config;
 pub mod dm;
+pub mod extension_bus;
 pub mod format;
 pub mod gateway;
 pub mod gateway_requirements;
@@ -28,6 +30,7 @@ pub mod hook_payloads;
 pub mod hooks;
 pub mod markdown_split;
 pub mod media;
+pub mod message_router;
 pub mod mirror;
 pub mod pairing;
 pub mod pairing_store;
@@ -35,6 +38,7 @@ pub mod platform_requirements;
 pub mod platforms;
 pub mod session;
 pub mod session_control;
+pub mod session_layer;
 pub mod ssrf;
 pub mod sticker_cache;
 pub mod stream;
@@ -58,12 +62,12 @@ pub use gateway::{
 };
 
 pub use agent_cache::{
-    agent_config_signature, extract_cache_busting_config, AgentConfigSignatureInput,
-    GatewayAgentCache,
+    AgentConfigSignatureInput, GatewayAgentCache, agent_config_signature,
+    extract_cache_busting_config,
 };
 pub use session_control::{
-    build_session_key, BusyInputMode, BusyMessageDecision, BusySessionCoordinator, MessageEvent,
-    MessageType, ProcessingOutcome, SessionSource,
+    BusyInputMode, BusyMessageDecision, BusySessionCoordinator, MessageEvent, MessageType,
+    ProcessingOutcome, SessionSource, build_session_key,
 };
 
 // Re-export session management

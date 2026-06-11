@@ -9,18 +9,31 @@
 //!
 //! Also integrates `StreamManager` for progressive message editing.
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use futures::future::{AbortHandle, Abortable};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex as TokioMutex, RwLock, mpsc};
+use tokio::sync::{Mutex as TokioMutex, mpsc};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, trace, warn};
+
+use crate::delivery_layer::{DeliveryLayer, TurnOutboundTracker};
+use crate::extension_bus::ExtensionBus;
+use crate::message_router::MessageRouter;
+use crate::session_layer::SessionLayer;
+
+// Re-export so external code using `hermes_gateway::gateway::*` keeps working.
+pub use crate::message_router::{
+    DmAccessMode, GatewayRuntimeContext, GroupAccessMode, MessageHandler,
+    MessageHandlerWithContext, PlatformAccessPolicy, StreamingMessageHandler,
+    StreamingMessageHandlerWithContext,
+};
+pub use crate::session_layer::{SessionTeardownContext, SessionTeardownHandler};
 
 /// Placeholder shown while the model is generating (WeCom native stream).
 const WECOM_NATIVE_STREAM_THINKING: &str = "思考中...";
@@ -97,13 +110,12 @@ use hermes_core::{
     InboundEvent, InboundMessagePreparer, InboundPrepareContext, transport_fallback_message,
 };
 
-use crate::background::{BackgroundTaskManager, TaskStatus};
+use crate::background::TaskStatus;
 use crate::commands::{
     BatchCommandClass, BatchedCommand, GatewayCommandResult, handle_command, parse_batch_commands,
 };
 use crate::dm::{DmDecision, DmManager};
 use crate::hooks::{HookEvent, HookRegistry};
-use crate::pairing_store::DmPairingStore;
 use crate::platforms::helpers::extract_inline_images;
 use crate::session::{SessionManager, SessionTeardownSnapshot};
 use crate::stream::{StreamConfig, StreamManager};
@@ -261,159 +273,10 @@ impl IncomingMessage {
     }
 }
 
-// ---------------------------------------------------------------------------
-// MessageHandler callback
-// ---------------------------------------------------------------------------
-
-/// Callback type for processing messages through the agent loop.
-/// Takes the session messages and returns the agent's response text.
-pub type MessageHandler = Arc<
-    dyn Fn(
-            Arc<Vec<Message>>,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send>,
-        > + Send
-        + Sync,
->;
-
-/// Structured runtime context passed to V2 handlers.
-#[derive(Debug, Clone, Default)]
-pub struct GatewayRuntimeContext {
-    pub session_key: String,
-    /// Rotatable session UUID (Python-style).  Equals `session_key` for sessions
-    /// that have never been reset; becomes a fresh UUID after each `/new` / `/reset`.
-    /// Use this — not `session_key` — as the agent's `session_id` for SQLite persistence.
-    pub session_id: String,
-    pub platform: String,
-    pub chat_id: String,
-    pub user_id: String,
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub profile: Option<String>,
-    pub branch: Option<String>,
-    pub personality: Option<String>,
-    pub home: Option<String>,
-    pub service_tier: Option<String>,
-    pub tool_progress: Option<String>,
-    pub verbose: bool,
-    pub yolo: bool,
-    pub reasoning: bool,
-    pub mcp_reload_generation: u64,
-    /// Messages queued by handlers to be delivered only after the main reply.
-    pub deferred_post_delivery_messages: Option<Arc<StdMutex<Vec<String>>>>,
-    /// Release flag shared with handlers for post-delivery gating.
-    pub deferred_post_delivery_released: Option<Arc<AtomicBool>>,
-}
-
-/// Context-aware callback type for processing messages through the agent loop.
-pub type MessageHandlerWithContext = Arc<
-    dyn Fn(
-            Arc<Vec<Message>>,
-            GatewayRuntimeContext,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send>,
-        > + Send
-        + Sync,
->;
-
-/// Callback type for streaming message processing.
-/// Takes session messages and a chunk callback, returns the final response.
-pub type StreamingMessageHandler = Arc<
-    dyn Fn(
-            Arc<Vec<Message>>,
-            Arc<dyn Fn(String) + Send + Sync>,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send>,
-        > + Send
-        + Sync,
->;
-
-/// Context-aware callback type for streaming message processing.
-pub type StreamingMessageHandlerWithContext = Arc<
-    dyn Fn(
-            Arc<Vec<Message>>,
-            GatewayRuntimeContext,
-            Arc<dyn Fn(String) + Send + Sync>,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send>,
-        > + Send
-        + Sync,
->;
-
-/// Payload for agent-layer session teardown (POI flush, memory `on_session_end`, etc.).
-#[derive(Debug, Clone)]
-pub struct SessionTeardownContext {
-    pub session_key: String,
-    pub session_id: String,
-    pub platform: String,
-    pub chat_id: String,
-    pub user_id: String,
-    pub messages: Arc<Vec<Message>>,
-    pub reason: String,
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub personality: Option<String>,
-    pub home: Option<String>,
-}
-
-/// Optional hook invoked before a gateway session is reset, expired, or drained.
-pub type SessionTeardownHandler = Arc<
-    dyn Fn(
-            SessionTeardownContext,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-        + Send
-        + Sync,
->;
-
-#[derive(Debug, Clone, Default)]
-struct UsageStats {
-    user_messages: u64,
-    assistant_messages: u64,
-    input_chars: u64,
-    output_chars: u64,
-    last_updated_at: Option<DateTime<Utc>>,
-}
-
 #[derive(Debug, Clone, Default)]
 struct CompressionOutcome {
     removed_messages: usize,
     summary_warning: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct SessionRuntimeState {
-    model: Option<String>,
-    provider: Option<String>,
-    profile: Option<String>,
-    branch: Option<String>,
-    personality: Option<String>,
-    home: Option<String>,
-    service_tier: Option<String>,
-    tool_progress: Option<String>,
-    /// Optional usage budget (same units as `/budget` input; gateway displays as-is).
-    budget: Option<f64>,
-    verbose: bool,
-    yolo: bool,
-    reasoning: bool,
-}
-
-impl Default for SessionRuntimeState {
-    fn default() -> Self {
-        Self {
-            model: None,
-            provider: None,
-            profile: None,
-            branch: None,
-            personality: None,
-            home: None,
-            service_tier: None,
-            tool_progress: None,
-            budget: None,
-            verbose: false,
-            yolo: false,
-            reasoning: false,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -422,172 +285,18 @@ impl Default for SessionRuntimeState {
 
 /// Central orchestrator for all platform adapters.
 ///
-/// Tracks outbound file deliveries during a single inbound route (tool + MEDIA).
-#[derive(Debug, Default)]
-struct TurnOutboundTracker {
-    platform: String,
-    chat_id: String,
-    paths: StdMutex<Vec<PathBuf>>,
-}
-
-impl TurnOutboundTracker {
-    fn new(platform: impl Into<String>, chat_id: impl Into<String>) -> Self {
-        Self {
-            platform: platform.into(),
-            chat_id: chat_id.into(),
-            paths: StdMutex::new(Vec::new()),
-        }
-    }
-
-    fn matches(&self, platform: &str, chat_id: &str) -> bool {
-        self.platform.eq_ignore_ascii_case(platform) && self.chat_id == chat_id
-    }
-
-    fn record(&self, path: PathBuf) {
-        let key = path.to_string_lossy().to_lowercase();
-        if let Ok(mut guard) = self.paths.lock() {
-            if guard
-                .iter()
-                .any(|existing| existing.to_string_lossy().to_lowercase() == key)
-            {
-                return;
-            }
-            guard.push(path);
-        }
-    }
-
-    fn count(&self) -> usize {
-        self.paths.lock().map(|g| g.len()).unwrap_or(0)
-    }
-}
-
-/// The `Gateway` owns a collection of named `PlatformAdapter` instances,
-/// a `SessionManager`, a `DmManager`, and a `StreamManager`. It provides
-/// a unified interface to start/stop adapters and route messages.
+/// State is partitioned into four sub-systems; `Gateway` itself is a thin
+/// facade that delegates to each and exposes the full public API.
 pub struct Gateway {
-    adapters: RwLock<HashMap<String, Arc<dyn PlatformAdapter>>>,
-    session_manager: Arc<SessionManager>,
-    dm_manager: Arc<RwLock<DmManager>>,
-    pairing_store: Arc<StdMutex<DmPairingStore>>,
-    stream_manager: Arc<StreamManager>,
+    /// Platform adapter registry, handler callbacks, and access policies.
+    router: MessageRouter,
+    /// Session management, per-session runtime state, concurrency locks.
+    session: SessionLayer,
+    /// Stream manager, outbound file tracking, live messaging context.
+    delivery: DeliveryLayer,
+    /// Optional extensions: hooks, voice/STT, inbound preparer, clarify.
+    extensions: ExtensionBus,
     config: GatewayConfig,
-    /// Optional message handler for processing messages through the agent loop.
-    message_handler: RwLock<Option<MessageHandler>>,
-    /// Optional context-aware message handler for processing incoming messages.
-    message_handler_with_context: RwLock<Option<MessageHandlerWithContext>>,
-    /// Optional streaming message handler.
-    streaming_handler: RwLock<Option<StreamingMessageHandler>>,
-    /// Optional context-aware streaming message handler.
-    streaming_handler_with_context: RwLock<Option<StreamingMessageHandlerWithContext>>,
-    /// Runtime command state for each session.
-    runtime_state: RwLock<HashMap<String, SessionRuntimeState>>,
-    /// Per-platform tool-progress overrides from `/verbose`.
-    tool_progress_modes: RwLock<BTreeMap<String, String>>,
-    /// Basic usage counters for each session.
-    usage_stats: RwLock<HashMap<String, UsageStats>>,
-    /// LLM token totals from agent loop (Python `agent.session_*` for `/usage`).
-    session_token_usage: RwLock<HashMap<String, hermes_agent::SessionUsageDisplay>>,
-    /// Tracks async `/background` and `/btw` tasks.
-    background_tasks: Arc<BackgroundTaskManager>,
-    /// MCP reload generation number.
-    mcp_reload_generation: RwLock<u64>,
-    /// Optional hook registry for runtime event emission.
-    hook_registry: RwLock<Option<Arc<HookRegistry>>>,
-    /// Per-platform allowlist policy for group and slash-command traffic.
-    platform_access_policies: RwLock<HashMap<String, PlatformAccessPolicy>>,
-    /// Optional agent-layer inbound preparer (vision routing, transcription).
-    inbound_preparer: RwLock<Option<Arc<dyn InboundMessagePreparer>>>,
-    /// Optional voice/STT manager for inbound audio and outbound TTS.
-    voice_manager: RwLock<Option<Arc<VoiceManager>>>,
-    /// When false, inbound audio is not transcribed (Python `stt_enabled`).
-    stt_enabled: RwLock<bool>,
-    /// Current inbound channel for `send_message` session fallback.
-    messaging_session: RwLock<Option<Arc<MessagingSessionContext>>>,
-    /// Per-session mutex so concurrent inbound messages for one chat queue (Python `_running_agents` guard).
-    session_serial: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Per-session abort handles for the in-flight foreground agent route.
-    active_routes: RwLock<HashMap<String, AbortHandle>>,
-    /// Outbound files delivered during the current inbound route (tool + MEDIA).
-    turn_outbound: StdMutex<HashMap<String, TurnOutboundTracker>>,
-    /// Optional agent-layer hook for POI / memory flush before session removal.
-    session_teardown_handler: RwLock<Option<SessionTeardownHandler>>,
-    /// Channel clarify dispatcher for IM fast-path answer delivery.
-    clarify_dispatcher: RwLock<Option<ClarifyDispatcher>>,
-    /// Concrete Discord adapter for history backfill (P2-8).
-    #[cfg(feature = "discord")]
-    discord_adapter: RwLock<Option<Arc<crate::platforms::discord::DiscordAdapter>>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroupAccessMode {
-    Open,
-    Allowlist,
-    Disabled,
-}
-
-impl Default for GroupAccessMode {
-    fn default() -> Self {
-        Self::Open
-    }
-}
-
-/// Direct-message access mode (`platforms.<name>.dm_policy` / `extra.dm_policy`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DmAccessMode {
-    /// Anyone may DM; skip global pairing gate.
-    Open,
-    /// Unknown senders get pairing / approval prompt.
-    #[default]
-    Pairing,
-    /// Only listed users may DM.
-    Allowlist,
-    /// All DMs dropped.
-    Disabled,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct PlatformAccessPolicy {
-    pub allowed_users: HashSet<String>,
-    pub admin_users: HashSet<String>,
-    pub allowed_roles: HashSet<String>,
-    pub group_mode: GroupAccessMode,
-    pub slash_requires_allowlist: bool,
-    pub dm_mode: DmAccessMode,
-}
-
-impl PlatformAccessPolicy {
-    fn has_allowlist(&self) -> bool {
-        !self.allowed_users.is_empty()
-            || !self.admin_users.is_empty()
-            || !self.allowed_roles.is_empty()
-    }
-
-    fn user_matches_any(user_id: &str, set: &HashSet<String>) -> bool {
-        let candidate = user_id.trim();
-        if candidate.is_empty() {
-            return false;
-        }
-        let candidate_no_at = candidate.strip_prefix('@').unwrap_or(candidate);
-        set.iter().any(|entry| {
-            let allowed = entry.trim();
-            if allowed.is_empty() {
-                return false;
-            }
-            let allowed_no_at = allowed.strip_prefix('@').unwrap_or(allowed);
-            allowed.eq_ignore_ascii_case(candidate)
-                || allowed.eq_ignore_ascii_case(candidate_no_at)
-                || allowed_no_at.eq_ignore_ascii_case(candidate)
-                || allowed_no_at.eq_ignore_ascii_case(candidate_no_at)
-        })
-    }
-
-    pub fn is_user_allowed(&self, user_id: &str, role_ids: &[String]) -> bool {
-        Self::user_matches_any(user_id, &self.admin_users)
-            || Self::user_matches_any(user_id, &self.allowed_users)
-            || role_ids
-                .iter()
-                .any(|role| Self::user_matches_any(role, &self.allowed_roles))
-    }
 }
 
 fn inbound_text_log_fields(text: &str) -> (usize, String, String) {
@@ -641,49 +350,27 @@ impl Gateway {
         dm_manager: DmManager,
         config: GatewayConfig,
     ) -> Self {
-        let stream_manager = Arc::new(StreamManager::new(config.streaming.clone()));
-
         Self {
-            adapters: RwLock::new(HashMap::new()),
-            session_manager,
-            dm_manager: Arc::new(RwLock::new(dm_manager)),
-            pairing_store: Arc::new(StdMutex::new(DmPairingStore::open_default())),
-            stream_manager,
+            router: MessageRouter::new(dm_manager),
+            session: SessionLayer::new(session_manager),
+            delivery: DeliveryLayer::new(config.streaming.clone()),
+            extensions: ExtensionBus::new(),
             config,
-            message_handler: RwLock::new(None),
-            message_handler_with_context: RwLock::new(None),
-            streaming_handler: RwLock::new(None),
-            streaming_handler_with_context: RwLock::new(None),
-            runtime_state: RwLock::new(HashMap::new()),
-            tool_progress_modes: RwLock::new(BTreeMap::new()),
-            usage_stats: RwLock::new(HashMap::new()),
-            session_token_usage: RwLock::new(HashMap::new()),
-            background_tasks: Arc::new(BackgroundTaskManager::new(8)),
-            mcp_reload_generation: RwLock::new(0),
-            hook_registry: RwLock::new(None),
-            platform_access_policies: RwLock::new(HashMap::new()),
-            inbound_preparer: RwLock::new(None),
-            voice_manager: RwLock::new(None),
-            stt_enabled: RwLock::new(true),
-            messaging_session: RwLock::new(None),
-            session_serial: RwLock::new(HashMap::new()),
-            active_routes: RwLock::new(HashMap::new()),
-            turn_outbound: StdMutex::new(HashMap::new()),
-            session_teardown_handler: RwLock::new(None),
-            clarify_dispatcher: RwLock::new(None),
-            #[cfg(feature = "discord")]
-            discord_adapter: RwLock::new(None),
         }
     }
 
     /// Wire the shared clarify dispatcher so inbound IM replies can fulfill an
     /// active sync `clarify` wait without waiting for the per-session route lock.
     pub async fn set_clarify_dispatcher(&self, dispatcher: ClarifyDispatcher) {
-        *self.clarify_dispatcher.write().await = Some(dispatcher);
+        *self.extensions.clarify_dispatcher.write().await = Some(dispatcher);
     }
 
     fn begin_turn_outbound_tracking(&self, session_key: &str, platform: &str, chat_id: &str) {
-        let mut guard = self.turn_outbound.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .delivery
+            .turn_outbound
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.insert(
             session_key.to_string(),
             TurnOutboundTracker::new(platform, chat_id),
@@ -691,12 +378,17 @@ impl Gateway {
     }
 
     fn clear_turn_outbound_tracking(&self, session_key: &str) {
-        let mut guard = self.turn_outbound.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .delivery
+            .turn_outbound
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.remove(session_key);
     }
 
     fn turn_outbound_file_count(&self, session_key: &str) -> usize {
-        self.turn_outbound
+        self.delivery
+            .turn_outbound
             .lock()
             .ok()
             .and_then(|g| g.get(session_key).map(TurnOutboundTracker::count))
@@ -707,7 +399,7 @@ impl Gateway {
         let path = hermes_config::resolve_outbound_media_path(file_path)
             .unwrap_or_else(|_| PathBuf::from(file_path));
         let canonical = path.canonicalize().unwrap_or(path);
-        if let Ok(guard) = self.turn_outbound.lock() {
+        if let Ok(guard) = self.delivery.turn_outbound.lock() {
             for tracker in guard.values() {
                 if tracker.matches(platform, chat_id) {
                     tracker.record(canonical);
@@ -723,14 +415,14 @@ impl Gateway {
         &self,
         adapter: Arc<crate::platforms::discord::DiscordAdapter>,
     ) {
-        *self.discord_adapter.write().await = Some(adapter.clone());
+        *self.extensions.discord_adapter.write().await = Some(adapter.clone());
         self.register_adapter("discord", adapter).await;
     }
 
     /// Hold the per-session lock for the full `route_message` pipeline (agent + session writes).
     async fn acquire_session_serial(&self, session_key: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let mutex = {
-            let mut map = self.session_serial.write().await;
+            let mut map = self.session.session_serial.write().await;
             map.entry(session_key.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
@@ -739,7 +431,7 @@ impl Gateway {
     }
 
     async fn abort_active_route(&self, session_key: &str) -> bool {
-        let handle = self.active_routes.write().await.remove(session_key);
+        let handle = self.session.active_routes.write().await.remove(session_key);
         if let Some(handle) = handle {
             handle.abort();
             true
@@ -750,18 +442,18 @@ impl Gateway {
 
     /// Register the agent inbound preparer (vision enrich, native multimodal, etc.).
     pub async fn set_inbound_preparer(&self, preparer: Arc<dyn InboundMessagePreparer>) {
-        *self.inbound_preparer.write().await = Some(preparer);
+        *self.extensions.inbound_preparer.write().await = Some(preparer);
     }
 
     /// Wire voice manager + STT gate from app `config.yaml` (`tts` / `stt` blocks).
     pub async fn set_voice_runtime(&self, manager: Arc<VoiceManager>, stt_enabled: bool) {
-        *self.voice_manager.write().await = Some(manager);
-        *self.stt_enabled.write().await = stt_enabled;
+        *self.extensions.voice_manager.write().await = Some(manager);
+        *self.extensions.stt_enabled.write().await = stt_enabled;
     }
 
     /// Share session context with `send_message` for automatic platform/recipient fallback.
     pub async fn set_messaging_session_context(&self, ctx: Arc<MessagingSessionContext>) {
-        *self.messaging_session.write().await = Some(ctx);
+        *self.delivery.messaging_session.write().await = Some(ctx);
     }
 
     fn incoming_to_event(incoming: &IncomingMessage) -> InboundEvent {
@@ -793,9 +485,10 @@ impl Gateway {
         personality: Option<String>,
     ) {
         let session_key = self
+            .session
             .session_manager
             .compose_session_key(platform, chat_id, user_id);
-        let mut states = self.runtime_state.write().await;
+        let mut states = self.session.runtime_state.write().await;
         let s = states.entry(session_key).or_default();
         if let Some(m) = model {
             s.model = Some(m.clone());
@@ -819,16 +512,17 @@ impl Gateway {
         user_id: &str,
     ) -> usize {
         let key = self
+            .session
             .session_manager
             .compose_session_key(platform, chat_id, user_id);
-        self.session_manager.get_messages(&key).await.len()
+        self.session.session_manager.get_messages(&key).await.len()
     }
 
     async fn clear_session_boundary_security_state(&self, session_key: &str) {
         if session_key.is_empty() {
             return;
         }
-        let mut states = self.runtime_state.write().await;
+        let mut states = self.session.runtime_state.write().await;
         if let Some(state) = states.get_mut(session_key) {
             state.yolo = false;
         }
@@ -867,19 +561,19 @@ impl Gateway {
 
     /// Set the message handler for processing incoming messages.
     pub async fn set_message_handler(&self, handler: MessageHandler) {
-        *self.message_handler.write().await = Some(handler);
-        *self.message_handler_with_context.write().await = None;
+        *self.router.message_handler.write().await = Some(handler);
+        *self.router.message_handler_with_context.write().await = None;
     }
 
     /// Set a context-aware message handler for processing incoming messages.
     pub async fn set_message_handler_with_context(&self, handler: MessageHandlerWithContext) {
-        *self.message_handler_with_context.write().await = Some(handler);
+        *self.router.message_handler_with_context.write().await = Some(handler);
     }
 
     /// Set the streaming message handler.
     pub async fn set_streaming_handler(&self, handler: StreamingMessageHandler) {
-        *self.streaming_handler.write().await = Some(handler);
-        *self.streaming_handler_with_context.write().await = None;
+        *self.router.streaming_handler.write().await = Some(handler);
+        *self.router.streaming_handler_with_context.write().await = None;
     }
 
     /// Set a context-aware streaming message handler.
@@ -887,17 +581,17 @@ impl Gateway {
         &self,
         handler: StreamingMessageHandlerWithContext,
     ) {
-        *self.streaming_handler_with_context.write().await = Some(handler);
+        *self.router.streaming_handler_with_context.write().await = Some(handler);
     }
 
     /// Attach gateway hook registry for emitting lifecycle/progress events.
     pub async fn set_hook_registry(&self, registry: Arc<HookRegistry>) {
-        *self.hook_registry.write().await = Some(registry);
+        *self.extensions.hook_registry.write().await = Some(registry);
     }
 
     /// Register agent-layer session teardown (POI flush, memory `on_session_end`, etc.).
     pub async fn set_session_teardown_handler(&self, handler: SessionTeardownHandler) {
-        *self.session_teardown_handler.write().await = Some(handler);
+        *self.session.session_teardown_handler.write().await = Some(handler);
     }
 
     async fn build_teardown_context(
@@ -906,6 +600,7 @@ impl Gateway {
         reason: &str,
     ) -> SessionTeardownContext {
         let state = self
+            .session
             .runtime_state
             .read()
             .await
@@ -928,7 +623,7 @@ impl Gateway {
     }
 
     async fn invoke_session_teardown(&self, ctx: SessionTeardownContext) {
-        let handler = self.session_teardown_handler.read().await.clone();
+        let handler = self.session.session_teardown_handler.read().await.clone();
         if let Some(handler) = handler {
             handler(ctx).await;
         }
@@ -940,7 +635,7 @@ impl Gateway {
     }
 
     async fn teardown_session_key(&self, session_key: &str, reason: &str) {
-        let session = self.session_manager.get_session(session_key).await;
+        let session = self.session.session_manager.get_session(session_key).await;
         let Some(session) = session else {
             return;
         };
@@ -956,7 +651,7 @@ impl Gateway {
 
     /// Flush agent session-end hooks for every in-memory session (gateway shutdown).
     pub async fn teardown_all_sessions(&self, reason: &str) {
-        let snapshots = self.session_manager.drain_all_sessions().await;
+        let snapshots = self.session.session_manager.drain_all_sessions().await;
         for snapshot in snapshots {
             self.teardown_session_snapshot(snapshot, reason).await;
         }
@@ -967,7 +662,7 @@ impl Gateway {
         &self,
         policies: HashMap<String, PlatformAccessPolicy>,
     ) {
-        *self.platform_access_policies.write().await = policies
+        *self.router.platform_access_policies.write().await = policies
             .into_iter()
             .map(|(platform, policy)| (platform.to_ascii_lowercase(), policy))
             .collect();
@@ -975,7 +670,8 @@ impl Gateway {
 
     async fn platform_access_policy(&self, platform: &str) -> Option<PlatformAccessPolicy> {
         let key = platform.trim().to_ascii_lowercase();
-        self.platform_access_policies
+        self.router
+            .platform_access_policies
             .read()
             .await
             .get(&key)
@@ -984,7 +680,7 @@ impl Gateway {
 
     /// Emit one hook event if a registry is configured.
     pub async fn emit_hook_event(&self, event_type: &str, context: serde_json::Value) {
-        let registry = self.hook_registry.read().await.clone();
+        let registry = self.extensions.hook_registry.read().await.clone();
         if let Some(reg) = registry {
             reg.emit(&HookEvent::new(event_type, context)).await;
         }
@@ -998,17 +694,17 @@ impl Gateway {
     ) {
         let name = name.into();
         info!("Registering platform adapter: {}", name);
-        self.adapters.write().await.insert(name, adapter);
+        self.router.adapters.write().await.insert(name, adapter);
     }
 
     /// Retrieve a registered platform adapter by name.
     pub async fn get_adapter(&self, name: &str) -> Option<Arc<dyn PlatformAdapter>> {
-        self.adapters.read().await.get(name).cloned()
+        self.router.adapters.read().await.get(name).cloned()
     }
 
     /// Start all registered and enabled platform adapters.
     pub async fn start_all(&self) -> Result<(), GatewayError> {
-        let adapters = self.adapters.read().await;
+        let adapters = self.router.adapters.read().await;
         for (name, adapter) in adapters.iter() {
             info!("Starting platform adapter: {}", name);
             if let Err(e) = adapter.start().await {
@@ -1022,7 +718,7 @@ impl Gateway {
 
     /// Stop all platform adapters gracefully.
     pub async fn stop_all(&self) -> Result<(), GatewayError> {
-        let adapters = self.adapters.read().await;
+        let adapters = self.router.adapters.read().await;
         for (name, adapter) in adapters.iter() {
             info!("Stopping platform adapter: {}", name);
             if let Err(e) = adapter.stop().await {
@@ -1098,7 +794,7 @@ impl Gateway {
     /// DM check → session lookup → agent loop → response.
     pub async fn route_message(&self, incoming: &IncomingMessage) -> Result<(), GatewayError> {
         let route_start = Instant::now();
-        if let Some(ctx) = self.messaging_session.read().await.as_ref() {
+        if let Some(ctx) = self.delivery.messaging_session.read().await.as_ref() {
             ctx.set(&incoming.platform, &incoming.chat_id);
         }
         let access_policy = self.platform_access_policy(&incoming.platform).await;
@@ -1177,7 +873,7 @@ impl Gateway {
                 }
             } else if dm_mode != DmAccessMode::Open {
                 let pair_approved =
-                    self.pairing_store.lock().ok().is_some_and(|store| {
+                    self.router.pairing_store.lock().ok().is_some_and(|store| {
                         store.is_approved(&incoming.platform, &incoming.user_id)
                     });
                 if pair_approved {
@@ -1187,7 +883,7 @@ impl Gateway {
                         "DM authorized by pairing store"
                     );
                 } else {
-                    let dm_manager = self.dm_manager.read().await;
+                    let dm_manager = self.router.dm_manager.read().await;
                     let decision = dm_manager
                         .handle_dm(&incoming.user_id, &incoming.platform)
                         .await;
@@ -1196,7 +892,7 @@ impl Gateway {
                         DmDecision::Allow => {}
                         DmDecision::Pair { message } => {
                             let pair_msg = self
-                            .pairing_store
+                            .router.pairing_store
                             .lock()
                             .ok()
                             .and_then(|store| {
@@ -1243,7 +939,7 @@ impl Gateway {
         let is_dm = Some(incoming.is_dm);
         let session_key = crate::telegram_topic::compose_telegram_session_key(incoming)
             .unwrap_or_else(|| {
-                self.session_manager.compose_session_key_with_dm(
+                self.session.session_manager.compose_session_key_with_dm(
                     &incoming.platform,
                     &incoming.chat_id,
                     &incoming.user_id,
@@ -1282,7 +978,7 @@ impl Gateway {
             }
         }
         if !is_slash_command {
-            if let Some(dispatcher) = self.clarify_dispatcher.read().await.as_ref() {
+            if let Some(dispatcher) = self.extensions.clarify_dispatcher.read().await.as_ref() {
                 if dispatcher
                     .try_fulfill_for_session(
                         &session_key,
@@ -1304,8 +1000,9 @@ impl Gateway {
         let _session_serial = self.acquire_session_serial(&session_key).await;
 
         // 2. Get or create session
-        let existing_session = self.session_manager.get_session(&session_key).await;
+        let existing_session = self.session.session_manager.get_session(&session_key).await;
         let session = self
+            .session
             .session_manager
             .get_or_create_session_with_dm(
                 &incoming.platform,
@@ -1316,11 +1013,13 @@ impl Gateway {
             .await;
         crate::telegram_topic::maybe_bind_new_topic_lane(incoming, &session_key, &session.id);
         if let Some(bound_id) = crate::telegram_topic::bound_session_id(incoming) {
-            self.session_manager
+            self.session
+                .session_manager
                 .apply_persisted_session_id(&session_key, &bound_id)
                 .await;
         }
         let session = self
+            .session
             .session_manager
             .get_session(&session_key)
             .await
@@ -1333,10 +1032,10 @@ impl Gateway {
         );
         #[cfg(feature = "discord")]
         if incoming.platform == "discord" {
-            if let Some(adapter) = self.discord_adapter.read().await.clone() {
+            if let Some(adapter) = self.extensions.discord_adapter.read().await.clone() {
                 let _ = adapter
                     .backfill_session_if_empty(
-                        &self.session_manager,
+                        &self.session.session_manager,
                         &session_key,
                         &incoming.chat_id,
                     )
@@ -1409,6 +1108,7 @@ impl Gateway {
 
         // 3–4. Append inbound user message and take a shared snapshot for the agent loop.
         let messages = self
+            .session
             .session_manager
             .append_and_snapshot(&session_key, user_message)
             .await;
@@ -1478,12 +1178,17 @@ impl Gateway {
             }
         };
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
-        self.active_routes
+        self.session
+            .active_routes
             .write()
             .await
             .insert(session_key.clone(), abort_handle);
         let routed = Abortable::new(route_future, abort_reg).await;
-        self.active_routes.write().await.remove(&session_key);
+        self.session
+            .active_routes
+            .write()
+            .await
+            .remove(&session_key);
         self.clear_turn_outbound_tracking(&session_key);
         typing_guard.finish().await;
         let processing_result = match routed {
@@ -1709,7 +1414,7 @@ impl Gateway {
             .replace('-', "_");
         let default_mode = self.default_tool_progress_for_platform(&platform);
         let next = {
-            let mut modes = self.tool_progress_modes.write().await;
+            let mut modes = self.router.tool_progress_modes.write().await;
             let current = modes
                 .get(&platform)
                 .cloned()
@@ -1719,7 +1424,7 @@ impl Gateway {
             next
         };
 
-        let mut states = self.runtime_state.write().await;
+        let mut states = self.session.runtime_state.write().await;
         let state = states.entry(session_key.to_string()).or_default();
         state.tool_progress = Some(next.clone());
         state.verbose = next == "verbose";
@@ -1797,7 +1502,10 @@ impl Gateway {
                 )
                 .await;
                 self.teardown_session_key(session_key, "reset").await;
-                self.session_manager.reset_session(session_key).await;
+                self.session
+                    .session_manager
+                    .reset_session(session_key)
+                    .await;
                 self.clear_session_boundary_security_state(session_key)
                     .await;
                 self.emit_hook_event(
@@ -1814,14 +1522,14 @@ impl Gateway {
                 Ok(true)
             }
             GatewayCommandResult::SwitchModel { model, reply } => {
-                let mut states = self.runtime_state.write().await;
+                let mut states = self.session.runtime_state.write().await;
                 states.entry(session_key.to_string()).or_default().model = Some(model);
                 drop(states);
                 self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::SwitchPersonality { name, reply } => {
-                let mut states = self.runtime_state.write().await;
+                let mut states = self.session.runtime_state.write().await;
                 states
                     .entry(session_key.to_string())
                     .or_default()
@@ -1831,7 +1539,7 @@ impl Gateway {
                 Ok(true)
             }
             GatewayCommandResult::ApproveUser { user_id } => {
-                let mut dm = self.dm_manager.write().await;
+                let mut dm = self.router.dm_manager.write().await;
                 if !dm.is_admin(&incoming.user_id) {
                     drop(dm);
                     self.send_message(
@@ -1855,7 +1563,7 @@ impl Gateway {
                 Ok(true)
             }
             GatewayCommandResult::DenyUser { user_id } => {
-                let mut dm = self.dm_manager.write().await;
+                let mut dm = self.router.dm_manager.write().await;
                 if !dm.is_admin(&incoming.user_id) {
                     drop(dm);
                     self.send_message(
@@ -1880,9 +1588,9 @@ impl Gateway {
             }
             GatewayCommandResult::StopAgent(reply) => {
                 let _ = self.abort_active_route(session_key).await;
-                for (task_id, status, _) in self.background_tasks.list_tasks() {
+                for (task_id, status, _) in self.router.background_tasks.list_tasks() {
                     if status == TaskStatus::Running {
-                        let _ = self.background_tasks.cancel(&task_id);
+                        let _ = self.router.background_tasks.cancel(&task_id);
                     }
                 }
                 self.send_incoming_reply(incoming, &reply, None).await?;
@@ -1916,7 +1624,7 @@ impl Gateway {
                 Ok(true)
             }
             GatewayCommandResult::ToggleYolo(_) => {
-                let mut states = self.runtime_state.write().await;
+                let mut states = self.session.runtime_state.write().await;
                 let state = states.entry(session_key.to_string()).or_default();
                 state.yolo = !state.yolo;
                 if state.yolo {
@@ -1964,7 +1672,7 @@ impl Gateway {
             GatewayCommandResult::SetHome { path, reply } => {
                 let target = std::path::Path::new(&path);
                 let response = if target.exists() && target.is_dir() {
-                    let mut states = self.runtime_state.write().await;
+                    let mut states = self.session.runtime_state.write().await;
                     states.entry(session_key.to_string()).or_default().home = Some(path);
                     reply
                 } else {
@@ -1979,7 +1687,7 @@ impl Gateway {
                 Ok(true)
             }
             GatewayCommandResult::ReloadMcp => {
-                let mut generation = self.mcp_reload_generation.write().await;
+                let mut generation = self.router.mcp_reload_generation.write().await;
                 *generation += 1;
                 let current = *generation;
                 drop(generation);
@@ -1993,14 +1701,14 @@ impl Gateway {
                 Ok(true)
             }
             GatewayCommandResult::SwitchProvider { provider, reply } => {
-                let mut states = self.runtime_state.write().await;
+                let mut states = self.session.runtime_state.write().await;
                 states.entry(session_key.to_string()).or_default().provider = Some(provider);
                 drop(states);
                 self.send_incoming_reply(incoming, &reply, None).await?;
                 Ok(true)
             }
             GatewayCommandResult::SwitchProfile { profile, reply } => {
-                let mut states = self.runtime_state.write().await;
+                let mut states = self.session.runtime_state.write().await;
                 states.entry(session_key.to_string()).or_default().profile = Some(profile);
                 drop(states);
                 self.send_incoming_reply(incoming, &reply, None).await?;
@@ -2009,13 +1717,14 @@ impl Gateway {
             GatewayCommandResult::SwitchBranch { branch } => {
                 let reply = match branch {
                     Some(name) => {
-                        let mut states = self.runtime_state.write().await;
+                        let mut states = self.session.runtime_state.write().await;
                         states.entry(session_key.to_string()).or_default().branch =
                             Some(name.clone());
                         format!("🌿 Branch context switched to: {}", name)
                     }
                     None => {
                         let branch = self
+                            .session
                             .runtime_state
                             .read()
                             .await
@@ -2032,6 +1741,7 @@ impl Gateway {
                 let mut removed = 0usize;
                 for _ in 0..steps {
                     if self
+                        .session
                         .session_manager
                         .pop_last_message(session_key)
                         .await
@@ -2071,7 +1781,7 @@ impl Gateway {
                 Ok(handled)
             }
             GatewayCommandResult::ToggleReasoning(_) => {
-                let mut states = self.runtime_state.write().await;
+                let mut states = self.session.runtime_state.write().await;
                 let state = states.entry(session_key.to_string()).or_default();
                 state.reasoning = !state.reasoning;
                 let reply = format!(
@@ -2086,7 +1796,7 @@ impl Gateway {
                 service_tier,
                 reply,
             } => {
-                let mut states = self.runtime_state.write().await;
+                let mut states = self.session.runtime_state.write().await;
                 states
                     .entry(session_key.to_string())
                     .or_default()
@@ -2096,7 +1806,7 @@ impl Gateway {
                 Ok(true)
             }
             GatewayCommandResult::Retry => {
-                let mut messages = self.session_manager.get_messages(session_key).await;
+                let mut messages = self.session.session_manager.get_messages(session_key).await;
                 if matches!(
                     messages.last().map(|m| m.role),
                     Some(MessageRole::Assistant)
@@ -2113,10 +1823,15 @@ impl Gateway {
                     .await?;
                     return Ok(true);
                 }
-                self.session_manager
+                self.session
+                    .session_manager
                     .replace_messages(session_key, messages)
                     .await;
-                let snapshot = self.session_manager.snapshot_messages(session_key).await;
+                let snapshot = self
+                    .session
+                    .session_manager
+                    .snapshot_messages(session_key)
+                    .await;
                 let route_id = Self::route_correlation_id(incoming, session_key);
                 self.route_non_streaming(incoming, snapshot, session_key, &route_id)
                     .await?;
@@ -2124,10 +1839,19 @@ impl Gateway {
             }
             GatewayCommandResult::Undo => {
                 let mut removed = 0usize;
-                if let Some(last) = self.session_manager.pop_last_message(session_key).await {
+                if let Some(last) = self
+                    .session
+                    .session_manager
+                    .pop_last_message(session_key)
+                    .await
+                {
                     removed += 1;
                     if last.role == MessageRole::Assistant {
-                        if let Some(prev) = self.session_manager.pop_last_message(session_key).await
+                        if let Some(prev) = self
+                            .session
+                            .session_manager
+                            .pop_last_message(session_key)
+                            .await
                         {
                             if prev.role == MessageRole::User {
                                 removed += 1;
@@ -2183,6 +1907,7 @@ impl Gateway {
             }
             GatewayCommandResult::ListSessions => {
                 let sessions = self
+                    .session
                     .session_manager
                     .get_user_sessions(&incoming.user_id)
                     .await;
@@ -2191,7 +1916,7 @@ impl Gateway {
                 } else {
                     let mut out = String::from("📚 **Your sessions:**\n\n");
                     for s in sessions {
-                        let key = self.session_manager.compose_session_key(
+                        let key = self.session.session_manager.compose_session_key(
                             &s.platform,
                             &s.chat_id,
                             &s.user_id,
@@ -2212,11 +1937,12 @@ impl Gateway {
             }
             GatewayCommandResult::SwitchSession { session_id } => {
                 let sessions = self
+                    .session
                     .session_manager
                     .get_user_sessions(&incoming.user_id)
                     .await;
                 let matched = sessions.iter().find(|s| {
-                    let key = self.session_manager.compose_session_key(
+                    let key = self.session.session_manager.compose_session_key(
                         &s.platform,
                         &s.chat_id,
                         &s.user_id,
@@ -2225,6 +1951,7 @@ impl Gateway {
                 });
                 let msg = if let Some(target) = matched {
                     let copied = self
+                        .session
                         .session_manager
                         .replace_messages(session_key, target.messages.as_ref().clone())
                         .await;
@@ -2252,7 +1979,7 @@ impl Gateway {
                 Ok(true)
             }
             GatewayCommandResult::ShowBudget { new_budget } => {
-                let mut states = self.runtime_state.write().await;
+                let mut states = self.session.runtime_state.write().await;
                 let state = states.entry(session_key.to_string()).or_default();
                 let msg = match new_budget {
                     Some(b) => {
@@ -2474,7 +2201,11 @@ impl Gateway {
             format!(
                 "Archived skills ({}):\n{}",
                 names.len(),
-                names.iter().map(|n| format!("  • {n}")).collect::<Vec<_>>().join("\n")
+                names
+                    .iter()
+                    .map(|n| format!("  • {n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             )
         }
     }
@@ -2503,7 +2234,12 @@ impl Gateway {
         let mut runtime_context = self.build_runtime_context(incoming, session_key).await;
         runtime_context.deferred_post_delivery_messages = Some(deferred_messages.clone());
         runtime_context.deferred_post_delivery_released = Some(deferred_release.clone());
-        let context_handler = self.message_handler_with_context.read().await.clone();
+        let context_handler = self
+            .router
+            .message_handler_with_context
+            .read()
+            .await
+            .clone();
         let feedback_done = Arc::new(AtomicBool::new(false));
         if platform_wants_processing_ack(&incoming.platform) {
             let adapter = self.get_adapter(&incoming.platform).await;
@@ -2533,7 +2269,7 @@ impl Gateway {
         let response_result = if let Some(handler) = context_handler {
             handler(messages, runtime_context).await
         } else {
-            let handler = self.message_handler.read().await;
+            let handler = self.router.message_handler.read().await;
             let handler = handler
                 .as_ref()
                 .ok_or_else(|| GatewayError::Platform("No message handler configured".into()))?;
@@ -2572,7 +2308,8 @@ impl Gateway {
         );
 
         // Add assistant response to session
-        self.session_manager
+        self.session
+            .session_manager
             .add_message(session_key, Message::assistant(&response))
             .await;
         self.bump_output_usage(session_key, response.chars().count())
@@ -2662,12 +2399,23 @@ impl Gateway {
         let mut runtime_context = self.build_runtime_context(incoming, session_key).await;
         runtime_context.deferred_post_delivery_messages = Some(deferred_messages.clone());
         runtime_context.deferred_post_delivery_released = Some(deferred_release.clone());
-        let context_handler = self.streaming_handler_with_context.read().await.clone();
+        let context_handler = self
+            .router
+            .streaming_handler_with_context
+            .read()
+            .await
+            .clone();
         let messages = Self::inject_discord_channel_context(incoming, messages);
         let message_count = messages.len();
         let legacy_messages = self.inject_runtime_hints(session_key, messages).await;
 
-        let adapter_for_platform = self.adapters.read().await.get(&incoming.platform).cloned();
+        let adapter_for_platform = self
+            .router
+            .adapters
+            .read()
+            .await
+            .get(&incoming.platform)
+            .cloned();
         let native_streaming = adapter_for_platform
             .as_ref()
             .map(|a| a.supports_native_streaming())
@@ -2781,6 +2529,7 @@ impl Gateway {
         } else {
             // Start legacy stream manager session.
             let stream_handle = self
+                .delivery
                 .stream_manager
                 .start_stream(&incoming.platform, &incoming.chat_id)
                 .await;
@@ -2814,7 +2563,10 @@ impl Gateway {
                     // Feishu does not use placeholder message edits in legacy streaming.
                     // Keep anchor unset so finalize sends the final text directly.
                 } else if let Some(mid) = anchor_id.as_deref().or(Some("stream-anchor")) {
-                    self.stream_manager.set_message_id(stream_id, mid).await;
+                    self.delivery
+                        .stream_manager
+                        .set_message_id(stream_id, mid)
+                        .await;
                 }
             }
             if incoming.platform != "feishu" {
@@ -2822,10 +2574,10 @@ impl Gateway {
                 first_visible_chunk_ms.store(0, Ordering::Release);
             }
 
-            let stream_manager = self.stream_manager.clone();
+            let stream_manager = self.delivery.stream_manager.clone();
             let platform = incoming.platform.clone();
             let chat_id = incoming.chat_id.clone();
-            let gateway_adapters = self.adapters.read().await.clone();
+            let gateway_adapters = self.router.adapters.read().await.clone();
             let sid = stream_id.clone().unwrap_or_default();
             // Serialize progressive edits; block chunk flushes after finalize so a
             // late in-flight edit cannot overwrite the final message (Discord race).
@@ -2990,7 +2742,7 @@ impl Gateway {
         let response_result = if let Some(handler) = context_handler {
             handler(legacy_messages, runtime_context, on_chunk).await
         } else {
-            let handler = self.streaming_handler.read().await;
+            let handler = self.router.streaming_handler.read().await;
             let handler = handler
                 .as_ref()
                 .ok_or_else(|| GatewayError::Platform("No streaming handler configured".into()))?;
@@ -3064,8 +2816,13 @@ impl Gateway {
                 finalized.store(true, Ordering::Release);
                 let _guard = edit_lock.lock().await;
             }
-            let anchor_message_id = self.stream_manager.get_message_id(&stream_id).await;
+            let anchor_message_id = self
+                .delivery
+                .stream_manager
+                .get_message_id(&stream_id)
+                .await;
             let accumulated = self
+                .delivery
                 .stream_manager
                 .finish_stream(&stream_id)
                 .await
@@ -3182,7 +2939,8 @@ impl Gateway {
         }
 
         // Add assistant response to session
-        self.session_manager
+        self.session
+            .session_manager
             .add_message(session_key, Message::assistant(&response))
             .await;
         self.bump_output_usage(session_key, response.chars().count())
@@ -3248,6 +3006,7 @@ impl Gateway {
         messages: Arc<Vec<Message>>,
     ) -> Arc<Vec<Message>> {
         let state = self
+            .session
             .runtime_state
             .read()
             .await
@@ -3293,15 +3052,17 @@ impl Gateway {
         session_key: &str,
     ) -> GatewayRuntimeContext {
         let state = self
+            .session
             .runtime_state
             .read()
             .await
             .get(session_key)
             .cloned()
             .unwrap_or_default();
-        let mcp_reload_generation = *self.mcp_reload_generation.read().await;
+        let mcp_reload_generation = *self.router.mcp_reload_generation.read().await;
 
         let session_id = self
+            .session
             .session_manager
             .get_session(session_key)
             .await
@@ -3366,7 +3127,7 @@ impl Gateway {
     }
 
     async fn bump_input_usage(&self, session_key: &str, chars: usize) {
-        let mut usage = self.usage_stats.write().await;
+        let mut usage = self.session.usage_stats.write().await;
         let stat = usage.entry(session_key.to_string()).or_default();
         stat.user_messages += 1;
         stat.input_chars += chars as u64;
@@ -3374,7 +3135,7 @@ impl Gateway {
     }
 
     async fn bump_output_usage(&self, session_key: &str, chars: usize) {
-        let mut usage = self.usage_stats.write().await;
+        let mut usage = self.session.usage_stats.write().await;
         let stat = usage.entry(session_key.to_string()).or_default();
         stat.assistant_messages += 1;
         stat.output_chars += chars as u64;
@@ -3387,7 +3148,8 @@ impl Gateway {
         session_key: &str,
         display: hermes_agent::SessionUsageDisplay,
     ) {
-        self.session_token_usage
+        self.session
+            .session_token_usage
             .write()
             .await
             .insert(session_key.to_string(), display);
@@ -3395,6 +3157,7 @@ impl Gateway {
 
     async fn build_usage_text(&self, session_key: &str) -> String {
         if let Some(display) = self
+            .session
             .session_token_usage
             .read()
             .await
@@ -3405,7 +3168,7 @@ impl Gateway {
                 return hermes_agent::format_gateway_usage_text(&display);
             }
         }
-        let usage = self.usage_stats.read().await;
+        let usage = self.session.usage_stats.read().await;
         let stat = usage.get(session_key).cloned().unwrap_or_default();
         let approx_input_tokens = stat.input_chars / 4;
         let approx_output_tokens = stat.output_chars / 4;
@@ -3454,7 +3217,7 @@ impl Gateway {
     }
 
     async fn compress_context(&self, session_key: &str, max_messages: usize) -> CompressionOutcome {
-        let current = self.session_manager.get_messages(session_key).await;
+        let current = self.session.session_manager.get_messages(session_key).await;
         if current.len() <= max_messages {
             return CompressionOutcome::default();
         }
@@ -3494,7 +3257,8 @@ impl Gateway {
         }
         compressed.extend(tail);
 
-        self.session_manager
+        self.session
+            .session_manager
             .replace_messages(session_key, compressed)
             .await;
         CompressionOutcome {
@@ -3505,6 +3269,7 @@ impl Gateway {
 
     async fn build_status_text(&self, session_key: &str) -> String {
         let state = self
+            .session
             .runtime_state
             .read()
             .await
@@ -3512,14 +3277,16 @@ impl Gateway {
             .cloned()
             .unwrap_or_default();
         let usage = self
+            .session
             .usage_stats
             .read()
             .await
             .get(session_key)
             .cloned()
             .unwrap_or_default();
-        let messages = self.session_manager.get_messages(session_key).await;
+        let messages = self.session.session_manager.get_messages(session_key).await;
         let running_tasks = self
+            .router
             .background_tasks
             .list_tasks()
             .into_iter()
@@ -3544,7 +3311,7 @@ impl Gateway {
             state.home.unwrap_or_else(|| "(not set)".to_string()),
             messages.len(),
             running_tasks,
-            *self.mcp_reload_generation.read().await,
+            *self.router.mcp_reload_generation.read().await,
             usage.input_chars,
             usage.output_chars
         )
@@ -3611,8 +3378,9 @@ impl Gateway {
 
         if ff_count > 0 {
             // ── All FireAndForget: parallel dispatch ────────────────────────
-            let legacy_handler = self.message_handler.read().await.as_ref().cloned();
+            let legacy_handler = self.router.message_handler.read().await.as_ref().cloned();
             let context_handler = self
+                .router
                 .message_handler_with_context
                 .read()
                 .await
@@ -3637,11 +3405,12 @@ impl Gateway {
                 let preview = Self::gateway_command_preview(&cmd.args);
                 ack.push_str(&format!("{}. [{}] \"{}\"\n", i + 1, task_id, preview));
                 let _ = self
+                    .router
                     .background_tasks
                     .submit_with_id(task_id.clone(), cmd.args.clone());
 
                 let messages: Arc<Vec<Message>> = if is_btw {
-                    let mut history = self.session_manager.get_messages(session_key).await;
+                    let mut history = self.session.session_manager.get_messages(session_key).await;
                     history.push(Message::user(format!(
                         "[Ephemeral /btw side question. Answer using the conversation \
                          context. No tools available. Be direct and concise.]\n\n{}",
@@ -3657,7 +3426,7 @@ impl Gateway {
             self.send_incoming_reply(incoming, &ack, None).await?;
 
             for (task_id, messages) in dispatches {
-                let manager = self.background_tasks.clone();
+                let manager = self.router.background_tasks.clone();
                 let task_id_inner = task_id;
                 let runtime_context = self.build_runtime_context(incoming, session_key).await;
                 let ctx_handler = context_handler.clone();
@@ -3705,7 +3474,7 @@ impl Gateway {
     ) -> Result<bool, GatewayError> {
         let trimmed = prompt.trim();
         if trimmed.eq_ignore_ascii_case("list") {
-            let tasks = self.background_tasks.list_tasks();
+            let tasks = self.router.background_tasks.list_tasks();
             let summary = if tasks.is_empty() {
                 "No background tasks.".to_string()
             } else {
@@ -3719,7 +3488,7 @@ impl Gateway {
             return Ok(true);
         }
         if let Some(task_id) = trimmed.strip_prefix("cancel ").map(str::trim) {
-            let ok = self.background_tasks.cancel(task_id);
+            let ok = self.router.background_tasks.cancel(task_id);
             let msg = if ok {
                 format!("Cancelled background task {}", task_id)
             } else {
@@ -3729,10 +3498,11 @@ impl Gateway {
             return Ok(true);
         }
         if let Some(task_id) = trimmed.strip_prefix("status ").map(str::trim) {
-            let msg = match self.background_tasks.get_status(task_id) {
+            let msg = match self.router.background_tasks.get_status(task_id) {
                 Some(TaskStatus::Running) => format!("Task {} is running", task_id),
                 Some(TaskStatus::Completed) => {
                     let result = self
+                        .router
                         .background_tasks
                         .get_result(task_id)
                         .unwrap_or_default();
@@ -3751,7 +3521,8 @@ impl Gateway {
         } else {
             Self::python_async_task_id("bg")
         };
-        self.background_tasks
+        self.router
+            .background_tasks
             .submit_with_id(task_id.clone(), trimmed.to_string())
             .map_err(GatewayError::Platform)?;
 
@@ -3766,8 +3537,9 @@ impl Gateway {
         };
         self.send_incoming_reply(incoming, &ack, None).await?;
 
-        let legacy_handler = self.message_handler.read().await.as_ref().cloned();
+        let legacy_handler = self.router.message_handler.read().await.as_ref().cloned();
         let context_handler = self
+            .router
             .message_handler_with_context
             .read()
             .await
@@ -3778,12 +3550,12 @@ impl Gateway {
                 "No message handler configured".into(),
             ));
         }
-        let manager = self.background_tasks.clone();
+        let manager = self.router.background_tasks.clone();
         let task_id_for_task = task_id.clone();
         // Python `GatewayRunner._run_background_task`: only `user_message=prompt` (fresh session).
         // Python `_run_btw_task`: `conversation_history` snapshot + ephemeral user turn (no tools).
         let original_messages: Arc<Vec<Message>> = if isolated_context {
-            let mut history = self.session_manager.get_messages(session_key).await;
+            let mut history = self.session.session_manager.get_messages(session_key).await;
             let btw_user = format!(
                 "[Ephemeral /btw side question. Answer using the conversation \
                  context. No tools available. Be direct and concise.]\n\n{}",
@@ -4156,12 +3928,12 @@ impl Gateway {
 
     /// Get a reference to the session manager.
     pub fn session_manager(&self) -> &Arc<SessionManager> {
-        &self.session_manager
+        &self.session.session_manager
     }
 
     /// Get a reference to the stream manager.
     pub fn stream_manager(&self) -> &Arc<StreamManager> {
-        &self.stream_manager
+        &self.delivery.stream_manager
     }
 
     /// Get a reference to the gateway config.
@@ -4171,7 +3943,7 @@ impl Gateway {
 
     /// List the names of all registered adapters.
     pub async fn adapter_names(&self) -> Vec<String> {
-        self.adapters.read().await.keys().cloned().collect()
+        self.router.adapters.read().await.keys().cloned().collect()
     }
 
     /// Periodically expires inactive sessions.
@@ -4180,7 +3952,7 @@ impl Gateway {
             tokio::time::interval(std::time::Duration::from_secs(interval_secs.max(30)));
         loop {
             ticker.tick().await;
-            let expired = self.session_manager.expire_idle_sessions().await;
+            let expired = self.session.session_manager.expire_idle_sessions().await;
             let expired_count = expired.len();
             for snapshot in expired {
                 self.teardown_session_snapshot(snapshot, "idle_expiry")
@@ -4198,7 +3970,7 @@ impl Gateway {
             tokio::time::interval(std::time::Duration::from_secs(interval_secs.max(20)));
         loop {
             ticker.tick().await;
-            let snapshot = self.adapters.read().await.clone();
+            let snapshot = self.router.adapters.read().await.clone();
             for (name, adapter) in snapshot {
                 if !adapter.is_running() {
                     tracing::warn!(platform = %name, "Adapter appears offline, reconnecting");
@@ -4216,7 +3988,7 @@ impl Gateway {
     ) -> Message {
         let event = Self::incoming_to_event(incoming);
         let (provider, model) = {
-            let states = self.runtime_state.read().await;
+            let states = self.session.runtime_state.read().await;
             states
                 .get(session_key)
                 .map(|s| (s.provider.clone(), s.model.clone()))
@@ -4231,7 +4003,7 @@ impl Gateway {
             aux_vision_model: None,
             aux_vision_base_url: None,
         };
-        let preparer = self.inbound_preparer.read().await.clone();
+        let preparer = self.extensions.inbound_preparer.read().await.clone();
         let mut message = if let Some(preparer) = preparer {
             match preparer.prepare(&event, &ctx).await {
                 Ok(message) => message,
@@ -4257,10 +4029,10 @@ impl Gateway {
 
     /// Transcribe inbound audio attachments (Python `_enrich_message_with_transcription`).
     async fn enrich_inbound_audio(&self, event: &InboundEvent, base: &Message) -> Option<Message> {
-        if !*self.stt_enabled.read().await {
+        if !*self.extensions.stt_enabled.read().await {
             return None;
         }
-        let voice = self.voice_manager.read().await.clone()?;
+        let voice = self.extensions.voice_manager.read().await.clone()?;
         let mut transcripts = Vec::new();
         for (idx, url) in event.media_urls.iter().enumerate() {
             let media_type = event
@@ -4337,7 +4109,7 @@ impl Gateway {
 
     /// Authorize user based on DM manager and platform context.
     pub async fn is_user_authorized(&self, user_id: &str, platform: &str) -> bool {
-        let dm = self.dm_manager.read().await;
+        let dm = self.router.dm_manager.read().await;
         dm.is_authorized(user_id) || dm.handle_dm(user_id, platform).await == DmDecision::Allow
     }
 
@@ -4994,17 +4766,21 @@ mod tests {
         gw.register_adapter("test", adapter).await;
 
         let session_key = gw
+            .session
             .session_manager
             .compose_session_key("test", "chat1", "user1");
         let _ = gw
+            .session
             .session_manager
             .get_or_create_session("test", "chat1", "user1")
             .await;
-        gw.session_manager
+        gw.session
+            .session_manager
             .add_message(&session_key, Message::system("sys"))
             .await;
         for _ in 0..40 {
-            gw.session_manager
+            gw.session
+                .session_manager
                 .add_message(
                     &session_key,
                     Message {
@@ -5058,13 +4834,16 @@ mod tests {
         gw.register_adapter("test", adapter).await;
 
         let session_key = gw
+            .session
             .session_manager
             .compose_session_key("test", "chat1", "user1");
         let _ = gw
+            .session
             .session_manager
             .get_or_create_session("test", "chat1", "user1")
             .await;
-        gw.session_manager
+        gw.session
+            .session_manager
             .add_message(&session_key, Message::system("sys"))
             .await;
         for i in 0..40 {
@@ -5073,7 +4852,10 @@ mod tests {
             } else {
                 Message::assistant(format!("turn {i} content"))
             };
-            gw.session_manager.add_message(&session_key, message).await;
+            gw.session
+                .session_manager
+                .add_message(&session_key, message)
+                .await;
         }
 
         let incoming = IncomingMessage {
@@ -5099,7 +4881,7 @@ mod tests {
         assert!(!reply.contains("⚠️"));
         drop(msgs);
 
-        let updated = gw.session_manager.get_messages(&session_key).await;
+        let updated = gw.session.session_manager.get_messages(&session_key).await;
         assert!(
             updated.iter().any(|m| {
                 m.content
@@ -5503,9 +5285,11 @@ mod tests {
         gw.register_adapter("test", adapter).await;
 
         let session_key_1 = gw
+            .session
             .session_manager
             .compose_session_key("test", "chat1", "user1");
         let session_key_2 = gw
+            .session
             .session_manager
             .compose_session_key("test", "chat2", "user1");
 
@@ -5542,7 +5326,7 @@ mod tests {
         assert!(gw.route_message(&yolo_chat2).await.is_ok());
 
         {
-            let states = gw.runtime_state.read().await;
+            let states = gw.session.runtime_state.read().await;
             assert_eq!(states.get(&session_key_1).map(|s| s.yolo), Some(true));
             assert_eq!(states.get(&session_key_2).map(|s| s.yolo), Some(true));
         }
@@ -5563,7 +5347,7 @@ mod tests {
         };
         assert!(gw.route_message(&reset_chat1).await.is_ok());
 
-        let states = gw.runtime_state.read().await;
+        let states = gw.session.runtime_state.read().await;
         assert_eq!(states.get(&session_key_1).map(|s| s.yolo), Some(false));
         assert_eq!(states.get(&session_key_2).map(|s| s.yolo), Some(true));
     }
@@ -5582,17 +5366,21 @@ mod tests {
         gw.register_adapter("test", adapter).await;
 
         let current_key = gw
+            .session
             .session_manager
             .compose_session_key("test", "chat1", "user1");
         let target_key = gw
+            .session
             .session_manager
             .compose_session_key("test", "chat2", "user1");
 
         let _ = gw
+            .session
             .session_manager
             .get_or_create_session("test", "chat2", "user1")
             .await;
-        gw.session_manager
+        gw.session
+            .session_manager
             .add_message(&target_key, Message::user("history from another session"))
             .await;
 
@@ -5612,7 +5400,7 @@ mod tests {
         };
         assert!(gw.route_message(&yolo_chat1).await.is_ok());
         {
-            let states = gw.runtime_state.read().await;
+            let states = gw.session.runtime_state.read().await;
             assert_eq!(states.get(&current_key).map(|s| s.yolo), Some(true));
         }
 
@@ -5632,7 +5420,7 @@ mod tests {
         };
         assert!(gw.route_message(&switch).await.is_ok());
 
-        let states = gw.runtime_state.read().await;
+        let states = gw.session.runtime_state.read().await;
         assert_eq!(states.get(&current_key).map(|s| s.yolo), Some(false));
     }
 

@@ -540,39 +540,15 @@ pub(crate) fn handle_agent_run_complete(
             app.push_ui_assistant(format!("Error: {}", err));
         }
     }
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .stream_buffer
-        .clear();
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .stream_md_cache
-        .clear();
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .stream_muted = false;
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .stream_needs_break = false;
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .active_tools
-        .clear();
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .awaiting_run_complete = false;
+    // finish_processing_cycle drops ProcessingState; guard defensively
+    if let Some(p) = state.phase.processing_mut() {
+        p.stream_buffer.clear();
+        p.stream_md_cache.clear();
+        p.stream_muted = false;
+        p.stream_needs_break = false;
+        p.active_tools.clear();
+        p.awaiting_run_complete = false;
+    }
 }
 
 pub(crate) fn handle_managed_app_run_complete(
@@ -595,39 +571,14 @@ pub(crate) fn handle_managed_app_run_complete(
             app.push_ui_assistant(format!("Error: {}", err));
         }
     }
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .stream_buffer
-        .clear();
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .stream_md_cache
-        .clear();
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .stream_muted = false;
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .stream_needs_break = false;
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .active_tools
-        .clear();
-    state
-        .phase
-        .processing_mut()
-        .expect("processing")
-        .awaiting_run_complete = false;
+    if let Some(p) = state.phase.processing_mut() {
+        p.stream_buffer.clear();
+        p.stream_md_cache.clear();
+        p.stream_muted = false;
+        p.stream_needs_break = false;
+        p.active_tools.clear();
+        p.awaiting_run_complete = false;
+    }
 }
 
 pub(crate) fn extract_file_like_hints(text: &str, limit: usize) -> Vec<String> {
@@ -1499,8 +1450,10 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                         stream_event_completes_background_task(&first);
                     let outcome = process_stream_lane_event(&mut state, first);
                     let mut redraw = apply_stream_lane_outcome(&mut app, &mut state, outcome);
-                    let (drain_cap, drain_budget) =
-                        stream_lane_budget(state.phase.is_processing(), state.phase.processing_mut().expect("processing").stream_chunk_count);
+                    let (drain_cap, drain_budget) = stream_lane_budget(
+                        state.phase.is_processing(),
+                        state.phase.processing_mut().map_or(0, |p| p.stream_chunk_count),
+                    );
                     let drain_started = Instant::now();
                     for _ in 0..drain_cap {
                         match tui.stream_events.try_recv() {

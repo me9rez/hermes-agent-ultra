@@ -58,7 +58,7 @@ fn build_minimal_test_app() -> App {
         acp: AcpState::new(),
         snapshot_gate: SnapshotPersistGate::new(),
         persist_lane: PersistLane::spawn(),
-        auth_lane: AuthLane::new(),
+        auth_lane: AuthLane::spawn(),
     }
 }
 
@@ -1323,12 +1323,13 @@ fn test_is_transient_retryable_error_detects_timeout_and_rate_limit() {
 
 #[test]
 fn test_auth_error_requires_nous_login_detects_missing_login_shape() {
+    use super::auth_refresh::auth_error_requires_nous_login;
     let err = AgentError::AuthFailed(
         "Hermes is not logged into Nous Portal. Run `hermes auth nous`.".to_string(),
     );
-    assert!(App::auth_error_requires_nous_login(&err));
+    assert!(auth_error_requires_nous_login(&err));
     let unrelated = AgentError::AuthFailed("rate limited".to_string());
-    assert!(!App::auth_error_requires_nous_login(&unrelated));
+    assert!(!auth_error_requires_nous_login(&unrelated));
 }
 
 #[test]

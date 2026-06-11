@@ -124,30 +124,6 @@ impl App {
     }
 
     /// Create a new session, clearing all messages.
-    pub fn new_session(&mut self) {
-        self.flush_session_teardown(false);
-        let old_session_id = self.session.session_id.clone();
-        self.session.session_id = Uuid::new_v4().to_string();
-        self.core
-            .agent
-            .set_runtime_session_id(&self.session.session_id);
-        self.core.agent.reset_session_state(None, None, false);
-        self.core.agent.reset_session_db_flush_cursor();
-        self.core.agent.invalidate_cached_system_prompt();
-        self.notify_memory_session_switch(
-            &self.session.session_id,
-            &old_session_id,
-            true,
-            "new_session",
-        );
-        self.session.messages.clear();
-        self.session.ui_messages.clear();
-        self.stream.pending_image_hint = None;
-        self.session.session_objective = None;
-        self.session.clear_input_history();
-        self.ensure_session_stub_snapshot();
-    }
-    /// Apply the finalized messages returned by an agent run.
     pub fn apply_agent_result(&mut self, result: hermes_core::AgentResult) {
         self.session.messages = result.messages;
         self.prune_ui_after_current_messages();

@@ -66,11 +66,11 @@ impl SessionRuntime for App {
     }
 
     fn new_session(&mut self) {
-        App::new_session(self);
+        super::super::session_lifecycle::new_session(self);
     }
 
     fn reset_session(&mut self) {
-        App::reset_session(self);
+        super::super::session_lifecycle::new_session(self);
     }
 
     fn undo_last(&mut self) -> Option<String> {

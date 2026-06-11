@@ -27,13 +27,16 @@ use crate::tui::StreamHandle;
 
 pub mod actors;
 mod agent_run;
+mod auth_refresh;
 mod inference;
+mod model_switch;
 mod objective;
 mod pet;
 mod provider;
 mod quorum;
 mod runtime_auth;
 mod runtime_env;
+mod session_lifecycle;
 mod session_snapshot;
 mod snapshot_policy;
 mod state;
@@ -287,7 +290,7 @@ impl App {
             acp: AcpState::new(),
             snapshot_gate: SnapshotPersistGate::new(),
             persist_lane: PersistLane::spawn(),
-            auth_lane: AuthLane::new(),
+            auth_lane: AuthLane::spawn(),
         };
         app.ensure_session_stub_snapshot();
         Ok(app)
@@ -519,12 +522,6 @@ impl App {
         Ok((pre_len, post_len, did_compress))
     }
 
-    /// Reset the current session — Python parity: same as [`Self::new_session`]
-    /// (`/reset` is an alias of `/new`; rotates session id + memory switch).
-    pub fn reset_session(&mut self) {
-        self.new_session();
-    }
-
     /// Set or clear a durable session objective.
     ///
     /// The objective is represented as a synthetic system message so it is
@@ -631,57 +628,6 @@ impl App {
         Some(prefill)
     }
 
-    /// Switch the active model, rebuilding the provider and agent loop.
-    pub fn switch_model(&mut self, provider_model: &str) {
-        self.model.current_model = provider_model.to_string();
-        sync_runtime_model_env(&self.core.config, &self.model.current_model);
-
-        let provider = build_provider(&self.core.config, &self.model.current_model);
-        let agent_config = build_agent_config(&self.core.config, &self.model.current_model);
-        let agent_tool_registry = Arc::new(bridge_tool_registry(&self.core.tool_registry));
-
-        let agent_inner = hermes_agent::attach_agent_runtime(AgentLoop::new(
-            agent_config,
-            agent_tool_registry,
-            provider,
-        ))
-        .with_async_tool_dispatch(async_tool_dispatch_for(self.core.tool_registry.clone()))
-        .with_callbacks(Self::stream_callbacks(
-            self.stream.stream_handle_shared.clone(),
-        ));
-        let orchestrator = Arc::new(SubAgentOrchestrator::from_parent(
-            &agent_inner,
-            self.state_root.clone(),
-        ));
-        self.core.agent = Arc::new(agent_inner.with_sub_agent_orchestrator(orchestrator));
-
-        match SessionPersistence::new(&self.state_root)
-            .update_session_model(&self.session.session_id, &self.model.current_model)
-        {
-            Ok(true) => tracing::debug!(
-                "Persisted model switch for session {} to {}",
-                self.session.session_id,
-                self.model.current_model
-            ),
-            Ok(false) => {}
-            Err(err) => tracing::debug!("Failed to persist model switch to session DB: {}", err),
-        }
-
-        tracing::info!("Switched model to: {}", provider_model);
-    }
-
-    /// Switch the active personality.
-    pub fn switch_personality(&mut self, name: &str) {
-        self.model.current_personality = Some(name.to_string());
-        tracing::info!("Switched personality to: {}", name);
-    }
-
-    /// Return the normalized runtime provider for the active model.
-    pub fn current_runtime_provider(&self) -> String {
-        let (provider_name, _) =
-            resolve_provider_and_model(&self.core.config, &self.model.current_model);
-        normalize_runtime_provider_name(provider_name.as_str())
-    }
     pub fn history_prev(&mut self) -> Option<&str> {
         self.session.history_prev()
     }

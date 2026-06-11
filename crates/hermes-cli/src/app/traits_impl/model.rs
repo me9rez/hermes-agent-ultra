@@ -27,11 +27,17 @@ impl ModelRuntime for App {
     }
 
     fn switch_model(&mut self, provider_model: &str) {
-        App::switch_model(self, provider_model);
+        self.model.switch_active(
+            provider_model,
+            &mut self.core,
+            &self.session,
+            &self.state_root,
+            &self.stream,
+        );
     }
 
     fn switch_personality(&mut self, name: &str) {
-        App::switch_personality(self, name);
+        self.model.switch_personality_name(name);
     }
 
     fn current_runtime_provider(&self) -> String {

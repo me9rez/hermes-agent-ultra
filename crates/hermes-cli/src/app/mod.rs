@@ -152,8 +152,6 @@ pub struct UiTranscriptMessage {
 // ---------------------------------------------------------------------------
 
 impl App {
-    const SESSION_OBJECTIVE_PREFIX: &'static str = "[SESSION_OBJECTIVE] ";
-
     /// Create a new `App` from the parsed CLI arguments.
     ///
     /// This loads (or creates) the gateway configuration, builds a tool
@@ -479,20 +477,6 @@ impl App {
         Ok(())
     }
 
-    /// Sync runtime session id to the agent and notify memory providers.
-    pub fn notify_memory_session_switch(
-        &self,
-        new_session_id: &str,
-        parent_session_id: &str,
-        reset: bool,
-        reason: &str,
-    ) {
-        self.core.agent.set_runtime_session_id(new_session_id);
-        self.core
-            .agent
-            .memory_on_session_switch(new_session_id, parent_session_id, reset, reason);
-    }
-
     /// Run agent-loop context compression on the current CLI transcript.
     pub async fn compress_conversation_context(
         &mut self,
@@ -520,34 +504,6 @@ impl App {
             }
         }
         Ok((pre_len, post_len, did_compress))
-    }
-
-    /// Set or clear a durable session objective.
-    ///
-    /// The objective is represented as a synthetic system message so it is
-    /// applied consistently on every turn without requiring user re-entry.
-    pub fn set_session_objective(&mut self, objective: Option<String>) {
-        self.session.messages.retain(|m| {
-            if m.role != hermes_core::MessageRole::System {
-                return true;
-            }
-            !m.content
-                .as_deref()
-                .unwrap_or_default()
-                .starts_with(Self::SESSION_OBJECTIVE_PREFIX)
-        });
-
-        self.session.session_objective = objective
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-
-        if let Some(obj) = &self.session.session_objective {
-            let system =
-                hermes_core::Message::system(format!("{}{}", Self::SESSION_OBJECTIVE_PREFIX, obj));
-            self.session.messages.insert(0, system);
-        }
-        self.prune_ui_after_current_messages();
     }
 
     /// Retry the last user message by re-sending it to the agent.

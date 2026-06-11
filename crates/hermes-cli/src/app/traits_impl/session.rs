@@ -40,7 +40,7 @@ impl SessionRuntime for App {
     }
 
     fn set_session_objective(&mut self, objective: Option<String>) {
-        App::set_session_objective(self, objective);
+        self.session.set_session_objective(objective);
     }
 
     fn input_history(&self) -> &[String] {
@@ -62,7 +62,8 @@ impl SessionRuntime for App {
         reset: bool,
         reason: &str,
     ) {
-        App::notify_memory_session_switch(self, new_session_id, parent_session_id, reset, reason);
+        self.core
+            .notify_memory_session_switch(new_session_id, parent_session_id, reset, reason);
     }
 
     fn new_session(&mut self) {

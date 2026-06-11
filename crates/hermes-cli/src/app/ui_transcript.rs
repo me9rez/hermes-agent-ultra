@@ -43,7 +43,6 @@ impl App {
     }
 
     pub(super) fn prune_ui_after_current_messages(&mut self) {
-        let cap = self.session.messages.len();
-        self.session.ui_messages.retain(|m| m.insert_at <= cap);
+        self.session.prune_ui_after_current_messages();
     }
 }

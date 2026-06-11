@@ -17,6 +17,7 @@ pub mod attachment_inference;
 pub mod background;
 pub mod channel_directory;
 pub mod clarify_session;
+pub mod command_runtime;
 pub mod commands;
 pub mod delivery;
 pub mod delivery_layer;

@@ -274,9 +274,9 @@ impl IncomingMessage {
 }
 
 #[derive(Debug, Clone, Default)]
-struct CompressionOutcome {
-    removed_messages: usize,
-    summary_warning: Option<String>,
+pub(crate) struct CompressionOutcome {
+    pub(crate) removed_messages: usize,
+    pub(crate) summary_warning: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +424,7 @@ impl Gateway {
         self.register_adapter("discord", adapter).await;
     }
 
-    async fn abort_active_route(&self, session_key: &str) -> bool {
+    pub(crate) async fn abort_active_route(&self, session_key: &str) -> bool {
         let handle = self.session.active_routes.write().await.remove(session_key);
         if let Some(handle) = handle {
             handle.abort();
@@ -512,7 +512,7 @@ impl Gateway {
         self.session.session_manager.get_messages(&key).await.len()
     }
 
-    async fn clear_session_boundary_security_state(&self, session_key: &str) {
+    pub(crate) async fn clear_session_boundary_security_state(&self, session_key: &str) {
         if session_key.is_empty() {
             return;
         }
@@ -628,7 +628,7 @@ impl Gateway {
         self.invoke_session_teardown(ctx).await;
     }
 
-    async fn teardown_session_key(&self, session_key: &str, reason: &str) {
+    pub(crate) async fn teardown_session_key(&self, session_key: &str, reason: &str) {
         let session = self.session.session_manager.get_session(session_key).await;
         let Some(session) = session else {
             return;
@@ -935,7 +935,7 @@ impl Gateway {
         }
     }
 
-    async fn apply_verbose_command(
+    pub(crate) async fn apply_verbose_command(
         &self,
         incoming: &IncomingMessage,
         session_key: &str,
@@ -1023,574 +1023,14 @@ impl Gateway {
         session_key: &str,
         result: GatewayCommandResult,
     ) -> Result<bool, GatewayError> {
-        match result {
-            GatewayCommandResult::Reply(text)
-            | GatewayCommandResult::ShowHelp(text)
-            | GatewayCommandResult::Unknown(text) => {
-                self.send_incoming_reply(incoming, &text, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ResetSession(reply) => {
-                self.emit_hook_event(
-                    "session:end",
-                    serde_json::json!({
-                        "platform": incoming.platform,
-                        "chat_id": incoming.chat_id,
-                        "user_id": incoming.user_id,
-                        "session_id": session_key
-                    }),
-                )
-                .await;
-                self.teardown_session_key(session_key, "reset").await;
-                self.session
-                    .session_manager
-                    .reset_session(session_key)
-                    .await;
-                self.clear_session_boundary_security_state(session_key)
-                    .await;
-                self.emit_hook_event(
-                    "session:reset",
-                    serde_json::json!({
-                        "platform": incoming.platform,
-                        "chat_id": incoming.chat_id,
-                        "user_id": incoming.user_id,
-                        "session_id": session_key
-                    }),
-                )
-                .await;
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::SwitchModel { model, reply } => {
-                let mut states = self.session.runtime_state.write().await;
-                states.entry(session_key.to_string()).or_default().model = Some(model);
-                drop(states);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::SwitchPersonality { name, reply } => {
-                let mut states = self.session.runtime_state.write().await;
-                states
-                    .entry(session_key.to_string())
-                    .or_default()
-                    .personality = Some(name);
-                drop(states);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ApproveUser { user_id } => {
-                let mut dm = self.router.dm_manager.write().await;
-                if !dm.is_admin(&incoming.user_id) {
-                    drop(dm);
-                    self.send_message(
-                        &incoming.platform,
-                        &incoming.chat_id,
-                        "🚫 /approve requires admin privileges.",
-                        None,
-                    )
-                    .await?;
-                    return Ok(true);
-                }
-                dm.authorize_user(user_id.clone());
-                drop(dm);
-                self.send_message(
-                    &incoming.platform,
-                    &incoming.chat_id,
-                    &format!("✅ User '{}' has been approved for DM access.", user_id),
-                    None,
-                )
-                .await?;
-                Ok(true)
-            }
-            GatewayCommandResult::DenyUser { user_id } => {
-                let mut dm = self.router.dm_manager.write().await;
-                if !dm.is_admin(&incoming.user_id) {
-                    drop(dm);
-                    self.send_message(
-                        &incoming.platform,
-                        &incoming.chat_id,
-                        "🚫 /deny requires admin privileges.",
-                        None,
-                    )
-                    .await?;
-                    return Ok(true);
-                }
-                dm.deauthorize_user(&user_id);
-                drop(dm);
-                self.send_message(
-                    &incoming.platform,
-                    &incoming.chat_id,
-                    &format!("⛔ User '{}' has been removed from DM allowlist.", user_id),
-                    None,
-                )
-                .await?;
-                Ok(true)
-            }
-            GatewayCommandResult::StopAgent(reply) => {
-                let _ = self.abort_active_route(session_key).await;
-                for (task_id, status, _) in self.router.background_tasks.list_tasks() {
-                    if status == TaskStatus::Running {
-                        let _ = self.router.background_tasks.cancel(&task_id);
-                    }
-                }
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ShowUsage(_) => {
-                let text = self.build_usage_text(session_key).await;
-                self.send_incoming_reply(incoming, &text, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::CompressContext(_) => {
-                let outcome = self.compress_context(session_key, 24).await;
-                let mut reply = format!(
-                    "📦 Context compressed. Removed {} old messages.",
-                    outcome.removed_messages
-                );
-                if let Some(warning) = outcome.summary_warning {
-                    reply.push_str("\n\n");
-                    reply.push_str(&warning);
-                }
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ShowInsights(text) => {
-                self.send_incoming_reply(incoming, &text, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ToggleVerbose(_) => {
-                let reply = self.apply_verbose_command(incoming, session_key).await?;
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ToggleYolo(_) => {
-                let mut states = self.session.runtime_state.write().await;
-                let state = states.entry(session_key.to_string()).or_default();
-                state.yolo = !state.yolo;
-                if state.yolo {
-                    hermes_tools::approval::enable_session_yolo(session_key);
-                } else {
-                    hermes_tools::approval::disable_session_yolo(session_key);
-                }
-                let reply = format!("🤠 YOLO mode: {}", if state.yolo { "ON" } else { "OFF" });
-                drop(states);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ResolveCommandApproval {
-                choice,
-                resolve_all,
-            } => {
-                let count = hermes_tools::approval::resolve_gateway_approval(
-                    session_key,
-                    choice,
-                    resolve_all,
-                );
-                let reply = if count == 0 {
-                    "No pending command approval for this session.".to_string()
-                } else if choice == hermes_tools::approval::ApprovalChoice::Deny {
-                    if count == 1 {
-                        "Denied pending command. The blocked agent will resume with a denial."
-                            .to_string()
-                    } else {
-                        format!("Denied {count} pending commands.")
-                    }
-                } else if count == 1 {
-                    format!(
-                        "Approved pending command with `{}` scope. Resuming.",
-                        choice.as_str()
-                    )
-                } else {
-                    format!(
-                        "Approved {count} pending commands with `{}` scope.",
-                        choice.as_str()
-                    )
-                };
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::SetHome { path, reply } => {
-                let target = std::path::Path::new(&path);
-                let response = if target.exists() && target.is_dir() {
-                    let mut states = self.session.runtime_state.write().await;
-                    states.entry(session_key.to_string()).or_default().home = Some(path);
-                    reply
-                } else {
-                    format!("❌ Path not found or not a directory: {}", path)
-                };
-                self.send_incoming_reply(incoming, &response, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ShowStatus(_) => {
-                let text = self.build_status_text(session_key).await;
-                self.send_incoming_reply(incoming, &text, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ReloadMcp => {
-                let mut generation = self.router.mcp_reload_generation.write().await;
-                *generation += 1;
-                let current = *generation;
-                drop(generation);
-                self.send_message(
-                    &incoming.platform,
-                    &incoming.chat_id,
-                    &format!("🔄 MCP registry reloaded (generation {}).", current),
-                    None,
-                )
-                .await?;
-                Ok(true)
-            }
-            GatewayCommandResult::SwitchProvider { provider, reply } => {
-                let mut states = self.session.runtime_state.write().await;
-                states.entry(session_key.to_string()).or_default().provider = Some(provider);
-                drop(states);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::SwitchProfile { profile, reply } => {
-                let mut states = self.session.runtime_state.write().await;
-                states.entry(session_key.to_string()).or_default().profile = Some(profile);
-                drop(states);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::SwitchBranch { branch } => {
-                let reply = match branch {
-                    Some(name) => {
-                        let mut states = self.session.runtime_state.write().await;
-                        states.entry(session_key.to_string()).or_default().branch =
-                            Some(name.clone());
-                        format!("🌿 Branch context switched to: {}", name)
-                    }
-                    None => {
-                        let branch = self
-                            .session
-                            .runtime_state
-                            .read()
-                            .await
-                            .get(session_key)
-                            .and_then(|s| s.branch.clone())
-                            .unwrap_or_else(|| "main".to_string());
-                        format!("🌿 Current branch context: {}", branch)
-                    }
-                };
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::Rollback { steps } => {
-                let mut removed = 0usize;
-                for _ in 0..steps {
-                    if self
-                        .session
-                        .session_manager
-                        .pop_last_message(session_key)
-                        .await
-                        .is_some()
-                    {
-                        removed += 1;
-                    } else {
-                        break;
-                    }
-                }
-                self.send_message(
-                    &incoming.platform,
-                    &incoming.chat_id,
-                    &format!("↪️ Rolled back {} message(s).", removed),
-                    None,
-                )
-                .await?;
-                Ok(true)
-            }
-            GatewayCommandResult::CheckUpdate => {
-                let version =
-                    std::env::var("HERMES_LATEST_VERSION").unwrap_or_else(|_| "latest".to_string());
-                self.send_update_notification(&incoming.platform, &incoming.chat_id, &version)
-                    .await?;
-                Ok(true)
-            }
-            GatewayCommandResult::BackgroundTask { prompt } => {
-                let handled = self
-                    .handle_background_command(incoming, session_key, &prompt, false)
-                    .await?;
-                Ok(handled)
-            }
-            GatewayCommandResult::BtwTask { prompt } => {
-                let handled = self
-                    .handle_background_command(incoming, session_key, &prompt, true)
-                    .await?;
-                Ok(handled)
-            }
-            GatewayCommandResult::ToggleReasoning(_) => {
-                let mut states = self.session.runtime_state.write().await;
-                let state = states.entry(session_key.to_string()).or_default();
-                state.reasoning = !state.reasoning;
-                let reply = format!(
-                    "🧠 Reasoning visibility: {}",
-                    if state.reasoning { "ON" } else { "OFF" }
-                );
-                drop(states);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::SwitchFast {
-                service_tier,
-                reply,
-            } => {
-                let mut states = self.session.runtime_state.write().await;
-                states
-                    .entry(session_key.to_string())
-                    .or_default()
-                    .service_tier = service_tier.clone();
-                drop(states);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::Retry => {
-                let mut messages = self.session.session_manager.get_messages(session_key).await;
-                if matches!(
-                    messages.last().map(|m| m.role),
-                    Some(MessageRole::Assistant)
-                ) {
-                    messages.pop();
-                }
-                if messages.is_empty() {
-                    self.send_message(
-                        &incoming.platform,
-                        &incoming.chat_id,
-                        "No previous message to retry.",
-                        None,
-                    )
-                    .await?;
-                    return Ok(true);
-                }
-                self.session
-                    .session_manager
-                    .replace_messages(session_key, messages)
-                    .await;
-                let snapshot = self
-                    .session
-                    .session_manager
-                    .snapshot_messages(session_key)
-                    .await;
-                let route_id = Self::route_correlation_id(incoming, session_key);
-                self.route_non_streaming(incoming, snapshot, session_key, &route_id)
-                    .await?;
-                Ok(true)
-            }
-            GatewayCommandResult::Undo => {
-                let mut removed = 0usize;
-                if let Some(last) = self
-                    .session
-                    .session_manager
-                    .pop_last_message(session_key)
-                    .await
-                {
-                    removed += 1;
-                    if last.role == MessageRole::Assistant {
-                        if let Some(prev) = self
-                            .session
-                            .session_manager
-                            .pop_last_message(session_key)
-                            .await
-                        {
-                            if prev.role == MessageRole::User {
-                                removed += 1;
-                            }
-                        }
-                    }
-                }
-                let reply = if removed == 0 {
-                    "Nothing to undo.".to_string()
-                } else {
-                    format!("↩️ Removed {} message(s) from current session.", removed)
-                };
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ListTools { filter } => {
-                let suffix = match &filter {
-                    Some(f) => format!(" (filter: `{}`)", f),
-                    None => String::new(),
-                };
-                let text = format!(
-                    "🔧 Tools{}.\nRegistered MCP tools are resolved at runtime after reload.",
-                    suffix
-                );
-                self.send_incoming_reply(incoming, &text, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::EnableTool { name } => {
-                self.send_message(
-                    &incoming.platform,
-                    &incoming.chat_id,
-                    &format!(
-                        "✅ Tool enabled: `{}` (effective on next agent turn).",
-                        name
-                    ),
-                    None,
-                )
-                .await?;
-                Ok(true)
-            }
-            GatewayCommandResult::DisableTool { name } => {
-                self.send_message(
-                    &incoming.platform,
-                    &incoming.chat_id,
-                    &format!(
-                        "⛔ Tool disabled: `{}` (effective on next agent turn).",
-                        name
-                    ),
-                    None,
-                )
-                .await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ListSessions => {
-                let sessions = self
-                    .session
-                    .session_manager
-                    .get_user_sessions(&incoming.user_id)
-                    .await;
-                let text = if sessions.is_empty() {
-                    "📚 No sessions found for your user.".to_string()
-                } else {
-                    let mut out = String::from("📚 **Your sessions:**\n\n");
-                    for s in sessions {
-                        let key = self.session.session_manager.compose_session_key(
-                            &s.platform,
-                            &s.chat_id,
-                            &s.user_id,
-                        );
-                        out.push_str(&format!(
-                            "• `{}` — {} messages, platform `{}` (id `{}`)\n",
-                            key,
-                            s.messages.len(),
-                            s.platform,
-                            s.id
-                        ));
-                    }
-                    out.push_str("\nUse `/sessions <key or id>` to switch.");
-                    out
-                };
-                self.send_incoming_reply(incoming, &text, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::SwitchSession { session_id } => {
-                let sessions = self
-                    .session
-                    .session_manager
-                    .get_user_sessions(&incoming.user_id)
-                    .await;
-                let matched = sessions.iter().find(|s| {
-                    let key = self.session.session_manager.compose_session_key(
-                        &s.platform,
-                        &s.chat_id,
-                        &s.user_id,
-                    );
-                    key == session_id || s.id == session_id
-                });
-                let msg = if let Some(target) = matched {
-                    let copied = self
-                        .session
-                        .session_manager
-                        .replace_messages(session_key, target.messages.as_ref().clone())
-                        .await;
-                    if copied {
-                        self.clear_session_boundary_security_state(session_key)
-                            .await;
-                        format!(
-                            "🔁 Switched to session `{}`.\nLoaded {} message(s) into this chat context.",
-                            session_id,
-                            target.messages.len()
-                        )
-                    } else {
-                        format!(
-                            "❌ Could not switch to `{}` because the current chat session key is missing.",
-                            session_id
-                        )
-                    }
-                } else {
-                    format!(
-                        "❌ No session matching `{}` for your user. Try `/sessions` to list keys.",
-                        session_id
-                    )
-                };
-                self.send_incoming_reply(incoming, &msg, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::ShowBudget { new_budget } => {
-                let mut states = self.session.runtime_state.write().await;
-                let state = states.entry(session_key.to_string()).or_default();
-                let msg = match new_budget {
-                    Some(b) => {
-                        state.budget = Some(b);
-                        format!("💰 Usage budget set to {:.4}.", b)
-                    }
-                    None => match state.budget {
-                        Some(b) => format!("💰 Current usage budget: {:.4}.", b),
-                        None => {
-                            "💰 No usage budget set. Use `/budget <amount>` to set one.".to_string()
-                        }
-                    },
-                };
-                drop(states);
-                self.send_incoming_reply(incoming, &msg, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::CuratorStatus => {
-                let reply = self.execute_curator_status();
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::CuratorRun { dry_run } => {
-                let reply = self.execute_curator_run(dry_run);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::CuratorPause => {
-                let reply = self.execute_curator_pause_resume(true);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::CuratorResume => {
-                let reply = self.execute_curator_pause_resume(false);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::CuratorPin { name } => {
-                let reply = self.execute_curator_pin_unpin(&name, true);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::CuratorUnpin { name } => {
-                let reply = self.execute_curator_pin_unpin(&name, false);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::CuratorArchive { name } => {
-                let reply = self.execute_curator_archive(&name);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::CuratorRestore { name } => {
-                let reply = self.execute_curator_restore(&name);
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::CuratorListArchived => {
-                let reply = self.execute_curator_list_archived();
-                self.send_incoming_reply(incoming, &reply, None).await?;
-                Ok(true)
-            }
-            GatewayCommandResult::Noop => Ok(true),
-        }
+        crate::command_runtime::apply_command(self, incoming, session_key, result).await
     }
 
     // -----------------------------------------------------------------------
     // Curator helper methods
     // -----------------------------------------------------------------------
 
-    fn execute_curator_status(&self) -> String {
+    pub(crate) fn execute_curator_status(&self) -> String {
         let skills_dir = hermes_config::hermes_home().join("skills");
         let state = hermes_skills::load_curator_state(&skills_dir);
         let config = &self.config.curator;
@@ -1631,7 +1071,7 @@ impl Gateway {
         lines.join("\n")
     }
 
-    fn execute_curator_run(&self, dry_run: bool) -> String {
+    pub(crate) fn execute_curator_run(&self, dry_run: bool) -> String {
         let skills_dir = hermes_config::hermes_home().join("skills");
         let config = &self.config.curator;
         let result = hermes_skills::apply_automatic_transitions(&skills_dir, config);
@@ -1662,7 +1102,7 @@ impl Gateway {
         lines.join("\n")
     }
 
-    fn execute_curator_pause_resume(&self, pause: bool) -> String {
+    pub(crate) fn execute_curator_pause_resume(&self, pause: bool) -> String {
         let skills_dir = hermes_config::hermes_home().join("skills");
         match hermes_skills::set_paused(&skills_dir, pause) {
             Ok(()) => {
@@ -1676,7 +1116,7 @@ impl Gateway {
         }
     }
 
-    fn execute_curator_pin_unpin(&self, name: &str, pin: bool) -> String {
+    pub(crate) fn execute_curator_pin_unpin(&self, name: &str, pin: bool) -> String {
         if name.is_empty() {
             return if pin {
                 "Usage: /curator pin <skill-name>".to_string()
@@ -1697,7 +1137,7 @@ impl Gateway {
         }
     }
 
-    fn execute_curator_archive(&self, name: &str) -> String {
+    pub(crate) fn execute_curator_archive(&self, name: &str) -> String {
         if name.is_empty() {
             return "Usage: /curator archive <skill-name>".to_string();
         }
@@ -1709,7 +1149,7 @@ impl Gateway {
         }
     }
 
-    fn execute_curator_restore(&self, name: &str) -> String {
+    pub(crate) fn execute_curator_restore(&self, name: &str) -> String {
         if name.is_empty() {
             return "Usage: /curator restore <skill-name>".to_string();
         }
@@ -1721,7 +1161,7 @@ impl Gateway {
         }
     }
 
-    fn execute_curator_list_archived(&self) -> String {
+    pub(crate) fn execute_curator_list_archived(&self) -> String {
         let skills_dir = hermes_config::hermes_home().join("skills");
         let archive_dir = skills_dir.join(".archive");
         let mut names = Vec::new();
@@ -2695,7 +2135,7 @@ impl Gateway {
             .insert(session_key.to_string(), display);
     }
 
-    async fn build_usage_text(&self, session_key: &str) -> String {
+    pub(crate) async fn build_usage_text(&self, session_key: &str) -> String {
         if let Some(display) = self
             .session
             .session_token_usage
@@ -2756,7 +2196,11 @@ impl Gateway {
         Ok(out)
     }
 
-    async fn compress_context(&self, session_key: &str, max_messages: usize) -> CompressionOutcome {
+    pub(crate) async fn compress_context(
+        &self,
+        session_key: &str,
+        max_messages: usize,
+    ) -> CompressionOutcome {
         let current = self.session.session_manager.get_messages(session_key).await;
         if current.len() <= max_messages {
             return CompressionOutcome::default();
@@ -2807,7 +2251,7 @@ impl Gateway {
         }
     }
 
-    async fn build_status_text(&self, session_key: &str) -> String {
+    pub(crate) async fn build_status_text(&self, session_key: &str) -> String {
         let state = self
             .session
             .runtime_state
@@ -3005,7 +2449,7 @@ impl Gateway {
         Ok(true)
     }
 
-    async fn handle_background_command(
+    pub(crate) async fn handle_background_command(
         &self,
         incoming: &IncomingMessage,
         session_key: &str,

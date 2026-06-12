@@ -1217,6 +1217,21 @@ impl Gateway {
     ///
     /// When the review completes, a follow-up message is sent to the
     /// originating chat with the LLM summary.
+
+    /// Truncate a string to at most `max_chars` **characters** (not bytes).
+    ///
+    /// Safe for CJK and other multi-byte UTF-8 text. Uses char-level
+    /// iteration instead of byte-index slicing.
+    fn truncate_to_chars(s: &str, max_chars: usize) -> String {
+        if s.chars().count() <= max_chars {
+            return s.to_string();
+        }
+        let take = max_chars.saturating_sub(1).max(1);
+        let mut out: String = s.chars().take(take).collect();
+        out.push('\u{2026}'); // …
+        out
+    }
+
     pub(crate) async fn spawn_curator_llm_review(
         &self,
         incoming: &IncomingMessage,
@@ -1246,11 +1261,7 @@ impl Gateway {
                 Ok(result) => {
                     let store = hermes_skills::UsageStore::new();
                     let mut state = hermes_skills::load_curator_state(&store);
-                    let summary = if result.len() > 300 {
-                        format!("{}...", &result[..300])
-                    } else {
-                        result.clone()
-                    };
+                    let summary = Self::truncate_to_chars(&result, 300);
                     state.last_run_summary = Some(format!("llm: {}", summary));
                     if let Err(e) = hermes_skills::save_curator_state(&store, &state) {
                         tracing::warn!("Failed to save curator state after LLM review: {}", e);
@@ -1258,10 +1269,11 @@ impl Gateway {
 
                     // Deliver LLM review result to the user
                     let header = "📋 Curator LLM review complete:\n\n";
-                    let truncated = if result.len() > 1500 {
-                        format!("{}...\n\n(truncated, check /curator status for full summary)", &result[..1500])
+                    let truncated_body = Self::truncate_to_chars(&result, 1500);
+                    let truncated = if result.chars().count() > 1500 {
+                        format!("{truncated_body}\n\n(truncated, check /curator status for full summary)")
                     } else {
-                        result
+                        truncated_body
                     };
                     let reply = format!("{header}{truncated}");
                     if let Some(adapter) = adapter {

@@ -547,11 +547,7 @@ fn extract_curator_review_result(
     });
 
     // Summary: take first 500 chars of final_response as fallback
-    let summary = if final_response.len() > 500 {
-        final_response[..500].to_string()
-    } else {
-        final_response.clone()
-    };
+    let summary = truncate_chars(&final_response, 500);
 
     let model = conv
         .loop_result

@@ -32,6 +32,7 @@ pub mod kanban;
 pub mod live_messaging;
 pub mod lumio;
 pub mod mcp_config;
+pub mod moa_wiring;
 pub mod model_switch;
 pub mod pairing_store;
 pub mod paths;

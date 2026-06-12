@@ -12,6 +12,19 @@ use std::sync::Arc;
 // SessionSearchBackend trait
 // ---------------------------------------------------------------------------
 
+/// Options controlling session search behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionSearchOptions {
+    /// When true, eligible hits may be LLM-summarized (tool path). Recall prefetch sets false.
+    pub summarize: bool,
+}
+
+impl Default for SessionSearchOptions {
+    fn default() -> Self {
+        Self { summarize: true }
+    }
+}
+
 /// Backend for searching past conversation sessions.
 #[async_trait]
 pub trait SessionSearchBackend: Send + Sync {
@@ -22,6 +35,7 @@ pub trait SessionSearchBackend: Send + Sync {
         role_filter: Option<&str>,
         limit: usize,
         current_session_id: Option<&str>,
+        options: SessionSearchOptions,
     ) -> Result<String, ToolError>;
 }
 
@@ -49,7 +63,13 @@ impl ToolHandler for SessionSearchHandler {
         let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
         let capped_limit = limit.min(5);
         self.backend
-            .search(query, role_filter, capped_limit, current_session_id)
+            .search(
+                query,
+                role_filter,
+                capped_limit,
+                current_session_id,
+                SessionSearchOptions::default(),
+            )
             .await
     }
 
@@ -106,6 +126,7 @@ mod tests {
             role_filter: Option<&str>,
             limit: usize,
             current_session_id: Option<&str>,
+            _options: SessionSearchOptions,
         ) -> Result<String, ToolError> {
             Ok(format!(
                 "Found {} results for '{:?}' with role_filter={:?}, current_session_id={:?} (limit: {})",

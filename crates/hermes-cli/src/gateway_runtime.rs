@@ -266,6 +266,7 @@ pub(crate) async fn run_gateway(
             let _p8 = _metrics.phase("handler_wiring");
             let agent_tools_for_cron = Arc::new(bridge_tool_registry(&tool_registry));
             let config_arc = Arc::new(config.clone());
+            hermes_cli::moa_wiring::wire_mixture_of_agents_backend(&tool_registry, config_arc.clone());
             let gateway_agent_cache: GatewayAgentCache =
                 Arc::new(tokio::sync::Mutex::new(HashMap::new()));
             let handler_deps = gateway_handlers::GatewayHandlerDeps {

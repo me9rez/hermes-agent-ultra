@@ -533,7 +533,15 @@ async fn run_with_message_prelude(
         .and_then(|m| m.content.clone())
         .unwrap_or_default();
     let mem_ctx_raw = agent.memory_prefetch(&first_user, session_id);
-    agent.set_turn_ext_prefetch_cache(mem_ctx_raw);
+    let recall_block = agent.recall_prefetch(&first_user, session_id).await;
+    let combined = if recall_block.is_empty() {
+        mem_ctx_raw
+    } else if mem_ctx_raw.is_empty() {
+        recall_block
+    } else {
+        format!("{mem_ctx_raw}\n\n{recall_block}")
+    };
+    agent.set_turn_ext_prefetch_cache(combined);
 
     crate::hooks::apply_pre_llm_call_hooks_once(agent, &mut ctx, &first_user, session_id);
 

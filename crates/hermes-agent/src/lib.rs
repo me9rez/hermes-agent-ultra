@@ -54,6 +54,7 @@ mod provider_serialize_cache;
 pub mod providers_extra;
 pub mod rate_limit;
 pub mod reasoning;
+pub mod recall_planner;
 pub mod replay;
 mod retry_failover;
 pub mod route_learning;
@@ -70,6 +71,7 @@ pub mod stream_scrubber;
 pub mod sub_agent_orchestrator;
 pub mod subdirectory_hints;
 mod system_prompt;
+pub mod text_terms;
 pub mod tool_call_args;
 pub mod tool_executor;
 pub mod tool_guardrails;
@@ -257,7 +259,32 @@ pub fn attach_discovered_plugins(agent: AgentLoop) -> AgentLoop {
 
 /// Memory + plugin runtime wiring for CLI, gateway, HTTP, and cron surfaces.
 pub fn attach_agent_runtime(agent: AgentLoop) -> AgentLoop {
-    attach_discovered_plugins(attach_discovered_memory(agent))
+    attach_recall_backend(attach_discovered_plugins(attach_discovered_memory(agent)))
+}
+
+/// Attach session search backend for proactive recall (Recall Planner).
+pub fn attach_recall_backend(mut agent: AgentLoop) -> AgentLoop {
+    if agent.config().skip_memory || !agent.config().recall_enabled {
+        return agent;
+    }
+    if std::env::var("HERMES_RECALL_ENABLED")
+        .ok()
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+    {
+        return agent;
+    }
+    let backend = hermes_tools::SqliteSessionSearchBackend::default_path()
+        .or_else(|_| {
+            let db_path = hermes_config::paths::hermes_home().join("sessions.db");
+            hermes_tools::SqliteSessionSearchBackend::new(db_path.to_string_lossy().as_ref())
+        });
+    match backend {
+        Ok(b) => agent.with_recall_backend(std::sync::Arc::new(b)),
+        Err(e) => {
+            tracing::debug!(error = %e, "recall backend unavailable; proactive recall disabled");
+            agent
+        }
+    }
 }
 
 /// Attach discovered external memory providers to an `AgentLoop`.

@@ -865,6 +865,8 @@ pub struct AgentLoop {
     pub interrupt: InterruptController,
     /// Optional memory manager for prefetch/sync/tool routing.
     pub memory_manager: Option<Arc<std::sync::Mutex<MemoryManager>>>,
+    /// Optional session search backend for proactive recall (Recall Planner).
+    recall_backend: Option<Arc<dyn hermes_tools::SessionSearchBackend>>,
     /// Local POI store (works even when `skip_memory` is true).
     interest_store: Option<Arc<Mutex<InterestStore>>>,
     /// Consolidated shared mutable state (replaces ~20 scattered Arc<Mutex<>> fields).
@@ -1364,6 +1366,7 @@ impl AgentLoop {
             llm_provider,
             interrupt: InterruptController::new(),
             memory_manager: None,
+            recall_backend: None,
             interest_store: None,
             state: Arc::new(Mutex::new(AgentSharedState::new(
                 stored_primary_runtime.clone(),
@@ -1632,6 +1635,7 @@ impl AgentLoop {
             llm_provider,
             interrupt,
             memory_manager: None,
+            recall_backend: None,
             interest_store: None,
             state: Arc::new(Mutex::new(AgentSharedState::new(
                 stored_primary_runtime.clone(),
@@ -1706,6 +1710,15 @@ impl AgentLoop {
     /// Set the memory manager.
     pub fn with_memory(mut self, mm: Arc<std::sync::Mutex<MemoryManager>>) -> Self {
         self.memory_manager = Some(mm);
+        self
+    }
+
+    /// Attach session search backend for proactive recall at turn start.
+    pub fn with_recall_backend(
+        mut self,
+        backend: Arc<dyn hermes_tools::SessionSearchBackend>,
+    ) -> Self {
+        self.recall_backend = Some(backend);
         self
     }
 
@@ -1887,6 +1900,57 @@ impl AgentLoop {
             }
         }
         parts.join("\n\n")
+    }
+
+    fn recall_enabled_for_agent(&self) -> bool {
+        if self.config().skip_memory {
+            return false;
+        }
+        if !self.config().recall_enabled {
+            return false;
+        }
+        std::env::var("HERMES_RECALL_ENABLED")
+            .ok()
+            .map(|v| {
+                !matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "off" | "no"
+                )
+            })
+            .unwrap_or(true)
+    }
+
+    /// Proactive session recall block for continuation-style user messages.
+    pub(crate) async fn recall_prefetch(&self, query: &str, session_id: &str) -> String {
+        if !self.recall_enabled_for_agent() {
+            return String::new();
+        }
+        let Some(backend) = self.recall_backend.as_ref() else {
+            return String::new();
+        };
+        let Some(rq) = crate::recall_planner::classify(query) else {
+            return String::new();
+        };
+        let options = hermes_tools::SessionSearchOptions {
+            summarize: false,
+        };
+        let json = match backend
+            .search(
+                Some(&rq.keywords),
+                None,
+                5,
+                Some(session_id),
+                options,
+            )
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(error = %e, signal = ?rq.signal, "recall_prefetch search failed");
+                return String::new();
+            }
+        };
+        crate::recall_planner::format_recall_block(&json)
     }
 
     pub(crate) fn memory_sync(&self, user: &str, assistant: &str, session_id: &str) {

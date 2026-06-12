@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use tokio::task::JoinSet;
 
-use crate::tools::session_search::SessionSearchBackend;
+use crate::tools::session_search::{SessionSearchBackend, SessionSearchOptions};
 use hermes_core::ToolError;
 
 const MAX_SESSION_CHARS: usize = 100_000;
@@ -155,6 +155,19 @@ impl SqliteSessionSearchBackend {
         "unknown".to_string()
     }
 
+    fn raw_preview_text(conversation_text: &str) -> String {
+        if conversation_text.chars().count() > 500 {
+            format!(
+                "{}\n…[truncated]",
+                conversation_text.chars().take(500).collect::<String>()
+            )
+        } else if conversation_text.trim().is_empty() {
+            "No preview available.".to_string()
+        } else {
+            conversation_text.to_string()
+        }
+    }
+
     fn summary_client_from_env() -> Option<SessionSummaryClient> {
         let model = std::env::var("HERMES_SESSION_SEARCH_SUMMARY_MODEL")
             .ok()
@@ -279,6 +292,7 @@ impl SessionSearchBackend for SqliteSessionSearchBackend {
         role_filter: Option<&str>,
         limit: usize,
         current_session_id: Option<&str>,
+        options: SessionSearchOptions,
     ) -> Result<String, ToolError> {
         let query = query.map(str::trim).unwrap_or("");
         let limit = limit.min(5).max(1);
@@ -393,9 +407,19 @@ impl SessionSearchBackend for SqliteSessionSearchBackend {
         }
 
         let sessions_searched = seen.len();
-        let summary_client = Self::summary_client_from_env();
         let mut summaries = Vec::new();
-        if let Some(summary_client) = summary_client {
+        if !options.summarize {
+            for task in tasks {
+                let preview = Self::raw_preview_text(&task.conversation_text);
+                summaries.push(json!({
+                    "session_id": task.session_id,
+                    "when": task.when,
+                    "source": task.source,
+                    "model": task.model,
+                    "summary": format!("[Raw preview — summarization disabled]\n{preview}"),
+                }));
+            }
+        } else if let Some(summary_client) = Self::summary_client_from_env() {
             let mut join_set = JoinSet::new();
             for (idx, task) in tasks.iter().cloned().enumerate() {
                 let summary_client = summary_client.clone();
@@ -416,17 +440,10 @@ impl SessionSearchBackend for SqliteSessionSearchBackend {
             for item in ordered.into_iter().flatten() {
                 let (task, maybe_summary) = item;
                 let summary = maybe_summary.unwrap_or_else(|| {
-                    let preview = if task.conversation_text.chars().count() > 500 {
-                        format!(
-                            "{}\n…[truncated]",
-                            task.conversation_text.chars().take(500).collect::<String>()
-                        )
-                    } else if task.conversation_text.trim().is_empty() {
-                        "No preview available.".to_string()
-                    } else {
-                        task.conversation_text.clone()
-                    };
-                    format!("[Raw preview — summarization unavailable]\n{preview}")
+                    format!(
+                        "[Raw preview — summarization unavailable]\n{}",
+                        Self::raw_preview_text(&task.conversation_text)
+                    )
                 });
                 summaries.push(json!({
                     "session_id": task.session_id,
@@ -438,22 +455,13 @@ impl SessionSearchBackend for SqliteSessionSearchBackend {
             }
         } else {
             for task in tasks {
-                let preview = if task.conversation_text.chars().count() > 500 {
-                    format!(
-                        "{}\n…[truncated]",
-                        task.conversation_text.chars().take(500).collect::<String>()
-                    )
-                } else if task.conversation_text.trim().is_empty() {
-                    "No preview available.".to_string()
-                } else {
-                    task.conversation_text.clone()
-                };
+                let preview = Self::raw_preview_text(&task.conversation_text);
                 summaries.push(json!({
                     "session_id": task.session_id,
                     "when": task.when,
                     "source": task.source,
                     "model": task.model,
-                    "summary": format!("[Raw preview — summarization unavailable]\n{}", preview),
+                    "summary": format!("[Raw preview — summarization unavailable]\n{preview}"),
                 }));
             }
         }

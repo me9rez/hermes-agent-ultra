@@ -428,6 +428,10 @@ pub struct AgentConfig {
     #[serde(default = "default_background_review_enabled")]
     pub background_review_enabled: bool,
 
+    /// Proactive session recall at turn start (Recall Planner).
+    #[serde(default = "default_recall_enabled")]
+    pub recall_enabled: bool,
+
     /// Emit background review metrics snapshots (`debug` tracing only).
     /// Child sessions disable this for stricter quiet-mode parity.
     #[serde(default = "default_background_review_metrics_enabled")]
@@ -591,6 +595,10 @@ fn default_background_review_metrics_enabled() -> bool {
     true
 }
 
+fn default_recall_enabled() -> bool {
+    true
+}
+
 fn default_budget_caution_threshold() -> f64 {
     0.7
 }
@@ -723,6 +731,7 @@ impl Default for AgentConfig {
             memory_nudge_interval: default_memory_nudge_interval(),
             skill_creation_nudge_interval: default_skill_creation_nudge_interval(),
             background_review_enabled: default_background_review_enabled(),
+            recall_enabled: default_recall_enabled(),
             background_review_metrics_enabled: default_background_review_metrics_enabled(),
             stored_system_prompt: None,
             cache_ttl: default_cache_ttl(),

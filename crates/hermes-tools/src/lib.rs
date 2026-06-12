@@ -107,7 +107,7 @@ pub use tools::messaging::{MessagingBackend, SendMessageHandler};
 pub use tools::mixture_of_agents::MixtureOfAgentsHandler;
 pub use tools::osv_check::OsvCheckHandler;
 pub use tools::process_registry::ProcessRegistryHandler;
-pub use tools::session_search::{SessionSearchBackend, SessionSearchHandler};
+pub use tools::session_search::{SessionSearchBackend, SessionSearchHandler, SessionSearchOptions};
 pub use tools::skill_commands;
 pub use tools::skill_utils;
 pub use tools::skills::{SkillManageHandler, SkillViewHandler, SkillsListHandler};

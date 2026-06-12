@@ -148,6 +148,7 @@ pub use backends::video::VisionFrameSamplingVideoBackend;
 pub use backends::video_gen::{
     FalVideoGenBackend, VideoGenBackend, XaiVideoCredentials, XaiVideoGenBackend,
 };
+#[cfg(feature = "web")]
 pub use backends::web::{
     DdgsSearchBackend, ExaSearchBackend, FallbackSearchBackend, FirecrawlExtractBackend,
     SimpleExtractBackend, TavilySearchBackend, search_backend_from_env_or_fallback,

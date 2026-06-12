@@ -16,8 +16,9 @@ pub mod file;
 pub mod homeassistant;
 pub mod image_gen;
 pub mod memory;
-pub mod meta_search;
 pub mod messaging;
+#[cfg(feature = "web")]
+pub mod meta_search;
 pub mod session_search;
 pub mod spotify;
 pub mod todo;
@@ -25,4 +26,5 @@ pub mod tts;
 pub mod video;
 pub mod video_gen;
 pub mod vision;
+#[cfg(feature = "web")]
 pub mod web;

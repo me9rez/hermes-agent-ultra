@@ -2,12 +2,15 @@
 //!
 //! Preconditions: no hard env requirements; web_search backend chosen from env
 //! (Exa key preferred, DuckDuckGo as fallback).
+//!
+//! web_search and web_extract require the `web` Cargo feature (enabled by default via `full`).
 
 use std::sync::Arc;
 
 use super::{RegistryContext, reg};
 
 pub fn register(ctx: &RegistryContext<'_>) {
+    #[cfg(feature = "web")]
     reg(
         ctx,
         "web",
@@ -17,6 +20,7 @@ pub fn register(ctx: &RegistryContext<'_>) {
         "🔍",
         vec![],
     );
+    #[cfg(feature = "web")]
     reg(
         ctx,
         "web",

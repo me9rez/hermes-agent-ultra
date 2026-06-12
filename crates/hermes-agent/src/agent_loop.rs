@@ -1,4 +1,4 @@
-﻿//! Core agent loop engine.
+//! Core agent loop engine.
 //!
 //! The `AgentLoop` orchestrates the autonomous agent cycle:
 //! 1. Send messages + tools to the LLM
@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use futures::StreamExt;
-use hermes_auth::{OAuth2Endpoints, exchange_refresh_token};
 use hermes_intelligence::get_model_context_length;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -696,7 +695,10 @@ pub(crate) fn summarize_tool_failure_for_user(tool_name: &str, error: &str) -> O
         "web_extract"
             if err.contains("403") || err.contains("401") || err.contains("blocks automated") =>
         {
-            Some("该网页拒绝自动抓取，将优先基于已有搜索结果摘要回答，或换一条检索词继续搜索。".to_string())
+            Some(
+                "该网页拒绝自动抓取，将优先基于已有搜索结果摘要回答，或换一条检索词继续搜索。"
+                    .to_string(),
+            )
         }
         "browser_navigate"
             if err.contains("cdp not reachable")
@@ -1095,14 +1097,7 @@ impl AgentLoop {
             ctx,
             persist_user_idx,
             prefill_range,
-            LoopExit::base(
-                "interrupted_by_user",
-                api_calls,
-                false,
-                false,
-                false,
-                true,
-            ),
+            LoopExit::base("interrupted_by_user", api_calls, false, false, false, true),
             total_turns,
             tool_errors,
             accumulated_usage,
@@ -1397,10 +1392,7 @@ impl AgentLoop {
     }
 
     /// Wire the live tools registry so plan phase gates apply to `dispatch_async`.
-    pub fn with_synced_tools_registry(
-        mut self,
-        registry: Arc<hermes_tools::ToolRegistry>,
-    ) -> Self {
+    pub fn with_synced_tools_registry(mut self, registry: Arc<hermes_tools::ToolRegistry>) -> Self {
         registry.set_plan_phase(self.plan_phase());
         self.synced_tools_registry = Some(registry);
         self
@@ -2848,70 +2840,6 @@ impl AgentLoop {
         Some(cred.access_token.clone())
     }
 
-    pub(crate) async fn refresh_oauth_store_tokens_if_needed(&self) {
-        crate::runtime_provider::refresh_oauth_store_tokens_if_needed(self).await
-    }
-
-    async fn refresh_single_oauth_store_token_if_needed(&self, provider_key: &str) {
-        if !self.can_attempt_oauth_refresh(provider_key) {
-            return;
-        }
-        let path = self.auth_tokens_path();
-        let raw = match tokio::fs::read_to_string(&path).await {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        let mut entries: HashMap<String, OAuthStoreCredential> = match serde_json::from_str(&raw) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        let Some(current) = entries.get(provider_key).cloned() else {
-            return;
-        };
-        let Some(expires_at) = current.expires_at else {
-            return;
-        };
-        if expires_at > Utc::now() {
-            return;
-        }
-        let Some(refresh_token) = current.refresh_token.clone() else {
-            return;
-        };
-        let Some((token_url, client_id)) = self.oauth_refresh_config(provider_key) else {
-            return;
-        };
-        let refreshed = match self
-            .exchange_oauth_refresh_token(
-                provider_key,
-                token_url.as_str(),
-                client_id.as_str(),
-                refresh_token.as_str(),
-            )
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                self.mark_oauth_refresh_failure(provider_key);
-                tracing::warn!(
-                    provider = provider_key,
-                    error = %e,
-                    "oauth token refresh failed for runtime provider"
-                );
-                return;
-            }
-        };
-        entries.insert(provider_key.to_string(), refreshed);
-        let Ok(content) = serde_json::to_string_pretty(&entries) else {
-            self.mark_oauth_refresh_success(provider_key);
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        let _ = tokio::fs::write(path, content).await;
-        self.mark_oauth_refresh_success(provider_key);
-    }
-
     fn oauth_refresh_config(&self, provider_key: &str) -> Option<(String, String)> {
         // Preferred source: unified provider config centre (runtime_providers).
         let cfg_token_url = self
@@ -2993,59 +2921,6 @@ impl AgentLoop {
                 _ => None,
             })?;
         Some((token_url, client_id))
-    }
-
-    async fn exchange_oauth_refresh_token(
-        &self,
-        provider_key: &str,
-        token_url: &str,
-        client_id: &str,
-        refresh_token: &str,
-    ) -> Result<OAuthStoreCredential, AgentError> {
-        let endpoints = OAuth2Endpoints {
-            authorize_url: "http://127.0.0.1/oauth/authorize-unused".to_string(),
-            token_url: token_url.to_string(),
-            client_id: client_id.to_string(),
-            redirect_uri: "http://127.0.0.1/unused".to_string(),
-            scopes: vec![],
-        };
-        let cred = exchange_refresh_token(provider_key, &endpoints, refresh_token)
-            .await
-            .map_err(|e| AgentError::AuthFailed(e.to_string()))?;
-        Ok(OAuthStoreCredential {
-            provider: Some(provider_key.to_string()),
-            access_token: cred.access_token,
-            refresh_token: cred
-                .refresh_token
-                .or_else(|| Some(refresh_token.to_string())),
-            token_type: Some(cred.token_type),
-            scope: cred.scope,
-            expires_at: cred.expires_at,
-        })
-    }
-
-    fn can_attempt_oauth_refresh(&self, provider_key: &str) -> bool {
-        let Ok(state) = self.state.lock() else {
-            return true;
-        };
-        let Some(last_fail) = state.oauth_refresh_backoff.get(provider_key) else {
-            return true;
-        };
-        last_fail.elapsed().as_secs() >= OAUTH_REFRESH_BACKOFF_SECS
-    }
-
-    fn mark_oauth_refresh_failure(&self, provider_key: &str) {
-        if let Ok(mut state) = self.state.lock() {
-            state
-                .oauth_refresh_backoff
-                .insert(provider_key.to_string(), Instant::now());
-        }
-    }
-
-    fn mark_oauth_refresh_success(&self, provider_key: &str) {
-        if let Ok(mut state) = self.state.lock() {
-            state.oauth_refresh_backoff.remove(provider_key);
-        }
     }
 
     fn auth_tokens_path(&self) -> PathBuf {

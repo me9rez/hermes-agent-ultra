@@ -45,7 +45,7 @@ pub(crate) fn render_header(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "AGENT ULTRA",
+            "x FlowyAIPC",
             Style::default()
                 .fg(colors.accent)
                 .bg(colors.status_bar_bg)

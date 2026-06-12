@@ -133,7 +133,9 @@ pub(crate) async fn apply_command(
         | GatewayCommandResult::CuratorUnpin { .. }
         | GatewayCommandResult::CuratorArchive { .. }
         | GatewayCommandResult::CuratorRestore { .. }
-        | GatewayCommandResult::CuratorListArchived) => apply_curator(gw, incoming, result).await,
+        | GatewayCommandResult::CuratorListArchived) => {
+            apply_curator(gw, incoming, session_key, result).await
+        }
     }
 }
 
@@ -697,20 +699,41 @@ async fn apply_tool(
 async fn apply_curator(
     gw: &Gateway,
     incoming: &IncomingMessage,
+    session_key: &str,
     result: GatewayCommandResult,
 ) -> Result<bool, GatewayError> {
-    let reply = match result {
-        GatewayCommandResult::CuratorStatus => gw.execute_curator_status(),
-        GatewayCommandResult::CuratorRun { dry_run } => gw.execute_curator_run(dry_run),
-        GatewayCommandResult::CuratorPause => gw.execute_curator_pause_resume(true),
-        GatewayCommandResult::CuratorResume => gw.execute_curator_pause_resume(false),
-        GatewayCommandResult::CuratorPin { name } => gw.execute_curator_pin_unpin(&name, true),
-        GatewayCommandResult::CuratorUnpin { name } => gw.execute_curator_pin_unpin(&name, false),
-        GatewayCommandResult::CuratorArchive { name } => gw.execute_curator_archive(&name),
-        GatewayCommandResult::CuratorRestore { name } => gw.execute_curator_restore(&name),
-        GatewayCommandResult::CuratorListArchived => gw.execute_curator_list_archived(),
-        _ => unreachable!("apply_curator called with non-curator variant"),
-    };
-    gw.send_incoming_reply(incoming, &reply, None).await?;
-    Ok(true)
+    match result {
+        GatewayCommandResult::CuratorRun { dry_run } => {
+            // Phase 1: auto transitions (fast, milliseconds)
+            let reply = gw.execute_curator_run(dry_run);
+            gw.send_incoming_reply(incoming, &reply, None).await?;
+
+            // Phase 2: spawn background LLM review (30-120s)
+            if !dry_run {
+                gw.spawn_curator_llm_review(incoming, session_key).await;
+            }
+            Ok(true)
+        }
+        _ => {
+            let reply = match result {
+                GatewayCommandResult::CuratorStatus => gw.execute_curator_status(),
+                GatewayCommandResult::CuratorPause => gw.execute_curator_pause_resume(true),
+                GatewayCommandResult::CuratorResume => gw.execute_curator_pause_resume(false),
+                GatewayCommandResult::CuratorPin { name } => {
+                    gw.execute_curator_pin_unpin(&name, true)
+                }
+                GatewayCommandResult::CuratorUnpin { name } => {
+                    gw.execute_curator_pin_unpin(&name, false)
+                }
+                GatewayCommandResult::CuratorArchive { name } => gw.execute_curator_archive(&name),
+                GatewayCommandResult::CuratorRestore { name } => {
+                    gw.execute_curator_restore(&name)
+                }
+                GatewayCommandResult::CuratorListArchived => gw.execute_curator_list_archived(),
+                _ => unreachable!("apply_curator called with non-curator variant"),
+            };
+            gw.send_incoming_reply(incoming, &reply, None).await?;
+            Ok(true)
+        }
+    }
 }

@@ -3,7 +3,8 @@
 use std::fmt::Write as _;
 
 use crate::commands::{CommandResult, emit_command_output, truncate_chars};
-use hermes_core::AgentError;
+use hermes_agent::RunConversationParams;
+use hermes_core::{AgentError, MessageRole};
 
 pub(crate) async fn handle_curator_command(
     host: &mut impl crate::app::SlashCommandHost,
@@ -96,29 +97,98 @@ pub(crate) async fn handle_curator_command(
             let dry_run = args
                 .get(1)
                 .is_some_and(|s| s.eq_ignore_ascii_case("--dry-run"));
-            let before_state = hermes_skills::load_curator_state(&store);
-            if dry_run {
-                let result =
-                    hermes_skills::apply_automatic_transitions(&store, &curator_config);
-                let report_text = format!(
-                    "Curator dry-run: checked={} stale={} archived={} reactivated={}",
-                    result.checked, result.marked_stale, result.archived, result.reactivated
-                );
-                emit_command_output(host, report_text);
+
+            // Gate checks
+            if !curator_config.enabled {
+                emit_command_output(host, "Curator is disabled in config.");
+                return Ok(CommandResult::Handled);
+            }
+            let state = hermes_skills::load_curator_state(&store);
+            if state.paused {
+                emit_command_output(host, "Curator is paused. Use `/curator unpause` to resume.");
                 return Ok(CommandResult::Handled);
             }
 
-            // Run the curator
-            let result = hermes_skills::apply_automatic_transitions(&store, &curator_config);
-            let report_text = format!(
-                "Curator run: checked={} stale={} archived={} reactivated={}",
-                result.checked, result.marked_stale, result.archived, result.reactivated
+            // Phase 1: deterministic auto-transitions (fast, milliseconds)
+            let phase1 = hermes_skills::apply_automatic_transitions(&store, &curator_config);
+            let mut out = format!(
+                "── curator run ──\nPhase 1 — Auto transitions:\n│ checked: {} │ stale: {} │ archived: {} │ reactivated: {} │",
+                phase1.checked, phase1.marked_stale, phase1.archived, phase1.reactivated
             );
-            emit_command_output(host, report_text);
-            let after_state = hermes_skills::load_curator_state(&store);
-            // Detect if a backup was created during curator run (state changed)
-            if before_state.last_run_at != after_state.last_run_at {
-                emit_command_output(host, "\n[Curator state updated]");
+            emit_command_output(host, &out);
+
+            if dry_run {
+                return Ok(CommandResult::Handled);
+            }
+
+            // Phase 2: LLM review (slow, 30-120s)
+            // Build the curator prompt and spawn an LLM agent via llm_runner
+            let prompt = hermes_skills::build_curator_prompt(&store);
+            let agent = host.agent().clone();
+            let tool_schemas = host.tool_schemas().to_vec();
+
+            let llm_start = std::time::Instant::now();
+            let llm_result: Result<hermes_skills::CuratorReviewResult, hermes_skills::CuratorError> =
+                {
+                    let conv_result = agent
+                        .run_conversation(RunConversationParams {
+                            user_message: prompt,
+                            conversation_history: vec![],
+                            task_id: None,
+                            stream_callback: None,
+                            persist_user_message: None,
+                            tools: Some(tool_schemas),
+                            persist_session: false,
+                        })
+                        .await;
+
+                    match conv_result {
+                        Ok(conv) => extract_curator_review_result(conv, llm_start),
+                        Err(e) => Err(hermes_skills::CuratorError::LlmError(format!(
+                            "Agent conversation failed: {}",
+                            e
+                        ))),
+                    }
+                };
+
+            match llm_result {
+                Ok(review) => {
+                    let model_label = format!("{} / {}", review.model, review.provider);
+                    let _ = write!(
+                        out,
+                        "\nPhase 2 — LLM review ({}):\n{}",
+                        model_label,
+                        truncate_chars(&review.final_response, 2000)
+                    );
+                    if !review.summary.is_empty() {
+                        let _ = write!(
+                            out,
+                            "\nSummary: {}",
+                            truncate_chars(&review.summary, 500)
+                        );
+                    }
+                    let _ = write!(out, "\nTool calls: {}", review.tool_calls.len());
+                    emit_command_output(host, &out);
+
+                    // Persist curator state with LLM summary
+                    save_post_run_state(&store, Some(&review.summary));
+                }
+                Err(hermes_skills::CuratorError::LlmError(ref msg)) => {
+                    let _ = write!(
+                        out,
+                        "\nPhase 2 — LLM review: skipped ({})",
+                        truncate_chars(msg, 200)
+                    );
+                    emit_command_output(host, &out);
+
+                    // Still persist Phase 1 state changes
+                    save_post_run_state(&store, None);
+                }
+                Err(_) => {
+                    let _ = write!(out, "\nPhase 2 — LLM review: skipped (unknown error)");
+                    emit_command_output(host, &out);
+                    save_post_run_state(&store, None);
+                }
             }
         }
         "history" => {
@@ -438,4 +508,87 @@ fn rollback_skills(skills_dir: &std::path::Path, backup_name: &str) -> Result<()
 
     tracing::info!("curator: rolled back to backup {}", backup_name);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 helpers
+// ---------------------------------------------------------------------------
+
+/// Extract `CuratorReviewResult` from an `AgentLoop::run_conversation` result.
+fn extract_curator_review_result(
+    conv: hermes_agent::ConversationResult,
+    started: std::time::Instant,
+) -> Result<hermes_skills::CuratorReviewResult, hermes_skills::CuratorError> {
+    let duration = started.elapsed().as_secs_f64();
+
+    // Collect tool calls from Assistant messages in the conversation
+    let tool_calls: Vec<hermes_skills::ToolCallRecord> = conv
+        .loop_result
+        .messages
+        .iter()
+        .filter(|m| m.role == MessageRole::Assistant)
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flatten()
+        .map(|tc| hermes_skills::ToolCallRecord {
+            name: tc.function.name.clone(),
+            arguments: tc.function.arguments.clone(),
+        })
+        .collect();
+
+    // Final response: prefer ConversationResult::final_response, fallback to last Assistant message
+    let final_response = conv.final_response.clone().unwrap_or_else(|| {
+        conv.loop_result
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant && m.content.is_some())
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default()
+    });
+
+    // Summary: take first 500 chars of final_response as fallback
+    let summary = if final_response.len() > 500 {
+        final_response[..500].to_string()
+    } else {
+        final_response.clone()
+    };
+
+    let model = conv
+        .loop_result
+        .model
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let provider = conv
+        .loop_result
+        .provider
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+
+    Ok(hermes_skills::CuratorReviewResult {
+        final_response,
+        summary,
+        model,
+        provider,
+        tool_calls,
+        error: None,
+        duration_seconds: duration,
+    })
+}
+
+/// Persist curator state after a run, optionally recording an LLM summary.
+fn save_post_run_state(
+    store: &hermes_skills::UsageStore,
+    llm_summary: Option<&str>,
+) {
+    let mut state = hermes_skills::load_curator_state(store);
+    state.run_count = state.run_count.saturating_add(1);
+    state.last_run_at = Some(chrono::Utc::now().to_rfc3339());
+    if let Some(summary) = llm_summary {
+        if !summary.is_empty() {
+            state.last_run_summary = Some(summary.to_string());
+        }
+    }
+    if let Err(e) = hermes_skills::save_curator_state(store, &state) {
+        tracing::warn!("Failed to persist curator state: {}", e);
+    }
 }

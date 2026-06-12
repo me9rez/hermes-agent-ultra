@@ -1180,18 +1180,18 @@ impl Gateway {
         let store = hermes_skills::UsageStore::new();
         let config = &self.config.curator;
         let result = hermes_skills::apply_automatic_transitions(&store, config);
-
+    
         let mut lines = vec![];
         if dry_run {
             lines.push("── curator dry-run ──".to_string());
         } else {
             lines.push("── curator run ──".to_string());
         }
-        lines.push(format!("  checked: {}", result.checked));
-        lines.push(format!("  marked stale: {}", result.marked_stale));
-        lines.push(format!("  archived: {}", result.archived));
-        lines.push(format!("  reactivated: {}", result.reactivated));
-
+        lines.push(format!("checked: {}", result.checked));
+        lines.push(format!("marked stale: {}", result.marked_stale));
+        lines.push(format!("archived: {}", result.archived));
+        lines.push(format!("reactivated: {}", result.reactivated));
+    
         if !dry_run {
             let mut state = hermes_skills::load_curator_state(&store);
             state.last_run_at = Some(chrono::Utc::now().to_rfc3339());
@@ -1202,9 +1202,88 @@ impl Gateway {
             ));
             let _ = hermes_skills::save_curator_state(&store, &state);
             lines.push("State updated.".to_string());
+            lines.push("\n🤖 LLM review is running in background, results will appear here shortly…"
+                .to_string());
         }
-
+    
         lines.join("\n")
+    }
+
+    /// Spawn a background LLM review for curator (Phase 2).
+    ///
+    /// Called after Phase 1 auto-transitions complete. Uses the same
+    /// `message_handler_with_context` callback as regular agent turns
+    /// so the LLM review has access to skill tools.
+    ///
+    /// When the review completes, a follow-up message is sent to the
+    /// originating chat with the LLM summary.
+    pub(crate) async fn spawn_curator_llm_review(
+        &self,
+        incoming: &IncomingMessage,
+        session_key: &str,
+    ) {
+        let handler = self
+            .router
+            .message_handler_with_context
+            .read()
+            .await
+            .clone();
+        let Some(handler) = handler else {
+            tracing::debug!("No message handler configured; skipping curator LLM review");
+            return;
+        };
+
+        let platform = incoming.platform.clone();
+        let chat_id = incoming.chat_id.clone();
+        let adapter = self.get_adapter(&platform).await;
+        let store = hermes_skills::UsageStore::new();
+        let prompt = hermes_skills::build_curator_prompt(&store);
+        let ctx = self.build_runtime_context(incoming, session_key).await;
+
+        tokio::spawn(async move {
+            let messages: Arc<Vec<Message>> = Arc::new(vec![Message::user(prompt)]);
+            match handler(messages, ctx).await {
+                Ok(result) => {
+                    let store = hermes_skills::UsageStore::new();
+                    let mut state = hermes_skills::load_curator_state(&store);
+                    let summary = if result.len() > 300 {
+                        format!("{}...", &result[..300])
+                    } else {
+                        result.clone()
+                    };
+                    state.last_run_summary = Some(format!("llm: {}", summary));
+                    if let Err(e) = hermes_skills::save_curator_state(&store, &state) {
+                        tracing::warn!("Failed to save curator state after LLM review: {}", e);
+                    }
+
+                    // Deliver LLM review result to the user
+                    let header = "📋 Curator LLM review complete:\n\n";
+                    let truncated = if result.len() > 1500 {
+                        format!("{}...\n\n(truncated, check /curator status for full summary)", &result[..1500])
+                    } else {
+                        result
+                    };
+                    let reply = format!("{header}{truncated}");
+                    if let Some(adapter) = adapter {
+                        if let Err(e) = adapter.send_message(&chat_id, &reply, None).await {
+                            tracing::warn!("Failed to send curator review result: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Curator LLM review failed: {}", e);
+                    if let Some(adapter) = adapter {
+                        let _ = adapter
+                            .send_message(
+                                &chat_id,
+                                &format!("⚠️ Curator LLM review failed: {}", e),
+                                None,
+                            )
+                            .await;
+                    }
+                }
+            }
+        });
     }
 
     pub(crate) fn execute_curator_pause_resume(&self, pause: bool) -> String {

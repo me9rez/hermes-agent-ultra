@@ -1344,6 +1344,43 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                                             needs_redraw = true;
                                             continue;
                                         }
+                                        if command_name.eq_ignore_ascii_case("/curator")
+                                            && trimmed
+                                                .split_whitespace()
+                                                .nth(1)
+                                                .is_some_and(|s| s.eq_ignore_ascii_case("run"))
+                                        {
+                                            // Curator run is long-running (LLM review can take
+                                            // 30-120s). Spawn it as a background managed task so
+                                            // the TUI event loop stays responsive.
+                                            app.push_ui_user(trimmed.clone());
+                                            state.begin_processing_cycle(app.current_model());
+                                            state.mark_blocking_action("running curator");
+                                            state.status_message =
+                                                "Running curator (LLM review in background)…"
+                                                    .to_string();
+                                            draw_frame_now(&mut tui, &app, &mut state)?;
+
+                                            let mut worker_app = app.clone();
+                                            let stream_tx = tui.stream_sender();
+                                            let input_for_task = trimmed.clone();
+                                            let task = tokio::spawn(async move {
+                                                let started = Instant::now();
+                                                let result = worker_app
+                                                    .handle_input(&input_for_task)
+                                                    .await
+                                                    .map(|_| Box::new(worker_app))
+                                                    .map_err(|e| e.to_string());
+                                                let _ = stream_tx.send(
+                                                    Event::ManagedAppRunComplete {
+                                                        result,
+                                                        elapsed_secs: started.elapsed().as_secs_f64(),
+                                                    },
+                                                );
+                                            });
+                                            active_managed_task = Some(task);
+                                            continue;
+                                        }
                                         state.begin_processing_cycle(app.current_model());
                                         state.mark_blocking_action(format!(
                                             "running {command_name} command"

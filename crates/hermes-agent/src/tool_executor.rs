@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use hermes_core::{Message, ToolCall, ToolError, ToolResult};
 use serde_json::Value;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::agent_loop::{
@@ -32,6 +33,7 @@ impl AgentLoop {
         } else {
             1
         };
+        let sem = Arc::new(Semaphore::new(tool_concurrency));
         let mut results = Vec::with_capacity(tool_calls.len());
         let max_delegate_depth = crate::tool_executor::resolve_max_delegate_depth(self);
         let current_delegate_depth = self.delegate_depth;
@@ -178,7 +180,12 @@ impl AgentLoop {
             let current_user_task = current_user_task.clone();
             let plan_phase = plan_phase;
 
+            let _permit = Arc::clone(&sem)
+                .acquire_owned()
+                .await
+                .expect("semaphore closed");
             join_set.spawn(async move {
+                let _permit = _permit; // held for task lifetime; dropped on completion
                 let started = Instant::now();
                 let dispatch_result = if let Some(dispatch) = async_tool_dispatch.as_ref() {
                     tracing::debug!(tool = %tool_name, "agent tool call start (async dispatch)");
@@ -366,30 +373,6 @@ impl AgentLoop {
                     }
                 }
             });
-            if join_set.len() >= tool_concurrency {
-                if let Some(result) = join_set.join_next().await {
-                    match result {
-                        Ok(tool_result) => {
-                            if tool_result.is_error {
-                                let tc = tool_calls
-                                    .iter()
-                                    .find(|tc| tc.id == tool_result.tool_call_id);
-                                if let Some(tc) = tc {
-                                    tool_errors.push(hermes_core::ToolErrorRecord {
-                                        tool_name: tc.function.name.clone(),
-                                        error: tool_result.content.clone(),
-                                        turn,
-                                    });
-                                }
-                            }
-                            results.push(tool_result);
-                        }
-                        Err(e) => {
-                            tracing::error!("Task join error: {}", e);
-                        }
-                    }
-                }
-            }
         }
 
         for tool_result in orchestrated {

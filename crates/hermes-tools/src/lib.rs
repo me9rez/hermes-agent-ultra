@@ -15,6 +15,7 @@ pub mod checkpoint_manager;
 pub mod code_execution_env;
 pub mod code_execution_ptc;
 pub mod code_execution_stubs;
+pub mod concurrency;
 pub mod dispatch;
 pub mod kanban;
 pub mod kanban_failure;

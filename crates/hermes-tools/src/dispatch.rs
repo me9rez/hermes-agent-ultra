@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use hermes_core::{BudgetConfig, ToolCall, ToolResult};
-use tokio::task::JoinSet;
 
+use crate::concurrency::run_bounded;
 use crate::registry::ToolRegistry;
 use crate::tools::tool_result_storage::{
     default_threshold_for_tool, enforce_turn_budget, maybe_persist_tool_result,
@@ -58,36 +58,9 @@ pub async fn dispatch_tools(
     budget: BudgetConfig,
     pool_size: usize,
 ) -> Vec<ToolResult> {
-    let concurrency = pool_size.max(1);
-    let mut join_set = JoinSet::new();
-    let mut results: Vec<ToolResult> = Vec::new();
-
-    let mut collect_join = |res: Result<DispatchedResult, tokio::task::JoinError>| match res {
-        Ok(dr) => {
-            let content = maybe_persist_tool_result(
-                &dr.content,
-                &dr.tool_name,
-                &dr.tool_call_id,
-                default_threshold_for_tool(&dr.tool_name, budget.max_result_size_chars),
-            );
-            results.push(ToolResult {
-                tool_call_id: dr.tool_call_id,
-                content,
-                is_error: dr.is_error,
-            });
-        }
-        Err(e) => {
-            // Join error — treat as a tool error
-            results.push(ToolResult::err(
-                "unknown",
-                format!("Task join error: {}", e),
-            ));
-        }
-    };
-
-    for call in calls {
+    let tasks = calls.into_iter().map(|call| {
         let registry = registry.clone();
-        join_set.spawn(async move {
+        async move {
             let start = Instant::now();
             let result = registry
                 .dispatch_async(
@@ -99,10 +72,7 @@ pub async fn dispatch_tools(
                 )
                 .await;
             let duration_ms = start.elapsed().as_millis() as u64;
-
-            // Check if result is an error
             let is_error = result.starts_with(r#"{"error"#);
-
             DispatchedResult {
                 tool_call_id: call.id,
                 tool_name: call.function.name,
@@ -110,19 +80,27 @@ pub async fn dispatch_tools(
                 is_error,
                 duration_ms,
             }
-        });
-
-        // Cap pending tasks to the requested concurrency.
-        if join_set.len() >= concurrency {
-            if let Some(res) = join_set.join_next().await {
-                collect_join(res);
-            }
         }
-    }
+    });
 
-    while let Some(res) = join_set.join_next().await {
-        collect_join(res);
-    }
+    let dispatched = run_bounded(pool_size, tasks).await;
+
+    let mut results: Vec<ToolResult> = dispatched
+        .into_iter()
+        .map(|dr| {
+            let content = maybe_persist_tool_result(
+                &dr.content,
+                &dr.tool_name,
+                &dr.tool_call_id,
+                default_threshold_for_tool(&dr.tool_name, budget.max_result_size_chars),
+            );
+            ToolResult {
+                tool_call_id: dr.tool_call_id,
+                content,
+                is_error: dr.is_error,
+            }
+        })
+        .collect();
 
     enforce_turn_budget(&mut results, &budget);
 
@@ -166,7 +144,7 @@ mod tests {
     use super::*;
 
     use async_trait::async_trait;
-    use hermes_core::{tool_schema, FunctionCall, JsonSchema, ToolError, ToolHandler, ToolSchema};
+    use hermes_core::{FunctionCall, JsonSchema, ToolError, ToolHandler, ToolSchema, tool_schema};
     use serde_json::Value;
 
     use crate::tools::tool_result_storage::{PERSISTED_OUTPUT_TAG, STORAGE_ENV_LOCK};

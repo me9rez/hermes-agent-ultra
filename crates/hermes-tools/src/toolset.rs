@@ -7,7 +7,7 @@
 //! - Integration with ToolRegistry for plugin-registered toolsets
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::registry::ToolRegistry;
 
@@ -18,11 +18,7 @@ use crate::registry::ToolRegistry;
 /// Web search and extraction tools.
 pub const TOOLSET_WEB: &[&str] = &["web_search", "web_extract"];
 /// Reusable content retrieval framework tools.
-pub const TOOLSET_CONTENT: &[&str] = &[
-    "content_plan",
-    "content_execute",
-    "content_normalize",
-];
+pub const TOOLSET_CONTENT: &[&str] = &["content_plan", "content_execute", "content_normalize"];
 /// Terminal command execution tools.
 pub const TOOLSET_TERMINAL: &[&str] = &["terminal", "process", "process_registry"];
 /// File system tools.
@@ -157,17 +153,59 @@ pub struct ToolsetManager {
     toolsets: HashMap<String, Toolset>,
     /// Reference to the tool registry (for plugin toolset integration).
     registry: Arc<ToolRegistry>,
+    /// Live MCP-registered toolset aliases shared with the registry.
+    ///
+    /// This Arc points to the same HashMap as `ToolRegistry.aliases`, making
+    /// `ToolsetManager` the authoritative API surface for alias management while
+    /// both objects remain consistent without a circular ownership cycle.
+    live_aliases: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl ToolsetManager {
     /// Create a new ToolsetManager with all predefined toolsets.
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
+        let live_aliases = registry.aliases_arc();
         let mut manager = Self {
             toolsets: HashMap::new(),
             registry,
+            live_aliases,
         };
         manager.register_defaults();
         manager
+    }
+
+    /// Register an explicit alias from a user-facing toolset token to its
+    /// canonical live-registry toolset name (e.g. MCP server aliases).
+    pub fn register_toolset_alias(&self, alias: impl Into<String>, target: impl Into<String>) {
+        let alias = alias.into().trim().to_string();
+        let target = target.into().trim().to_string();
+        if alias.is_empty() || target.is_empty() {
+            return;
+        }
+        self.live_aliases.write().unwrap().insert(alias, target);
+    }
+
+    /// Return the canonical live-registry target for a registered alias.
+    pub fn get_toolset_alias_target(&self, alias: &str) -> Option<String> {
+        self.live_aliases.read().unwrap().get(alias).cloned()
+    }
+
+    /// Check whether the manager knows this toolset (static or live alias).
+    pub fn has_toolset(&self, name: &str) -> bool {
+        if self.toolsets.contains_key(name) {
+            return true;
+        }
+        self.live_aliases.read().unwrap().contains_key(name)
+    }
+
+    /// Return tool names for a live-alias toolset (available_only filters by check_fn).
+    pub fn tool_names_for_live_toolset(&self, toolset: &str, available_only: bool) -> Vec<String> {
+        let resolved = {
+            let aliases = self.live_aliases.read().unwrap();
+            resolve_live_alias(&aliases, toolset)
+        };
+        self.registry
+            .tool_names_for_toolset(&resolved, available_only)
     }
 
     /// Register all predefined toolsets.
@@ -439,6 +477,18 @@ impl ToolsetManager {
         }
         visited.insert(name.to_string());
 
+        // If the name is a live alias, resolve it and delegate to the registry.
+        {
+            let aliases = self.live_aliases.read().unwrap();
+            if let Some(canonical) = aliases.get(name) {
+                let canonical = canonical.clone();
+                drop(aliases);
+                let mut tools = self.registry.tool_names_for_toolset(&canonical, true);
+                tools.sort();
+                return Ok(tools);
+            }
+        }
+
         let toolset = self
             .toolsets
             .get(name)
@@ -537,6 +587,24 @@ impl ToolsetManager {
     pub fn get_toolset(&self, name: &str) -> Option<&Toolset> {
         self.toolsets.get(name)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Free helpers
+// ---------------------------------------------------------------------------
+
+/// Follow alias chains in the live alias map until a non-alias entry is reached.
+///
+/// Stops after 32 hops to break infinite alias cycles.
+fn resolve_live_alias(aliases: &HashMap<String, String>, name: &str) -> String {
+    let mut current = name.to_string();
+    for _ in 0..32 {
+        let Some(next) = aliases.get(&current) else {
+            break;
+        };
+        current = next.clone();
+    }
+    current
 }
 
 // ---------------------------------------------------------------------------

@@ -461,6 +461,14 @@ impl ToolRegistry {
         sets
     }
 
+    /// Return the underlying aliases Arc so it can be shared with a `ToolsetManager`.
+    ///
+    /// Both objects then see consistent alias state through the shared `RwLock`
+    /// without creating a circular ownership cycle.
+    pub fn aliases_arc(&self) -> Arc<RwLock<HashMap<String, String>>> {
+        Arc::clone(&self.aliases)
+    }
+
     /// Register an explicit alias from a user-facing toolset token to its
     /// canonical live-registry toolset.
     pub fn register_toolset_alias(&self, alias: impl Into<String>, target: impl Into<String>) {

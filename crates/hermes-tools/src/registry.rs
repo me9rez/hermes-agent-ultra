@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use hermes_core::{ToolHandler, ToolSchema};
 use serde_json::Value;
@@ -55,127 +55,122 @@ pub struct ToolEntry {
 // ---------------------------------------------------------------------------
 
 /// Thread-safe registry of all available tools.
-pub struct ToolRegistryInner {
-    /// Registered tools keyed by name.
-    tools: HashMap<String, ToolEntry>,
-    /// Explicit aliases for dynamic toolset names, for example an MCP server
-    /// name (`dynserver`) pointing at its canonical toolset (`mcp-dynserver`).
-    toolset_aliases: HashMap<String, String>,
-    /// Global default max result size in characters.
-    pub global_max_result_size_chars: usize,
-    /// Centralized policy engine for tool-call governance.
-    pub policy: ToolPolicyEngine,
-    /// Runtime counters for policy outcomes (allow/deny/audit/simulate).
-    pub policy_counters: ToolPolicyCounters,
-    /// RTK-style filter engine for rewrite/filter/log handling.
-    pub rtk_filter: RtkFilterEngine,
-    /// Session-wide raw pass-through mode for tool output.
-    pub rtk_raw_mode: bool,
-    /// One-shot raw pass-through for the next tool call only.
-    pub rtk_raw_once: bool,
-    /// Plan-then-execute phase gate (read-only during Planning).
-    pub plan_phase: PlanPhase,
-}
-
-/// Thread-safe wrapper around `ToolRegistryInner`.
+///
+/// # Lock ordering invariants
+///
+/// To prevent deadlocks, locks must always be acquired in this order:
+///   1. `tools` (RwLock)
+///   2. `aliases` (RwLock)
+///   3. `raw_state` (Mutex) — held only briefly; never across `await`
+///   4. `counters` (Mutex) — held only briefly; never across `await`
+///
+/// `policy` is a separate RwLock for mutable `set_policy` calls; it is
+/// never held simultaneously with `tools` or `aliases`.
+///
+/// The hot dispatch path (`dispatch_async`) never holds `tools` across
+/// the `handler.execute().await` call — the read guard is dropped before
+/// any async work begins.
 #[derive(Clone)]
 pub struct ToolRegistry {
-    inner: Arc<Mutex<ToolRegistryInner>>,
+    /// Registered tools keyed by name. Read-heavy, infrequently written.
+    tools: Arc<RwLock<HashMap<String, ToolEntry>>>,
+    /// Toolset alias map. Rarely mutated.
+    aliases: Arc<RwLock<HashMap<String, String>>>,
+    /// Policy engine. Immutable after initial construction; mutable only via `set_policy`.
+    policy: Arc<RwLock<ToolPolicyEngine>>,
+    /// RTK filter engine. Never mutated after construction; `Arc` for cheap dispatch clones.
+    rtk: Arc<RtkFilterEngine>,
+    /// Session-wide and one-shot raw pass-through flags.
+    raw_state: Arc<Mutex<RawModeState>>,
+    /// Running counters for policy outcomes.
+    counters: Arc<Mutex<ToolPolicyCounters>>,
+    /// Global default max result size (characters). Immutable after construction.
+    global_max_result_size_chars: usize,
+    /// Plan-then-execute phase gate.
+    plan_phase: Arc<Mutex<PlanPhase>>,
 }
 
 impl ToolRegistry {
     /// Create a new empty registry with default global max result size.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(ToolRegistryInner {
-                tools: HashMap::new(),
-                toolset_aliases: HashMap::new(),
-                global_max_result_size_chars: 50_000,
-                policy: ToolPolicyEngine::from_env(),
-                policy_counters: ToolPolicyCounters::default(),
-                rtk_filter: RtkFilterEngine::from_env(),
-                rtk_raw_mode: false,
-                rtk_raw_once: false,
-                plan_phase: PlanPhase::Off,
+            tools: Arc::new(RwLock::new(HashMap::new())),
+            aliases: Arc::new(RwLock::new(HashMap::new())),
+            global_max_result_size_chars: 50_000,
+            policy: Arc::new(RwLock::new(ToolPolicyEngine::from_env())),
+            rtk: Arc::new(RtkFilterEngine::from_env()),
+            raw_state: Arc::new(Mutex::new(RawModeState {
+                enabled: false,
+                once_pending: false,
             })),
+            counters: Arc::new(Mutex::new(ToolPolicyCounters::default())),
+            plan_phase: Arc::new(Mutex::new(PlanPhase::Off)),
         }
     }
 
     /// Create a new registry with a custom global max result size.
     pub fn with_max_result_size(max: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(ToolRegistryInner {
-                tools: HashMap::new(),
-                toolset_aliases: HashMap::new(),
-                global_max_result_size_chars: max,
-                policy: ToolPolicyEngine::from_env(),
-                policy_counters: ToolPolicyCounters::default(),
-                rtk_filter: RtkFilterEngine::from_env(),
-                rtk_raw_mode: false,
-                rtk_raw_once: false,
-                plan_phase: PlanPhase::Off,
+            tools: Arc::new(RwLock::new(HashMap::new())),
+            aliases: Arc::new(RwLock::new(HashMap::new())),
+            global_max_result_size_chars: max,
+            policy: Arc::new(RwLock::new(ToolPolicyEngine::from_env())),
+            rtk: Arc::new(RtkFilterEngine::from_env()),
+            raw_state: Arc::new(Mutex::new(RawModeState {
+                enabled: false,
+                once_pending: false,
             })),
+            counters: Arc::new(Mutex::new(ToolPolicyCounters::default())),
+            plan_phase: Arc::new(Mutex::new(PlanPhase::Off)),
         }
     }
 
     /// Set plan-then-execute phase for tool dispatch gating.
     pub fn set_plan_phase(&self, phase: PlanPhase) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.plan_phase = phase;
+        *self.plan_phase.lock().unwrap() = phase;
     }
 
-    /// Current plan mode phase.
     pub fn plan_phase(&self) -> PlanPhase {
-        let inner = self.inner.lock().unwrap();
-        inner.plan_phase
+        *self.plan_phase.lock().unwrap()
     }
 
     /// Override active tool policy engine (used by tests/runtime tuning).
     pub fn set_policy(&self, policy: ToolPolicyEngine) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.policy = policy;
+        *self.policy.write().unwrap() = policy;
     }
 
     /// Snapshot current policy counters.
     pub fn policy_counters(&self) -> ToolPolicyCounters {
-        let inner = self.inner.lock().unwrap();
-        inner.policy_counters.clone()
+        self.counters.lock().unwrap().clone()
     }
 
     /// Preview the current policy decision for a tool call without executing it.
     pub fn evaluate_policy_preview(&self, name: &str, params: &Value) -> ToolPolicyDecision {
-        let inner = self.inner.lock().unwrap();
-        inner.policy.evaluate(name, params)
+        self.policy.read().unwrap().evaluate(name, params)
     }
 
     /// Enable or disable session-wide raw pass-through mode.
     pub fn set_raw_mode(&self, enabled: bool) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.rtk_raw_mode = enabled;
+        let mut state = self.raw_state.lock().unwrap();
+        state.enabled = enabled;
         if enabled {
-            inner.rtk_raw_once = false;
+            state.once_pending = false;
         }
     }
 
     /// Enable one-shot raw pass-through for the next tool dispatch.
     pub fn set_raw_mode_once(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.rtk_raw_once = true;
+        self.raw_state.lock().unwrap().once_pending = true;
     }
 
     /// Current raw-mode state.
     pub fn raw_mode_state(&self) -> RawModeState {
-        let inner = self.inner.lock().unwrap();
-        RawModeState {
-            enabled: inner.rtk_raw_mode,
-            once_pending: inner.rtk_raw_once,
-        }
+        *self.raw_state.lock().unwrap()
     }
 
     /// RTK dual-log directory.
     pub fn rtk_log_dir(&self) -> PathBuf {
-        let inner = self.inner.lock().unwrap();
-        inner.rtk_filter.log_dir().to_path_buf()
+        self.rtk.log_dir().to_path_buf()
     }
 
     /// Register a new tool.
@@ -195,11 +190,11 @@ impl ToolRegistry {
         max_result_size_chars: Option<usize>,
     ) {
         let name = name.into();
-        let mut inner = self.inner.lock().unwrap();
-        if inner.tools.contains_key(&name) {
+        let mut tools = self.tools.write().unwrap();
+        if tools.contains_key(&name) {
             warn!("Tool '{}' already registered; overwriting", name);
         }
-        inner.tools.insert(
+        tools.insert(
             name.clone(),
             ToolEntry {
                 name: name.clone(),
@@ -220,33 +215,40 @@ impl ToolRegistry {
     ///
     /// Returns `true` if the tool was present and removed.
     pub fn deregister(&self, name: &str) -> bool {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(removed) = inner.tools.remove(name) else {
-            return false;
+        let (removed_toolset, has_remaining) = {
+            let mut tools = self.tools.write().unwrap();
+            let Some(removed) = tools.remove(name) else {
+                return false;
+            };
+            let target = removed.toolset.clone();
+            let remaining = tools.values().any(|e| e.toolset == target);
+            (target, remaining)
         };
-        let target_toolset = removed.toolset;
-        if !inner
-            .tools
-            .values()
-            .any(|entry| entry.toolset == target_toolset)
-        {
-            inner
-                .toolset_aliases
-                .retain(|_, target| target != &target_toolset);
+        if !has_remaining {
+            self.aliases
+                .write()
+                .unwrap()
+                .retain(|_, target| target != &removed_toolset);
         }
         true
     }
 
     /// Get tool definitions for all tools whose `check_fn` returns true.
     ///
-    /// This is used to build the tool list sent to the LLM.
+    /// The read lock on `tools` is released before any `check_fn` is called
+    /// so that availability checks cannot deadlock against concurrent registrations.
     pub fn get_definitions(&self) -> Vec<ToolSchema> {
-        let inner = self.inner.lock().unwrap();
-        let definitions: Vec<ToolSchema> = inner
-            .tools
-            .values()
-            .filter(|entry| (entry.check_fn)())
-            .map(|entry| entry.schema.clone())
+        let entries: Vec<(ToolSchema, Arc<dyn Fn() -> bool + Send + Sync>)> = {
+            let tools = self.tools.read().unwrap();
+            tools
+                .values()
+                .map(|e| (e.schema.clone(), Arc::clone(&e.check_fn)))
+                .collect()
+        };
+        let definitions: Vec<ToolSchema> = entries
+            .into_iter()
+            .filter(|(_, check)| (check)())
+            .map(|(schema, _)| schema)
             .collect();
         sanitize_tool_schema_list(definitions)
     }
@@ -256,40 +258,31 @@ impl ToolRegistry {
     /// On success, returns the tool result string.
     /// On failure, returns a JSON error string: `{"error": "..."}`.
     pub fn dispatch(&self, name: &str, params: Value) -> String {
-        let (
-            handler,
-            max_chars,
-            policy_decision,
-            effective_params,
-            raw_bypassed,
-            rewrite_applied,
-            rtk_filter,
-            plan_phase,
-        ) = {
-            let mut inner = self.inner.lock().unwrap();
-            let decision = inner.policy.evaluate(name, &params);
-            let raw_bypassed = inner.rtk_raw_mode || inner.rtk_raw_once;
-            if inner.rtk_raw_once {
-                inner.rtk_raw_once = false;
+        // 1. Short raw_state lock — read and clear once-flag.
+        let raw_bypassed = {
+            let mut state = self.raw_state.lock().unwrap();
+            let bypassed = state.enabled || state.once_pending;
+            if state.once_pending {
+                state.once_pending = false;
             }
-            let (effective_params, rewrite_applied) =
-                inner.rtk_filter.rewrite_params(name, &params, raw_bypassed);
-            let entry = match inner.tools.get(name) {
-                Some(e) => e,
+            bypassed
+        };
+        // 2. Evaluate policy and rewrite params — no tools lock needed.
+        let (effective_params, rewrite_applied) =
+            self.rtk.rewrite_params(name, &params, raw_bypassed);
+        let policy_decision = self.policy.read().unwrap().evaluate(name, &params);
+        let plan_phase = *self.plan_phase.lock().unwrap();
+        // 3. Short read lock on tools — clone handler and cap, then release.
+        let (handler, max_chars) = {
+            let tools = self.tools.read().unwrap();
+            match tools.get(name) {
+                Some(e) => (
+                    Arc::clone(&e.handler),
+                    e.max_result_size_chars
+                        .unwrap_or(self.global_max_result_size_chars),
+                ),
                 None => return Self::tool_error(&format!("Tool not found: {}", name)),
-            };
-            (
-                Arc::clone(&entry.handler),
-                entry
-                    .max_result_size_chars
-                    .unwrap_or(inner.global_max_result_size_chars),
-                decision,
-                effective_params,
-                raw_bypassed,
-                rewrite_applied,
-                inner.rtk_filter.clone(),
-                inner.plan_phase,
-            )
+            }
         };
         self.record_policy_decision(&policy_decision);
         if !policy_decision.allow {
@@ -312,9 +305,10 @@ impl ToolRegistry {
                 .unwrap_or_else(|e| Err(hermes_core::ToolError::ExecutionFailed(e.to_string())))
         };
 
+        // 4. Filter output — fully lock-free.
         let output = match result {
             Ok(output) => {
-                let filtered = rtk_filter.filter_and_log(
+                let filtered = self.rtk.filter_and_log(
                     name,
                     &effective_params,
                     &output,
@@ -325,7 +319,7 @@ impl ToolRegistry {
             }
             Err(e) => {
                 let err_text = e.to_string();
-                let filtered = rtk_filter.filter_and_log(
+                let filtered = self.rtk.filter_and_log(
                     name,
                     &effective_params,
                     &err_text,
@@ -339,45 +333,45 @@ impl ToolRegistry {
     }
 
     /// Dispatch a tool call asynchronously.
+    ///
+    /// # Lock invariants
+    ///
+    /// No lock is held across the `handler.execute().await` call:
+    ///   - `raw_state` Mutex: acquired and released before any async work.
+    ///   - `tools` RwLock: acquired to clone the handler, released immediately.
+    ///   - `policy` RwLock: acquired to evaluate the decision, released immediately.
     pub async fn dispatch_async(&self, name: &str, params: Value) -> String {
-        let (
-            handler,
-            max_chars,
-            policy_decision,
-            effective_params,
-            raw_bypassed,
-            rewrite_applied,
-            rtk_filter,
-            required_fields,
-            plan_phase,
-        ) = {
-            let mut inner = self.inner.lock().unwrap();
-            let raw_bypassed = inner.rtk_raw_mode || inner.rtk_raw_once;
-            if inner.rtk_raw_once {
-                inner.rtk_raw_once = false;
+        // 1. Short raw_state lock — read and clear once-flag.
+        let raw_bypassed = {
+            let mut state = self.raw_state.lock().unwrap();
+            let bypassed = state.enabled || state.once_pending;
+            if state.once_pending {
+                state.once_pending = false;
             }
-            let (effective_params, rewrite_applied) =
-                inner.rtk_filter.rewrite_params(name, &params, raw_bypassed);
-            let decision = inner.policy.evaluate(name, &params);
-            match inner.tools.get(name) {
+            bypassed
+        };
+        // 2. Evaluate policy and rewrite params — no tools lock needed.
+        let (effective_params, rewrite_applied) =
+            self.rtk.rewrite_params(name, &params, raw_bypassed);
+        let policy_decision = self.policy.read().unwrap().evaluate(name, &params);
+        let plan_phase = *self.plan_phase.lock().unwrap();
+        // 3. Short read lock on tools — clone handler, cap, and required fields, then release.
+        let (handler, max_chars, required_fields) = {
+            let tools = self.tools.read().unwrap();
+            match tools.get(name) {
                 Some(e) => {
                     let required = e.schema.parameters.required.clone().unwrap_or_default();
                     (
                         Arc::clone(&e.handler),
                         e.max_result_size_chars
-                            .unwrap_or(inner.global_max_result_size_chars),
-                        decision,
-                        effective_params,
-                        raw_bypassed,
-                        rewrite_applied,
-                        inner.rtk_filter.clone(),
+                            .unwrap_or(self.global_max_result_size_chars),
                         required,
-                        inner.plan_phase,
                     )
                 }
                 None => return Self::tool_error(&format!("Tool not found: {}", name)),
             }
         };
+        // 4. Handle policy outcome — counters Mutex held briefly.
         self.record_policy_decision(&policy_decision);
         if !policy_decision.allow {
             return Self::tool_policy_error(name, &policy_decision);
@@ -397,9 +391,10 @@ impl ToolRegistry {
             }
         }
 
+        // 5. Execute handler — completely lock-free.
         let output = match handler.execute(effective_params.clone()).await {
             Ok(output) => {
-                let filtered = rtk_filter.filter_and_log(
+                let filtered = self.rtk.filter_and_log(
                     name,
                     &effective_params,
                     &output,
@@ -410,7 +405,7 @@ impl ToolRegistry {
             }
             Err(e) => {
                 let err_text = e.to_string();
-                let filtered = rtk_filter.filter_and_log(
+                let filtered = self.rtk.filter_and_log(
                     name,
                     &effective_params,
                     &err_text,
@@ -424,12 +419,9 @@ impl ToolRegistry {
     }
 
     /// Get a reference to a tool entry by name.
-    ///
-    /// Note: This returns a cloned `Arc<ToolEntry>` because we cannot return
-    /// a reference to data behind a Mutex lock. Returns `None` if not found.
     pub fn get_tool(&self, name: &str) -> Option<ToolEntryInfo> {
-        let inner = self.inner.lock().unwrap();
-        inner.tools.get(name).map(|e| ToolEntryInfo {
+        let tools = self.tools.read().unwrap();
+        tools.get(name).map(|e| ToolEntryInfo {
             name: e.name.clone(),
             toolset: e.toolset.clone(),
             description: e.description.clone(),
@@ -442,9 +434,8 @@ impl ToolRegistry {
 
     /// List all registered tool entries.
     pub fn list_tools(&self) -> Vec<ToolEntryInfo> {
-        let inner = self.inner.lock().unwrap();
-        inner
-            .tools
+        let tools = self.tools.read().unwrap();
+        tools
             .values()
             .map(|e| ToolEntryInfo {
                 name: e.name.clone(),
@@ -460,9 +451,11 @@ impl ToolRegistry {
 
     /// List distinct toolset names.
     pub fn list_toolsets(&self) -> Vec<String> {
-        let inner = self.inner.lock().unwrap();
-        let mut sets: Vec<String> = inner.tools.values().map(|e| e.toolset.clone()).collect();
-        sets.extend(inner.toolset_aliases.keys().cloned());
+        let mut sets: Vec<String> = {
+            let tools = self.tools.read().unwrap();
+            tools.values().map(|e| e.toolset.clone()).collect()
+        };
+        sets.extend(self.aliases.read().unwrap().keys().cloned());
         sets.sort();
         sets.dedup();
         sets
@@ -476,34 +469,43 @@ impl ToolRegistry {
         if alias.is_empty() || target.is_empty() {
             return;
         }
-        let mut inner = self.inner.lock().unwrap();
-        inner.toolset_aliases.insert(alias, target);
+        self.aliases.write().unwrap().insert(alias, target);
     }
 
     /// Return the canonical target for a registered toolset alias.
     pub fn get_toolset_alias_target(&self, alias: &str) -> Option<String> {
-        let inner = self.inner.lock().unwrap();
-        inner.toolset_aliases.get(alias).cloned()
+        self.aliases.read().unwrap().get(alias).cloned()
     }
 
     /// Check whether the registry owns this live toolset or alias.
     pub fn has_toolset(&self, toolset: &str) -> bool {
-        let inner = self.inner.lock().unwrap();
-        let resolved = resolve_toolset_alias_locked(&inner, toolset);
-        inner.tools.values().any(|entry| entry.toolset == resolved)
-            || inner.toolset_aliases.contains_key(toolset)
+        let aliases = self.aliases.read().unwrap();
+        let resolved = resolve_toolset_alias(&aliases, toolset);
+        if aliases.contains_key(toolset) {
+            return true;
+        }
+        let tools = self.tools.read().unwrap();
+        tools.values().any(|entry| entry.toolset == resolved)
     }
 
     /// Return tool names belonging to a live registry-owned toolset or alias.
     pub fn tool_names_for_toolset(&self, toolset: &str, available_only: bool) -> Vec<String> {
-        let inner = self.inner.lock().unwrap();
-        let resolved = resolve_toolset_alias_locked(&inner, toolset);
-        let mut names: Vec<String> = inner
-            .tools
-            .values()
-            .filter(|entry| entry.toolset == resolved)
-            .filter(|entry| !available_only || (entry.check_fn)())
-            .map(|entry| entry.name.clone())
+        let resolved = {
+            let aliases = self.aliases.read().unwrap();
+            resolve_toolset_alias(&aliases, toolset)
+        };
+        let entries: Vec<(String, Arc<dyn Fn() -> bool + Send + Sync>)> = {
+            let tools = self.tools.read().unwrap();
+            tools
+                .values()
+                .filter(|entry| entry.toolset == resolved)
+                .map(|entry| (entry.name.clone(), Arc::clone(&entry.check_fn)))
+                .collect()
+        };
+        let mut names: Vec<String> = entries
+            .into_iter()
+            .filter(|(_, check)| !available_only || (check)())
+            .map(|(name, _)| name)
             .collect();
         names.sort();
         names
@@ -511,11 +513,11 @@ impl ToolRegistry {
 
     /// Check whether a tool is available (exists and check_fn passes).
     pub fn is_available(&self, name: &str) -> bool {
-        let inner = self.inner.lock().unwrap();
-        match inner.tools.get(name) {
-            Some(e) => (e.check_fn)(),
-            None => false,
-        }
+        let check: Option<Arc<dyn Fn() -> bool + Send + Sync>> = {
+            let tools = self.tools.read().unwrap();
+            tools.get(name).map(|e| Arc::clone(&e.check_fn))
+        };
+        check.map_or(false, |f| f())
     }
 
     /// Format an error as JSON: `{"error": "msg"}`.
@@ -544,7 +546,6 @@ impl ToolRegistry {
     /// otherwise wrap it as `{"result": "..."}`.
     pub fn tool_result(data: &str) -> String {
         if looks_like_json(data) {
-            // Assume already JSON-ish, pass through
             data.to_string()
         } else {
             serde_json::json!({ "result": data }).to_string()
@@ -553,24 +554,22 @@ impl ToolRegistry {
 
     fn record_policy_decision(&self, decision: &ToolPolicyDecision) {
         let counters_snapshot = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut counters = self.counters.lock().unwrap();
             if decision.allow {
-                inner.policy_counters.allow = inner.policy_counters.allow.saturating_add(1);
+                counters.allow = counters.allow.saturating_add(1);
             } else {
-                inner.policy_counters.deny = inner.policy_counters.deny.saturating_add(1);
+                counters.deny = counters.deny.saturating_add(1);
             }
             if decision.audited_only {
-                inner.policy_counters.audit_only =
-                    inner.policy_counters.audit_only.saturating_add(1);
+                counters.audit_only = counters.audit_only.saturating_add(1);
             }
             if decision.simulated {
-                inner.policy_counters.simulate = inner.policy_counters.simulate.saturating_add(1);
+                counters.simulate = counters.simulate.saturating_add(1);
             }
             if decision.would_block {
-                inner.policy_counters.would_block =
-                    inner.policy_counters.would_block.saturating_add(1);
+                counters.would_block = counters.would_block.saturating_add(1);
             }
-            inner.policy_counters.clone()
+            counters.clone()
         };
         let _ =
             persist_tool_policy_counters(&default_tool_policy_counters_path(), &counters_snapshot);
@@ -621,11 +620,11 @@ fn maybe_annotate_audit(output: String, decision: &ToolPolicyDecision) -> String
     }
 }
 
-fn resolve_toolset_alias_locked(inner: &ToolRegistryInner, name: &str) -> String {
+fn resolve_toolset_alias(aliases: &HashMap<String, String>, name: &str) -> String {
     let mut current = name.to_string();
     let mut seen = HashSet::new();
     while seen.insert(current.clone()) {
-        let Some(next) = inner.toolset_aliases.get(&current) else {
+        let Some(next) = aliases.get(&current) else {
             return current;
         };
         current = next.clone();

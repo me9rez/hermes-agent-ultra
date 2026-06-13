@@ -25,23 +25,27 @@ pub(crate) use personality::handle_personality_command;
 pub(crate) use plan_mode::handle_plan_mode_command;
 pub(crate) use provider_cmd::handle_provider_command;
 pub(crate) use raw::{handle_raw_command, replay_enabled_runtime};
-pub(crate) use reasoning::{handle_reasoning_command, parse_reasoning_effort};
+pub(crate) use reasoning::handle_reasoning_command;
 pub(crate) use runbook::handle_runbook_command;
 pub(crate) use runtime_flags::{
     handle_status_command, handle_stop_command, handle_usage_command, handle_verbose_command,
     handle_yolo_command,
 };
-pub(crate) use subconscious::{
-    SubconsciousQueueState, SubconsciousTask, handle_subconscious_command, save_subconscious_state,
-};
+pub(crate) use subconscious::handle_subconscious_command;
 pub(crate) use toolcards::handle_toolcards_command;
 pub(crate) use tools::handle_tools_command;
 pub(crate) use transcript::{handle_context_command, handle_history_command, handle_recap_command};
-pub(crate) use triage::{
-    TriggerTriageAssessment, TriggerTriageDecision, append_triage_learning_feedback,
-    evaluate_trigger_triage, handle_trigger_triage_command, triage_learning_bias,
-    trigger_triage_learning_state_path,
-};
+pub(crate) use triage::handle_trigger_triage_command;
 
 #[cfg(test)]
-pub(crate) use subconscious::subconscious_test_high_risk_state;
+pub(crate) use reasoning::parse_reasoning_effort;
+#[cfg(test)]
+pub(crate) use subconscious::{
+    save_subconscious_state, SubconsciousQueueState, SubconsciousTask,
+    subconscious_test_high_risk_state,
+};
+#[cfg(test)]
+pub(crate) use triage::{
+    append_triage_learning_feedback, evaluate_trigger_triage, triage_learning_bias,
+    trigger_triage_learning_state_path, TriggerTriageAssessment, TriggerTriageDecision,
+};

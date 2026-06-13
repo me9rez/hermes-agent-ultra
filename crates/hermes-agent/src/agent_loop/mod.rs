@@ -16,20 +16,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use futures::StreamExt;
 use hermes_intelligence::get_model_context_length;
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::Value;
 
 use hermes_core::{
     AgentError, AgentResult, LlmProvider, LlmResponse, Message, MessageRole, StreamChunk, ToolCall,
-    ToolResult, ToolSchema, UsageStats, separate_text_and_calls,
+    ToolResult, ToolSchema, UsageStats,
 };
 
 use crate::agent_runtime_helpers;
-use crate::api_bridge::CodexProvider;
 use crate::auxiliary_builder::{AuxiliaryBuildParams, build_auxiliary_client};
-use crate::bedrock::{BedrockProvider, resolve_bedrock_region};
 use crate::code_index::CodeIndex;
 use crate::compression::{
     CompressorConfig, ContextCompressor, estimate_messages_tokens,
@@ -44,28 +40,16 @@ use crate::lsp_context::{LspContextConfig, build_lsp_context_note};
 use crate::memory_manager::MemoryManager;
 use crate::message_sanitization::{
     build_partial_stream_stub_response, format_partial_stream_tool_call_warning,
-    partial_stream_dropped_tool_names, partial_stream_tool_calls_in_flight, sanitize_surrogates,
-    should_treat_stop_as_truncated, strip_budget_warnings_from_messages,
+    partial_stream_dropped_tool_names, sanitize_surrogates, strip_budget_warnings_from_messages,
 };
-use crate::plugins::{HookResult, HookType, PluginManager};
-use crate::provider::{AnthropicProvider, GenericProvider, OpenAiProvider, OpenRouterProvider};
-use crate::providers_extra::{
-    CopilotProvider, KimiProvider, MiniMaxProvider, NousProvider, QwenProvider,
-};
-use crate::replay::{
-    RouteLearningState, RouteLearningStats, short_sha256_hex, truncate_hook_preview,
-};
+use crate::plugins::{HookType, PluginManager};
+use crate::replay::short_sha256_hex;
 use crate::session_persistence::{SessionFlushCursor, SessionPersistence};
 use crate::skill_orchestrator::SkillOrchestrator;
 pub use crate::smart_model_routing::{ApiMode, CheapModelRouteConfig, SmartModelRoutingConfig};
-use crate::smart_model_routing::{
-    PrimaryRuntime, ResolveTurnOutcome, ResolvedCheapRuntime, TurnRouteSignature,
-    detect_api_mode_for_url, resolve_turn_route,
-};
+use crate::smart_model_routing::{PrimaryRuntime, TurnRouteSignature};
 use crate::steer::PendingSteer;
-use crate::system_prompt::{
-    BACKEND_PROBE_COMMAND, format_probe_output, platform_hint_for, probe_remote_backend_cached,
-};
+use crate::system_prompt::{format_probe_output, platform_hint_for, probe_remote_backend_cached};
 use crate::user_interest::{InterestStore, ingest_user_message, is_poi_synthetic_user_text};
 use crate::work_session::{spawn_session_end_pipeline, touch_active_session};
 use hermes_intelligence::auxiliary::AuxiliaryClient;
@@ -78,10 +62,9 @@ pub use crate::agent_config::{
     AgentConfig, ErrorClass, RetryConfig, RuntimeProviderConfig, TurnMetrics,
 };
 use crate::agent_config::{
-    CompactionGovernanceMode, EvolutionCounters, FinalizationSignals, OAuthStoreCredential,
+    CompactionGovernanceMode, EvolutionCounters, OAuthStoreCredential,
     compaction_governance_mode_runtime, contextlattice_orchestration_script_path,
-    has_ssl_transient_phrase, is_copilot_acp_transport, is_stream_not_supported_error,
-    is_transient_stream_error, rand_u64_range, should_inject_tool_enforcement_for_model,
+    has_ssl_transient_phrase, rand_u64_range, should_inject_tool_enforcement_for_model,
 };
 pub(crate) use crate::agent_state::AgentSharedState;
 pub use crate::tool_registry::{ToolEntry, ToolRegistry};
@@ -122,8 +105,7 @@ pub(crate) use crate::window_stats::{push_window_f64, push_window_u64};
 pub(crate) const CONVERSATIONAL_SUPPORT_GUIDANCE: &str = "# Conversational support protocol\nWhen users share personal stress, emotions, or difficult decisions, start with a brief non-judgmental acknowledgment, ask one clarifying question if context is missing, then offer practical options with trade-offs. Keep factual or technical requests direct and do not force emotional language where it does not fit. Do not present yourself as a therapist or crisis service; when safety risk appears, urge the user to seek immediate professional or emergency help.";
 pub(crate) const OAUTH_REFRESH_BACKOFF_SECS: u64 = 60;
 pub(crate) use crate::objective_guard::{
-    OBJECTIVE_ANALYTICS_TAG, OBJECTIVE_DEEP_AUDIT_MAX_RETRIES, OBJECTIVE_DEEP_AUDIT_TAG,
-    OBJECTIVE_GUARD_MAX_RETRIES, OBJECTIVE_PATCH_TAG, detect_repo_review_intent,
+    OBJECTIVE_DEEP_AUDIT_MAX_RETRIES, OBJECTIVE_GUARD_MAX_RETRIES, detect_repo_review_intent,
     exploratory_problem_solving_system_hint, extract_session_objective, objective_guard_policy,
     objective_guard_retry_prompt, objective_guard_satisfied, objective_mode_system_hint,
 };
@@ -1752,7 +1734,7 @@ pub(crate) use finalizer_fns::{
     finalizer_action_execution_requires_retry, finalizer_claim_requires_evidence_retry,
     finalizer_output_quality_requires_retry, inject_runtime_tool_params,
     is_contextlattice_shell_invocation, latest_user_content, objective_eval_score,
-    session_search_has_query, summarize_background_review_result,
+    session_search_has_query,
 };
 
 pub(crate) use cost_fns::{

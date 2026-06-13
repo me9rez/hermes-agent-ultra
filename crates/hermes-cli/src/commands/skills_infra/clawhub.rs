@@ -5,7 +5,7 @@ use hermes_core::AgentError;
 
 use super::constants::CLAWHUB_API_BASE;
 use super::parse::ensure_safe_relative_path;
-use super::types::{ClawHubLatestVersion, ClawHubSkillDetailResponse};
+use super::types::ClawHubSkillDetailResponse;
 
 pub(crate) fn detect_archive_format(bytes: &[u8]) -> &'static str {
     if bytes.len() >= 4

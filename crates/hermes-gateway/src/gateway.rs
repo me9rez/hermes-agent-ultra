@@ -1789,7 +1789,7 @@ impl Gateway {
                 None
             };
             #[cfg(not(feature = "discord"))]
-            let discord_progressive_edit_gate: Option<Arc<TokioMutex<Instant>>> = None;
+            let _discord_progressive_edit_gate: Option<Arc<TokioMutex<Instant>>> = None;
 
             Arc::new(move |chunk: String| {
                 if !chunk.trim().is_empty() && !visible_emitted.swap(true, Ordering::AcqRel) {

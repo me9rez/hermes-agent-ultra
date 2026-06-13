@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use hermes_agent::sub_agent_orchestrator::SubAgentOrchestrator;
 use hermes_agent::{AgentLoop, InterruptController, SessionPersistence};
-use hermes_config::{GatewayConfig, hermes_home as hermes_home_dir, load_config, state_dir};
+use hermes_config::{hermes_home as hermes_home_dir, load_config, state_dir};
 use hermes_core::AgentError;
 use hermes_cron::cron_scheduler_for_data_dir;
 use hermes_skills::{FileSkillStore, SkillManager};
@@ -67,8 +67,7 @@ use actors::{AuthLane, PersistLane};
 use pet::{load_pet_settings, persist_pet_settings};
 use provider::{
     apply_cli_runtime_overrides, default_mouse_enabled, default_rtk_raw_mode,
-    normalize_runtime_provider_name, resolve_provider_and_model, resolve_startup_model,
-    sync_runtime_model_env,
+    resolve_startup_model, sync_runtime_model_env,
 };
 use snapshot_policy::SnapshotPersistGate;
 

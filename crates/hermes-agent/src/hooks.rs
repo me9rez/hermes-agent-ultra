@@ -34,7 +34,7 @@ pub(crate) fn invoke_hook(agent: &AgentLoop, hook: HookType, ctx_val: &Value) ->
 // ---------------------------------------------------------------------------
 
 pub(crate) fn inject_pre_llm_hook_into_user_message(
-    agent: &AgentLoop,
+    _agent: &AgentLoop,
     results: &[HookResult],
     ctx: &mut ContextManager,
 ) {
@@ -154,7 +154,7 @@ pub(crate) fn apply_transform_llm_output_hooks(agent: &AgentLoop, content: &mut 
 // Context spill
 // ---------------------------------------------------------------------------
 
-fn hook_context_spill_threshold_chars(agent: &AgentLoop) -> usize {
+fn hook_context_spill_threshold_chars(_agent: &AgentLoop) -> usize {
     std::env::var("HERMES_HOOK_CONTEXT_SPILL_CHARS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())

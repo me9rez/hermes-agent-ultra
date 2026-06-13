@@ -6,12 +6,11 @@
 
 use std::path::PathBuf;
 
-use hermes_config::{GatewayConfig, LlmProviderConfig};
+use hermes_config::GatewayConfig;
 use hermes_core::AgentError;
 use hermes_intelligence::model_metadata::{get_model_context_length, get_model_info};
 pub(crate) use hermes_intelligence::models_dev::default_client;
 
-use crate::App;
 use crate::app::provider_api_key_from_env;
 use crate::commands::{CommandResult, emit_command_output};
 use crate::env_vars;
@@ -1432,92 +1431,6 @@ pub(crate) fn openai_reasoning_effort_for_level(effort: &str) -> &'static str {
     }
 }
 
-fn set_provider_reasoning_effort(cfg: &mut GatewayConfig, provider: &str, effort: Option<&str>) {
-    let provider_key = resolve_provider_key(cfg, provider);
-    let provider_cfg = cfg
-        .llm_providers
-        .entry(provider_key.clone())
-        .or_insert_with(LlmProviderConfig::default);
-
-    let mut body_map = provider_cfg
-        .extra_body
-        .take()
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
-
-    match effort {
-        Some(level) => {
-            body_map.remove("reasoning_effort");
-            let mut reasoning_obj = body_map
-                .get("reasoning")
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default();
-            let mapped_reasoning = openai_reasoning_effort_for_level(level);
-            reasoning_obj.insert(
-                "effort".to_string(),
-                serde_json::Value::String(mapped_reasoning.to_string()),
-            );
-            body_map.insert(
-                "reasoning".to_string(),
-                serde_json::Value::Object(reasoning_obj),
-            );
-
-            if provider_key.contains("gemini") || provider_key == "google" {
-                let level_mapped = gemini_thinking_level_for_effort(level);
-                let mut google_obj = body_map
-                    .get("google")
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default();
-                let mut thinking_cfg = google_obj
-                    .get("thinking_config")
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default();
-                thinking_cfg.insert(
-                    "thinking_level".to_string(),
-                    serde_json::Value::String(level_mapped.to_string()),
-                );
-                google_obj.insert(
-                    "thinking_config".to_string(),
-                    serde_json::Value::Object(thinking_cfg.clone()),
-                );
-                body_map.insert("google".to_string(), serde_json::Value::Object(google_obj));
-                body_map.insert(
-                    "thinking_config".to_string(),
-                    serde_json::Value::Object(thinking_cfg),
-                );
-            }
-        }
-        None => {
-            body_map.remove("reasoning_effort");
-            if let Some(reasoning_obj) = body_map
-                .get_mut("reasoning")
-                .and_then(|value| value.as_object_mut())
-            {
-                reasoning_obj.remove("effort");
-                if reasoning_obj.is_empty() {
-                    body_map.remove("reasoning");
-                }
-            }
-            body_map.remove("thinking_config");
-            if let Some(google_obj) = body_map
-                .get_mut("google")
-                .and_then(|value| value.as_object_mut())
-            {
-                google_obj.remove("thinking_config");
-                if google_obj.is_empty() {
-                    body_map.remove("google");
-                }
-            }
-        }
-    }
-
-    provider_cfg.extra_body = if body_map.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Object(body_map))
-    };
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1525,6 +1438,97 @@ fn set_provider_reasoning_effort(cfg: &mut GatewayConfig, provider: &str, effort
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hermes_config::LlmProviderConfig;
+
+    fn set_provider_reasoning_effort(
+        cfg: &mut GatewayConfig,
+        provider: &str,
+        effort: Option<&str>,
+    ) {
+        let provider_key = resolve_provider_key(cfg, provider);
+        let provider_cfg = cfg
+            .llm_providers
+            .entry(provider_key.clone())
+            .or_insert_with(LlmProviderConfig::default);
+
+        let mut body_map = provider_cfg
+            .extra_body
+            .take()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+
+        match effort {
+            Some(level) => {
+                body_map.remove("reasoning_effort");
+                let mut reasoning_obj = body_map
+                    .get("reasoning")
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                let mapped_reasoning = openai_reasoning_effort_for_level(level);
+                reasoning_obj.insert(
+                    "effort".to_string(),
+                    serde_json::Value::String(mapped_reasoning.to_string()),
+                );
+                body_map.insert(
+                    "reasoning".to_string(),
+                    serde_json::Value::Object(reasoning_obj),
+                );
+
+                if provider_key.contains("gemini") || provider_key == "google" {
+                    let level_mapped = gemini_thinking_level_for_effort(level);
+                    let mut google_obj = body_map
+                        .get("google")
+                        .and_then(|v| v.as_object().cloned())
+                        .unwrap_or_default();
+                    let mut thinking_cfg = google_obj
+                        .get("thinking_config")
+                        .and_then(|v| v.as_object().cloned())
+                        .unwrap_or_default();
+                    thinking_cfg.insert(
+                        "thinking_level".to_string(),
+                        serde_json::Value::String(level_mapped.to_string()),
+                    );
+                    google_obj.insert(
+                        "thinking_config".to_string(),
+                        serde_json::Value::Object(thinking_cfg.clone()),
+                    );
+                    body_map.insert("google".to_string(), serde_json::Value::Object(google_obj));
+                    body_map.insert(
+                        "thinking_config".to_string(),
+                        serde_json::Value::Object(thinking_cfg),
+                    );
+                }
+            }
+            None => {
+                body_map.remove("reasoning_effort");
+                if let Some(reasoning_obj) = body_map
+                    .get_mut("reasoning")
+                    .and_then(|value| value.as_object_mut())
+                {
+                    reasoning_obj.remove("effort");
+                    if reasoning_obj.is_empty() {
+                        body_map.remove("reasoning");
+                    }
+                }
+                body_map.remove("thinking_config");
+                if let Some(google_obj) = body_map
+                    .get_mut("google")
+                    .and_then(|value| value.as_object_mut())
+                {
+                    google_obj.remove("thinking_config");
+                    if google_obj.is_empty() {
+                        body_map.remove("google");
+                    }
+                }
+            }
+        }
+
+        provider_cfg.extra_body = if body_map.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(body_map))
+        };
+    }
     use crate::test_env_lock;
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {

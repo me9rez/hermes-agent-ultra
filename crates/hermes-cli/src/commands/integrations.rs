@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use hermes_core::AgentError;
 
-use crate::app::App;
 use crate::commands::policy;
 use crate::commands::{CommandResult, emit_command_output, truncate_chars};
 use crate::model_switch::curated_provider_slugs;

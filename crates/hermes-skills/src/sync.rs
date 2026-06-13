@@ -240,7 +240,7 @@ pub fn dir_hash(dir: &Path) -> String {
         }
         ctx.consume([0xff]);
     }
-    format!("{:x}", ctx.compute())
+    format!("{:x}", ctx.finalize())
 }
 
 fn collect_files(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) {

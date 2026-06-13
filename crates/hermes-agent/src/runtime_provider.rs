@@ -25,8 +25,8 @@ use crate::provider::{AnthropicProvider, GenericProvider, OpenAiProvider, OpenRo
 use crate::providers_extra::{
     CopilotProvider, KimiProvider, MiniMaxProvider, NousProvider, QwenProvider,
 };
-use crate::smart_model_routing::{ApiMode, PrimaryRuntime, ResolvedCheapRuntime};
-use crate::smart_model_routing::{CheapModelRouteConfig, detect_api_mode_for_url};
+use crate::smart_model_routing::detect_api_mode_for_url;
+use crate::smart_model_routing::{ApiMode, PrimaryRuntime};
 
 // ---------------------------------------------------------------------------
 // Provider construction
@@ -752,7 +752,7 @@ fn auth_tokens_path(agent: &AgentLoop) -> PathBuf {
 }
 
 async fn exchange_oauth_refresh_token(
-    agent: &AgentLoop,
+    _agent: &AgentLoop,
     provider_key: &str,
     token_url: &str,
     client_id: &str,

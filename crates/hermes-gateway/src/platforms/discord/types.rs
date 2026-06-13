@@ -31,6 +31,7 @@ pub struct SlashCommand {
     pub command_type: u8,
 }
 
+#[allow(dead_code)]
 fn default_command_type() -> u8 {
     1
 }

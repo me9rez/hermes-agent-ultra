@@ -3,7 +3,7 @@
 use hermes_core::AgentError;
 
 use super::constants::{HERMES_SKILLS_INDEX_URL, OFFICIAL_SKILLS_REPO};
-use super::parse::{parse_explicit_github_skill, parse_registry_prefixed_skill};
+use super::parse::parse_explicit_github_skill;
 use super::types::{
     HermesSkillsIndexEntry, HermesSkillsIndexResponse, LobeHubAgentResponse, RegistryInstallSource,
     RegistrySkillRecord, ResolvedSkillSource,

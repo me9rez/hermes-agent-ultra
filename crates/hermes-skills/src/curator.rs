@@ -19,7 +19,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::curator_prompt::CURATOR_REVIEW_PROMPT;
-use crate::usage::{is_protected_skill, STATE_ACTIVE, STATE_ARCHIVED, STATE_STALE, UsageStore};
+use crate::usage::{STATE_ACTIVE, STATE_ARCHIVED, STATE_STALE, UsageStore, is_protected_skill};
 
 /// Curator persistent state (stored at `store.dir()/.curator_state`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

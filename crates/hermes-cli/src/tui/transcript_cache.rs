@@ -8,7 +8,7 @@ use ratatui::text::Line;
 use super::{TuiState, ViewDensity};
 
 #[derive(Debug, Clone)]
-pub(super) struct TranscriptCache {
+pub(crate) struct TranscriptCache {
     pub fingerprint: u64,
     pub width: u16,
     pub lines: Vec<Line<'static>>,

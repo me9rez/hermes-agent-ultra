@@ -1,21 +1,14 @@
-use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use chrono::Local;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
-use hermes_core::Message;
+use unicode_width::UnicodeWidthStr;
 
 use super::super::state::TuiState;
 use super::super::text::{hard_wrap_segments, transcript_divider, truncate_chars};
-use super::super::transcript_cache::{
-    TranscriptCache, TranscriptRefreshPlan, expanded_tool_cards_signature,
-    find_message_fingerprint_divergence, plan_transcript_refresh,
-};
+use super::super::transcript_cache::{TranscriptCache, expanded_tool_cards_signature};
 use super::super::types::{StreamMarkdownCache, ViewDensity};
-use crate::theme;
 use crate::tool_preview::{build_tool_preview_from_value, tool_emoji};
 const TRANSCRIPT_HARD_WRAP_COLS: u16 = 80;
 const TRANSCRIPT_CONTENT_WRAP_COLS: usize = 76;
@@ -451,6 +444,7 @@ pub(crate) fn transcript_message_fingerprints(messages: &[hermes_core::Message])
     messages.iter().map(message_fingerprint).collect()
 }
 
+#[cfg(test)]
 pub(crate) fn count_renderable_messages(messages: &[hermes_core::Message]) -> usize {
     messages
         .iter()

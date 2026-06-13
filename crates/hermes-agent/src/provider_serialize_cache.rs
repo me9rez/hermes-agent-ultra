@@ -26,7 +26,7 @@ pub(crate) struct AnthropicMessagesCacheKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ToolsCacheKey {
+pub(crate) struct ToolsCacheKey {
     count: usize,
     schema_hash: u64,
 }

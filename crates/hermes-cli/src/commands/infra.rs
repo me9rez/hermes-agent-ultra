@@ -8,7 +8,6 @@ use std::sync::Arc;
 use hermes_core::AgentError;
 use regex::Regex;
 
-use crate::App;
 use crate::alpha_runtime::load_contextlattice_policy;
 use crate::commands::{CommandResult, emit_command_output, yes_no};
 

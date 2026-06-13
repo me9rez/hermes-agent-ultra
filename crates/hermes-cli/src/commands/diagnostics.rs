@@ -5,7 +5,6 @@ use std::path::Path;
 
 use hermes_core::AgentError;
 
-use crate::app::App;
 use crate::commands::{CommandResult, emit_command_output};
 
 pub(crate) fn handle_image_command(

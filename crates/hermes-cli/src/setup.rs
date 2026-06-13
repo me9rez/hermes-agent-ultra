@@ -10,7 +10,7 @@ use hermes_cli::auth::{
     save_codex_auth_state, save_openai_auth_state, save_provider_auth_state,
 };
 use hermes_cli::model_switch::{normalize_provider_model, provider_model_ids};
-use hermes_config::{ConfigError, load_user_config_file, save_config_yaml, validate_config};
+use hermes_config::{load_user_config_file, save_config_yaml, validate_config};
 use hermes_core::AgentError;
 use std::path::{Path, PathBuf};
 

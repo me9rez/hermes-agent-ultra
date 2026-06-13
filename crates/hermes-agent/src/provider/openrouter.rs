@@ -88,7 +88,7 @@ impl OpenRouterProvider {
         }
     }
 
-    pub fn with_serialize_cache(self, cache: Arc<ProviderSerializeCache>) -> Self {
+    pub(crate) fn with_serialize_cache(self, cache: Arc<ProviderSerializeCache>) -> Self {
         Self {
             inner: self.inner.with_serialize_cache(cache),
             ..self

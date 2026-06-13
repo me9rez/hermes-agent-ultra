@@ -837,7 +837,10 @@ mod tests {
         // mark_agent_created on a bundled skill should silently no-op
         store.mark_agent_created("yuanbao").unwrap();
         let rec = store.get_record("yuanbao");
-        assert!(!rec.agent_created, "bundled skill should not be marked agent-created");
+        assert!(
+            !rec.agent_created,
+            "bundled skill should not be marked agent-created"
+        );
     }
 
     #[test]

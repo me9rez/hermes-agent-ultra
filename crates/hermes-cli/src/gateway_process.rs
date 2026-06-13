@@ -36,6 +36,7 @@ pub(crate) fn cleanup_stale_gateway_metadata(pid_path: &Path) {
     let _ = std::fs::remove_file(gateway_lock_path_for_pid_path(pid_path));
 }
 
+#[cfg(unix)]
 pub(crate) fn looks_like_gateway_process(cmdline: &str) -> bool {
     let cmdline = cmdline.to_ascii_lowercase();
     const PATTERNS: &[&str] = &[
@@ -121,11 +122,6 @@ pub(crate) fn gateway_launchd_plist_path() -> Option<PathBuf> {
             .join("LaunchAgents")
             .join(format!("{}.plist", gateway_launchd_label())),
     )
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn gateway_launchd_plist_path() -> Option<PathBuf> {
-    None
 }
 
 #[cfg(target_os = "macos")]

@@ -37,38 +37,18 @@ pub(crate) mod skills_infra;
 pub(crate) mod studio_ops;
 pub(crate) mod swarm;
 
-pub(crate) use approval::{handle_approve_command, handle_deny_command, handle_gquota_command};
-pub(crate) use diagnostics::{
-    handle_debug_dump_command, handle_dump_format_command, handle_image_command,
-    handle_insights_command, handle_interactive_question_command, handle_log_command,
-};
-pub(crate) use plan::{handle_plan_command, plan_capability_mode};
-pub(crate) use studio_ops::{
-    extract_marker_paths, normalize_repo_relative_path, specpatch_block_reason,
-};
-
 pub use autocomplete::{SLASH_COMMANDS, autocomplete, autocomplete_contextual, help_for};
 pub use slash_dispatch::handle_slash_command;
 
-pub(crate) use autocomplete::canonical_command;
-pub(crate) use catalog::{
-    detect_repo_root_from_cwd, feedback_log_path, handle_feedback_command, provider_health_snapshot,
-};
+pub(crate) use catalog::{detect_repo_root_from_cwd, provider_health_snapshot};
 
 pub use background::recover_queued_background_jobs;
 pub use kanban::run_kanban_command;
 
 pub(crate) use misc::{
-    SubconsciousQueueState, SubconsciousTask, TriggerTriageAssessment, TriggerTriageDecision,
-    append_triage_learning_feedback, discover_repo_root_for_about, evaluate_trigger_triage,
-    handle_about_command, handle_config_command, handle_curator_command, handle_history_command,
-    handle_personality_command, handle_plan_mode_command, handle_provider_command,
-    handle_raw_command, handle_reasoning_command, handle_recap_command, handle_runbook_command,
-    handle_status_command, handle_stop_command, handle_subconscious_command,
-    handle_toolcards_command, handle_tools_command, handle_trigger_triage_command,
-    handle_usage_command, handle_verbose_command, handle_yolo_command, parse_reasoning_effort,
-    read_json_file, replay_enabled_runtime, save_subconscious_state, triage_learning_bias,
-    trigger_triage_learning_state_path,
+    discover_repo_root_for_about, handle_personality_command, handle_raw_command,
+    handle_reasoning_command, handle_trigger_triage_command, handle_verbose_command,
+    handle_yolo_command, read_json_file, replay_enabled_runtime,
 };
 
 /// Result of handling a slash command.
@@ -213,8 +193,7 @@ pub(crate) fn truncate_chars(input: &str, max_len: usize) -> String {
 }
 
 pub(crate) use cli_handlers::{
-    discover_plugin_surface, query_mode_tools_enabled, render_plugin_surface_table,
-    whatsapp_cloud_setup_impl,
+    discover_plugin_surface, render_plugin_surface_table, whatsapp_cloud_setup_impl,
 };
 pub use cli_handlers::{
     handle_cli_acp, handle_cli_backup, handle_cli_chat, handle_cli_claw, handle_cli_contribute,
@@ -225,16 +204,40 @@ pub use cli_handlers::{
 };
 
 #[cfg(test)]
+pub(crate) use cli_handlers::query_mode_tools_enabled;
+#[cfg(test)]
+pub(crate) use studio_ops::{
+    extract_marker_paths, normalize_repo_relative_path, specpatch_block_reason,
+};
+#[cfg(test)]
+pub(crate) use catalog::feedback_log_path;
+#[cfg(test)]
+pub(crate) use misc::{
+    append_triage_learning_feedback, evaluate_trigger_triage, parse_reasoning_effort,
+    save_subconscious_state, triage_learning_bias, trigger_triage_learning_state_path,
+    SubconsciousQueueState, SubconsciousTask, TriggerTriageAssessment, TriggerTriageDecision,
+};
+#[cfg(test)]
 pub(crate) use background::handle_queue_command;
+#[cfg(test)]
+pub(crate) use autocomplete::canonical_command;
+#[cfg(test)]
+pub(crate) use approval::{handle_approve_command, handle_deny_command, handle_gquota_command};
+#[cfg(test)]
+pub(crate) use catalog::handle_feedback_command;
 #[cfg(test)]
 pub(crate) use cli_handlers::{
     ACP_MULTIMODAL_PREFIX, acp_history_to_messages, apply_cli_chat_runtime_env,
     remove_sentrux_mcp_profile, resolve_cli_chat_provider_model, upsert_sentrux_mcp_profile,
 };
 #[cfg(test)]
+pub(crate) use diagnostics::{handle_debug_dump_command, handle_image_command};
+#[cfg(test)]
 pub(crate) use infra::extract_embedding_diag_line;
 #[cfg(test)]
 pub(crate) use kanban::parse_kanban_add;
+#[cfg(test)]
+pub(crate) use plan::handle_plan_command;
 #[cfg(test)]
 pub(crate) use policy::walkthrough_events_path;
 #[cfg(test)]

@@ -4,7 +4,6 @@ use std::fmt::Write as _;
 
 use hermes_core::AgentError;
 
-use crate::app::App;
 use crate::commands::background;
 use crate::commands::model::{
     ModelCapabilityRequirements, default_client, resolve_model_capabilities, split_provider_model,

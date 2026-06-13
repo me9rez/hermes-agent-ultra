@@ -9,7 +9,6 @@ use std::process::Stdio;
 
 use hermes_core::AgentError;
 
-use crate::App;
 use crate::alpha_runtime::{
     enqueue_loop_event, ensure_alpha_runtime_bootstrap, ensure_trading_runtime_bootstrap,
     load_alpha_loops, load_last_trading_alpha_report, recover_orphan_loop_events,

@@ -1,6 +1,8 @@
 use super::actors::AuthLane;
-use super::provider::NoBackendProvider;
-use super::provider::{allow_no_api_key, clear_provider_cache, provider_cache_key};
+use super::provider::{
+    allow_no_api_key, clear_provider_cache, normalize_runtime_provider_name, NoBackendProvider,
+    provider_cache_key, resolve_provider_and_model, resolve_startup_model,
+};
 use super::quorum::{QUORUM_DEFAULT_VOTER_PASSES, QUORUM_HINT_PREFIX};
 use super::*;
 use crate::alpha_runtime::QuorumPolicy;
@@ -9,7 +11,7 @@ use crate::alpha_runtime::{
     upsert_objective_contract,
 };
 use crate::test_env_lock;
-use hermes_config::LlmProviderConfig;
+use hermes_config::{GatewayConfig, LlmProviderConfig};
 use hermes_core::LlmProvider;
 use hermes_gateway::tool_backends::ClarifyDispatcher;
 use std::collections::HashMap;

@@ -820,6 +820,7 @@ fn normalize_subprocess_path(path: Option<&str>) -> String {
     entries.join(":")
 }
 
+#[cfg(unix)]
 fn shell_env_cleanup_snippet(configured_passthrough: &[String]) -> String {
     let mut snippet = String::new();
     let configured_passthrough = configured_passthrough
@@ -904,6 +905,7 @@ fn terminal_config_from_env() -> (Vec<String>, bool, Vec<String>) {
     (explicit, auto_source_bashrc, env_passthrough)
 }
 
+#[cfg(unix)]
 fn expand_env_refs(input: &str) -> String {
     let mut output = String::new();
     let mut rest = input;
@@ -934,6 +936,7 @@ fn expand_env_refs(input: &str) -> String {
     output
 }
 
+#[cfg(unix)]
 fn expand_shell_init_path(input: &str) -> PathBuf {
     let expanded = expand_env_refs(input.trim());
     if expanded == "~" {
@@ -947,10 +950,12 @@ fn expand_shell_init_path(input: &str) -> PathBuf {
     PathBuf::from(expanded)
 }
 
+#[cfg(unix)]
 fn resolve_existing_shell_init_files(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     paths.into_iter().filter(|p| p.is_file()).collect()
 }
 
+#[cfg(unix)]
 fn auto_shell_init_candidates(shell: &str) -> Vec<PathBuf> {
     let Some(home) = home_dir() else {
         return Vec::new();
@@ -967,6 +972,7 @@ fn auto_shell_init_candidates(shell: &str) -> Vec<PathBuf> {
     }
 }
 
+#[cfg(unix)]
 fn resolve_shell_init_files_for_shell(
     shell: &str,
     explicit_files: &[String],
@@ -985,10 +991,12 @@ fn resolve_shell_init_files_for_shell(
     resolve_existing_shell_init_files(auto_shell_init_candidates(shell))
 }
 
+#[cfg(unix)]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+#[cfg(unix)]
 fn shell_source_prelude(files: &[PathBuf]) -> String {
     let mut prelude = String::new();
     if files.is_empty() {

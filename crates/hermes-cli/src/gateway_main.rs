@@ -18,7 +18,6 @@ use hermes_config::{
     GatewayConfig, PlatformConfig, UnauthorizedDmBehavior, hermes_home, load_user_config_file,
 };
 use hermes_core::AgentError;
-use hermes_core::MessageRole;
 use hermes_core::PlatformAdapter;
 use hermes_gateway::gateway::IncomingMessage as GatewayIncomingMessage;
 use hermes_gateway::gateway::{DmAccessMode, GroupAccessMode, PlatformAccessPolicy};
@@ -836,20 +835,6 @@ pub(crate) async fn get_or_build_gateway_cached_agent(
     );
     prune_gateway_agent_cache(&mut guard);
     built
-}
-
-pub(crate) fn extract_last_assistant_reply(messages: &[hermes_core::Message]) -> String {
-    messages
-        .iter()
-        .rev()
-        .find_map(|m| {
-            if m.role == MessageRole::Assistant {
-                m.content.clone()
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "(no assistant reply)".to_string())
 }
 
 pub(crate) fn truncate_hook_tool_result(result: &str) -> String {

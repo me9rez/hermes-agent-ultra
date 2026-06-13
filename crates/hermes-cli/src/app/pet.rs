@@ -81,16 +81,6 @@ pub(super) fn pet_settings_path() -> PathBuf {
     CliStateRoot::from_config_dir(None).pet_settings()
 }
 
-fn parse_runtime_provider_api_mode(value: &str) -> Option<hermes_agent::agent_loop::ApiMode> {
-    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "chat_completions" => Some(hermes_agent::agent_loop::ApiMode::ChatCompletions),
-        "anthropic_messages" => Some(hermes_agent::agent_loop::ApiMode::AnthropicMessages),
-        "codex_responses" => Some(hermes_agent::agent_loop::ApiMode::CodexResponses),
-        "bedrock_converse" => Some(hermes_agent::agent_loop::ApiMode::BedrockConverse),
-        _ => None,
-    }
-}
-
 fn parse_bool_env(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),

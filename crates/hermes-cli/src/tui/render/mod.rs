@@ -2,12 +2,12 @@ mod transcript;
 mod widgets;
 
 pub(crate) use transcript::*;
-pub(crate) use widgets::*;
 
-use std::time::{Duration, Instant};
+#[cfg(test)]
+pub(crate) use widgets::{animated_processing_bar, pet_frame_token, status_message_style};
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::Style;
 use ratatui::widgets::Block;
 

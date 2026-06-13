@@ -91,10 +91,6 @@ impl RingBuffer {
         let start = all.len().saturating_sub(n);
         String::from_utf8_lossy(&all[start..]).to_string()
     }
-
-    fn total_bytes(&self) -> usize {
-        self.total_written
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -28,10 +28,7 @@ use hermes_core::traits::{ParseMode, PlatformAdapter};
 
 use crate::adapter::{AdapterProxyConfig, BasePlatformAdapter};
 use crate::gateway::IncomingMessage;
-use crate::platforms::helpers::{
-    image_extension_from_content_type, image_fallback_text, normalized_image_content_type,
-    remote_image_file_name,
-};
+use crate::platforms::helpers::{image_fallback_text, remote_image_file_name};
 
 const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
 const FEISHU_WS_ENDPOINT_PATH: &str = "/callback/ws/endpoint";

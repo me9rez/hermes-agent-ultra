@@ -131,7 +131,7 @@ impl GenericProvider {
     }
 
     /// Share per-turn sanitize/tools JSON cache (LLM retry fast path).
-    pub fn with_serialize_cache(mut self, cache: Arc<ProviderSerializeCache>) -> Self {
+    pub(crate) fn with_serialize_cache(mut self, cache: Arc<ProviderSerializeCache>) -> Self {
         self.serialize_cache = Some(cache);
         self
     }

@@ -128,28 +128,30 @@ pub(crate) async fn handle_curator_command(
             let tool_schemas = host.tool_schemas().to_vec();
 
             let llm_start = std::time::Instant::now();
-            let llm_result: Result<hermes_skills::CuratorReviewResult, hermes_skills::CuratorError> =
-                {
-                    let conv_result = agent
-                        .run_conversation(RunConversationParams {
-                            user_message: prompt,
-                            conversation_history: vec![],
-                            task_id: None,
-                            stream_callback: None,
-                            persist_user_message: None,
-                            tools: Some(tool_schemas),
-                            persist_session: false,
-                        })
-                        .await;
+            let llm_result: Result<
+                hermes_skills::CuratorReviewResult,
+                hermes_skills::CuratorError,
+            > = {
+                let conv_result = agent
+                    .run_conversation(RunConversationParams {
+                        user_message: prompt,
+                        conversation_history: vec![],
+                        task_id: None,
+                        stream_callback: None,
+                        persist_user_message: None,
+                        tools: Some(tool_schemas),
+                        persist_session: false,
+                    })
+                    .await;
 
-                    match conv_result {
-                        Ok(conv) => extract_curator_review_result(conv, llm_start),
-                        Err(e) => Err(hermes_skills::CuratorError::LlmError(format!(
-                            "Agent conversation failed: {}",
-                            e
-                        ))),
-                    }
-                };
+                match conv_result {
+                    Ok(conv) => extract_curator_review_result(conv, llm_start),
+                    Err(e) => Err(hermes_skills::CuratorError::LlmError(format!(
+                        "Agent conversation failed: {}",
+                        e
+                    ))),
+                }
+            };
 
             match llm_result {
                 Ok(review) => {
@@ -161,11 +163,7 @@ pub(crate) async fn handle_curator_command(
                         truncate_chars(&review.final_response, 2000)
                     );
                     if !review.summary.is_empty() {
-                        let _ = write!(
-                            out,
-                            "\nSummary: {}",
-                            truncate_chars(&review.summary, 500)
-                        );
+                        let _ = write!(out, "\nSummary: {}", truncate_chars(&review.summary, 500));
                     }
                     let _ = write!(out, "\nTool calls: {}", review.tool_calls.len());
                     emit_command_output(host, &out);
@@ -572,10 +570,7 @@ fn extract_curator_review_result(
 }
 
 /// Persist curator state after a run, optionally recording an LLM summary.
-fn save_post_run_state(
-    store: &hermes_skills::UsageStore,
-    llm_summary: Option<&str>,
-) {
+fn save_post_run_state(store: &hermes_skills::UsageStore, llm_summary: Option<&str>) {
     let mut state = hermes_skills::load_curator_state(store);
     state.run_count = state.run_count.saturating_add(1);
     state.last_run_at = Some(chrono::Utc::now().to_rfc3339());

@@ -22,7 +22,6 @@ use crate::alpha_runtime::{
     set_objective_ensemble_mode, set_objective_profile, set_objective_simulation_mode,
     summarize_objective_contract, upsert_objective_contract, utility_terms_from_contract,
 };
-use crate::app::App;
 use crate::commands::background;
 use crate::commands::{CommandResult, emit_command_output, truncate_chars, yes_no};
 
@@ -1609,6 +1608,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::app::App;
     use crate::app::SessionRuntime;
     use crate::commands::{SLASH_COMMANDS, autocomplete, canonical_command};
     use crate::test_env_lock;

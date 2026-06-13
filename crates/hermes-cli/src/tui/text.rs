@@ -1,5 +1,5 @@
 ﻿use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 pub(crate) fn transcript_divider(content_width: u16) -> String {
     let width = usize::from(content_width.max(12));
     let rule = "─".repeat(width.saturating_sub(3).max(8));

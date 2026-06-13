@@ -1,21 +1,17 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use chrono::Local;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use hermes_core::Message;
+use crossterm::event::KeyEvent;
 use tui_textarea::{CursorMove, TextArea};
 
 use super::text::{is_submit_shortcut, truncate_chars};
-use super::transcript_cache::{
-    TranscriptCache, expanded_tool_cards_signature, plan_transcript_refresh,
-};
+use super::transcript_cache::TranscriptCache;
 use super::types::{
-    ActivityLaneMode, InputMode, ModalAction, PickerItem, PickerKind, PickerModal,
-    StreamMarkdownCache, ToolOutputSection, ViewDensity,
+    ActivityLaneMode, InputMode, ModalAction, PickerKind, PickerModal, ToolOutputSection,
+    ViewDensity,
 };
-use super::ui_phase::{ComposerState, InputPaintSnapshot, ProcessingState, UiPhase};
-use crate::app::{ModelRuntime, SessionRuntime, TranscriptRuntime, UiChromeRuntime};
+use super::ui_phase::UiPhase;
+use crate::app::{SessionRuntime, TranscriptRuntime};
 use crate::commands;
 /// Mutable state for the TUI rendering loop.
 pub struct TuiState {
@@ -88,10 +84,6 @@ impl Default for TuiState {
 }
 
 impl TuiState {
-    pub(crate) fn input_paint_snapshot(&self) -> InputPaintSnapshot {
-        self.phase.composer().input_paint_snapshot()
-    }
-
     pub(crate) fn reset_input_paint_cache(&mut self) {
         self.phase.composer_mut().reset_input_paint_cache();
     }

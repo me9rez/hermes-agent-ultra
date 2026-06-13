@@ -34,7 +34,9 @@ pub(crate) async fn handle_ops_evolve_command(
             let runtime = runtime_evolve_status();
             let dev = discover_repo_root_for_about()
                 .map(|root| dev_evolve_status(&root))
-                .unwrap_or_else(|| "self_evolution=unavailable (not in source checkout)".to_string());
+                .unwrap_or_else(|| {
+                    "self_evolution=unavailable (not in source checkout)".to_string()
+                });
             emit_command_output(
                 host,
                 format!(

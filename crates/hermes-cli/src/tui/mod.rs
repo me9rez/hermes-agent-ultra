@@ -39,15 +39,17 @@ mod ui_phase;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) use types::{PickerItem, PickerKind};
+
 pub use event::{Event, StreamHandle};
 pub use run_loop::run;
 pub use state::TuiState;
 pub use types::{ActivityLaneMode, InputMode, ToolOutputSection, ViewDensity};
 
-pub(crate) use types::{ModalAction, PickerItem, PickerKind, PickerModal, StreamMarkdownCache};
+pub(crate) use types::{PickerModal, StreamMarkdownCache};
 
 pub use render::render;
-pub(crate) use text::{hard_wrap_segments, transcript_divider, truncate_chars};
 
 pub trait TuiReadHost:
     SessionRuntime + ModelRuntime + TranscriptRuntime + UiChromeRuntime + AgentCoordinator
@@ -58,6 +60,7 @@ impl<T> TuiReadHost for T where
 {
 }
 
+#[allow(dead_code)]
 trait TuiLoopHost: SlashCommandHost + SessionSnapshotRuntime + AcpServerRuntime {}
 impl<T> TuiLoopHost for T where T: SlashCommandHost + SessionSnapshotRuntime + AcpServerRuntime {}
 

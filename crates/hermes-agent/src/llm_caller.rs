@@ -641,7 +641,7 @@ pub(crate) fn effective_finish_reason(
 }
 
 pub(crate) fn build_finalization_signals(
-    agent: &AgentLoop,
+    _agent: &AgentLoop,
     task_hint: &str,
     messages: &[Message],
     message: &Message,

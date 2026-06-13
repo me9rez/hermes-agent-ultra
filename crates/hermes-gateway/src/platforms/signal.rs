@@ -12,10 +12,7 @@ use hermes_core::errors::GatewayError;
 use hermes_core::traits::{ParseMode, PlatformAdapter};
 
 use crate::adapter::{AdapterProxyConfig, BasePlatformAdapter};
-use crate::platforms::helpers::{
-    image_extension_from_content_type, image_fallback_text, normalized_image_content_type,
-    remote_image_file_name,
-};
+use crate::platforms::helpers::{image_fallback_text, remote_image_file_name};
 
 // ---------------------------------------------------------------------------
 // Incoming message types

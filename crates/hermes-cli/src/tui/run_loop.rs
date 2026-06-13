@@ -1,14 +1,11 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hermes_auth::FileTokenStore;
 use hermes_core::{AgentError, AgentResult, Message, StreamChunk};
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::Tui;
-use super::TuiLoopHost;
 use super::event::{Event, StreamHandle};
 use super::pipeline::{
     abort_agent_lanes, shutdown_crossterm_event_pipeline, shutdown_signal_bridge,
@@ -16,19 +13,18 @@ use super::pipeline::{
 };
 use super::render::{
     draw_frame_now, parse_markdown_numbered_marker, render, should_redraw_stream_while_composing,
-    should_render_completions_popup, should_route_prompt_via_managed_agent,
-    stream_event_completes_background_task, stream_lane_budget, tool_complete_looks_failed,
+    should_route_prompt_via_managed_agent, stream_event_completes_background_task,
+    stream_lane_budget, tool_complete_looks_failed,
 };
 use super::state::TuiState;
 use super::text::{is_ctrl_c, is_submit_shortcut, truncate_chars};
 use super::transcript_cache::TranscriptCache;
-use super::types::{InputMode, ModalAction, PickerItem, PickerKind, PickerModal};
+use super::types::{ModalAction, PickerItem, PickerKind, PickerModal};
 use crate::app::{
-    AcpServerRuntime, AgentCoordinator, App, ModelRuntime, SessionRuntime, SessionSnapshotRuntime,
-    SlashCommandHost, TranscriptRuntime, UiChromeRuntime,
+    AgentCoordinator, App, ModelRuntime, SessionRuntime, SessionSnapshotRuntime, SlashCommandHost,
+    TranscriptRuntime, UiChromeRuntime,
     actors::{AgentLane, StandardAgentRunRequest},
 };
-use crate::commands;
 
 pub(crate) fn parse_slash_parts(input: &str) -> Option<(String, Vec<String>)> {
     let trimmed = input.trim();

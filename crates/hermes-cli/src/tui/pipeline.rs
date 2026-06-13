@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crossterm::event::{Event as CrosstermEvent, KeyEvent};
+use crossterm::event::Event as CrosstermEvent;
 use hermes_core::AgentError;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;

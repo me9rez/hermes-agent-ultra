@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use hermes_core::AgentError;
 use serde::{Deserialize, Serialize};
 
-use crate::App;
 use crate::commands::{CommandResult, emit_command_output};
 
 // ---------------------------------------------------------------------------
@@ -692,6 +691,7 @@ pub(crate) async fn handle_autocompact_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
     use crate::commands::handle_slash_command;
     use crate::test_env_lock;
     use tempfile::tempdir;

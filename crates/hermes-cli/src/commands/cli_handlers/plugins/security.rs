@@ -1,6 +1,4 @@
-﻿//! Plugin security scanning and git host allowlist.
-
-use std::path::Path;
+//! Plugin security scanning and git host allowlist.
 
 use regex::Regex;
 fn default_git_host_allowlist() -> Vec<&'static str> {

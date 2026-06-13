@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use hermes_core::{AgentError, MessageRole};
 
-use crate::app::{App, PetDock, PetSettings};
+use crate::app::{PetDock, PetSettings};
 use crate::commands::{CommandResult, emit_command_output, truncate_chars};
 use crate::skin_engine::{BUILTIN_SKINS, canonical_skin_name};
 

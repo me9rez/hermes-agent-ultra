@@ -8,7 +8,6 @@ use super::model::{
     rank_catalog_model_candidates, resolve_catalog_model_candidate, split_provider_model,
 };
 use crate::alpha_runtime::{load_quorum_policy, set_quorum_policy};
-use crate::app::App;
 use crate::commands::{CommandResult, emit_command_output};
 use crate::model_switch::{normalize_provider_model, provider_model_ids};
 

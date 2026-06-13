@@ -4,6 +4,8 @@
 //! context management into a fully autonomous loop that runs until the
 //! model finishes naturally or the turn budget is exhausted.
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 pub mod test_support;
 
@@ -271,21 +273,25 @@ pub fn attach_agent_runtime(agent: AgentLoop) -> AgentLoop {
 }
 
 /// Attach session search backend for proactive recall (Recall Planner).
-pub fn attach_recall_backend(mut agent: AgentLoop) -> AgentLoop {
+pub fn attach_recall_backend(agent: AgentLoop) -> AgentLoop {
     if agent.config().skip_memory || !agent.config().recall_enabled {
         return agent;
     }
     if std::env::var("HERMES_RECALL_ENABLED")
         .ok()
-        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+        .is_some_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
     {
         return agent;
     }
-    let backend = hermes_tools::SqliteSessionSearchBackend::default_path()
-        .or_else(|_| {
-            let db_path = hermes_config::paths::hermes_home().join("sessions.db");
-            hermes_tools::SqliteSessionSearchBackend::new(db_path.to_string_lossy().as_ref())
-        });
+    let backend = hermes_tools::SqliteSessionSearchBackend::default_path().or_else(|_| {
+        let db_path = hermes_config::paths::hermes_home().join("sessions.db");
+        hermes_tools::SqliteSessionSearchBackend::new(db_path.to_string_lossy().as_ref())
+    });
     match backend {
         Ok(b) => agent.with_recall_backend(std::sync::Arc::new(b)),
         Err(e) => {

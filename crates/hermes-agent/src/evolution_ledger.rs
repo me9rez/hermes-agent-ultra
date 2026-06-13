@@ -341,10 +341,7 @@ pub fn extract_review_tools(messages: &[Message]) -> Vec<ReviewToolAction> {
         if !success && message.is_empty() {
             continue;
         }
-        let name = msg
-            .name
-            .clone()
-            .unwrap_or_else(|| "tool".to_string());
+        let name = msg.name.clone().unwrap_or_else(|| "tool".to_string());
         actions.push(ReviewToolAction {
             name,
             success,
@@ -469,7 +466,11 @@ mod tests {
         let id = new_review_id();
         append_event(
             home,
-            &started_event(id.clone(), Some("sess:1".into()), ReviewTrigger::MemoryNudge),
+            &started_event(
+                id.clone(),
+                Some("sess:1".into()),
+                ReviewTrigger::MemoryNudge,
+            ),
             10,
         )
         .expect("append started");

@@ -9,7 +9,6 @@ use hermes_core::AgentError;
 
 use super::autocomplete::{SLASH_COMMANDS, help_for};
 use super::{CommandResult, emit_command_output};
-use crate::app::App;
 
 pub(crate) fn provider_health_snapshot(provider: &str) -> &'static str {
     match provider.trim().to_ascii_lowercase().as_str() {

@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 impl AgentLoop {
     fn interest_prefetch_block(&self, query: &str) -> String {
@@ -184,17 +185,9 @@ impl AgentLoop {
         let Some(rq) = crate::recall_planner::classify(query) else {
             return String::new();
         };
-        let options = hermes_tools::SessionSearchOptions {
-            summarize: false,
-        };
+        let options = hermes_tools::SessionSearchOptions { summarize: false };
         let json = match backend
-            .search(
-                Some(&rq.keywords),
-                None,
-                5,
-                Some(session_id),
-                options,
-            )
+            .search(Some(&rq.keywords), None, 5, Some(session_id), options)
             .await
         {
             Ok(s) => s,

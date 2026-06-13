@@ -1,7 +1,7 @@
 ﻿use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
-pub(super) struct SnapshotPersistGate {
+pub(crate) struct SnapshotPersistGate {
     pub(super) last_persist: Instant,
     pub(super) pending_mutations: u32,
     pub(super) backoff_ms: u64,

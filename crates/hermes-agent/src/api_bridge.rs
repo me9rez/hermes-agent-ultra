@@ -105,7 +105,7 @@ impl CodexProvider {
         self
     }
 
-    pub fn with_serialize_cache(mut self, cache: Arc<ProviderSerializeCache>) -> Self {
+    pub(crate) fn with_serialize_cache(mut self, cache: Arc<ProviderSerializeCache>) -> Self {
         self.serialize_cache = Some(cache);
         self
     }

@@ -1,6 +1,5 @@
 ﻿//! Insights CLI handler.
 
-use std::collections::{BTreeMap, HashMap};
 pub async fn handle_cli_insights(
     days: u32,
     source: Option<String>,

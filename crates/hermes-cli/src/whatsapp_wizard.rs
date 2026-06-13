@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use hermes_config::{GatewayConfig, PlatformConfig};
 use hermes_gateway::platforms::whatsapp::{
     WhatsAppConfig, WhatsAppRustClient, clear_pairing_session, has_legacy_baileys_session,
-    is_paired, mark_paired, session_db_path,
+    is_paired, session_db_path,
 };
 
 /// Result of the interactive WhatsApp Web (QR) setup flow.
@@ -395,6 +395,7 @@ pub async fn whatsapp_cloud_setup() -> Result<(), hermes_core::AgentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hermes_gateway::platforms::whatsapp::mark_paired;
 
     #[test]
     fn whatsapp_gateway_menu_status_labels() {

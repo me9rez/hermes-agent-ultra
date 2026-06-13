@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use uuid::Uuid;
-
 use hermes_core::AgentError;
 
 use super::{App, SessionInfo};

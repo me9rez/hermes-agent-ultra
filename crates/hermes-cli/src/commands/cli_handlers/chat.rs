@@ -1,4 +1,4 @@
-﻿//! CLI chat subcommand handler.
+//! CLI chat subcommand handler.
 
 use std::sync::Arc;
 
@@ -175,10 +175,7 @@ pub async fn handle_cli_chat(
         let skill_provider: Arc<dyn hermes_core::SkillProvider> =
             Arc::new(SkillManager::new(skill_store));
         hermes_tools::register_builtin_tools(&tool_registry, terminal_backend, skill_provider);
-        crate::moa_wiring::wire_mixture_of_agents_backend(
-            &tool_registry,
-            Arc::new(config.clone()),
-        );
+        crate::moa_wiring::wire_mixture_of_agents_backend(&tool_registry, Arc::new(config.clone()));
         let live_count =
             crate::live_messaging::enable_live_messaging_tool(&config, &tool_registry).await;
         if live_count > 0 {

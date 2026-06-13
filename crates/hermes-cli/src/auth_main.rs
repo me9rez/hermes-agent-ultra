@@ -16,12 +16,11 @@ use hermes_cli::Cli;
 use hermes_cli::app::provider_api_key_from_env;
 use hermes_cli::auth::{
     ANTHROPIC_OAUTH_CLIENT_ID, ANTHROPIC_OAUTH_TOKEN_URL, AnthropicOAuthLoginOptions,
-    CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_TOKEN_URL, CodexDeviceCodeOptions, DEFAULT_CODEX_BASE_URL,
-    DEFAULT_NOUS_AGENT_KEY_MIN_TTL_SECONDS, DEFAULT_NOUS_CLIENT_ID, DEFAULT_NOUS_PORTAL_URL,
-    DEFAULT_OPENAI_BASE_URL, GeminiOAuthLoginOptions, NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
-    NousAuthState, NousDeviceCodeOptions, NousRuntimeCredentials,
-    QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, QWEN_OAUTH_CLIENT_ID, QWEN_OAUTH_TOKEN_URL,
-    clear_provider_auth_state, discover_existing_anthropic_oauth, discover_existing_nous_oauth,
+    CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_TOKEN_URL, CodexDeviceCodeOptions,
+    DEFAULT_NOUS_AGENT_KEY_MIN_TTL_SECONDS, GeminiOAuthLoginOptions,
+    NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, NousAuthState, NousDeviceCodeOptions,
+    NousRuntimeCredentials, QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, clear_provider_auth_state,
+    discover_existing_anthropic_oauth, discover_existing_nous_oauth,
     discover_existing_openai_codex_oauth, discover_existing_openai_oauth,
     get_anthropic_oauth_status, get_gemini_oauth_auth_status, get_qwen_auth_status,
     login_anthropic_oauth, login_google_gemini_cli_oauth, login_nous_device_code,
@@ -30,7 +29,6 @@ use hermes_cli::auth::{
     resolve_qwen_runtime_credentials, save_codex_auth_state, save_nous_auth_state,
     save_openai_auth_state, save_provider_auth_state,
 };
-use hermes_cli::env_vars;
 use hermes_cli::paths::CliStateRoot;
 use hermes_cli::providers::{OAUTH_CAPABLE_PROVIDERS, known_providers};
 use hermes_config::{

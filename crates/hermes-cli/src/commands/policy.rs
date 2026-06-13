@@ -11,7 +11,6 @@ use hermes_core::AgentError;
 use hermes_tools::ToolPolicyEngine;
 use serde::{Deserialize, Serialize};
 
-use crate::app::App;
 use crate::commands::{CommandResult, emit_command_output, truncate_chars};
 
 // ---------------------------------------------------------------------------

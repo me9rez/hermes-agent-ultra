@@ -433,7 +433,7 @@ async fn run_with_message_prelude(
     };
 
     let mut ctx = ContextManager::for_model(crate::runtime_provider::active_model(agent).as_str());
-    let mut tool_errors: Vec<hermes_core::ToolErrorRecord> = Vec::new();
+    let _tool_errors: Vec<hermes_core::ToolErrorRecord> = Vec::new();
     let session_id_owned = agent.config().session_id.clone().unwrap_or_default();
     let session_id = session_id_owned.as_str();
     let mut messages = messages;
@@ -505,7 +505,7 @@ async fn run_with_message_prelude(
     } else {
         None
     };
-    let mut codex_ack_continuations: u32 = 0;
+    let _codex_ack_continuations: u32 = 0;
 
     let mut review_memory_at_end = false;
     if agent.config().memory_nudge_interval > 0
@@ -522,7 +522,7 @@ async fn run_with_message_prelude(
             }
         }
     }
-    let mut api_call_count: u32 = 0;
+    let _api_call_count: u32 = 0;
 
     // Memory prefetch
     let first_user = ctx
@@ -579,50 +579,50 @@ async fn run_with_message_prelude(
         }),
     );
 
-    let mut total_turns: u32 = 0;
+    let _total_turns: u32 = 0;
     let mut _total_api_time_ms: u64 = 0;
     let mut _total_tool_time_ms: u64 = 0;
-    let mut accumulated_usage: Option<UsageStats> = None;
-    let mut session_cost_usd: f64 = 0.0;
-    let mut cost_warned = false;
-    let mut forced_runtime_route: Option<TurnRuntimeRoute> = None;
-    let mut last_checkpoint_messages: Option<Vec<Message>> = None;
-    let mut invalid_tool_retries: u32 = 0;
-    let mut invalid_json_retries: u32 = 0;
-    let mut truncated_tool_call_retries: u32 = 0;
-    let mut continuation_retries: u32 = 0;
-    let mut last_content_with_tools: Option<String> = None;
-    let mut continuation_trigger_count: u32 = 0;
-    let mut ack_trigger_count: u32 = 0;
-    let mut premature_finalize_suspected_count: u32 = 0;
-    let mut context_pressure_warned_at: f64 = 0.0;
-    let mut context_pressure_last_warn_at: Option<Instant> = None;
-    let mut context_pressure_last_warn_percent: f64 = 0.0;
-    let mut governor_llm_latency_window: VecDeque<u64> = VecDeque::new();
-    let mut governor_tool_error_window: VecDeque<f64> = VecDeque::new();
-    let mut governor_consecutive_error_turns: u32 = 0;
-    let mut web_tool_calls_used: u32 = 0;
-    let mut web_search_calls_used: u32 = 0;
-    let mut web_tool_consecutive_error_turns: u32 = 0;
-    let mut repo_review_budget_state = RepoReviewBudgetState::default();
-    let mut objective_guard_retries: u32 = 0;
-    let mut finalizer_evidence_retries: u32 = 0;
-    let mut finalizer_output_quality_retries: u32 = 0;
-    let mut finalizer_action_execution_retries: u32 = 0;
-    let mut clarify_tool_retries: u32 = 0;
-    let governor_window_limit = governor_window_size();
+    let _accumulated_usage: Option<UsageStats> = None;
+    let _session_cost_usd: f64 = 0.0;
+    let _cost_warned = false;
+    let _forced_runtime_route: Option<TurnRuntimeRoute> = None;
+    let _last_checkpoint_messages: Option<Vec<Message>> = None;
+    let _invalid_tool_retries: u32 = 0;
+    let _invalid_json_retries: u32 = 0;
+    let _truncated_tool_call_retries: u32 = 0;
+    let _continuation_retries: u32 = 0;
+    let _last_content_with_tools: Option<String> = None;
+    let _continuation_trigger_count: u32 = 0;
+    let _ack_trigger_count: u32 = 0;
+    let _premature_finalize_suspected_count: u32 = 0;
+    let _context_pressure_warned_at: f64 = 0.0;
+    let _context_pressure_last_warn_at: Option<Instant> = None;
+    let _context_pressure_last_warn_percent: f64 = 0.0;
+    let _governor_llm_latency_window: VecDeque<u64> = VecDeque::new();
+    let _governor_tool_error_window: VecDeque<f64> = VecDeque::new();
+    let _governor_consecutive_error_turns: u32 = 0;
+    let _web_tool_calls_used: u32 = 0;
+    let _web_search_calls_used: u32 = 0;
+    let _web_tool_consecutive_error_turns: u32 = 0;
+    let _repo_review_budget_state = RepoReviewBudgetState::default();
+    let _objective_guard_retries: u32 = 0;
+    let _finalizer_evidence_retries: u32 = 0;
+    let _finalizer_output_quality_retries: u32 = 0;
+    let _finalizer_action_execution_retries: u32 = 0;
+    let _clarify_tool_retries: u32 = 0;
+    let _governor_window_limit = governor_window_size();
     let budget_cap = max_turns_limit.unwrap_or(agent.config().max_turns);
-    let mut iteration_budget = crate::iteration_budget::IterationBudget::new(budget_cap);
-    let mut tool_guardrails = crate::tool_guardrails::ToolGuardrailController::new();
-    let mut file_mutation =
+    let _iteration_budget = crate::iteration_budget::IterationBudget::new(budget_cap);
+    let _tool_guardrails = crate::tool_guardrails::ToolGuardrailController::new();
+    let _file_mutation =
         crate::file_mutation_tracker::FileMutationTracker::new(agent.config().checkpoints_enabled);
-    let mut stream_scrubber =
+    let stream_scrubber =
         if crate::llm_caller::use_streaming_llm_transport(agent, ui_streaming, 0, None) {
             Some(crate::stream_scrubber::ThinkBlockScrubber::new())
         } else {
             None
         };
-    let mut checkpoint_mgr = hermes_tools::CheckpointManager::new(
+    let _checkpoint_mgr = hermes_tools::CheckpointManager::new(
         agent.config().checkpoints_enabled,
         agent.config().hermes_home.as_deref().map(Path::new),
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),

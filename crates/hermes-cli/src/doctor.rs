@@ -11,8 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::gateway_process::{gateway_pid_is_alive, gateway_service_status, read_gateway_pid};
 use crate::provenance::{
-    load_or_create_provenance_key, provenance_sidecar_path_for_artifact, sign_artifact_bytes,
-    verify_artifact_provenance, write_provenance_sidecar,
+    load_or_create_provenance_key, sign_artifact_bytes, write_provenance_sidecar,
 };
 use crate::route_learning::{
     load_route_learning_state_for_cli, route_learning_half_life_secs, route_learning_ttl_secs,

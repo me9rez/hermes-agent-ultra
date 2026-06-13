@@ -120,7 +120,10 @@ fn snippet_from_summary(raw: &str) -> String {
     let stripped = raw
         .trim()
         .strip_prefix("[Raw preview — summarization unavailable]")
-        .or_else(|| raw.trim().strip_prefix("[Raw preview — summarization disabled]"))
+        .or_else(|| {
+            raw.trim()
+                .strip_prefix("[Raw preview — summarization disabled]")
+        })
         .unwrap_or(raw)
         .trim();
     let one_line: String = stripped
@@ -200,10 +203,7 @@ pub fn format_recall_block(json_str: &str) -> String {
         return String::new();
     }
 
-    format!(
-        "<recall-context>\n{}\n</recall-context>",
-        lines.join("\n")
-    )
+    format!("<recall-context>\n{}\n</recall-context>", lines.join("\n"))
 }
 
 #[cfg(test)]

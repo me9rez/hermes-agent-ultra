@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -13,11 +12,10 @@ use hermes_core::Message;
 
 use crate::agent_config::AgentConfig;
 use crate::agent_loop::{AgentLoop, TurnRuntimeRoute};
-use crate::credential_pool::CredentialPool;
 use crate::replay::{RouteLearningState, RouteLearningStats};
 use crate::smart_model_routing::{
     ApiMode, CheapModelRouteConfig, PrimaryRuntime, ResolveTurnOutcome, ResolvedCheapRuntime,
-    TurnRouteSignature, detect_api_mode_for_url, resolve_turn_route,
+    detect_api_mode_for_url, resolve_turn_route,
 };
 
 // ---------------------------------------------------------------------------

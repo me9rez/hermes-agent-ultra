@@ -64,7 +64,7 @@ pub trait ToolHandler: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Parse mode for platform messages.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseMode {
     Plain,
     Markdown,

@@ -23,10 +23,7 @@ use hermes_core::traits::{ParseMode, PlatformAdapter};
 
 use crate::adapter::{AdapterProxyConfig, BasePlatformAdapter};
 use crate::gateway::IncomingMessage;
-use crate::platforms::helpers::{
-    image_extension_from_content_type, image_fallback_text, normalized_image_content_type,
-    remote_image_file_name,
-};
+use crate::platforms::helpers::{image_fallback_text, remote_image_file_name};
 
 const WECOM_API_BASE: &str = "https://qyapi.weixin.qq.com/cgi-bin";
 const DEDUP_TTL_SECS: u64 = 300;
@@ -768,6 +765,7 @@ async fn handle_callback_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platforms::helpers::normalized_image_content_type;
     use std::path::Path;
 
     fn app() -> WeComCallbackApp {

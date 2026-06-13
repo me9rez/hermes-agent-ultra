@@ -1,6 +1,5 @@
 use hermes_core::AgentError;
 
-use crate::app::App;
 use crate::commands::{CommandResult, emit_command_output};
 
 pub(crate) fn persist_browser_cdp_url(url: Option<&str>) -> Result<(), AgentError> {

@@ -1,4 +1,5 @@
-﻿use super::*;
+use super::*;
+use crate::system_prompt::BACKEND_PROBE_COMMAND;
 
 impl AgentLoop {
     pub(crate) fn openrouter_provider_preferences(&self) -> Option<Value> {
@@ -58,7 +59,7 @@ impl AgentLoop {
             if let Some(obj) = provider_obj.as_object_mut() {
                 obj.insert(
                     "plugins".into(),
-                    json!([{ "id": "pareto-router", "min_coding_score": score }]),
+                    serde_json::json!([{ "id": "pareto-router", "min_coding_score": score }]),
                 );
             }
         }
@@ -163,7 +164,8 @@ impl AgentLoop {
         let cwd_hint = std::env::var("TERMINAL_CWD").unwrap_or_default();
         probe_remote_backend_cached(env_type, &cwd_hint, || {
             let terminal = self.tool_registry.get("terminal")?;
-            let output = (terminal.handler)(json!({ "command": BACKEND_PROBE_COMMAND })).ok()?;
+            let output =
+                (terminal.handler)(serde_json::json!({ "command": BACKEND_PROBE_COMMAND })).ok()?;
             format_probe_output(output.trim())
         })
     }

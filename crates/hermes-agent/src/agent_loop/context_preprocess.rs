@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 impl AgentLoop {
     // Collect one streaming completion into [`LlmResponse`] (first attempt in `run_stream` D-step).
@@ -177,7 +177,8 @@ impl AgentLoop {
             (false, true) => SKILL_REVIEW_PROMPT,
             _ => return,
         };
-        let ledger_enabled = crate::evolution_ledger::evolution_ledger_enabled(self.config().as_ref());
+        let ledger_enabled =
+            crate::evolution_ledger::evolution_ledger_enabled(self.config().as_ref());
         let hermes_home = crate::evolution_ledger::resolve_hermes_home(self.config().as_ref());
         let ledger_max = self.config().evolution_ledger_max_entries;
         let review_id = crate::evolution_ledger::new_review_id();
@@ -188,7 +189,8 @@ impl AgentLoop {
                 session_key_owned.clone(),
                 trigger,
             );
-            if let Err(e) = crate::evolution_ledger::append_event(&hermes_home, &started, ledger_max)
+            if let Err(e) =
+                crate::evolution_ledger::append_event(&hermes_home, &started, ledger_max)
             {
                 tracing::debug!(error = %e, "evolution ledger append (started) failed");
             }
@@ -233,7 +235,8 @@ impl AgentLoop {
             match agent.run(hist, None).await {
                 Ok(result) => {
                     let tools = crate::evolution_ledger::extract_review_tools(&result.messages);
-                    let summary = crate::evolution_ledger::summarize_review_for_chat(&result.messages);
+                    let summary =
+                        crate::evolution_ledger::summarize_review_for_chat(&result.messages);
                     if ledger_enabled {
                         let completed = crate::evolution_ledger::completed_event(
                             review_id.clone(),
@@ -243,9 +246,11 @@ impl AgentLoop {
                             tools,
                             summary.clone(),
                         );
-                        if let Err(e) =
-                            crate::evolution_ledger::append_event(&hermes_home, &completed, ledger_max)
-                        {
+                        if let Err(e) = crate::evolution_ledger::append_event(
+                            &hermes_home,
+                            &completed,
+                            ledger_max,
+                        ) {
                             tracing::debug!(error = %e, "evolution ledger append (completed) failed");
                         }
                     }

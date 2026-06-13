@@ -18,6 +18,7 @@ pub(crate) fn provider_cache()
     CACHE.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
 }
 
+#[cfg(test)]
 pub(crate) fn clear_provider_cache() {
     provider_cache().lock().unwrap().clear();
 }

@@ -2,7 +2,6 @@ use std::fmt::Write as _;
 
 use hermes_core::AgentError;
 
-use crate::App;
 use crate::commands::{CommandResult, emit_command_output};
 
 pub(crate) async fn handle_auth_command(

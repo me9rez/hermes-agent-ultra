@@ -16,13 +16,13 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use hermes_config::GatewayConfig;
-use hermes_core::types::Message;
 use hermes_core::ToolError;
 use hermes_core::ToolHandler;
+use hermes_core::types::Message;
+use hermes_tools::ToolRegistry;
 use hermes_tools::tools::mixture_of_agents::{
     MixtureOfAgentsHandler, MoaBackend, MoaConfig, MoaResponse,
 };
-use hermes_tools::ToolRegistry;
 
 use crate::app::build_provider;
 
@@ -134,7 +134,10 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         // Routed through build_provider → our wrapper error, not the stub's.
-        assert!(msg.contains("MoA query to 'openai:gpt-4o' failed"), "got: {msg}");
+        assert!(
+            msg.contains("MoA query to 'openai:gpt-4o' failed"),
+            "got: {msg}"
+        );
         assert!(
             !msg.contains("backend not configured"),
             "should not hit StubMoaBackend path: {msg}"

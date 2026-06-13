@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use sha1::{Digest as Sha1Digest, Sha1};
-use sha2::{Digest as Sha2Digest, Sha256};
+use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::prompt_builder::DEFAULT_AGENT_IDENTITY;

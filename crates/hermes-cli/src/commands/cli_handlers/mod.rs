@@ -33,12 +33,14 @@ pub use plugins::{handle_cli_external_plugin_subcommand, handle_cli_plugins};
 pub use sessions::handle_cli_sessions;
 pub use whatsapp::handle_cli_whatsapp;
 
-pub(crate) use acp::{ACP_MULTIMODAL_PREFIX, acp_history_to_messages};
-pub(crate) use chat::{
-    apply_cli_chat_runtime_env, query_mode_tools_enabled, resolve_cli_chat_provider_model,
-};
-pub(crate) use mcp_profile::{remove_sentrux_mcp_profile, upsert_sentrux_mcp_profile};
-pub(crate) use plugins::{
-    PluginSurfaceEntry, PluginSurfaceSource, discover_plugin_surface, render_plugin_surface_table,
-};
+pub(crate) use plugins::{discover_plugin_surface, render_plugin_surface_table};
 pub(crate) use whatsapp::whatsapp_cloud_setup_impl;
+
+#[cfg(test)]
+pub(crate) use chat::query_mode_tools_enabled;
+#[cfg(test)]
+pub(crate) use acp::{ACP_MULTIMODAL_PREFIX, acp_history_to_messages};
+#[cfg(test)]
+pub(crate) use chat::{apply_cli_chat_runtime_env, resolve_cli_chat_provider_model};
+#[cfg(test)]
+pub(crate) use mcp_profile::{remove_sentrux_mcp_profile, upsert_sentrux_mcp_profile};

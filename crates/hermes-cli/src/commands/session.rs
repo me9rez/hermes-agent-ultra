@@ -13,7 +13,6 @@ use hermes_agent::{SessionPersistence, format_session_db_unavailable};
 use hermes_core::AgentError;
 
 use super::{CommandResult, emit_command_output, truncate_chars};
-use crate::App;
 
 // ---------------------------------------------------------------------------
 // handle_save_command
@@ -1188,6 +1187,7 @@ pub(crate) fn handle_session_compat_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
     use crate::test_env_lock;
     use clap::Parser;
     use tempfile::tempdir;

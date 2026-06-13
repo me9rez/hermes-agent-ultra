@@ -4,7 +4,7 @@ use super::{InputMode, PickerModal, StreamMarkdownCache};
 
 /// Snapshot of composer state used to skip redundant clears/cursor updates.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InputPaintSnapshot {
+pub(crate) struct InputPaintSnapshot {
     pub input: String,
     pub cursor_position: usize,
     pub mode: InputMode,
@@ -21,6 +21,7 @@ pub struct ComposerState {
     pub completion_index: Option<usize>,
     pub history_search_active: bool,
     pub history_search_query: String,
+    #[allow(dead_code)]
     pub message_browse_index: Option<usize>,
     pub selection_anchor: Option<usize>,
     pub last_input_paint: Option<InputPaintSnapshot>,

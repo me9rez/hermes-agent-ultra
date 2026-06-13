@@ -1,7 +1,5 @@
 //! Plugin list/enable/disable/remove/update/inspect handlers.
 
-use hermes_core::AgentError;
-
 use super::install::install_plugin;
 use super::security::short_sha;
 use super::surface::{

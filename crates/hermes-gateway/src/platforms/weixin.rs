@@ -27,10 +27,7 @@ use hermes_core::traits::{ParseMode, PlatformAdapter};
 
 use crate::adapter::{AdapterProxyConfig, BasePlatformAdapter};
 use crate::gateway::IncomingMessage;
-use crate::platforms::helpers::{
-    image_extension_from_content_type, image_fallback_text, normalized_image_content_type,
-    remote_image_file_name,
-};
+use crate::platforms::helpers::{image_fallback_text, remote_image_file_name};
 
 #[path = "weixin_format.rs"]
 mod weixin_format;
@@ -51,7 +48,6 @@ const MSG_TYPE_BOT: i32 = 2;
 const MSG_STATE_FINISH: i32 = 2;
 const ITEM_TEXT: i32 = 1;
 const DEDUP_TTL: Duration = Duration::from_secs(300);
-const MAX_TEXT: usize = 2000;
 const RATE_LIMIT_ERRCODE: i64 = -2;
 
 const EP_GET_UPLOAD_URL: &str = "ilink/bot/getuploadurl";
@@ -313,15 +309,6 @@ fn raise_for_ilink_send(resp: &Value, operation: &str) -> Result<(), GatewayErro
     Err(GatewayError::SendFailed(format!(
         "weixin {operation} failed: ret={ret} errcode={errcode} errmsg={errmsg}"
     )))
-}
-
-/// Classify a chat by its ID suffix.
-fn get_chat_type(chat_id: &str) -> &'static str {
-    if chat_id.ends_with("@chatroom") {
-        "group"
-    } else {
-        "dm"
-    }
 }
 
 /// iLink WeChat configuration (mirrors Python `extra` + env names in docs).

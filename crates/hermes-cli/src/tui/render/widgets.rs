@@ -5,13 +5,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
-use hermes_core::Message;
 
 use super::super::TuiReadHost;
 use super::super::state::TuiState;
-use super::super::text::{fit_status_line, hard_wrap_segments, transcript_divider, truncate_chars};
+use super::super::text::{fit_status_line, transcript_divider, truncate_chars};
 use super::super::transcript_cache::{
     TranscriptCache, TranscriptRefreshPlan, expanded_tool_cards_signature, plan_transcript_refresh,
 };
@@ -22,8 +19,7 @@ use super::transcript::{
     find_anchor_line_index, project_transcript_window, streaming_transcript_active,
     transcript_fingerprint, transcript_message_fingerprints, transcript_wrap_width,
 };
-use crate::app::{ModelRuntime, SessionRuntime, TranscriptRuntime, UiChromeRuntime};
-use crate::theme;
+use crate::app::{SessionRuntime, TranscriptRuntime};
 pub(crate) fn render_header(
     frame: &mut Frame,
     app: &impl SessionRuntime,

@@ -4,8 +4,7 @@ use std::path::PathBuf;
 
 use hermes_cli::cli::Cli;
 use hermes_config::{
-    PlatformConfig, hermes_home, load_config, load_user_config_file, save_config_yaml,
-    validate_config,
+    PlatformConfig, load_config, load_user_config_file, save_config_yaml, validate_config,
 };
 use hermes_core::AgentError;
 use hermes_tools::{default_tool_policy_counters_path, load_tool_policy_counters};

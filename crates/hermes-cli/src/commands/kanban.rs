@@ -7,7 +7,6 @@ use std::fmt::Write as _;
 
 use hermes_core::AgentError;
 
-use crate::app::App;
 use crate::kanban::{
     KanbanActionInput, KanbanBoard, KanbanLane, NewKanbanTaskInput, add_task, archive_done,
     claim_task, create_or_select_board, ensure_board, find_task_mut, lane_counts, load_store,

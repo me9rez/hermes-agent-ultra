@@ -8,7 +8,6 @@ use std::process::Stdio;
 use hermes_core::AgentError;
 use regex::Regex;
 
-use crate::app::App;
 use crate::commands::misc::discover_repo_root_for_about;
 use crate::commands::{
     CommandResult, emit_command_output, replay_log_path_for_session, replay_trace_integrity,

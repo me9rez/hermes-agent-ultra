@@ -3,7 +3,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use super::config::{MAX_MESSAGE_LENGTH, WhatsAppConfig};
+use super::config::WhatsAppConfig;
 
 static FENCE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"```[\s\S]*?```").expect("valid regex"));
@@ -147,5 +147,3 @@ mod tests {
         assert!(chunks[0].contains("hello"));
     }
 }
-
-use super::config::DEFAULT_REPLY_PREFIX;

@@ -11,7 +11,6 @@ use hermes_intelligence::{SwarmExecutionMode, build_swarm_execution_plan, swarm_
 
 use super::quorum::{clear_quorum_system_hints, handle_quorum_command, install_quorum_system_hint};
 use crate::alpha_runtime::load_quorum_policy;
-use crate::app::App;
 use crate::commands::{CommandResult, emit_command_output};
 
 fn parse_swarm_mode(input: Option<&str>) -> SwarmExecutionMode {

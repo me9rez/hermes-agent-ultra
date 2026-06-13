@@ -65,6 +65,7 @@ fn push_fatal(
     });
 }
 
+#[cfg(feature = "wecom-callback")]
 fn push_warn(
     issues: &mut Vec<RequirementIssue>,
     platform: &str,

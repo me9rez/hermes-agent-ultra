@@ -266,7 +266,10 @@ pub(crate) async fn run_gateway(
             let _p8 = _metrics.phase("handler_wiring");
             let agent_tools_for_cron = Arc::new(bridge_tool_registry(&tool_registry));
             let config_arc = Arc::new(config.clone());
-            hermes_cli::moa_wiring::wire_mixture_of_agents_backend(&tool_registry, config_arc.clone());
+            hermes_cli::moa_wiring::wire_mixture_of_agents_backend(
+                &tool_registry,
+                config_arc.clone(),
+            );
             let gateway_agent_cache: GatewayAgentCache =
                 Arc::new(tokio::sync::Mutex::new(HashMap::new()));
             let handler_deps = gateway_handlers::GatewayHandlerDeps {
@@ -507,14 +510,6 @@ fn telegram_platform_has_allowlist(platform: &PlatformConfig) -> bool {
             .get("allow_from")
             .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
             .is_some_and(|users| users.iter().any(|u| !u.trim().is_empty()))
-}
-
-fn enabled_flag(platform: Option<&PlatformConfig>) -> &'static str {
-    if platform.map(|p| p.enabled).unwrap_or(false) {
-        "enabled"
-    } else {
-        "disabled"
-    }
 }
 
 fn platform_extra_nonempty(platform: &PlatformConfig, key: &str) -> bool {

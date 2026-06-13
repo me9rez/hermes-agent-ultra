@@ -3,7 +3,6 @@
 use hermes_core::AgentError;
 
 use crate::alpha_runtime::{load_claim_verifier_policy, set_claim_verifier_enabled};
-use crate::app::App;
 use crate::commands::{CommandResult, emit_command_output};
 
 pub(crate) fn handle_claims_command(

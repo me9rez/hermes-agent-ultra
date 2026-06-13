@@ -27,17 +27,13 @@ mod status_main;
 #[cfg(test)]
 mod main_tests;
 
-pub(crate) use cli_setup::{run_config, run_model, run_optional_setup_sections, run_tools};
-pub(crate) use cron_main::{run_cron, run_cron_webhook_delivery_loop, run_webhook};
-pub(crate) use gateway_runtime::{gateway_platform_menu_label, run_gateway};
-pub(crate) use misc_main::{
-    read_setup_stdin_line, run_completion, run_dump, run_elite_check, run_kanban, run_lumio,
-    run_portal, run_rotate_provenance_key, run_uninstall, run_update, run_verify_provenance,
-};
+pub(crate) use cli_setup::{run_config, run_model, run_tools};
+pub(crate) use cron_main::{run_cron, run_webhook};
+pub(crate) use gateway_runtime::run_gateway;
+pub(crate) use misc_main::read_setup_stdin_line;
 pub(crate) use oneshot::{
-    handle_local_slash_query, infer_oauth_provider_from_error_message, oneshot_auth_is_refreshable,
-    oneshot_auto_verify_oauth_provider, oneshot_should_use_app_runtime, print_app_oneshot_result,
-    query_is_local_slash_command, start_gateway_keepawake_guard,
+    handle_local_slash_query, oneshot_auto_verify_oauth_provider, oneshot_should_use_app_runtime,
+    print_app_oneshot_result,
 };
 pub(crate) use state_paths::{hermes_state_root, log_legacy_home_env_hint};
 pub(crate) use status_main::{run_dashboard, run_debug, run_logs, run_status};

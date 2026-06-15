@@ -75,10 +75,10 @@ where
             continue;
         }
 
-        if let Some(obj) = tool.as_object_mut() {
-            if let Some(params) = obj.get_mut("parameters") {
-                f(params);
-            }
+        if let Some(obj) = tool.as_object_mut()
+            && let Some(params) = obj.get_mut("parameters")
+        {
+            f(params);
         }
     }
 }
@@ -118,10 +118,10 @@ fn sanitize_schema_node(node: &mut Value, top_level: bool) {
         sanitize_schema_node(items, false);
     }
 
-    if let Some(additional) = obj.get_mut("additionalProperties") {
-        if additional.is_object() || additional.is_string() {
-            sanitize_schema_node(additional, false);
-        }
+    if let Some(additional) = obj.get_mut("additionalProperties")
+        && (additional.is_object() || additional.is_string())
+    {
+        sanitize_schema_node(additional, false);
     }
 
     for key in ["anyOf"] {
@@ -248,10 +248,10 @@ where
     if let Some(items) = obj.get_mut("items") {
         count += f(items);
     }
-    if let Some(additional) = obj.get_mut("additionalProperties") {
-        if additional.is_object() {
-            count += f(additional);
-        }
+    if let Some(additional) = obj.get_mut("additionalProperties")
+        && additional.is_object()
+    {
+        count += f(additional);
     }
     for key in ["anyOf", "oneOf", "allOf"] {
         if let Some(branches) = obj.get_mut(key).and_then(Value::as_array_mut) {

@@ -22,6 +22,10 @@ members = [
     "crates/hermes-server-client",
     "crates/hermes-acp-server",
     "crates/hermes-wiki",
+    "crates/hermes-vibe",
+    "crates/hermes-strategies",
+    "crates/hermes-market-watch",
+    "crates/hermes-copilot-lite",
 ]
 
 [workspace.package]
@@ -53,6 +57,10 @@ hermes-insights = { path = "crates/hermes-insights" }
 hermes-server-client = { path = "crates/hermes-server-client" }
 hermes-acp-server = { path = "crates/hermes-acp-server" }
 hermes-wiki = { path = "crates/hermes-wiki" }
+hermes-vibe = { path = "crates/hermes-vibe" }
+hermes-strategies = { path = "crates/hermes-strategies" }
+hermes-market-watch = { path = "crates/hermes-market-watch" }
+hermes-copilot-lite = { path = "crates/hermes-copilot-lite" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

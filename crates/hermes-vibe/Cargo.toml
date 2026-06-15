@@ -1,0 +1,25 @@
+[package]
+name = "hermes-vibe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Vibe Research: 0py market data and backtesting for Hermes Agent"
+
+[features]
+default = []
+test-mock = ["dep:wiremock"]
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+wiremock = { version = "0.6", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

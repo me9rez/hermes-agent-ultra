@@ -1,0 +1,24 @@
+[package]
+name = "hermes-market-watch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Market watch: real-time quotes, watchlist, and alert engine for Vibe Research"
+
+[features]
+default = []
+
+[dependencies]
+hermes-vibe = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

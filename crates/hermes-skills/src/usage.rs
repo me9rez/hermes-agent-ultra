@@ -520,6 +520,7 @@ pub(crate) fn read_skill_name_from_dir(skill_dir: &Path) -> String {
 /// **Maintenance**: When a new internal skill is added to the `skills/`
 /// directory, append its `name:` frontmatter value here. See AGENTS.md.
 const BUNDLED_SKILL_NAMES_FALLBACK: &[&str] = &[
+    "a-share-quant-tools",
     "airtable",
     "apple-notes",
     "apple-reminders",
@@ -549,6 +550,7 @@ const BUNDLED_SKILL_NAMES_FALLBACK: &[&str] = &[
     "github-issues",
     "github-pr-workflow",
     "github-repo-management",
+    "global-market-watch",
     "godmode",
     "google-workspace",
     "heartmula",
@@ -567,8 +569,10 @@ const BUNDLED_SKILL_NAMES_FALLBACK: &[&str] = &[
     "llm-wiki",
     "macos-computer-use",
     "manim-video",
+    "market-news-sentinel",
     "maps",
     "minecraft-modpack-server",
+    "multi-factor-backtest",
     "nano-pdf",
     "native-mcp",
     "node-inspect-debugger",
@@ -598,6 +602,7 @@ const BUNDLED_SKILL_NAMES_FALLBACK: &[&str] = &[
     "spotify",
     "subagent-driven-development",
     "systematic-debugging",
+    "technical-indicators",
     "teams-meeting-pipeline",
     "test-driven-development",
     "touchdesigner-mcp",

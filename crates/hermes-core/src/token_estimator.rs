@@ -72,7 +72,7 @@ impl TokenEstimator for CharBasedEstimator {
 
         // ASCII: ~4 chars/token, non-ASCII: ~1.5 chars/token
         let ascii_tokens = ascii_bytes.div_ceil(4);
-        let non_ascii_tokens = ((non_ascii_chars as u64) * 2 + 2) / 3; // ceil(n * 2/3)
+        let non_ascii_tokens = (non_ascii_chars as u64 * 2).div_ceil(3);
 
         (ascii_tokens as u64) + non_ascii_tokens
     }

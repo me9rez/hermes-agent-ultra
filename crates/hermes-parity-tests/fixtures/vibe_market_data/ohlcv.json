@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "fixture_group": "vibe_market_data",
+  "python_module": "N/A (Rust-native hermes-vibe)",
+  "cases": [
+    {
+      "id": "btc_usdt_daily_basic",
+      "op": "get_market_data",
+      "input": {
+        "symbol": "BTC-USDT",
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-10",
+        "interval": "daily"
+      },
+      "expected": {
+        "has_symbol": "BTC-USDT",
+        "has_interval": "daily",
+        "min_rows": 5,
+        "columns": ["date", "open", "high", "low", "close", "volume"]
+      },
+      "skip": true
+    },
+    {
+      "id": "a_share_sz_daily",
+      "op": "get_market_data",
+      "input": {
+        "symbol": "000001.SZ",
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-10",
+        "interval": "daily"
+      },
+      "expected": {
+        "has_symbol": "000001.SZ",
+        "has_interval": "daily",
+        "min_rows": 3,
+        "columns": ["date", "open", "high", "low", "close", "volume"]
+      },
+      "skip": true
+    },
+    {
+      "id": "invalid_symbol",
+      "op": "get_market_data",
+      "input": {
+        "symbol": "INVALID_XYZ",
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-10"
+      },
+      "expected": {
+        "error_contains": "not found"
+      },
+      "skip": true
+    }
+  ]
+}

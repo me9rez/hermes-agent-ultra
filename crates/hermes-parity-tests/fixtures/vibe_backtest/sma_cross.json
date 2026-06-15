@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "fixture_group": "vibe_backtest",
+  "python_module": "N/A (Rust-native hermes-vibe)",
+  "cases": [
+    {
+      "id": "btc_sma_cross_20_50",
+      "op": "run_backtest",
+      "input": {
+        "symbol": "BTC-USDT",
+        "strategy": "sma_cross",
+        "params": {"short_window": 20, "long_window": 50},
+        "start_date": "2025-06-01",
+        "end_date": "2026-06-01"
+      },
+      "expected": {
+        "has_fields": ["symbol", "strategy", "params", "total_return_pct", "max_drawdown_pct", "trade_count", "sharpe_ratio", "win_rate_pct", "period"],
+        "strategy_eq": "sma_cross",
+        "trade_count_gte": 1,
+        "max_drawdown_lte": 0.0
+      },
+      "skip": true
+    },
+    {
+      "id": "unsupported_strategy",
+      "op": "run_backtest",
+      "input": {
+        "symbol": "BTC-USDT",
+        "strategy": "unknown_strategy",
+        "params": {}
+      },
+      "expected": {
+        "error_contains": "Unsupported strategy"
+      },
+      "skip": true
+    }
+  ]
+}

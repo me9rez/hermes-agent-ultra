@@ -16,8 +16,9 @@ browser = []
 file = []
 media = []
 integrations = []
+vibe-research = ["dep:hermes-vibe"]
 # Convenience: enable all groups.
-full = ["core", "web", "browser", "file", "media", "integrations"]
+full = ["core", "web", "browser", "file", "media", "integrations", "vibe-research"]
 
 [dependencies]
 hermes-core = { workspace = true }
@@ -49,6 +50,7 @@ tempfile = "3"
 ddgs = { version = "0.1.0", optional = true }
 scraper = { workspace = true, optional = true }
 hex = "0.4"
+hermes-vibe = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

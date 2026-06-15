@@ -55,3 +55,8 @@ pub mod video;
 pub mod vision;
 pub mod voice_mode;
 pub mod web;
+
+#[cfg(feature = "vibe-research")]
+pub mod vibe_backtest;
+#[cfg(feature = "vibe-research")]
+pub mod vibe_market_data;

@@ -10,6 +10,7 @@ pub mod file;
 pub mod integrations;
 pub mod media;
 pub mod terminal;
+pub mod vibe;
 pub mod web;
 
 use std::path::PathBuf;
@@ -40,6 +41,7 @@ pub fn register_all(ctx: &RegistryContext<'_>) {
     browser::register(ctx);
     integrations::register(ctx);
     core::register(ctx);
+    vibe::register(ctx);
 
     tracing::info!(
         tool_count = ctx.registry.list_tools().len(),

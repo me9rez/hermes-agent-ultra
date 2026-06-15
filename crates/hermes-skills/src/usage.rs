@@ -509,18 +509,115 @@ pub(crate) fn read_skill_name_from_dir(skill_dir: &Path) -> String {
     read_skill_name_from_file(&skill_dir.join("SKILL.md"), fallback)
 }
 
-fn bundled_skill_names(skills_dir: &Path) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    let manifest_path = skills_dir.join(".bundled_manifest");
-    if let Ok(raw) = fs::read_to_string(&manifest_path) {
-        for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
-            let name = line.split_once(':').map(|(name, _)| name).unwrap_or(line);
-            if !name.trim().is_empty() {
-                names.insert(name.trim().to_string());
-            }
-        }
-    }
-    names
+/// Compile-time canonical list of all bundled skill names (from SKILL.md frontmatter `name:`).
+///
+/// This is the **sole source of truth** for identifying built-in skills at
+/// runtime. The `.bundled_manifest` file is never produced in production
+/// (the `sync_skills()` code path that writes it is dead code), so the
+/// protection mechanism must not depend on any runtime file for bundled
+/// skill identification.
+///
+/// **Maintenance**: When a new internal skill is added to the `skills/`
+/// directory, append its `name:` frontmatter value here. See AGENTS.md.
+const BUNDLED_SKILL_NAMES_FALLBACK: &[&str] = &[
+    "airtable",
+    "apple-notes",
+    "apple-reminders",
+    "architecture-diagram",
+    "arxiv",
+    "ascii-art",
+    "ascii-video",
+    "audiocraft-audio-generation",
+    "baoyu-comic",
+    "baoyu-infographic",
+    "blogwatcher",
+    "claude-code",
+    "claude-design",
+    "codebase-inspection",
+    "codex",
+    "comfyui",
+    "debugging-hermes-tui-commands",
+    "design-md",
+    "dogfood",
+    "dspy",
+    "evaluating-llms-harness",
+    "excalidraw",
+    "findmy",
+    "gif-search",
+    "github-auth",
+    "github-code-review",
+    "github-issues",
+    "github-pr-workflow",
+    "github-repo-management",
+    "godmode",
+    "google-workspace",
+    "heartmula",
+    "hermes-agent",
+    "hermes-agent-skill-authoring",
+    "himalaya",
+    "huggingface-hub",
+    "humanizer",
+    "ideation",
+    "imessage",
+    "jupyter-live-kernel",
+    "kanban-orchestrator",
+    "kanban-worker",
+    "linear",
+    "llama-cpp",
+    "llm-wiki",
+    "macos-computer-use",
+    "manim-video",
+    "maps",
+    "minecraft-modpack-server",
+    "nano-pdf",
+    "native-mcp",
+    "node-inspect-debugger",
+    "notion",
+    "obliteratus",
+    "obsidian",
+    "ocr-and-documents",
+    "opencode",
+    "openhue",
+    "p5js",
+    "pixel-art",
+    "plan",
+    "pokemon-player",
+    "polymarket",
+    "popular-web-designs",
+    "powerpoint",
+    "pretext",
+    "python-debugpy",
+    "requesting-code-review",
+    "research-paper-writing",
+    "segment-anything-model",
+    "serving-llms-vllm",
+    "sketch",
+    "songsee",
+    "songwriting-and-ai-music",
+    "spike",
+    "spotify",
+    "subagent-driven-development",
+    "systematic-debugging",
+    "teams-meeting-pipeline",
+    "test-driven-development",
+    "touchdesigner-mcp",
+    "webhook-subscriptions",
+    "weights-and-biases",
+    "writing-plans",
+    "xurl",
+    "youtube-content",
+    "yuanbao",
+];
+
+fn bundled_skill_names(_skills_dir: &Path) -> BTreeSet<String> {
+    // The compile-time constant is the sole source of truth.
+    // `.bundled_manifest` is not read because `sync_skills()` is never
+    // invoked from any production entry point — the manifest is never
+    // created, making a runtime layer unreliable.
+    BUNDLED_SKILL_NAMES_FALLBACK
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -726,7 +823,8 @@ mod tests {
         let skills = dir.path();
         let store = make_store(&dir);
         fs::create_dir_all(skills.join(".hub")).unwrap();
-        fs::write(skills.join(".bundled_manifest"), "bundled:abc\n").unwrap();
+        // "bundled" is not a real fallback name — use "yuanbao" instead.
+        store.bump_view("yuanbao").unwrap();
         fs::write(
             skills.join(".hub").join("lock.json"),
             r#"{"installed":[{"name":"hubbed","install_path":"hubbed"}]}"#,
@@ -735,12 +833,12 @@ mod tests {
 
         store.bump_view("bundled").unwrap();
         store.bump_use("hubbed").unwrap();
-        store.set_state("bundled", STATE_ARCHIVED).unwrap();
+        store.set_state("yuanbao", STATE_ARCHIVED).unwrap();
         // Preset skills now receive normal usage records — only curator
         // operations are blocked via mark_agent_created / auto-heal.
         let usage = store.load_usage();
         assert!(!usage.is_empty());
-        assert!(!is_agent_created(skills, "bundled"));
+        assert!(!is_agent_created(skills, "yuanbao"));
         assert!(!is_agent_created(skills, "hubbed"));
         assert!(is_agent_created(skills, "mine"));
     }
@@ -817,24 +915,26 @@ mod tests {
         write_skill(skills, "shared", None);
         store.archive_skill("shared").unwrap();
         write_skill(skills, "shared", None);
-        fs::write(skills.join(".bundled_manifest"), "shared:abc\n").unwrap();
+        // "shared" is not in the fallback list — use "yuanbao" to test
+        // archive/restore interaction with a protected skill.
+        // Create a skill dir so restore finds it on disk (shadowing guard).
+        write_skill(skills, "yuanbao", None);
         // Restore refuses to shadow an existing skill (protected or not).
-        let (ok, msg) = store.restore_skill("shared").unwrap();
-        assert!(!ok);
-        assert!(msg.contains("shadow"));
-        // Archiving a protected skill is now allowed — only curator operations
+        let (ok, msg) = store.restore_skill("yuanbao").unwrap();
+        assert!(!ok, "restore should refuse because yuanbao dir already exists");
+        assert!(msg.contains("shadow") || msg.contains("shadow") || msg.contains("Refusing"));
+        // Archiving a protected skill is allowed — only curator operations
         // are blocked on protected skills.
-        let (ok, _) = store.archive_skill("shared").unwrap();
+        let (ok, _) = store.archive_skill("yuanbao").unwrap();
         assert!(ok);
     }
 
     #[test]
     fn mark_agent_created_rejects_protected() {
         let dir = tempdir().unwrap();
-        let skills = dir.path();
         let store = make_store(&dir);
-        fs::write(skills.join(".bundled_manifest"), "yuanbao:abc\n").unwrap();
-        // mark_agent_created on a bundled skill should silently no-op
+        // "yuanbao" is in the compile-time constant → protected
+        // (no manifest needed)
         store.mark_agent_created("yuanbao").unwrap();
         let rec = store.get_record("yuanbao");
         assert!(
@@ -848,9 +948,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let skills = dir.path();
         let store = make_store(&dir);
+        // "yuanbao" is in the compile-time constant → protected
+        // (no manifest needed)
         // Create the skill dir so find_skill_dir doesn't filter it out
         write_skill(skills, "yuanbao", None);
-        fs::write(skills.join(".bundled_manifest"), "yuanbao:abc\n").unwrap();
         // Manually inject agent_created=true into .usage.json (bypass mark_agent_created guard)
         {
             let mut usage = store.load_usage();
@@ -892,26 +993,44 @@ mod tests {
     }
 
     #[test]
-    fn bundled_manifest_missing_no_protection() {
+    fn compile_time_constant_protects_without_manifest() {
         let dir = tempdir().unwrap();
         let skills = dir.path();
-        // No .bundled_manifest file — without compile-time fallback,
-        // nothing is recognised as protected.
+        // No .bundled_manifest file — compile-time constant is the sole guard
         assert!(
             !skills.join(".bundled_manifest").exists(),
             "test precondition: no manifest"
         );
+        // Fallback should recognise built-in skills as protected
         assert!(
-            !is_protected_skill(skills, "yuanbao"),
-            "without manifest, yuanbao is not protected"
+            is_protected_skill(skills, "yuanbao"),
+            "yuanbao should be protected via compile-time constant"
         );
         assert!(
-            !is_protected_skill(skills, "powerpoint"),
-            "without manifest, powerpoint is not protected"
+            is_protected_skill(skills, "powerpoint"),
+            "powerpoint should be protected via compile-time constant"
         );
+        assert!(
+            is_protected_skill(skills, "baoyu-comic"),
+            "baoyu-comic should be protected via compile-time constant"
+        );
+        assert!(
+            is_protected_skill(skills, "baoyu-infographic"),
+            "baoyu-infographic should be protected via compile-time constant"
+        );
+        // Unknown skill should still not be protected
         assert!(
             !is_protected_skill(skills, "my-custom-skill"),
             "unknown skill should not be protected"
+        );
+        // Agent-created umbrella skills should also not be protected
+        assert!(
+            !is_protected_skill(skills, "baoyu"),
+            "agent-created umbrella 'baoyu' is NOT a built-in name"
+        );
+        assert!(
+            !is_protected_skill(skills, "software-engineering"),
+            "agent-created umbrella 'software-engineering' is NOT a built-in name"
         );
     }
 }

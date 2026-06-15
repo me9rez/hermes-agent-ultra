@@ -540,6 +540,14 @@ fn build_curator_prompt_with_skills_includes_table() {
             },
         ),
     ]);
+    // list_agent_created_skill_names auto-heals by removing entries whose
+    // directories don't exist on disk — create skill dirs to keep them alive.
+    let skills_dir = store.dir().to_path_buf();
+    std::fs::create_dir_all(skills_dir.join("skill_a")).unwrap();
+    std::fs::write(skills_dir.join("skill_a").join("SKILL.md"), "# skill_a").unwrap();
+    std::fs::create_dir_all(skills_dir.join("skill_b")).unwrap();
+    std::fs::write(skills_dir.join("skill_b").join("SKILL.md"), "# skill_b").unwrap();
+
     let prompt = build_curator_prompt(&store);
     // Both skills should appear in the markdown table
     assert!(prompt.contains("skill_a"), "prompt should mention skill_a");

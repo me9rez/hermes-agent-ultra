@@ -206,8 +206,8 @@ pub fn apply_automatic_transitions(store: &UsageStore, config: &CuratorConfig) -
 
         // Skip protected skills (bundled/hub-installed).
         // Defense in depth: set_state() → mutate_usage() already guards
-        // against this, but an explicit early check catches the case where
-        // .bundled_manifest is missing and mutate_usage's guard fails.
+        // against this, but an explicit early check avoids unnecessary
+        // state transitions for built-in skills.
         if is_protected_skill(store.dir(), name) {
             continue;
         }

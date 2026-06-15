@@ -47,6 +47,12 @@
 5. 新 golden：放在 `crates/hermes-parity-tests/fixtures/<dir>/`，并更新 `scripts/record_fixtures.py`（若适用）与 `registry.json`。
 6. `docs\roadmaps\ULTRA_ADDITIONAL_FEATURES_PLAN_2026-04-24.md` Issue #78 / Workstream 7 不属于 registry.json parity，避免移植任务误加 Rust-only 行为。
 
+### 内置技能注册
+
+在 `skills/` 目录下新增内置技能时，**必须同步更新** `crates/hermes-skills/src/usage.rs` 中的 `BUNDLED_SKILL_NAMES_FALLBACK` 编译时常量——添加该技能 `SKILL.md` frontmatter 中的 `name:` 值。
+
+该常量是 curator 判断内置技能是否受保护的**唯一来源**（`.bundled_manifest` 文件在生产环境中从不生成）。漏加会导致 curator 将新内置技能误认为 agent-created，进而触发错误的归档或合并操作。
+
 ### 禁止事项
 
 - 不随意改 workspace 成员（新 crate 需动机 + 根 `Cargo.toml`）。

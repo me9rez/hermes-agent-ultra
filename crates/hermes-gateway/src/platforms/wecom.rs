@@ -1,6 +1,5 @@
 //! WeCom (Enterprise WeChat) **AI Bot WebSocket** adapter.
 //!
-//! Ported from Python `gateway/platforms/wecom.py`:
 //! - `aibot_subscribe` authentication
 //! - inbound `aibot_msg_callback` / legacy `aibot_callback`
 //! - outbound markdown via `aibot_send_msg` / `aibot_respond_msg`
@@ -1604,6 +1603,11 @@ impl WeComAdapter {
                             if let Some(err) = response_error(&resp) {
                                 error!(error = %err, "WeCom subscribe failed");
                                 Self::fail_pending(&inner).await;
+                                if err.contains("853000") || err.contains("invalid_bot_id") {
+                                    error!("Fatal WeCom credential error — stopping adapter");
+                                    inner.base.mark_stopped();
+                                    return; // exit stream_loop permanently
+                                }
                                 tokio::time::sleep(Duration::from_secs(
                                     RECONNECT_SECS[backoff_idx.min(RECONNECT_SECS.len() - 1)],
                                 ))

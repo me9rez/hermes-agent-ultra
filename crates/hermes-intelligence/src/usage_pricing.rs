@@ -491,6 +491,16 @@ pub fn format_duration_compact(seconds: f64) -> String {
 // Normalize raw API usage
 // ---------------------------------------------------------------------------
 
+fn first_nonzero(obj: &serde_json::Value, keys: &[&str]) -> u64 {
+    for key in keys {
+        let value = obj.get(*key).and_then(|v| v.as_u64()).unwrap_or(0);
+        if value > 0 {
+            return value;
+        }
+    }
+    0
+}
+
 /// Normalize raw API response usage into canonical token buckets.
 pub fn normalize_usage(
     raw_usage: &serde_json::Value,
@@ -542,8 +552,8 @@ pub fn normalize_usage(
     }
 
     // OpenAI Chat Completions (default)
-    let prompt_total = get_u64(raw_usage, "prompt_tokens");
-    let completion_tokens = get_u64(raw_usage, "completion_tokens");
+    let prompt_total = first_nonzero(raw_usage, &["prompt_tokens", "input_tokens"]);
+    let completion_tokens = first_nonzero(raw_usage, &["completion_tokens", "output_tokens"]);
     let details = raw_usage.get("prompt_tokens_details");
     let mut cache_read = details
         .and_then(|d| d.get("cached_tokens"))
@@ -660,6 +670,20 @@ mod tests {
         assert_eq!(usage.cache_read_tokens, 2000);
         assert_eq!(usage.cache_write_tokens, 400);
         assert_eq!(usage.prompt_tokens(), 3400);
+    }
+
+    #[test]
+    fn test_normalize_usage_openai_input_output_token_field_names() {
+        let raw = serde_json::json!({
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_tokens": 150
+        });
+        let usage = normalize_usage(&raw, Some("minimax"), Some("chat_completions"));
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.prompt_tokens(), 100);
+        assert_eq!(usage.total_tokens(), 150);
     }
 
     #[test]

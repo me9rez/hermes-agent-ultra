@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use hermes_core::{
     AgentError, FunctionCallDelta, LlmResponse, Message, MessageRole, StreamChunk, StreamDelta,
-    ToolCallDelta, ToolSchema, UsageStats,
+    ToolCallDelta, ToolSchema,
 };
 
 use crate::tool_call_args::arguments_value_to_string;
@@ -499,72 +499,73 @@ pub(crate) fn infer_moonshot_schema_type(obj: &serde_json::Map<String, Value>) -
 
 /// Parse a single SSE data JSON object into a StreamChunk (OpenAI format).
 pub(crate) fn parse_sse_chunk(json: &Value) -> Option<StreamChunk> {
-    let choices = json.get("choices").and_then(|c| c.as_array())?;
-    let choice = choices.first()?;
+    let first_choice = json
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first());
 
-    let delta_obj = choice.get("delta")?;
+    let mut delta = None;
+    let mut finish_reason = None;
 
-    let content = delta_obj
-        .get("content")
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string());
-    let thinking = parse_sse_delta_reasoning(delta_obj);
+    if let Some(choice) = first_choice {
+        if let Some(delta_obj) = choice.get("delta") {
+            let content = delta_obj
+                .get("content")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            let thinking = parse_sse_delta_reasoning(delta_obj);
 
-    let tool_calls = delta_obj
-        .get("tool_calls")
-        .and_then(|tc| tc.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|tc| {
-                    let index = tc.get("index").and_then(|i| i.as_u64())? as u32;
-                    let id = tc.get("id").and_then(|i| i.as_str()).map(|s| s.to_string());
-                    let function = tc.get("function").map(|f| FunctionCallDelta {
-                        name: f
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .map(|s| s.to_string()),
-                        arguments: f
-                            .get("arguments")
-                            .and_then(|a| a.as_str())
-                            .map(|s| s.to_string()),
-                    });
-                    Some(ToolCallDelta {
-                        index,
-                        id,
-                        function,
-                    })
+            let tool_calls = delta_obj
+                .get("tool_calls")
+                .and_then(|tc| tc.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|tc| {
+                            let index = tc.get("index").and_then(|i| i.as_u64())? as u32;
+                            let id = tc.get("id").and_then(|i| i.as_str()).map(|s| s.to_string());
+                            let function = tc.get("function").map(|f| FunctionCallDelta {
+                                name: f
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .map(|s| s.to_string()),
+                                arguments: f
+                                    .get("arguments")
+                                    .and_then(|a| a.as_str())
+                                    .map(|s| s.to_string()),
+                            });
+                            Some(ToolCallDelta {
+                                index,
+                                id,
+                                function,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                });
+
+            delta = if content.is_some() || tool_calls.is_some() || thinking.is_some() {
+                Some(StreamDelta {
+                    content,
+                    tool_calls,
+                    extra: thinking.map(|text| serde_json::json!({ "thinking": text })),
                 })
-                .collect::<Vec<_>>()
-        });
+            } else {
+                None
+            };
+        }
 
-    let delta = if content.is_some() || tool_calls.is_some() || thinking.is_some() {
-        Some(StreamDelta {
-            content,
-            tool_calls,
-            extra: thinking.map(|text| serde_json::json!({ "thinking": text })),
-        })
-    } else {
-        None
-    };
+        finish_reason = choice
+            .get("finish_reason")
+            .and_then(|f| f.as_str())
+            .map(|s| s.to_string());
+    }
 
-    let finish_reason = choice
-        .get("finish_reason")
-        .and_then(|f| f.as_str())
-        .map(|s| s.to_string());
+    let usage = json
+        .get("usage")
+        .and_then(|u| crate::usage_parse::usage_stats_from_raw(u, None, None));
 
-    // Usage may appear in the final chunk
-    let usage = json.get("usage").and_then(|u| {
-        Some(UsageStats {
-            prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            completion_tokens: u
-                .get("completion_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            estimated_cost: None,
-            ..Default::default()
-        })
-    });
+    if delta.is_none() && finish_reason.is_none() && usage.is_none() {
+        return None;
+    }
 
     Some(StreamChunk {
         delta,
@@ -648,15 +649,9 @@ pub(crate) fn parse_openai_response(json: &Value) -> Result<LlmResponse, AgentEr
         });
 
     // Parse usage
-    let usage = json.get("usage").and_then(|u| {
-        Some(UsageStats {
-            prompt_tokens: u.get("prompt_tokens")?.as_u64()? as u64,
-            completion_tokens: u.get("completion_tokens")?.as_u64()? as u64,
-            total_tokens: u.get("total_tokens")?.as_u64()? as u64,
-            estimated_cost: None,
-            ..Default::default()
-        })
-    });
+    let usage = json
+        .get("usage")
+        .and_then(|u| crate::usage_parse::usage_stats_from_raw(u, None, Some("chat_completions")));
 
     let role = message_obj
         .get("role")

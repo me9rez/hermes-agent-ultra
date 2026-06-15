@@ -61,6 +61,7 @@ hermes-telemetry = { workspace = true }
 hermes-acp-server = { workspace = true }
 hermes-intelligence = { workspace = true }
 hermes-insights = { workspace = true }
+hermes-server-client = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"
 ratatui = { workspace = true }

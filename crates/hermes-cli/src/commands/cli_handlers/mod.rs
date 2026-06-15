@@ -14,6 +14,7 @@ mod meeting;
 mod memory;
 mod pairing;
 mod plugins;
+mod server;
 mod sessions;
 mod whatsapp;
 
@@ -30,6 +31,7 @@ pub use meeting::handle_cli_meeting;
 pub use memory::handle_cli_memory;
 pub use pairing::handle_cli_pairing;
 pub use plugins::{handle_cli_external_plugin_subcommand, handle_cli_plugins};
+pub use server::handle_cli_server;
 pub use sessions::handle_cli_sessions;
 pub use whatsapp::handle_cli_whatsapp;
 
@@ -37,9 +39,9 @@ pub(crate) use plugins::{discover_plugin_surface, render_plugin_surface_table};
 pub(crate) use whatsapp::whatsapp_cloud_setup_impl;
 
 #[cfg(test)]
-pub(crate) use chat::query_mode_tools_enabled;
-#[cfg(test)]
 pub(crate) use acp::{ACP_MULTIMODAL_PREFIX, acp_history_to_messages};
+#[cfg(test)]
+pub(crate) use chat::query_mode_tools_enabled;
 #[cfg(test)]
 pub(crate) use chat::{apply_cli_chat_runtime_env, resolve_cli_chat_provider_model};
 #[cfg(test)]

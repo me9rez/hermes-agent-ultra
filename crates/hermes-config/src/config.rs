@@ -170,6 +170,10 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub insights: crate::insights::InsightsConfig,
 
+    /// Remote LLM server (login + OpenAI-compatible inference gateway).
+    #[serde(default)]
+    pub server: crate::server::ServerConfig,
+
     /// Anthropic prompt caching (`cache_ttl`: `"5m"` or `"1h"`).
     #[serde(default)]
     pub prompt_caching: PromptCachingConfig,
@@ -226,6 +230,7 @@ impl Default for GatewayConfig {
             agent: AgentLoopBehaviorConfig::default(),
             interest: InterestConfig::default(),
             insights: crate::insights::InsightsConfig::default(),
+            server: crate::server::ServerConfig::default(),
             prompt_caching: PromptCachingConfig::default(),
             home_dir: None,
             timezone: None,

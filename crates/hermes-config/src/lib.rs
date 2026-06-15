@@ -19,6 +19,7 @@ pub mod platform;
 mod python_platform_env;
 mod python_yaml_compat;
 pub mod roundtrip_tests;
+pub mod server;
 pub mod session;
 pub mod streaming;
 pub mod voice;
@@ -63,6 +64,7 @@ pub use paths::{
     state_db_path, state_db_path_in, state_dir, user_home_dir, user_path,
 };
 pub use platform::{PlatformConfig, UnauthorizedDmBehavior, extra_string, platform_token_or_extra};
+pub use server::{ServerAuthConfig, ServerConfig, ServerLlmConfig, ServerLoginMethod};
 pub use session::{DailyReset, IdleReset, SessionConfig, SessionResetPolicy, SessionType};
 pub use streaming::StreamingConfig;
 pub use voice::{

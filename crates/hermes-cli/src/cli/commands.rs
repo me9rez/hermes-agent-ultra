@@ -824,6 +824,24 @@ pub fn parse_contribute(args: &[OsString]) -> Result<CliCommand, clap::Error> {
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(
+    name = "server",
+    about = "Remote LLM server account (login/logout/whoami/doctor)"
+)]
+struct ServerArgs {
+    action: Option<String>,
+    #[arg(long, value_parser = ["wechat", "wechat_qr", "email", "email_otp"])]
+    method: Option<String>,
+}
+
+pub fn parse_server(args: &[OsString]) -> Result<CliCommand, clap::Error> {
+    parse_subcommand::<ServerArgs, _>(args, |a| CliCommand::Server {
+        action: a.action,
+        method: a.method,
+    })
+}
+
+#[derive(Parser, Debug, Clone)]
 #[command(name = "mcp", about = "mcp command")]
 struct McpArgs {
     action: Option<String>,
@@ -1107,6 +1125,7 @@ pub fn all_subcommand_commands() -> Vec<clap::Command> {
         MemoryArgs,
         InterestArgs,
         ContributeArgs,
+        ServerArgs,
         McpArgs,
         MeetingArgs,
         SessionsArgs,

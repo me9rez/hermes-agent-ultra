@@ -199,32 +199,22 @@ pub use cli_handlers::{
     handle_cli_acp, handle_cli_backup, handle_cli_chat, handle_cli_claw, handle_cli_contribute,
     handle_cli_external_plugin_subcommand, handle_cli_import, handle_cli_insights,
     handle_cli_interest, handle_cli_login, handle_cli_logout, handle_cli_mcp, handle_cli_meeting,
-    handle_cli_memory, handle_cli_pairing, handle_cli_plugins, handle_cli_sessions,
-    handle_cli_version, handle_cli_whatsapp,
+    handle_cli_memory, handle_cli_pairing, handle_cli_plugins, handle_cli_server,
+    handle_cli_sessions, handle_cli_version, handle_cli_whatsapp,
 };
 
 #[cfg(test)]
-pub(crate) use cli_handlers::query_mode_tools_enabled;
-#[cfg(test)]
-pub(crate) use studio_ops::{
-    extract_marker_paths, normalize_repo_relative_path, specpatch_block_reason,
-};
-#[cfg(test)]
-pub(crate) use catalog::feedback_log_path;
-#[cfg(test)]
-pub(crate) use misc::{
-    append_triage_learning_feedback, evaluate_trigger_triage, parse_reasoning_effort,
-    save_subconscious_state, triage_learning_bias, trigger_triage_learning_state_path,
-    SubconsciousQueueState, SubconsciousTask, TriggerTriageAssessment, TriggerTriageDecision,
-};
-#[cfg(test)]
-pub(crate) use background::handle_queue_command;
+pub(crate) use approval::{handle_approve_command, handle_deny_command, handle_gquota_command};
 #[cfg(test)]
 pub(crate) use autocomplete::canonical_command;
 #[cfg(test)]
-pub(crate) use approval::{handle_approve_command, handle_deny_command, handle_gquota_command};
+pub(crate) use background::handle_queue_command;
+#[cfg(test)]
+pub(crate) use catalog::feedback_log_path;
 #[cfg(test)]
 pub(crate) use catalog::handle_feedback_command;
+#[cfg(test)]
+pub(crate) use cli_handlers::query_mode_tools_enabled;
 #[cfg(test)]
 pub(crate) use cli_handlers::{
     ACP_MULTIMODAL_PREFIX, acp_history_to_messages, apply_cli_chat_runtime_env,
@@ -237,11 +227,21 @@ pub(crate) use infra::extract_embedding_diag_line;
 #[cfg(test)]
 pub(crate) use kanban::parse_kanban_add;
 #[cfg(test)]
+pub(crate) use misc::{
+    SubconsciousQueueState, SubconsciousTask, TriggerTriageAssessment, TriggerTriageDecision,
+    append_triage_learning_feedback, evaluate_trigger_triage, parse_reasoning_effort,
+    save_subconscious_state, triage_learning_bias, trigger_triage_learning_state_path,
+};
+#[cfg(test)]
 pub(crate) use plan::handle_plan_command;
 #[cfg(test)]
 pub(crate) use policy::walkthrough_events_path;
 #[cfg(test)]
 pub(crate) use session::{handle_rollback_command, handle_snapshot_command};
+#[cfg(test)]
+pub(crate) use studio_ops::{
+    extract_marker_paths, normalize_repo_relative_path, specpatch_block_reason,
+};
 
 #[cfg(test)]
 mod tests;

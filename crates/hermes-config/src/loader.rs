@@ -2110,6 +2110,24 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
             config.insights.contribution.auth_token = Some(trimmed.to_string());
         }
     }
+    if let Ok(v) = std::env::var("HERMES_SERVER_URL") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            config.server.base_url = trimmed.to_string();
+        }
+    }
+    if let Ok(v) = std::env::var("HERMES_SERVER_ENABLED") {
+        if let Some(parsed) = parse_bool_env("HERMES_SERVER_ENABLED", &v) {
+            config.server.enabled = parsed;
+        }
+    }
+    if let Ok(v) = std::env::var("HERMES_SERVER_TOKEN") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            // Token is read at runtime from env by hermes-server-client; no config field needed.
+            let _ = trimmed;
+        }
+    }
     if let Ok(v) = std::env::var("HERMES_KANBAN_DISPATCH_IN_GATEWAY") {
         if let Some(parsed) = parse_bool_env("HERMES_KANBAN_DISPATCH_IN_GATEWAY", &v) {
             config.kanban.dispatch_in_gateway = parsed;

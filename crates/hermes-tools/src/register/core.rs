@@ -19,7 +19,6 @@ pub fn register(ctx: &RegistryContext<'_>) {
     register_dashboard(ctx);
     register_security(ctx);
     register_system(ctx);
-    register_mixture_of_agents(ctx);
 }
 
 fn register_skills(ctx: &RegistryContext<'_>) {
@@ -200,21 +199,6 @@ fn register_system(ctx: &RegistryContext<'_>) {
         "system",
         Arc::new(crate::tools::tool_result_storage::ToolResultStorageHandler::default()),
         "💾",
-        vec![],
-    );
-}
-
-fn register_mixture_of_agents(ctx: &RegistryContext<'_>) {
-    reg(
-        ctx,
-        "mixture_of_agents",
-        Arc::new(
-            crate::tools::mixture_of_agents::MixtureOfAgentsHandler::new(
-                Arc::new(crate::tools::mixture_of_agents::StubMoaBackend),
-                crate::tools::mixture_of_agents::MoaConfig::default(),
-            ),
-        ),
-        "🤖",
         vec![],
     );
 }

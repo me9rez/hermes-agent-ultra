@@ -91,11 +91,11 @@ impl MoaBackend for ProviderMoaBackend {
     }
 }
 
-/// Replace the startup `StubMoaBackend` with a real provider-backed backend.
+/// Wire the real provider-backed `mixture_of_agents` tool into the registry.
 ///
-/// Safe to call after `register_builtin_tools`: re-registering under the same
-/// `mixture_of_agents` name overwrites the stub entry (see
-/// `ToolRegistry::register`).
+/// Call once after `register_builtin_tools` during gateway/CLI startup. The tool
+/// is not registered by the built-in catalog so startup never installs a stub
+/// that would be overwritten later.
 pub fn wire_mixture_of_agents_backend(registry: &ToolRegistry, config: Arc<GatewayConfig>) {
     let backend = Arc::new(ProviderMoaBackend::new(config));
     let handler = MixtureOfAgentsHandler::new(backend, MoaConfig::default());
@@ -119,7 +119,6 @@ pub fn wire_mixture_of_agents_backend(registry: &ToolRegistry, config: Arc<Gatew
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hermes_tools::tools::mixture_of_agents::StubMoaBackend;
 
     /// With no provider/API key configured, `build_provider` falls back to
     /// `NoBackendProvider`, so a query must surface a structured
@@ -144,31 +143,16 @@ mod tests {
         );
     }
 
-    /// Re-registering overwrites the startup stub under the same tool name.
+    /// Re-registering installs the tool when built-in registration omitted it.
     #[test]
-    fn wiring_overwrites_stub_entry() {
+    fn wiring_registers_mixture_of_agents() {
         let registry = ToolRegistry::new();
-        // Install the stub the way startup registration does.
-        let stub = MixtureOfAgentsHandler::new(Arc::new(StubMoaBackend), MoaConfig::default());
-        let schema = stub.schema();
-        let name = schema.name.clone();
-        registry.register(
-            name.clone(),
-            "mixture_of_agents",
-            schema,
-            Arc::new(stub),
-            Arc::new(|| true),
-            vec![],
-            true,
-            "stub",
-            "🤖",
-            None,
-        );
-        assert!(registry.get_tool(&name).is_some());
+        assert!(registry.get_tool("mixture_of_agents").is_none());
 
-        // Real wiring should overwrite, keeping the tool present.
         wire_mixture_of_agents_backend(&registry, Arc::new(GatewayConfig::default()));
-        let entry = registry.get_tool(&name).expect("tool still registered");
+        let entry = registry
+            .get_tool("mixture_of_agents")
+            .expect("tool registered");
         assert_eq!(entry.name, "mixture_of_agents");
     }
 }

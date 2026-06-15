@@ -279,7 +279,7 @@ pub fn build_memory_context_block(raw_context: &str) -> String {
         return String::new();
     }
     if FENCE_TAG_RE.is_match(trimmed) {
-        tracing::warn!("Memory provider returned pre-wrapped memory-context; stripping wrapper");
+        tracing::trace!("Memory provider returned pre-wrapped memory-context; stripping wrapper");
     }
     let clean = sanitize_context(trimmed);
     format!(
@@ -390,7 +390,7 @@ impl MemoryManager {
 
     // -- Prefetch / recall --------------------------------------------------
 
-    /// Collect prefetch context from all providers, wrap in memory-context fence.
+    /// Collect prefetch context from all providers as raw text (fencing happens at API assembly).
     pub fn prefetch_all(&self, query: &str, session_id: &str) -> String {
         let query = query.to_string();
         let session_id = session_id.to_string();
@@ -440,7 +440,7 @@ impl MemoryManager {
         };
 
         let raw = parts.join("\n\n");
-        build_memory_context_block(&raw)
+        raw
     }
 
     /// Queue background prefetch on all providers for the next turn.
@@ -1140,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prefetch_all_wraps_in_fence() {
+    fn test_prefetch_all_returns_raw_unfenced_content() {
         let _guard = FUSION_ENV_LOCK.lock().expect("fusion env lock");
         let orig = std::env::var("HERMES_MEMORY_FUSION_MIN_CONFIDENCE").ok();
         unsafe { std::env::remove_var("HERMES_MEMORY_FUSION_MIN_CONFIDENCE") };
@@ -1149,9 +1149,9 @@ mod tests {
             TestProvider::new("builtin").with_prefetch("User likes Rust."),
         ));
         let ctx = mm.prefetch_all("hello", "");
-        assert!(ctx.contains("<memory-context>"));
         assert!(ctx.contains("User likes Rust."));
-        assert!(ctx.contains("</memory-context>"));
+        assert!(!ctx.contains("<memory-context>"));
+        assert!(!ctx.contains("</memory-context>"));
         match orig {
             Some(v) => unsafe { std::env::set_var("HERMES_MEMORY_FUSION_MIN_CONFIDENCE", v) },
             None => unsafe { std::env::remove_var("HERMES_MEMORY_FUSION_MIN_CONFIDENCE") },

@@ -263,6 +263,39 @@ mod tests {
     }
 
     #[test]
+    fn fal_media_tools_hidden_without_credentials() {
+        let _lock = lock_env();
+        let home = tempfile::tempdir().expect("temp home");
+        let _home = EnvGuard::set("HOME", home.path().to_string_lossy().as_ref());
+        let _terminal_env = EnvGuard::set("TERMINAL_ENV", "local");
+        let _fal = EnvGuard::remove("FAL_KEY");
+        let _managed = EnvGuard::remove("HERMES_ENABLE_NOUS_MANAGED_TOOLS");
+        let _token = EnvGuard::remove("TOOL_GATEWAY_USER_TOKEN");
+        let registry = ToolRegistry::new();
+        register_builtin_tools(
+            &registry,
+            Arc::new(MockTerminalBackend),
+            Arc::new(MockSkillProvider),
+        );
+        let exposed: Vec<String> = registry
+            .get_definitions()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(
+            !exposed.contains(&"image_generate".to_string()),
+            "image_generate should not be exposed without FAL credentials"
+        );
+        assert!(
+            !exposed.contains(&"video_generate".to_string()),
+            "video_generate should not be exposed without FAL credentials"
+        );
+        let registered: Vec<String> = registry.list_tools().into_iter().map(|t| t.name).collect();
+        assert!(registered.contains(&"image_generate".to_string()));
+        assert!(registered.contains(&"video_generate".to_string()));
+    }
+
+    #[test]
     fn invalid_backend_hides_terminal_backed_tools_but_keeps_local_file_tools() {
         let _lock = lock_env();
         let home = tempfile::tempdir().expect("temp home");

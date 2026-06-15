@@ -2,14 +2,14 @@
 //!
 //! Preconditions:
 //! - vision_analyze / video_analyze: injected `VisionBackend` (auxiliary LLM).
-//! - image_gen: FAL_KEY env var.
+//! - image_gen: FAL_KEY env var or Nous-managed fal-queue gateway.
 //! - video_gen: backend-dependent env vars resolved at startup.
 //! - tts / tts_premium: TtsConfig from gateway; ELEVENLABS_API_KEY for premium.
 //! - transcription: VOICE_TOOLS_OPENAI_KEY / OPENAI_API_KEY / STT_OPENAI_BASE_URL.
 
 use std::sync::Arc;
 
-use super::{RegistryContext, reg};
+use super::{RegistryContext, reg, reg_with_check};
 
 pub fn register(ctx: &RegistryContext<'_>) {
     if let Some(vision_backend) = &ctx.vision_backend {
@@ -38,9 +38,9 @@ pub fn register(ctx: &RegistryContext<'_>) {
     }
 
     {
-        let backend = crate::backends::image_gen::FalImageGenBackend::from_env()
-            .unwrap_or_else(|_| crate::backends::image_gen::FalImageGenBackend::new(String::new()));
-        reg(
+        let backend = crate::backends::image_gen::FalImageGenBackend::from_env_or_managed()
+            .unwrap_or_else(|_| crate::backends::image_gen::FalImageGenBackend::unconfigured());
+        reg_with_check(
             ctx,
             "image_gen",
             Arc::new(crate::tools::image_gen::ImageGenerateHandler::new(
@@ -48,13 +48,14 @@ pub fn register(ctx: &RegistryContext<'_>) {
             )),
             "🎨",
             vec!["FAL_KEY".into()],
+            Arc::new(crate::backends::image_gen::FalImageGenBackend::image_gen_is_configured),
         );
     }
 
     {
         let backend = crate::backends::video_gen::VideoGenBackend::from_env_or_managed();
         let env_deps = backend.required_env_vars();
-        reg(
+        reg_with_check(
             ctx,
             "video_gen",
             Arc::new(crate::tools::video::VideoGenerateHandler::new(Arc::new(
@@ -62,6 +63,7 @@ pub fn register(ctx: &RegistryContext<'_>) {
             ))),
             "🎞️",
             env_deps,
+            Arc::new(crate::backends::video_gen::VideoGenBackend::video_gen_is_configured),
         );
     }
 

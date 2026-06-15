@@ -535,6 +535,13 @@ impl VideoGenBackend {
         }
     }
 
+    pub fn video_gen_is_configured() -> bool {
+        match selected_video_provider() {
+            Some("xai") => XaiVideoGenBackend::from_env_or_auth_store().is_ok(),
+            _ => FalVideoGenBackend::from_env_or_managed().is_ok(),
+        }
+    }
+
     pub fn provider_label(&self) -> &'static str {
         match self {
             Self::Fal(_) => "fal",

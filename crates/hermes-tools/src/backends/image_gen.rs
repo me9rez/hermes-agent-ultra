@@ -25,6 +25,9 @@ use hermes_core::ToolError;
 /// the Python `image_generation_tool.py`.
 const DEFAULT_FAL_MODEL_PATH: &str = "fal-ai/flux/dev";
 
+const FAL_IMAGE_UNCONFIGURED_MSG: &str =
+    "FAL_KEY not set and Nous-managed fal-queue gateway is not configured.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FalTransport {
     Direct {
@@ -34,6 +37,7 @@ enum FalTransport {
         gateway_origin: String,
         nous_token: String,
     },
+    Unconfigured,
 }
 
 impl FalTransport {
@@ -41,28 +45,34 @@ impl FalTransport {
         match self {
             Self::Direct { .. } => "direct",
             Self::Managed { .. } => "managed",
+            Self::Unconfigured => "unconfigured",
         }
     }
 
     /// Returns the full submit URL for the given fal model path
     /// (e.g. `fal-ai/flux/dev`).
-    fn submit_url(&self, model_path: &str) -> String {
+    fn submit_url(&self, model_path: &str) -> Result<String, ToolError> {
         match self {
-            Self::Direct { .. } => format!("https://fal.run/{model_path}"),
-            // Managed gateways expose a uniform `/run/{model}` endpoint.
+            Self::Direct { .. } => Ok(format!("https://fal.run/{model_path}")),
             Self::Managed { gateway_origin, .. } => {
                 let root = gateway_origin.trim_end_matches('/');
-                format!("{root}/run/{model_path}")
+                Ok(format!("{root}/run/{model_path}"))
             }
+            Self::Unconfigured => Err(ToolError::ExecutionFailed(
+                FAL_IMAGE_UNCONFIGURED_MSG.into(),
+            )),
         }
     }
 
-    fn auth_header(&self) -> (String, String) {
+    fn auth_header(&self) -> Result<(String, String), ToolError> {
         match self {
-            Self::Direct { api_key } => ("Authorization".into(), format!("Key {api_key}")),
+            Self::Direct { api_key } => Ok(("Authorization".into(), format!("Key {api_key}"))),
             Self::Managed { nous_token, .. } => {
-                ("Authorization".into(), format!("Bearer {nous_token}"))
+                Ok(("Authorization".into(), format!("Bearer {nous_token}")))
             }
+            Self::Unconfigured => Err(ToolError::ExecutionFailed(
+                FAL_IMAGE_UNCONFIGURED_MSG.into(),
+            )),
         }
     }
 }
@@ -105,6 +115,14 @@ impl FalImageGenBackend {
         }
     }
 
+    pub fn unconfigured() -> Self {
+        Self {
+            client: Client::new(),
+            transport: FalTransport::Unconfigured,
+            model_path: DEFAULT_FAL_MODEL_PATH.into(),
+        }
+    }
+
     /// Resolve the best-available transport.
     ///
     /// Priority: direct `FAL_KEY` → Nous-managed `fal-queue` vendor →
@@ -120,13 +138,17 @@ impl FalImageGenBackend {
             return Ok(Self::from_managed(&cfg));
         }
         Err(ToolError::ExecutionFailed(
-            "FAL_KEY not set and Nous-managed fal-queue gateway is not configured.".into(),
+            FAL_IMAGE_UNCONFIGURED_MSG.into(),
         ))
     }
 
     /// Backwards-compatible alias.
     pub fn from_env() -> Result<Self, ToolError> {
         Self::from_env_or_managed()
+    }
+
+    pub fn image_gen_is_configured() -> bool {
+        Self::from_env_or_managed().is_ok()
     }
 
     pub fn transport_label(&self) -> &'static str {
@@ -162,8 +184,8 @@ impl ImageGenBackend for FalImageGenBackend {
             "num_images": n.unwrap_or(1),
         });
 
-        let url = self.transport.submit_url(&self.model_path);
-        let (auth_name, auth_value) = self.transport.auth_header();
+        let url = self.transport.submit_url(&self.model_path)?;
+        let (auth_name, auth_value) = self.transport.auth_header()?;
 
         let resp = self
             .client
@@ -300,10 +322,12 @@ mod fal_managed_tests {
         };
         let b = FalImageGenBackend::from_managed(&cfg);
         assert_eq!(
-            b.transport.submit_url("fal-ai/flux/dev"),
+            b.transport
+                .submit_url("fal-ai/flux/dev")
+                .expect("managed url"),
             "https://fal-queue.gw.example.com/run/fal-ai/flux/dev"
         );
-        let (name, value) = b.transport.auth_header();
+        let (name, value) = b.transport.auth_header().expect("auth");
         assert_eq!(name, "Authorization");
         assert_eq!(value, "Bearer tok");
     }
@@ -312,10 +336,12 @@ mod fal_managed_tests {
     fn direct_submit_url_uses_fal_run_root() {
         let b = FalImageGenBackend::new("k".into());
         assert_eq!(
-            b.transport.submit_url("fal-ai/flux/dev"),
+            b.transport
+                .submit_url("fal-ai/flux/dev")
+                .expect("direct url"),
             "https://fal.run/fal-ai/flux/dev"
         );
-        let (_, value) = b.transport.auth_header();
+        let (_, value) = b.transport.auth_header().expect("auth");
         assert_eq!(value, "Key k");
     }
 
@@ -330,6 +356,16 @@ mod fal_managed_tests {
         let _g = EnvScope::new();
         hermes_core::test_env::set_var("FAL_KEY", "  ");
         let err = FalImageGenBackend::from_env_or_managed().unwrap_err();
+        assert!(err.to_string().contains("FAL_KEY"));
+    }
+
+    #[tokio::test]
+    async fn unconfigured_backend_errors_before_network() {
+        let backend = FalImageGenBackend::unconfigured();
+        let err = backend
+            .generate("a prompt", None, None, None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("FAL_KEY"));
     }
 }

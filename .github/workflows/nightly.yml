@@ -31,7 +31,8 @@ jobs:
       - name: Create nightly tag
         id: create-tag
         run: |
-          VERSION="0.1.0-nightly.$(date +%Y%m%d)"
+          BASE_VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          VERSION="${BASE_VERSION}-nightly.$(date +%Y%m%d)"
           TAG="v${VERSION}"
           echo "nightly_tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Creating nightly tag: ${TAG}"

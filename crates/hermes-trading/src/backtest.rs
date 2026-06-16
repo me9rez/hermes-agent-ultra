@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::TradingError;
 use crate::indicators::{rsi, sma};
+use crate::settlement::{SettlementMode, settlement_for_symbol};
 use crate::types::OhlcvData;
 
 /// Results of a backtest run.
@@ -97,6 +98,8 @@ impl StrategyRegistry {
 
 /// Internal record of a completed round-trip trade.
 struct Trade {
+    entry_bar: usize,
+    exit_bar: usize,
     entry_price: f64,
     exit_price: f64,
 }
@@ -120,9 +123,10 @@ impl BacktestEngine {
         strategy: &str,
         params: &serde_json::Value,
     ) -> Result<RunCard, TradingError> {
+        let risk_free_rate = risk_free_rate_from_params(params);
         match strategy {
-            "sma_cross" => Self::run_sma_cross(data, params),
-            "rsi_revert" => Self::run_rsi_revert(data, params),
+            "sma_cross" => Self::run_sma_cross(data, params, risk_free_rate),
+            "rsi_revert" => Self::run_rsi_revert(data, params, risk_free_rate),
             _ => Err(TradingError::UnsupportedStrategy(strategy.to_string())),
         }
     }
@@ -153,9 +157,21 @@ impl BacktestEngine {
             ));
         }
 
-        let trades = simulate_trades_from_signals(data, signals);
+        let risk_free_rate = risk_free_rate_from_params(params);
+        let mode = settlement_for_symbol(&data.symbol);
+        let trades = simulate_trades_from_signals(data, signals, mode);
+        Self::build_runcard(data, strategy_name, params, &trades, risk_free_rate)
+    }
+
+    fn build_runcard(
+        data: &OhlcvData,
+        strategy_name: &str,
+        params: &serde_json::Value,
+        trades: &[Trade],
+        risk_free_rate: f64,
+    ) -> Result<RunCard, TradingError> {
         let (total_return_pct, max_drawdown_pct, sharpe_ratio, trade_count, win_rate_pct) =
-            compute_metrics(&trades);
+            compute_metrics(data, trades, risk_free_rate);
 
         let period = Period {
             start: data.rows.first().unwrap().date.to_string(),
@@ -184,6 +200,7 @@ impl BacktestEngine {
     fn run_sma_cross(
         data: &OhlcvData,
         params: &serde_json::Value,
+        risk_free_rate: f64,
     ) -> Result<RunCard, TradingError> {
         let short_window = params
             .get("short_window")
@@ -201,98 +218,10 @@ impl BacktestEngine {
             )));
         }
 
-        let closes: Vec<f64> = data.rows.iter().map(|r| r.close).collect();
-        let sma_short = sma(&closes, short_window);
-        let sma_long = sma(&closes, long_window);
-
-        // Simulate trades.
-        let mut trades: Vec<Trade> = Vec::new();
-        let mut entry_price: Option<f64> = None;
-        // Track previous-bar SMA values to detect cross.
-        let mut prev_short: Option<f64> = None;
-        let mut prev_long: Option<f64> = None;
-
-        for i in 0..closes.len() {
-            let s = sma_short[i];
-            let l = sma_long[i];
-            if let (Some(ps), Some(pl)) = (prev_short, prev_long)
-                && let (Some(cs), Some(cl)) = (s, l)
-            {
-                // Golden cross: short crosses above long
-                if ps <= pl && cs > cl && entry_price.is_none() {
-                    entry_price = Some(closes[i]);
-                }
-                // Death cross: short crosses below long
-                if ps >= pl
-                    && cs < cl
-                    && let Some(ep) = entry_price.take()
-                {
-                    trades.push(Trade {
-                        entry_price: ep,
-                        exit_price: closes[i],
-                    });
-                }
-            }
-            prev_short = s;
-            prev_long = l;
-        }
-
-        // If still holding at the end, close at last price.
-        if let Some(ep) = entry_price {
-            trades.push(Trade {
-                entry_price: ep,
-                exit_price: *closes.last().unwrap(),
-            });
-        }
-
-        // Compute metrics.
-        let initial_capital = 10_000.0_f64;
-        let mut capital = initial_capital;
-        let mut equity_curve = vec![capital];
-        let mut wins = 0usize;
-
-        for t in &trades {
-            let ret = (t.exit_price - t.entry_price) / t.entry_price;
-            capital *= 1.0 + ret;
-            equity_curve.push(capital);
-            if t.exit_price > t.entry_price {
-                wins += 1;
-            }
-        }
-
-        let total_return_pct = (capital / initial_capital - 1.0) * 100.0;
-
-        // Max drawdown from equity curve.
-        let max_drawdown_pct = compute_max_drawdown(&equity_curve);
-
-        // Daily returns for Sharpe (using equity curve steps).
-        let sharpe_ratio = compute_sharpe(&equity_curve);
-
-        let trade_count = trades.len();
-        let win_rate_pct = if trade_count > 0 {
-            wins as f64 / trade_count as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let period = Period {
-            start: data.rows.first().unwrap().date.to_string(),
-            end: data.rows.last().unwrap().date.to_string(),
-        };
-
-        Ok(RunCard {
-            id: String::new(),
-            created_at: String::new(),
-            symbol: data.symbol.clone(),
-            strategy: "sma_cross".to_string(),
-            params: params.clone(),
-            total_return_pct,
-            max_drawdown_pct,
-            trade_count,
-            sharpe_ratio,
-            win_rate_pct,
-            period,
-        })
+        let signals = signals_sma_cross(data, short_window, long_window);
+        let mode = settlement_for_symbol(&data.symbol);
+        let trades = simulate_trades_from_signals(data, &signals, mode);
+        Self::build_runcard(data, "sma_cross", params, &trades, risk_free_rate)
     }
 
     /// RSI mean-reversion strategy.
@@ -303,6 +232,7 @@ impl BacktestEngine {
     fn run_rsi_revert(
         data: &OhlcvData,
         params: &serde_json::Value,
+        risk_free_rate: f64,
     ) -> Result<RunCard, TradingError> {
         let rsi_period = params
             .get("rsi_period")
@@ -325,85 +255,19 @@ impl BacktestEngine {
             )));
         }
 
-        let closes: Vec<f64> = data.rows.iter().map(|r| r.close).collect();
-        let rsi_values = rsi(&closes, rsi_period);
-
-        let mut trades: Vec<Trade> = Vec::new();
-        let mut entry_price: Option<f64> = None;
-        let mut prev_rsi: Option<f64> = None;
-
-        for i in 0..closes.len() {
-            let cur = rsi_values[i];
-            if let (Some(pr), Some(cr)) = (prev_rsi, cur) {
-                // Buy: RSI crosses above oversold from below.
-                if pr <= oversold && cr > oversold && entry_price.is_none() {
-                    entry_price = Some(closes[i]);
-                }
-                // Sell: RSI crosses below overbought from above.
-                if pr >= overbought
-                    && cr < overbought
-                    && let Some(ep) = entry_price.take()
-                {
-                    trades.push(Trade {
-                        entry_price: ep,
-                        exit_price: closes[i],
-                    });
-                }
-            }
-            prev_rsi = cur;
-        }
-
-        // If still holding at the end, close at last price.
-        if let Some(ep) = entry_price {
-            trades.push(Trade {
-                entry_price: ep,
-                exit_price: *closes.last().unwrap(),
-            });
-        }
-
-        let initial_capital = 10_000.0_f64;
-        let mut capital = initial_capital;
-        let mut equity_curve = vec![capital];
-        let mut wins = 0usize;
-
-        for t in &trades {
-            let ret = (t.exit_price - t.entry_price) / t.entry_price;
-            capital *= 1.0 + ret;
-            equity_curve.push(capital);
-            if t.exit_price > t.entry_price {
-                wins += 1;
-            }
-        }
-
-        let total_return_pct = (capital / initial_capital - 1.0) * 100.0;
-        let max_drawdown_pct = compute_max_drawdown(&equity_curve);
-        let sharpe_ratio = compute_sharpe(&equity_curve);
-        let trade_count = trades.len();
-        let win_rate_pct = if trade_count > 0 {
-            wins as f64 / trade_count as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let period = Period {
-            start: data.rows.first().unwrap().date.to_string(),
-            end: data.rows.last().unwrap().date.to_string(),
-        };
-
-        Ok(RunCard {
-            id: String::new(),
-            created_at: String::new(),
-            symbol: data.symbol.clone(),
-            strategy: "rsi_revert".to_string(),
-            params: params.clone(),
-            total_return_pct,
-            max_drawdown_pct,
-            trade_count,
-            sharpe_ratio,
-            win_rate_pct,
-            period,
-        })
+        let signals = signals_rsi_revert(data, rsi_period, oversold, overbought);
+        let mode = settlement_for_symbol(&data.symbol);
+        let trades = simulate_trades_from_signals(data, &signals, mode);
+        Self::build_runcard(data, "rsi_revert", params, &trades, risk_free_rate)
     }
+}
+
+/// Extract annualized risk-free rate from strategy params (default 0.0).
+fn risk_free_rate_from_params(params: &serde_json::Value) -> f64 {
+    params
+        .get("risk_free_rate")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
 }
 
 /// Compute maximum drawdown percentage from an equity curve.
@@ -426,82 +290,220 @@ fn compute_max_drawdown(equity: &[f64]) -> f64 {
     max_dd
 }
 
-/// Compute annualized Sharpe ratio from an equity curve.
-/// Assumes risk-free rate = 0, annualization factor = √252.
-fn compute_sharpe(equity: &[f64]) -> f64 {
-    if equity.len() < 2 {
+/// Compute annualized Sharpe from a daily return series.
+/// `risk_free_rate` is annualized (e.g. 0.02 = 2%).
+fn compute_sharpe(daily_returns: &[f64], risk_free_rate: f64) -> f64 {
+    if daily_returns.len() < 2 {
         return 0.0;
     }
-    let returns: Vec<f64> = equity.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
-    let n = returns.len() as f64;
-    let mean = returns.iter().sum::<f64>() / n;
-    let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
+    let rf_daily = risk_free_rate / 252.0;
+    let n = daily_returns.len() as f64;
+    let mean = daily_returns.iter().sum::<f64>() / n;
+    let variance = daily_returns
+        .iter()
+        .map(|r| (r - mean).powi(2))
+        .sum::<f64>()
+        / n;
     let std_dev = variance.sqrt();
     if std_dev == 0.0 {
         return 0.0;
     }
-    mean / std_dev * (252.0_f64).sqrt()
+    (mean - rf_daily) / std_dev * (252.0_f64).sqrt()
+}
+
+/// Build a daily mark-to-market equity curve aligned to OHLCV bars.
+fn build_daily_equity_curve(data: &OhlcvData, trades: &[Trade]) -> Vec<f64> {
+    let initial_capital = 10_000.0_f64;
+    if data.is_empty() {
+        return vec![initial_capital];
+    }
+
+    let mut equity = Vec::with_capacity(data.len());
+    let mut cash = initial_capital;
+    let mut in_trade = false;
+    let mut entry_price = 0.0_f64;
+    let mut entry_cash = 0.0_f64;
+    let mut trade_idx = 0usize;
+
+    for (i, row) in data.rows.iter().enumerate() {
+        if in_trade && trade_idx < trades.len() && trades[trade_idx].exit_bar == i {
+            let t = &trades[trade_idx];
+            cash = entry_cash * (t.exit_price / entry_price);
+            in_trade = false;
+            trade_idx += 1;
+        }
+
+        if !in_trade && trade_idx < trades.len() && trades[trade_idx].entry_bar == i {
+            let t = &trades[trade_idx];
+            entry_price = t.entry_price;
+            entry_cash = cash;
+            in_trade = true;
+        }
+
+        let val = if in_trade {
+            entry_cash * (row.close / entry_price)
+        } else {
+            cash
+        };
+        equity.push(val);
+    }
+
+    equity
+}
+
+/// Daily returns from a mark-to-market equity curve.
+fn daily_returns_from_equity(equity: &[f64]) -> Vec<f64> {
+    if equity.len() < 2 {
+        return Vec::new();
+    }
+    equity.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect()
 }
 
 /// Simulate trades from a signal sequence.
 ///
-/// Buy → enter position; Sell → exit position.
-/// If still holding at the end, close at last price.
-fn simulate_trades_from_signals(data: &OhlcvData, signals: &[SignalKind]) -> Vec<Trade> {
-    let closes: Vec<f64> = data.rows.iter().map(|r| r.close).collect();
+/// T+0: buy/sell at bar close. T+1 (A-share): buy fills next open; sell at close
+/// if position was entered on a prior bar.
+fn simulate_trades_from_signals(
+    data: &OhlcvData,
+    signals: &[SignalKind],
+    mode: SettlementMode,
+) -> Vec<Trade> {
+    let n = data.rows.len();
     let mut trades = Vec::new();
     let mut entry_price: Option<f64> = None;
+    let mut entry_bar: Option<usize> = None;
+    let mut pending_buy = false;
 
-    for (i, signal) in signals.iter().enumerate() {
-        match signal {
-            SignalKind::Buy if entry_price.is_none() => {
-                entry_price = Some(closes[i]);
-            }
-            SignalKind::Sell
-                if entry_price.is_some()
-                    && let Some(ep) = entry_price.take() =>
-            {
-                trades.push(Trade {
-                    entry_price: ep,
-                    exit_price: closes[i],
-                });
+    for i in 0..n {
+        let row = &data.rows[i];
+
+        if mode == SettlementMode::T1 && pending_buy && entry_price.is_none() {
+            entry_price = Some(row.open);
+            entry_bar = Some(i);
+            pending_buy = false;
+        }
+
+        match signals.get(i) {
+            Some(SignalKind::Buy) if entry_price.is_none() && !pending_buy => match mode {
+                SettlementMode::T0 => {
+                    entry_price = Some(row.close);
+                    entry_bar = Some(i);
+                }
+                SettlementMode::T1 if i + 1 < n => pending_buy = true,
+                SettlementMode::T1 => {}
+            },
+            Some(SignalKind::Sell) if entry_price.is_some() => {
+                let can_sell = match mode {
+                    SettlementMode::T0 => true,
+                    SettlementMode::T1 => entry_bar.is_some_and(|eb| eb < i),
+                };
+                if can_sell && let (Some(ep), Some(eb)) = (entry_price.take(), entry_bar.take()) {
+                    trades.push(Trade {
+                        entry_bar: eb,
+                        exit_bar: i,
+                        entry_price: ep,
+                        exit_price: row.close,
+                    });
+                }
             }
             _ => {}
         }
     }
 
-    // If still holding at the end, close at last price.
-    if let Some(ep) = entry_price {
+    if let (Some(ep), Some(eb)) = (entry_price.take(), entry_bar.take()) {
+        let last = n - 1;
         trades.push(Trade {
+            entry_bar: eb,
+            exit_bar: last,
             entry_price: ep,
-            exit_price: *closes.last().unwrap(),
+            exit_price: data.rows[last].close,
         });
     }
 
     trades
 }
 
+/// Generate SMA crossover signals.
+fn signals_sma_cross(data: &OhlcvData, short_window: usize, long_window: usize) -> Vec<SignalKind> {
+    let closes: Vec<f64> = data.rows.iter().map(|r| r.close).collect();
+    let sma_short = sma(&closes, short_window);
+    let sma_long = sma(&closes, long_window);
+    let mut signals = vec![SignalKind::Hold; closes.len()];
+    let mut in_position = false;
+    let mut prev_short: Option<f64> = None;
+    let mut prev_long: Option<f64> = None;
+
+    for i in 0..closes.len() {
+        if let (Some(ps), Some(pl)) = (prev_short, prev_long)
+            && let (Some(cs), Some(cl)) = (sma_short[i], sma_long[i])
+        {
+            if ps <= pl && cs > cl && !in_position {
+                signals[i] = SignalKind::Buy;
+                in_position = true;
+            } else if ps >= pl && cs < cl && in_position {
+                signals[i] = SignalKind::Sell;
+                in_position = false;
+            }
+        }
+        prev_short = sma_short[i];
+        prev_long = sma_long[i];
+    }
+    signals
+}
+
+/// Generate RSI mean-reversion signals.
+fn signals_rsi_revert(
+    data: &OhlcvData,
+    rsi_period: usize,
+    oversold: f64,
+    overbought: f64,
+) -> Vec<SignalKind> {
+    let closes: Vec<f64> = data.rows.iter().map(|r| r.close).collect();
+    let rsi_values = rsi(&closes, rsi_period);
+    let mut signals = vec![SignalKind::Hold; closes.len()];
+    let mut in_position = false;
+    let mut prev_rsi: Option<f64> = None;
+
+    for i in 0..closes.len() {
+        if let (Some(pr), Some(cr)) = (prev_rsi, rsi_values[i]) {
+            if pr <= oversold && cr > oversold && !in_position {
+                signals[i] = SignalKind::Buy;
+                in_position = true;
+            } else if pr >= overbought && cr < overbought && in_position {
+                signals[i] = SignalKind::Sell;
+                in_position = false;
+            }
+        }
+        prev_rsi = rsi_values[i];
+    }
+    signals
+}
+
 /// Compute metrics from a list of trades.
 ///
 /// Returns `(total_return_pct, max_drawdown_pct, sharpe_ratio, trade_count, win_rate_pct)`.
-fn compute_metrics(trades: &[Trade]) -> (f64, f64, f64, usize, f64) {
+fn compute_metrics(
+    data: &OhlcvData,
+    trades: &[Trade],
+    risk_free_rate: f64,
+) -> (f64, f64, f64, usize, f64) {
     let initial_capital = 10_000.0_f64;
     let mut capital = initial_capital;
-    let mut equity_curve = vec![capital];
     let mut wins = 0usize;
 
     for t in trades {
         let ret = (t.exit_price - t.entry_price) / t.entry_price;
         capital *= 1.0 + ret;
-        equity_curve.push(capital);
         if t.exit_price > t.entry_price {
             wins += 1;
         }
     }
 
     let total_return_pct = (capital / initial_capital - 1.0) * 100.0;
+    let equity_curve = build_daily_equity_curve(data, trades);
     let max_drawdown_pct = compute_max_drawdown(&equity_curve);
-    let sharpe_ratio = compute_sharpe(&equity_curve);
+    let daily_returns = daily_returns_from_equity(&equity_curve);
+    let sharpe_ratio = compute_sharpe(&daily_returns, risk_free_rate);
     let trade_count = trades.len();
     let win_rate_pct = if trade_count > 0 {
         wins as f64 / trade_count as f64 * 100.0
@@ -547,6 +549,7 @@ mod tests {
             symbol: "MOCK-USD".to_string(),
             interval: Interval::Daily,
             rows,
+            partial: false,
         }
     }
 
@@ -627,8 +630,24 @@ mod tests {
 
     #[test]
     fn test_sharpe_flat() {
-        let equity = vec![100.0; 10];
-        assert!((compute_sharpe(&equity) - 0.0).abs() < f64::EPSILON);
+        let returns = vec![0.0; 10];
+        assert!((compute_sharpe(&returns, 0.0) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_sharpe_with_risk_free_rate() {
+        let returns = vec![0.01, 0.02, -0.01, 0.015];
+        let sharpe_zero = compute_sharpe(&returns, 0.0);
+        let sharpe_rf = compute_sharpe(&returns, 0.02);
+        assert!(sharpe_rf < sharpe_zero);
+    }
+
+    #[test]
+    fn test_daily_returns_from_equity() {
+        let equity = vec![100.0, 110.0, 99.0];
+        let rets = daily_returns_from_equity(&equity);
+        assert_eq!(rets.len(), 2);
+        assert!((rets[0] - 0.1).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -698,6 +717,7 @@ mod tests {
             symbol: "MOCK-USD".to_string(),
             interval: Interval::Daily,
             rows,
+            partial: false,
         }
     }
 
@@ -733,5 +753,82 @@ mod tests {
         let names: Vec<&str> = strategies.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"sma_cross"));
         assert!(names.contains(&"rsi_revert"));
+    }
+
+    fn three_bar_data(symbol: &str) -> OhlcvData {
+        let d = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        OhlcvData {
+            symbol: symbol.to_string(),
+            interval: Interval::Daily,
+            rows: vec![
+                OhlcvRow {
+                    date: d,
+                    open: 10.0,
+                    high: 11.0,
+                    low: 9.5,
+                    close: 10.5,
+                    volume: 1.0,
+                },
+                OhlcvRow {
+                    date: d + chrono::Duration::days(1),
+                    open: 11.0,
+                    high: 12.0,
+                    low: 10.5,
+                    close: 11.5,
+                    volume: 1.0,
+                },
+                OhlcvRow {
+                    date: d + chrono::Duration::days(2),
+                    open: 12.0,
+                    high: 13.0,
+                    low: 11.5,
+                    close: 12.5,
+                    volume: 1.0,
+                },
+            ],
+            partial: false,
+        }
+    }
+
+    #[test]
+    fn test_t1_buy_fills_next_open() {
+        let data = three_bar_data("000001.SZ");
+        let signals = [SignalKind::Buy, SignalKind::Hold, SignalKind::Hold];
+        let trades = simulate_trades_from_signals(&data, &signals, SettlementMode::T1);
+        assert_eq!(trades.len(), 1);
+        assert!((trades[0].entry_price - 11.0).abs() < f64::EPSILON);
+        assert_eq!(trades[0].entry_bar, 1);
+        assert!((trades[0].exit_price - 12.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_t1_cannot_sell_same_day_as_buy() {
+        let data = three_bar_data("600519.SH");
+        let signals = [SignalKind::Buy, SignalKind::Sell, SignalKind::Hold];
+        let trades = simulate_trades_from_signals(&data, &signals, SettlementMode::T1);
+        // Buy fills bar 1; sell on bar 1 blocked → forced exit bar 2 only.
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].entry_bar, 1);
+        assert_eq!(trades[0].exit_bar, 2);
+    }
+
+    #[test]
+    fn test_t0_crypto_same_bar_close() {
+        let data = three_bar_data("BTC-USDT");
+        let signals = [SignalKind::Buy, SignalKind::Hold, SignalKind::Hold];
+        let trades = simulate_trades_from_signals(&data, &signals, SettlementMode::T0);
+        assert_eq!(trades.len(), 1);
+        assert!((trades[0].entry_price - 10.5).abs() < f64::EPSILON);
+        assert_eq!(trades[0].entry_bar, 0);
+    }
+
+    #[test]
+    fn test_a_share_sma_cross_runs() {
+        let mut data = mock_ohlcv(120);
+        data.symbol = "000001.SZ".to_string();
+        let params = serde_json::json!({"short_window": 5, "long_window": 10});
+        let card = BacktestEngine::run(&data, "sma_cross", &params).unwrap();
+        assert_eq!(card.symbol, "000001.SZ");
+        assert!(card.trade_count >= 1);
     }
 }

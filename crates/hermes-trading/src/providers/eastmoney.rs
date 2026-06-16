@@ -9,8 +9,9 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::error::TradingError;
+use crate::http::{default_client, send_with_retry};
 use crate::provider::MarketDataProvider;
-use crate::types::{Interval, OhlcvData, OhlcvRequest, OhlcvRow};
+use crate::types::{Interval, OhlcvData, OhlcvRequest, OhlcvRow, mark_partial};
 
 /// Base URL for Eastmoney historical kline API.
 const EASTMONEY_BASE_URL: &str = "https://push2his.eastmoney.com/api/qt/stock/kline/get";
@@ -28,7 +29,7 @@ impl EastmoneyProvider {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: default_client(),
         }
     }
 
@@ -129,10 +130,8 @@ impl MarketDataProvider for EastmoneyProvider {
             "Eastmoney kline request"
         );
 
-        let resp = self
-            .client
-            .get(EASTMONEY_BASE_URL)
-            .query(&[
+        let resp = send_with_retry(|| {
+            self.client.get(EASTMONEY_BASE_URL).query(&[
                 ("secid", secid.as_str()),
                 ("fields1", "f1,f2,f3,f4,f5,f6"),
                 ("fields2", "f51,f52,f53,f54,f55,f56,f57"),
@@ -141,8 +140,15 @@ impl MarketDataProvider for EastmoneyProvider {
                 ("beg", beg.as_str()),
                 ("end", end.as_str()),
             ])
-            .send()
-            .await?;
+        })
+        .await?;
+
+        if resp.status() == reqwest::StatusCode::FORBIDDEN {
+            return Err(TradingError::InvalidResponse(format!(
+                "Eastmoney returned HTTP 403 for symbol {}",
+                req.symbol
+            )));
+        }
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -156,8 +162,8 @@ impl MarketDataProvider for EastmoneyProvider {
         let parsed: EastmoneyResponse = resp.json().await?;
 
         let data = parsed.data.ok_or_else(|| {
-            TradingError::SymbolNotFound(format!(
-                "Eastmoney returned no data for symbol {}",
+            TradingError::InvalidResponse(format!(
+                "Eastmoney returned empty data for symbol {}",
                 req.symbol
             ))
         })?;
@@ -169,16 +175,22 @@ impl MarketDataProvider for EastmoneyProvider {
             .collect();
 
         if rows.is_empty() {
-            return Err(TradingError::NoData);
+            return Err(TradingError::InvalidResponse(format!(
+                "Eastmoney returned no kline rows for symbol {}",
+                req.symbol
+            )));
         }
 
         debug!(rows = rows.len(), "Eastmoney klines parsed");
 
-        Ok(OhlcvData {
+        let mut data = OhlcvData {
             symbol: req.symbol.clone(),
             interval: req.interval,
             rows,
-        })
+            partial: false,
+        };
+        mark_partial(&mut data, req);
+        Ok(data)
     }
 
     fn name(&self) -> &str {

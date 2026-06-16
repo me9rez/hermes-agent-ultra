@@ -14,7 +14,7 @@ use chrono::NaiveDate;
 use serde_json::Value;
 
 use hermes_trading::{
-    AutoRouter, BacktestEngine, Interval, MarketDataProvider, MockProvider, OhlcvRequest,
+    AutoRouter, BacktestEngine, DataSource, Interval, MockProvider, OhlcvRequest,
 };
 
 /// A single fixture file containing one or more cases.
@@ -116,20 +116,39 @@ fn mock_router() -> AutoRouter {
     AutoRouter::with_providers(mock.clone(), mock)
 }
 
+fn source_from_input(input: &Value) -> Result<DataSource, String> {
+    match input.get("source").and_then(|v| v.as_str()) {
+        None => Ok(DataSource::Auto),
+        Some(s) => DataSource::parse(s).map_err(|e| e.to_string()),
+    }
+}
+
 async fn run_case(case: &FixtureCase) -> Result<Value, String> {
     match case.op.as_str() {
         "get_market_data" => {
             let req = request_from_input(&case.input);
+            let source = source_from_input(&case.input)?;
+            let refresh = case
+                .input
+                .get("refresh")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let data = mock_router()
-                .fetch_ohlcv(&req)
+                .fetch_ohlcv_with_source(&req, source, refresh)
                 .await
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(&data).map_err(|e| e.to_string())
         }
         "run_backtest" => {
             let req = request_from_input(&case.input);
+            let source = source_from_input(&case.input)?;
+            let refresh = case
+                .input
+                .get("refresh")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let data = mock_router()
-                .fetch_ohlcv(&req)
+                .fetch_ohlcv_with_source(&req, source, refresh)
                 .await
                 .map_err(|e| e.to_string())?;
             let strategy = case
@@ -160,6 +179,14 @@ fn assert_expected(case_id: &str, actual: &Value, expected: &Value) {
             .and_then(|v| v.as_str())
             .unwrap_or("<missing>");
         assert_eq!(actual_interval, interval, "[{case_id}] interval mismatch");
+    }
+
+    if let Some(partial) = expected.get("partial_eq").and_then(|v| v.as_bool()) {
+        let actual_partial = actual
+            .get("partial")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert_eq!(actual_partial, partial, "[{case_id}] partial mismatch");
     }
 
     if let Some(min_rows) = expected.get("min_rows").and_then(|v| v.as_u64()) {

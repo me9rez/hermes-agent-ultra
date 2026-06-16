@@ -15,6 +15,7 @@
       "expected": {
         "has_symbol": "BTC-USDT",
         "has_interval": "daily",
+        "partial_eq": false,
         "min_rows": 5,
         "columns": ["date", "open", "high", "low", "close", "volume"]
       },
@@ -32,6 +33,7 @@
       "expected": {
         "has_symbol": "000001.SZ",
         "has_interval": "daily",
+        "partial_eq": false,
         "min_rows": 3,
         "columns": ["date", "open", "high", "low", "close", "volume"]
       },
@@ -47,6 +49,54 @@
       },
       "expected": {
         "error_contains": "not found"
+      },
+      "skip": false
+    },
+    {
+      "id": "source_binance_btc",
+      "op": "get_market_data",
+      "input": {
+        "symbol": "BTC-USDT",
+        "source": "binance",
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-10",
+        "interval": "daily"
+      },
+      "expected": {
+        "has_symbol": "BTC-USDT",
+        "has_interval": "daily",
+        "min_rows": 5
+      },
+      "skip": false
+    },
+    {
+      "id": "source_eastmoney_a_share",
+      "op": "get_market_data",
+      "input": {
+        "symbol": "000001.SZ",
+        "source": "eastmoney",
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-10",
+        "interval": "daily"
+      },
+      "expected": {
+        "has_symbol": "000001.SZ",
+        "has_interval": "daily",
+        "min_rows": 3
+      },
+      "skip": false
+    },
+    {
+      "id": "source_binance_rejects_a_share",
+      "op": "get_market_data",
+      "input": {
+        "symbol": "000001.SZ",
+        "source": "binance",
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-10"
+      },
+      "expected": {
+        "error_contains": "not compatible with source=binance"
       },
       "skip": false
     }

@@ -85,6 +85,7 @@ impl MarketDataProvider for MockProvider {
             symbol: req.symbol.clone(),
             interval: req.interval,
             rows,
+            partial: false,
         })
     }
 

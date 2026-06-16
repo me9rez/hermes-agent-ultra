@@ -51,6 +51,24 @@
         "error_contains": "Unsupported strategy"
       },
       "skip": false
+    },
+    {
+      "id": "a_share_sma_cross_t1",
+      "op": "run_backtest",
+      "input": {
+        "symbol": "000001.SZ",
+        "strategy": "sma_cross",
+        "params": {"short_window": 20, "long_window": 50},
+        "start_date": "2025-06-01",
+        "end_date": "2026-06-01"
+      },
+      "expected": {
+        "has_fields": ["id", "created_at", "symbol", "strategy", "params", "total_return_pct", "max_drawdown_pct", "trade_count", "sharpe_ratio", "win_rate_pct", "period"],
+        "strategy_eq": "sma_cross",
+        "trade_count_gte": 1,
+        "max_drawdown_lte": 0.0
+      },
+      "skip": false
     }
   ]
 }

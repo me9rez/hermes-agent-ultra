@@ -10,4 +10,4 @@ pub use binance::BinanceProvider;
 pub use eastmoney::EastmoneyProvider;
 #[cfg(any(test, feature = "test-mock"))]
 pub use mock::MockProvider;
-pub use router::AutoRouter;
+pub use router::{AutoRouter, DataSource};

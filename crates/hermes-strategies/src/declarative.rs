@@ -358,6 +358,7 @@ mod tests {
             symbol: "MOCK-USD".to_string(),
             interval: Interval::Daily,
             rows,
+            partial: false,
         }
     }
 

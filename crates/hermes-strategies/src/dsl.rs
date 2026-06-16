@@ -160,13 +160,23 @@ impl DeclarativeStrategyDef {
     /// - rules parse correctly and reference existing indicator ids
     pub fn validate(&self) -> Result<(), StrategyError> {
         // Name format: must match ^[a-z][a-z0-9_]*$
-        if self.name.is_empty() || !self.name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+        if self.name.is_empty()
+            || !self
+                .name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase())
+        {
             return Err(StrategyError::DefinitionError(format!(
                 "Strategy name '{}' must start with a lowercase letter",
                 self.name
             )));
         }
-        if !self.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+        if !self
+            .name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
             return Err(StrategyError::DefinitionError(format!(
                 "Strategy name '{}' must contain only lowercase letters, digits, and underscores",
                 self.name
@@ -247,10 +257,10 @@ fn validate_rule_refs(rule: &RuleExpr, declared_ids: &[String]) -> Result<(), St
             if let RuleOperand::Indicator(id) = right
                 && !declared_ids.contains(id)
             {
-                    return Err(StrategyError::DefinitionError(format!(
-                        "Rule references unknown indicator '{id}'"
-                    )));
-                }
+                return Err(StrategyError::DefinitionError(format!(
+                    "Rule references unknown indicator '{id}'"
+                )));
+            }
         }
     }
     Ok(())

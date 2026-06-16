@@ -41,6 +41,19 @@ pub struct OhlcvData {
     pub symbol: String,
     pub interval: Interval,
     pub rows: Vec<OhlcvRow>,
+    /// True when returned rows do not fully cover the requested date range.
+    #[serde(default)]
+    pub partial: bool,
+}
+
+/// Mark `partial` when first/last row dates do not cover the request window.
+pub fn mark_partial(data: &mut OhlcvData, req: &OhlcvRequest) {
+    if data.rows.is_empty() {
+        return;
+    }
+    let first = data.rows.first().unwrap().date;
+    let last = data.rows.last().unwrap().date;
+    data.partial = first > req.start || last < req.end;
 }
 
 impl OhlcvData {
@@ -52,5 +65,36 @@ impl OhlcvData {
     /// Returns the number of data rows.
     pub fn len(&self) -> usize {
         self.rows.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    #[test]
+    fn mark_partial_when_range_incomplete() {
+        let req = OhlcvRequest {
+            symbol: "BTC-USDT".into(),
+            start: NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+            end: NaiveDate::from_ymd_opt(2026, 5, 10).unwrap(),
+            interval: Interval::Daily,
+        };
+        let mut data = OhlcvData {
+            symbol: "BTC-USDT".into(),
+            interval: Interval::Daily,
+            rows: vec![OhlcvRow {
+                date: NaiveDate::from_ymd_opt(2026, 5, 3).unwrap(),
+                open: 1.0,
+                high: 1.0,
+                low: 1.0,
+                close: 1.0,
+                volume: 1.0,
+            }],
+            partial: false,
+        };
+        mark_partial(&mut data, &req);
+        assert!(data.partial);
     }
 }

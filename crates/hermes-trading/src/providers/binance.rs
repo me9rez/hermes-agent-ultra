@@ -9,8 +9,9 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::error::TradingError;
+use crate::http::{default_client, send_with_retry};
 use crate::provider::MarketDataProvider;
-use crate::types::{Interval, OhlcvData, OhlcvRequest, OhlcvRow};
+use crate::types::{Interval, OhlcvData, OhlcvRequest, OhlcvRow, mark_partial};
 
 /// Base URL for Binance public REST API v3.
 const BINANCE_BASE_URL: &str = "https://api.binance.com/api/v3/klines";
@@ -29,7 +30,7 @@ impl BinanceProvider {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: default_client(),
         }
     }
 
@@ -97,18 +98,16 @@ impl MarketDataProvider for BinanceProvider {
             "Binance klines request"
         );
 
-        let resp = self
-            .client
-            .get(BINANCE_BASE_URL)
-            .query(&[
+        let resp = send_with_retry(|| {
+            self.client.get(BINANCE_BASE_URL).query(&[
                 ("symbol", symbol.as_str()),
                 ("interval", interval),
                 ("startTime", &start_ms.to_string()),
                 ("endTime", &end_ms.to_string()),
                 ("limit", "1000"),
             ])
-            .send()
-            .await?;
+        })
+        .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -143,11 +142,14 @@ impl MarketDataProvider for BinanceProvider {
 
         debug!(rows = rows.len(), "Binance klines parsed");
 
-        Ok(OhlcvData {
+        let mut data = OhlcvData {
             symbol: req.symbol.clone(),
             interval: req.interval,
             rows,
-        })
+            partial: false,
+        };
+        mark_partial(&mut data, req);
+        Ok(data)
     }
 
     fn name(&self) -> &str {

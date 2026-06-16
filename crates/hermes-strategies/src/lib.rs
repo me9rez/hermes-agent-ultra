@@ -10,8 +10,8 @@
 //! **0py constraint**: No Python runtime, PyO3, or Python subprocess dependencies.
 
 pub mod builtin;
-pub mod dsl;
 pub mod declarative;
+pub mod dsl;
 pub mod error;
 pub mod indicators;
 pub mod registry;

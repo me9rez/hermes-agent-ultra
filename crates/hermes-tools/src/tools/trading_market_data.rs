@@ -5,7 +5,6 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use hermes_core::{JsonSchema, ToolError, ToolHandler, ToolSchema, tool_schema};
-use hermes_trading::MarketDataProvider;
 
 #[derive(Default)]
 pub struct GetMarketDataHandler;
@@ -41,6 +40,19 @@ impl ToolHandler for GetMarketDataHandler {
             _ => hermes_trading::Interval::Daily,
         };
 
+        let source = params
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(hermes_trading::DataSource::parse)
+            .transpose()
+            .map_err(|e| ToolError::InvalidParams(e.to_string()))?
+            .unwrap_or(hermes_trading::DataSource::Auto);
+
+        let refresh = params
+            .get("refresh")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let req = hermes_trading::OhlcvRequest {
             symbol: symbol.to_string(),
             start: start_date,
@@ -50,7 +62,7 @@ impl ToolHandler for GetMarketDataHandler {
 
         let router = hermes_trading::AutoRouter::new();
         let data = router
-            .fetch_ohlcv(&req)
+            .fetch_ohlcv_with_source(&req, source, refresh)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to fetch market data: {e}")))?;
 
@@ -87,6 +99,21 @@ impl ToolHandler for GetMarketDataHandler {
                 "type": "string",
                 "description": "Data interval: 'daily' or 'weekly' (default: daily)",
                 "enum": ["daily", "weekly"]
+            }),
+        );
+        props.insert(
+            "source".into(),
+            json!({
+                "type": "string",
+                "description": "Data source: 'auto' (default), 'binance', or 'eastmoney'",
+                "enum": ["auto", "binance", "eastmoney"]
+            }),
+        );
+        props.insert(
+            "refresh".into(),
+            json!({
+                "type": "boolean",
+                "description": "Bypass disk cache and force network fetch (default: false)"
             }),
         );
 

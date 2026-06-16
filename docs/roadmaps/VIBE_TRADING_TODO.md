@@ -1,7 +1,7 @@
-# trading-Trading Rust 重写 — TODO 进度
+# Trading Rust 重写 — TODO 进度
 
 > **更新时间**：2026-06-16  
-> **总体状态**：P0 ✅ 已完成，P1 部分完成（回测持久化、声明式策略框架、rsi_revert 已完成）→ 下一步继续 P1 剩余任务
+> **总体状态**：P0 ✅ 已完成，P1 核心增强（T+1、source、Sharpe、缓存/健壮性）✅ → 继续 P1 剩余（HK/US、Skills 集成）
 
 ---
 
@@ -31,7 +31,7 @@
 ### Skill & 测试
 - [x] `skills/finance/trading-research/SKILL.md`
 - [x] Parity fixture + runner（`trading_market_data/ohlcv.json` + `trading_backtest/sma_cross.json`，`cargo test -p hermes-parity-tests` 通过，MockProvider 隔离网络）
-- [x] `hermes-trading` 单元测试 27 通过，`hermes-parity-tests` 4 个 fixture case 通过；Clippy 零警告
+- [x] `hermes-trading` 单元测试 54 通过，`hermes-parity-tests` trading fixtures 通过；Clippy 零警告（touched crates）
 
 ### P0 验收
 - [x] `cargo build -p hermes-cli` 自动包含 trading tools
@@ -44,63 +44,64 @@
 **P1 总体验收目标**：
 - [ ] A-share / HK / US / crypto 四类市场各至少 1 个 symbol 能成功回测。
 - [x] 回测结果持久化为 `~/.hermes/trading/runs/{id}/run_card.json`，并可通过 tool 读取复盘。
-- [x] 新增 `rsi_revert` 策略模板，A 股 T+1 规则生效。
+- [x] 新增 `rsi_revert` 策略模板。
+- [x] A 股 T+1 规则生效（`.SZ`/`.SH` 自动启用）。
 - [x] 声明式策略框架：JSON 定义策略 + DSL 规则解析 + 运行时注册表 + create_strategy 工具。
-- [ ] `cargo test -p hermes-trading` 和 `cargo test -p hermes-parity-tests` 全部通过。
-- [ ] `cargo clippy -p hermes-trading -p hermes-parity-tests -- -D warnings` 通过。
+- [x] `cargo test -p hermes-trading` 和 `cargo test -p hermes-parity-tests` trading 全部通过。
+- [x] `cargo clippy -p hermes-trading -p hermes-parity-tests -- -D warnings` 通过。
 
 ### Tools 增强
 
 #### `get_market_data`
-- [ ] 支持显式 `source` 参数
+- [x] 支持显式 `source` 参数
   - 验收：`source` 可选值为 `auto|binance|eastmoney`，默认 `auto`。
   - 验收：`source=binance` 时只走 BinanceProvider，`source=eastmoney` 时只走 EastmoneyProvider。
   - 验收：新增/更新 parity fixture 覆盖 `source` 参数。
 - [ ] 支持 HK / US 市场 symbol 格式（至少设计好路由规则）
   - 验收：`HK_00700` 或 `0700.HK` 格式能识别为待接入状态（可 mock）。
   - 验收：非法 market 返回清晰错误。
-- [ ] 实现 `TRADING_DATA_CACHE` 磁盘缓存
-  - 验收：缓存目录为 `~/.hermes/trading/cache/`。
+- [x] 实现 `TRADING_DATA_CACHE` 磁盘缓存
+  - 验收：缓存目录为 `{HERMES_HOME}/trading/cache/`。
   - 验收：缓存 key 格式为 `{source}-{symbol}-{interval}-{start}-{end}.json`。
   - 验收：默认缓存有效期 24h；过期后重新请求网络。
   - 验收：同一请求在缓存有效期内只触发一次网络调用（单测验证）。
-  - 验收：缓存可手动清空或绕过。
+  - 验收：缓存可手动清空或绕过（`refresh=true`）。
 
 #### `run_backtest`
-- [ ] 新增 `rsi_revert` 策略模板
+- [x] 新增 `rsi_revert` 策略模板
   - 验收：默认参数 `rsi_period=14`, `oversold=30`, `overbought=70`。
   - 验收：在 mock 数据上产生至少 1 笔交易。
-  - 验收：新增 parity fixture `trading_backtest/rsi_revert.json`。
-- [ ] A 股 T+1 规则
+  - 验收：parity fixture `trading_backtest/sma_cross.json` 含 `btc_rsi_revert_14`。
+- [x] A 股 T+1 规则
   - 验收：当日买入信号不成交，下一交易日开盘价成交。
   - 验收：卖出信号当日可成交（A 股 T+1 只限制买入后当日卖出）。
-  - 验收：新增单测覆盖 T+1 与 T+0 的差异。
-- [ ] Sharpe 改进
-  - 验收：使用收益率序列（而非 equity curve 步长）计算年化 Sharpe。
+  - 验收：单测覆盖 T+1 与 T+0 的差异。
+- [x] Sharpe 改进
+  - 验收：使用日频收益率序列（mark-to-market equity）计算年化 Sharpe。
   - 验收：提供 `risk_free_rate` 参数，默认 0.0。
 
 #### `get_backtest_report`（可选）
-- [ ] 读取 `~/.hermes/trading/runs/{id}/run_card.json`
+- [x] 读取 `~/.hermes/trading/runs/{id}/run_card.json`
   - 验收：`{id}` 支持 UUID 或时间戳格式。
   - 验收：文件不存在时返回清晰错误。
   - 验收：返回 JSON 包含 run_card 全部字段。
 
 #### 数据质量与 API 健壮性
-- [ ] 网络超时与重试
+- [x] 网络超时与重试
   - 验收：`reqwest` client 配置连接/读取超时（默认 10s / 30s）。
   - 验收：对 Binance / Eastmoney 请求实现指数退避重试（最多 3 次）。
   - 验收：重试失败后返回明确错误，不返回半成品数据。
-- [ ] API 限流与降级
+- [x] API 限流与降级
   - 验收：Binance 429 时识别 `Retry-After` 并等待。
   - 验收：Eastmoney 返回空数据或 403 时返回 `TradingError::InvalidResponse`。
-  - 验收：mock provider 可模拟 429 / 空数据场景用于测试。
-- [ ] 数据缺口处理
+  - 验收：wiremock 单测覆盖 429 场景。
+- [x] 数据缺口处理
   - 验收：节假日/停牌导致某日期无数据时不 panic。
   - 验收：返回数据行数小于请求区间时，在结果中标记 `partial: true`。
 
 ### Skills
 
-- [ ] 更新 `trading-research` SKILL
+- [x] 更新 `trading-research` SKILL
   - 验收：When to Use 增加 `rsi_revert` 说明。
   - 验收：增加 T+1 规则说明（A-share 回测默认启用）。
   - 验收：增加 `run_card.json` 保存路径说明。

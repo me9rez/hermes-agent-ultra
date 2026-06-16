@@ -8,7 +8,6 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use hermes_core::{JsonSchema, ToolError, ToolHandler, ToolSchema, tool_schema};
-use hermes_trading::MarketDataProvider;
 
 use crate::backends::trading::RunCardStore;
 
@@ -43,6 +42,25 @@ impl ToolHandler for RunBacktestHandler {
             .ok_or_else(|| ToolError::InvalidParams("Missing 'strategy' parameter".into()))?;
 
         let strategy_params = params.get("params").cloned().unwrap_or_else(|| json!({}));
+        let mut strategy_params = strategy_params;
+        if let Some(rf) = params.get("risk_free_rate").and_then(|v| v.as_f64()) {
+            if let Some(obj) = strategy_params.as_object_mut() {
+                obj.insert("risk_free_rate".into(), json!(rf));
+            }
+        }
+
+        let source = params
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(hermes_trading::DataSource::parse)
+            .transpose()
+            .map_err(|e| ToolError::InvalidParams(e.to_string()))?
+            .unwrap_or(hermes_trading::DataSource::Auto);
+
+        let refresh = params
+            .get("refresh")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let end_date = params
             .get("end_date")
@@ -66,7 +84,7 @@ impl ToolHandler for RunBacktestHandler {
 
         let router = hermes_trading::AutoRouter::new();
         let data = router
-            .fetch_ohlcv(&req)
+            .fetch_ohlcv_with_source(&req, source, refresh)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to fetch market data: {e}")))?;
 
@@ -164,8 +182,31 @@ impl ToolHandler for RunBacktestHandler {
                     "long_window": {"type": "integer", "description": "Long SMA window (sma_cross, default: 50)"},
                     "rsi_period": {"type": "integer", "description": "RSI period (rsi_revert, default: 14)"},
                     "oversold": {"type": "number", "description": "RSI oversold threshold (rsi_revert, default: 30)"},
-                    "overbought": {"type": "number", "description": "RSI overbought threshold (rsi_revert, default: 70)"}
+                    "overbought": {"type": "number", "description": "RSI overbought threshold (rsi_revert, default: 70)"},
+                    "risk_free_rate": {"type": "number", "description": "Annual risk-free rate for Sharpe (default: 0.0)"}
                 }
+            }),
+        );
+        props.insert(
+            "source".into(),
+            json!({
+                "type": "string",
+                "description": "Data source: 'auto' (default), 'binance', or 'eastmoney'",
+                "enum": ["auto", "binance", "eastmoney"]
+            }),
+        );
+        props.insert(
+            "risk_free_rate".into(),
+            json!({
+                "type": "number",
+                "description": "Annual risk-free rate for Sharpe ratio (default: 0.0). Also accepted inside params."
+            }),
+        );
+        props.insert(
+            "refresh".into(),
+            json!({
+                "type": "boolean",
+                "description": "Bypass disk cache and force network fetch (default: false)"
             }),
         );
         props.insert(

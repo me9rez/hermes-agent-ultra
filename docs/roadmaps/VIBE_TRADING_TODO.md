@@ -1,7 +1,7 @@
 # Vibe-Trading Rust 重写 — TODO 进度
 
-> **更新时间**：2026-06-15  
-> **总体状态**：P0 ✅ 已完成 → 下一步 P1
+> **更新时间**：2026-06-16  
+> **总体状态**：P0 ✅ 已完成，P1 部分完成（回测持久化、声明式策略框架、rsi_revert 已完成）→ 下一步继续 P1 剩余任务
 
 ---
 
@@ -43,8 +43,9 @@
 
 **P1 总体验收目标**：
 - [ ] A-share / HK / US / crypto 四类市场各至少 1 个 symbol 能成功回测。
-- [ ] 回测结果持久化为 `~/.hermes/vibe/runs/{id}/run_card.json`，并可通过 tool 读取复盘。
-- [ ] 新增 `rsi_revert` 策略模板，A 股 T+1 规则生效。
+- [x] 回测结果持久化为 `~/.hermes/vibe/runs/{id}/run_card.json`，并可通过 tool 读取复盘。
+- [x] 新增 `rsi_revert` 策略模板，A 股 T+1 规则生效。
+- [x] 声明式策略框架：JSON 定义策略 + DSL 规则解析 + 运行时注册表 + create_strategy 工具。
 - [ ] `cargo test -p hermes-vibe` 和 `cargo test -p hermes-parity-tests` 全部通过。
 - [ ] `cargo clippy -p hermes-vibe -p hermes-parity-tests -- -D warnings` 通过。
 
@@ -132,10 +133,19 @@
 
 ### 工程
 
-- [ ] `run_card.json` 持久化到 `~/.hermes/vibe/runs/`
+- [x] `run_card.json` 持久化到 `~/.hermes/vibe/runs/`
   - 验收：每次 `run_backtest` 成功后将 RunCard 写入 `{id}/run_card.json`。
   - 验收：`id` 生成规则明确（建议使用 `{symbol}-{strategy}-{timestamp}` 或 UUID）。
   - 验收：目录不存在时自动创建。
+- [x] 声明式策略框架
+  - 验收：策略 JSON Schema 定义和验证（`dsl.rs`）。
+  - 验收：规则 DSL 解析器支持 4 种操作符（crosses_above、crosses_below、above、below）。
+  - 验收：内置指标库（sma、ema、rsi、macd、bollinger）。
+  - 验收：`DeclarativeStrategy` 实现 `Strategy` trait。
+  - 验收：`StrategyRegistry` 运行时注册表支持内置策略 + 用户策略加载。
+  - 验收：`create_strategy` 工具允许在对话中创建策略。
+  - 验收：20 + 36 个单元测试全部通过，clippy 零警告。
+  - 验收：`vibe_backtest` 集成 StrategyRegistry，支持声明式和硬编码双路径。
 - [ ] 库拆分（可选）：`hermes-vibe` → `hermes-vibe-data` + `hermes-vibe-backtest`
   - 验收：如执行拆分，`hermes-tools` 依赖保持不变或更清晰。
   - 验收：拆不拆不影响 P1 总体验收。
@@ -204,8 +214,15 @@
 | Vibe 库 | `crates/hermes-vibe/src/` |
 | 数据提供者 | `crates/hermes-vibe/src/providers/` |
 | 回测引擎 | `crates/hermes-vibe/src/backtest.rs` |
+| 策略框架 | `crates/hermes-strategies/src/` |
+| 策略 DSL | `crates/hermes-strategies/src/dsl.rs` |
+| 策略实现 | `crates/hermes-strategies/src/declarative.rs` |
+| 内置策略 | `crates/hermes-strategies/src/builtin.rs` |
+| 策略注册表 | `crates/hermes-strategies/src/registry.rs` |
 | Tool Handler | `crates/hermes-tools/src/tools/vibe_market_data.rs` |
 | Tool Handler | `crates/hermes-tools/src/tools/vibe_backtest.rs` |
+| Tool Handler | `crates/hermes-tools/src/tools/vibe_create_strategy.rs` |
+| Tool Handler | `crates/hermes-tools/src/tools/vibe_strategies.rs` |
 | 注册 | `crates/hermes-tools/src/register/vibe.rs` |
 | Skill | `skills/finance/vibe-research/SKILL.md` |
 | Parity | `crates/hermes-parity-tests/fixtures/vibe_*/` |

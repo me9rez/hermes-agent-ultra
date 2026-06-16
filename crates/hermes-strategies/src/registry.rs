@@ -171,12 +171,13 @@ impl StrategyRegistry {
     ///
     /// Returns `true` if the strategy was found and removed.
     pub fn unregister(&mut self, name: &str) -> bool {
-        if let Some(meta) = self.info.get(name)
-            && meta.info.author == "builtin"
-        {
-            return false; // cannot remove built-in strategies
+        // Fix 5: Check info first to prevent bypassing builtin protection.
+        if self.info.get(name).is_some_and(|m| m.info.author == "builtin") {
+            return false;
         }
-        self.strategies.remove(name).is_some() && self.info.remove(name).is_some()
+        let removed_s = self.strategies.remove(name).is_some();
+        let removed_i = self.info.remove(name).is_some();
+        removed_s || removed_i
     }
 
     /// Check if a strategy name already exists.

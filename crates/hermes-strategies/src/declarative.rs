@@ -78,11 +78,14 @@ impl Strategy for DeclarativeStrategy {
                 closes.clone()
             } else {
                 // Use the output of a previously computed indicator.
-                // Replace None with 0.0 for computation purposes.
+                // Fix 10: Log warning if source is not found instead of silently falling back.
                 series_map
                     .get(source)
                     .map(|s| s.iter().map(|v| v.unwrap_or(0.0)).collect())
-                    .unwrap_or_else(|| closes.clone())
+                    .unwrap_or_else(|| {
+                        tracing::warn!(indicator = %id, source = %source, "Chained source not found, falling back to close prices");
+                        closes.clone()
+                    })
             };
             let series = indicator.compute_series(&input);
             series_map.insert(id.clone(), series);
@@ -142,6 +145,13 @@ fn instantiate_indicator(def: &IndicatorDef) -> Result<Box<dyn Indicator>, Strat
                         def.id
                     ))
                 })? as usize;
+            // Fix 7: Validate period > 0 to prevent division by zero.
+            if period == 0 {
+                return Err(StrategyError::InvalidParams(format!(
+                    "SMA indicator '{}' period must be > 0",
+                    def.id
+                )));
+            }
             Ok(Box::new(Sma::new(period)))
         }
         "ema" => {
@@ -155,6 +165,13 @@ fn instantiate_indicator(def: &IndicatorDef) -> Result<Box<dyn Indicator>, Strat
                         def.id
                     ))
                 })? as usize;
+            // Fix 7: Validate period > 0.
+            if period == 0 {
+                return Err(StrategyError::InvalidParams(format!(
+                    "EMA indicator '{}' period must be > 0",
+                    def.id
+                )));
+            }
             Ok(Box::new(Ema::new(period)))
         }
         "rsi" => {
@@ -168,6 +185,13 @@ fn instantiate_indicator(def: &IndicatorDef) -> Result<Box<dyn Indicator>, Strat
                         def.id
                     ))
                 })? as usize;
+            // Fix 7: Validate period > 0.
+            if period == 0 {
+                return Err(StrategyError::InvalidParams(format!(
+                    "RSI indicator '{}' period must be > 0",
+                    def.id
+                )));
+            }
             Ok(Box::new(Rsi::new(period)))
         }
         "macd" => {
@@ -243,9 +267,11 @@ fn evaluate_rule_at_bar(
 ) -> bool {
     match rule {
         RuleExpr::CrossesAbove { left, right } => {
-            let prev = get_value(left, bar_index.saturating_sub(1), series_map);
+            // Fix 3: Require bar_index > 0 for cross detection (need previous bar).
+            if bar_index == 0 { return false; }
+            let prev = get_value(left, bar_index - 1, series_map);
             let cur = get_value(left, bar_index, series_map);
-            let prev_right = get_operand_value(right, bar_index.saturating_sub(1), series_map);
+            let prev_right = get_operand_value(right, bar_index - 1, series_map);
             let cur_right = get_operand_value(right, bar_index, series_map);
             match (prev, cur, prev_right, cur_right) {
                 (Some(p), Some(c), Some(pr), Some(cr)) => p <= pr && c > cr,
@@ -253,9 +279,11 @@ fn evaluate_rule_at_bar(
             }
         }
         RuleExpr::CrossesBelow { left, right } => {
-            let prev = get_value(left, bar_index.saturating_sub(1), series_map);
+            // Fix 3: Require bar_index > 0 for cross detection (need previous bar).
+            if bar_index == 0 { return false; }
+            let prev = get_value(left, bar_index - 1, series_map);
             let cur = get_value(left, bar_index, series_map);
-            let prev_right = get_operand_value(right, bar_index.saturating_sub(1), series_map);
+            let prev_right = get_operand_value(right, bar_index - 1, series_map);
             let cur_right = get_operand_value(right, bar_index, series_map);
             match (prev, cur, prev_right, cur_right) {
                 (Some(p), Some(c), Some(pr), Some(cr)) => p >= pr && c < cr,

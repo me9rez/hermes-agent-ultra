@@ -14,11 +14,12 @@ pub fn register(ctx: &RegistryContext<'_>) {
 
         // Build the strategy registry: built-ins + user strategies from disk.
         let strategies_dir = hermes_config::hermes_home().join("vibe").join("strategies");
-        let strategy_registry = Arc::new(Mutex::new(
-            // We can't use async in a sync context, so build with builtins only.
-            // User strategies will be loaded on first access or via create_strategy.
-            hermes_strategies::StrategyRegistry::with_builtins()
-        ));
+        let mut registry = hermes_strategies::StrategyRegistry::with_builtins();
+        // Fix 4: Load user strategies from disk at startup for cross-session persistence.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(registry.load_from_dir(&strategies_dir));
+        });
+        let strategy_registry = Arc::new(Mutex::new(registry));
 
         reg(
             ctx,

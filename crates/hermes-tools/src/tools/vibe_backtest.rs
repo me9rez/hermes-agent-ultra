@@ -71,27 +71,49 @@ impl ToolHandler for RunBacktestHandler {
         let strategy_name = strategy; // save before we shadow it
         let card = {
             let reg = self.strategy_registry.lock().await;
-            if let Some(strategy) = reg.get(strategy_name) {
-                // Declarative strategy path.
-                let decisions = strategy.run(&data).map_err(|e| {
-                    ToolError::ExecutionFailed(format!("Strategy execution failed: {e}"))
-                })?;
-                // Convert Decision → SignalKind.
-                let signals: Vec<hermes_vibe::SignalKind> = decisions
-                    .iter()
-                    .map(|d| match d.signal {
-                        hermes_strategies::Signal::Buy => hermes_vibe::SignalKind::Buy,
-                        hermes_strategies::Signal::Sell => hermes_vibe::SignalKind::Sell,
-                        hermes_strategies::Signal::Hold => hermes_vibe::SignalKind::Hold,
-                    })
-                    .collect();
-                drop(reg);
-                hermes_vibe::BacktestEngine::run_from_signals(&data, strategy_name, &strategy_params, &signals)
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Backtest failed: {e}")))?
+            
+            // Fix 1: If user provided params, use hardcoded path for param override support.
+            let has_params = strategy_params.as_object().map_or(false, |o| !o.is_empty());
+            
+            // Fix 9: Get strategy clone, then release lock before expensive computation.
+            let strategy_opt = reg.get(strategy_name);
+            drop(reg);
+            
+            if let Some(strategy) = strategy_opt {
+                if has_params {
+                    // User passed params → use hardcoded path for backward compatibility.
+                    hermes_vibe::BacktestEngine::run(&data, strategy_name, &strategy_params)
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Backtest failed: {e}")))?
+                } else {
+                    // Declarative strategy path.
+                    let decisions = strategy.run(&data).map_err(|e| {
+                        ToolError::ExecutionFailed(format!("Strategy execution failed: {e}"))
+                    })?;
+                    // Convert Decision → SignalKind.
+                    let signals: Vec<hermes_vibe::SignalKind> = decisions
+                        .iter()
+                        .map(|d| match d.signal {
+                            hermes_strategies::Signal::Buy => hermes_vibe::SignalKind::Buy,
+                            hermes_strategies::Signal::Sell => hermes_vibe::SignalKind::Sell,
+                            hermes_strategies::Signal::Hold => hermes_vibe::SignalKind::Hold,
+                        })
+                        .collect();
+                    hermes_vibe::BacktestEngine::run_from_signals(&data, strategy_name, &strategy_params, &signals)
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Backtest failed: {e}")))?
+                }
             } else {
-                // Fallback to hardcoded strategies.
-                hermes_vibe::BacktestEngine::run(&data, strategy_name, &strategy_params)
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Backtest failed: {e}")))?
+                // Fix 8: Fallback failed — provide helpful error with available strategies.
+                let reg = self.strategy_registry.lock().await;
+                let available = reg.list().into_iter().map(|s| s.name).collect::<Vec<_>>();
+                drop(reg);
+                let hint = if available.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Available strategies: {}.", available.join(", "))
+                };
+                return Err(ToolError::ExecutionFailed(
+                    format!("Unsupported strategy '{}'.{}", strategy_name, hint)
+                ));
             }
         };
 

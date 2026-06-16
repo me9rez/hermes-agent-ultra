@@ -146,6 +146,11 @@ impl BacktestEngine {
             )));
         }
 
+        // Fix 6: Defensive check for empty data to prevent panic on .first().unwrap().
+        if data.is_empty() {
+            return Err(VibeError::Backtest("Cannot run backtest on empty data".into()));
+        }
+
         let trades = simulate_trades_from_signals(data, signals);
         let (total_return_pct, max_drawdown_pct, sharpe_ratio, trade_count, win_rate_pct) =
             compute_metrics(&trades);

@@ -114,26 +114,57 @@ impl Rsi {
 }
 
 impl Indicator for Rsi {
-    fn compute(&self, closes: &[f64], index: usize) -> Option<f64> {
-        if index < self.period || closes.len() <= index {
-            return None;
+    fn compute_series(&self, closes: &[f64]) -> Vec<Option<f64>> {
+        // Fix 2: Use Wilder's smoothing to match hermes_vibe::rsi().
+        let n = closes.len();
+        if self.period == 0 || n < self.period + 1 {
+            return vec![None; n];
         }
-        let start = index + 1 - self.period;
-        let mut gains = 0.0_f64;
-        let mut losses = 0.0_f64;
-        for i in start..=index {
+
+        let mut result = Vec::with_capacity(n);
+        // First `period` elements: not enough data.
+        for _ in 0..self.period {
+            result.push(None);
+        }
+
+        // Compute initial average gain/loss from the first `period` deltas.
+        let mut avg_gain: f64 = 0.0;
+        let mut avg_loss: f64 = 0.0;
+        for i in 1..=self.period {
             let delta = closes[i] - closes[i - 1];
-            if delta >= 0.0 {
-                gains += delta;
+            if delta > 0.0 {
+                avg_gain += delta;
             } else {
-                losses -= delta;
+                avg_loss += -delta;
             }
         }
-        if losses == 0.0 {
-            return Some(100.0);
+        avg_gain /= self.period as f64;
+        avg_loss /= self.period as f64;
+
+        // RSI at index `period`.
+        let rs = if avg_loss == 0.0 { 100.0 } else { avg_gain / avg_loss };
+        let rsi_val = if avg_loss == 0.0 { 100.0 } else { 100.0 - 100.0 / (1.0 + rs) };
+        result.push(Some(rsi_val));
+
+        // Wilder's smoothing for the remaining bars.
+        for i in (self.period + 1)..n {
+            let delta = closes[i] - closes[i - 1];
+            let gain = if delta > 0.0 { delta } else { 0.0 };
+            let loss = if delta < 0.0 { -delta } else { 0.0 };
+
+            avg_gain = (avg_gain * (self.period as f64 - 1.0) + gain) / self.period as f64;
+            avg_loss = (avg_loss * (self.period as f64 - 1.0) + loss) / self.period as f64;
+
+            let r = if avg_loss == 0.0 { 100.0 } else { 100.0 - 100.0 / (1.0 + avg_gain / avg_loss) };
+            result.push(Some(r));
         }
-        let rs = (gains / self.period as f64) / (losses / self.period as f64);
-        Some(100.0 - 100.0 / (1.0 + rs))
+
+        result
+    }
+
+    fn compute(&self, _closes: &[f64], _index: usize) -> Option<f64> {
+        // compute_series handles the full sequence; compute is not used for series-based execution.
+        None
     }
 
     fn name(&self) -> &str {

@@ -16,10 +16,10 @@ use super::eastmoney::EastmoneyProvider;
 
 /// Automatic market data router that dispatches to the correct provider
 /// based on the symbol format.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AutoRouter {
-    binance: BinanceProvider,
-    eastmoney: EastmoneyProvider,
+    binance: Box<dyn MarketDataProvider>,
+    eastmoney: Box<dyn MarketDataProvider>,
 }
 
 impl AutoRouter {
@@ -27,15 +27,21 @@ impl AutoRouter {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            binance: BinanceProvider::new(),
-            eastmoney: EastmoneyProvider::new(),
+            binance: Box::new(BinanceProvider::new()),
+            eastmoney: Box::new(EastmoneyProvider::new()),
         }
     }
 
     /// Create with pre-configured providers.
     #[must_use]
-    pub fn with_providers(binance: BinanceProvider, eastmoney: EastmoneyProvider) -> Self {
-        Self { binance, eastmoney }
+    pub fn with_providers(
+        binance: impl MarketDataProvider + 'static,
+        eastmoney: impl MarketDataProvider + 'static,
+    ) -> Self {
+        Self {
+            binance: Box::new(binance),
+            eastmoney: Box::new(eastmoney),
+        }
     }
 
     /// Determine which provider to use based on the symbol format.

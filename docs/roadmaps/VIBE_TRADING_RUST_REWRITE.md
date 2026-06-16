@@ -296,7 +296,7 @@ polars = { version = "0.46", features = ["lazy", "temporal"] }
 
 | ID | Skill | 路径 | 作用 |
 |----|-------|------|------|
-| S-P0-01 | `vibe-research` | `optional-skills/finance/vibe-research/SKILL.md` | 路由：何时 `get_market_data` / `run_backtest` vs `web_search`；**禁止编造回测数字** |
+| S-P0-01 | `vibe-research` | `skills/finance/vibe-research/SKILL.md` | 路由：何时 `get_market_data` / `run_backtest` vs `web_search`；**禁止编造回测数字** |
 
 **SKILL.md 必含**：When to Use / When NOT to Use · 工具调用顺序 · 与 `stocks` skill 关系 · Verification 示例 prompt。**不新建** Python `scripts/`。
 
@@ -569,7 +569,7 @@ crates/hermes-tools/
   register/vibe.rs             # reg() 注册 2 个 ToolHandler
   tools/vibe_market_data.rs
   tools/vibe_backtest.rs
-optional-skills/finance/
+skills/finance/
   vibe-research/SKILL.md       # 教 agent：何时用 get_market_data vs web_search vs stocks skill
 ```
 

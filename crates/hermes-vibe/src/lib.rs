@@ -18,4 +18,6 @@ pub use error::VibeError;
 pub use indicators::sma;
 pub use provider::MarketDataProvider;
 pub use providers::{AutoRouter, BinanceProvider, EastmoneyProvider};
+#[cfg(any(test, feature = "test-mock"))]
+pub use providers::MockProvider;
 pub use types::{Interval, OhlcvData, OhlcvRequest, OhlcvRow};

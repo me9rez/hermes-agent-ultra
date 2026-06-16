@@ -2890,6 +2890,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hermes-parity-tests"
+version = "0.16.0"
+dependencies = [
+ "chrono",
+ "hermes-vibe",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "hermes-server-client"
 version = "0.16.0"
 dependencies = [

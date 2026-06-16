@@ -18,7 +18,7 @@
         "min_rows": 5,
         "columns": ["date", "open", "high", "low", "close", "volume"]
       },
-      "skip": true
+      "skip": false
     },
     {
       "id": "a_share_sz_daily",
@@ -35,7 +35,7 @@
         "min_rows": 3,
         "columns": ["date", "open", "high", "low", "close", "volume"]
       },
-      "skip": true
+      "skip": false
     },
     {
       "id": "invalid_symbol",
@@ -48,7 +48,7 @@
       "expected": {
         "error_contains": "not found"
       },
-      "skip": true
+      "skip": false
     }
   ]
 }

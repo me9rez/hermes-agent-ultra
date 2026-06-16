@@ -606,6 +606,7 @@ const BUNDLED_SKILL_NAMES_FALLBACK: &[&str] = &[
     "teams-meeting-pipeline",
     "test-driven-development",
     "touchdesigner-mcp",
+    "vibe-research",
     "webhook-subscriptions",
     "weights-and-biases",
     "writing-plans",

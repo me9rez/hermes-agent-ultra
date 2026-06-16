@@ -23,6 +23,7 @@ members = [
     "crates/hermes-acp-server",
     "crates/hermes-wiki",
     "crates/hermes-vibe",
+    "crates/hermes-parity-tests",
     "crates/hermes-strategies",
     "crates/hermes-market-watch",
     "crates/hermes-copilot-lite",
@@ -58,6 +59,7 @@ hermes-server-client = { path = "crates/hermes-server-client" }
 hermes-acp-server = { path = "crates/hermes-acp-server" }
 hermes-wiki = { path = "crates/hermes-wiki" }
 hermes-vibe = { path = "crates/hermes-vibe" }
+hermes-parity-tests = { path = "crates/hermes-parity-tests" }
 hermes-strategies = { path = "crates/hermes-strategies" }
 hermes-market-watch = { path = "crates/hermes-market-watch" }
 hermes-copilot-lite = { path = "crates/hermes-copilot-lite" }

@@ -14,8 +14,26 @@
         "end_date": "2026-06-01"
       },
       "expected": {
-        "has_fields": ["symbol", "strategy", "params", "total_return_pct", "max_drawdown_pct", "trade_count", "sharpe_ratio", "win_rate_pct", "period"],
+        "has_fields": ["id", "created_at", "symbol", "strategy", "params", "total_return_pct", "max_drawdown_pct", "trade_count", "sharpe_ratio", "win_rate_pct", "period"],
         "strategy_eq": "sma_cross",
+        "trade_count_gte": 1,
+        "max_drawdown_lte": 0.0
+      },
+      "skip": false
+    },
+    {
+      "id": "btc_rsi_revert_14",
+      "op": "run_backtest",
+      "input": {
+        "symbol": "BTC-USDT",
+        "strategy": "rsi_revert",
+        "params": {"rsi_period": 14, "oversold": 30, "overbought": 70},
+        "start_date": "2025-06-01",
+        "end_date": "2026-06-01"
+      },
+      "expected": {
+        "has_fields": ["id", "created_at", "symbol", "strategy", "params", "total_return_pct", "max_drawdown_pct", "trade_count", "sharpe_ratio", "win_rate_pct", "period"],
+        "strategy_eq": "rsi_revert",
         "trade_count_gte": 1,
         "max_drawdown_lte": 0.0
       },

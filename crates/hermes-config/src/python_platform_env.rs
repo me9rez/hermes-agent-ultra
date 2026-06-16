@@ -92,7 +92,7 @@ fn apply_telegram_env(config: &mut GatewayConfig) {
     let telegram = config
         .platforms
         .entry("telegram".into())
-        .or_insert_with(PlatformConfig::default);
+        .or_default();
 
     if let Some(token) = token {
         let enabled_was_explicit = telegram
@@ -186,7 +186,7 @@ fn apply_weixin_env(config: &mut GatewayConfig) {
     let wx = config
         .platforms
         .entry("weixin".into())
-        .or_insert_with(PlatformConfig::default);
+        .or_default();
 
     if let Some(t) = env_nonempty("WEIXIN_TOKEN") {
         wx.token = Some(t);
@@ -230,7 +230,7 @@ fn apply_dingtalk_env(config: &mut GatewayConfig) {
     let dt = config
         .platforms
         .entry("dingtalk".into())
-        .or_insert_with(PlatformConfig::default);
+        .or_default();
 
     if let Some(v) = env_nonempty("DINGTALK_CLIENT_ID") {
         set_extra(dt, "client_id", json!(v));
@@ -259,7 +259,7 @@ fn apply_mattermost_env(config: &mut GatewayConfig) {
     let mattermost = config
         .platforms
         .entry("mattermost".into())
-        .or_insert_with(PlatformConfig::default);
+        .or_default();
     if let Some(v) = server_url {
         set_extra(mattermost, "server_url", json!(v));
     }
@@ -305,7 +305,7 @@ fn apply_matrix_env(config: &mut GatewayConfig) {
     let matrix = config
         .platforms
         .entry("matrix".into())
-        .or_insert_with(PlatformConfig::default);
+        .or_default();
     if let Some(v) = homeserver_url {
         set_extra(matrix, "homeserver_url", json!(v));
     }
@@ -339,7 +339,7 @@ fn apply_ntfy_env(config: &mut GatewayConfig) {
     let ntfy = config
         .platforms
         .entry("ntfy".into())
-        .or_insert_with(PlatformConfig::default);
+        .or_default();
     let enabled_was_explicit = ntfy
         .extra
         .remove("_enabled_explicit")
@@ -380,7 +380,7 @@ fn apply_discord_env(config: &mut GatewayConfig) {
     let discord = config
         .platforms
         .entry("discord".into())
-        .or_insert_with(PlatformConfig::default);
+        .or_default();
 
     if let Some(token) = env_nonempty("DISCORD_BOT_TOKEN") {
         let enabled_was_explicit = discord
@@ -415,11 +415,10 @@ fn apply_discord_env(config: &mut GatewayConfig) {
     if let Some(v) = env_nonempty("DISCORD_REACTIONS") {
         set_extra(discord, "reactions", json!(env_bool(&v)));
     }
-    if let Some(v) = env_nonempty("DISCORD_REPLY_TO_MODE") {
-        if let Some(mode) = reply_to_mode(&v) {
+    if let Some(v) = env_nonempty("DISCORD_REPLY_TO_MODE")
+        && let Some(mode) = reply_to_mode(&v) {
             set_extra(discord, "reply_to_mode", json!(mode));
         }
-    }
     if let Some(v) = env_nonempty("DISCORD_REQUIRE_MENTION") {
         discord.require_mention = Some(env_bool(&v));
     }
@@ -479,13 +478,12 @@ fn bridge_telegram_yaml_to_env(config: &mut GatewayConfig) {
     let tg = config
         .platforms
         .entry("telegram".into())
-        .or_insert_with(PlatformConfig::default);
+        .or_default();
 
-    if tg.token.is_none() {
-        if let Some(t) = env_nonempty("TELEGRAM_BOT_TOKEN") {
+    if tg.token.is_none()
+        && let Some(t) = env_nonempty("TELEGRAM_BOT_TOKEN") {
             tg.token = Some(t);
         }
-    }
 
     if env_nonempty("TELEGRAM_ALLOWED_USERS").is_none() {
         let mut users = tg
@@ -516,14 +514,13 @@ fn bridge_telegram_yaml_to_env(config: &mut GatewayConfig) {
         }
     }
 
-    if env_nonempty("TELEGRAM_WEBHOOK_URL").is_none() {
-        if let Some(url) = tg.webhook_url.as_deref().filter(|s| !s.trim().is_empty()) {
+    if env_nonempty("TELEGRAM_WEBHOOK_URL").is_none()
+        && let Some(url) = tg.webhook_url.as_deref().filter(|s| !s.trim().is_empty()) {
             set_env_if_unset("TELEGRAM_WEBHOOK_URL", url.trim());
         }
-    }
 
-    if env_nonempty("TELEGRAM_WEBHOOK_SECRET").is_none() {
-        if let Some(secret) = tg
+    if env_nonempty("TELEGRAM_WEBHOOK_SECRET").is_none()
+        && let Some(secret) = tg
             .extra
             .get("webhook_secret")
             .and_then(|v| v.as_str())
@@ -532,13 +529,11 @@ fn bridge_telegram_yaml_to_env(config: &mut GatewayConfig) {
         {
             set_env_if_unset("TELEGRAM_WEBHOOK_SECRET", secret);
         }
-    }
 
-    if env_nonempty("TELEGRAM_WEBHOOK_PORT").is_none() {
-        if let Some(port) = tg.extra.get("webhook_port").and_then(|v| v.as_u64()) {
+    if env_nonempty("TELEGRAM_WEBHOOK_PORT").is_none()
+        && let Some(port) = tg.extra.get("webhook_port").and_then(|v| v.as_u64()) {
             set_env_if_unset("TELEGRAM_WEBHOOK_PORT", &port.to_string());
         }
-    }
 }
 
 /// Apply platform environment variables consistent with Python docs into `platforms`.

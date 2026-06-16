@@ -175,11 +175,10 @@ pub fn has_direct_modal_credentials() -> bool {
         .ok()
         .or_else(|| std::env::var("USERPROFILE").ok())
         .map(PathBuf::from);
-    if let Some(home) = home {
-        if home.join(".modal.toml").exists() {
+    if let Some(home) = home
+        && home.join(".modal.toml").exists() {
             return true;
         }
-    }
     false
 }
 
@@ -211,6 +210,7 @@ pub fn resolve_openai_audio_api_key() -> String {
 mod tests {
     use super::*;
     use crate::managed_gateway::test_lock;
+    use hermes_core::test_env;
 
     struct EnvGuard {
         keys: Vec<&'static str>,
@@ -300,13 +300,13 @@ mod tests {
     fn env_flag_helpers_round_trip() {
         let _g = EnvGuard::new(&["HERMES_ENABLE_NOUS_MANAGED_TOOLS"]);
 
-        std::env::remove_var("HERMES_ENABLE_NOUS_MANAGED_TOOLS");
+        test_env::remove_var("HERMES_ENABLE_NOUS_MANAGED_TOOLS");
         assert!(!managed_nous_tools_enabled());
 
-        std::env::set_var("HERMES_ENABLE_NOUS_MANAGED_TOOLS", "yes");
+        test_env::set_var("HERMES_ENABLE_NOUS_MANAGED_TOOLS", "yes");
         assert!(managed_nous_tools_enabled());
 
-        std::env::set_var("HERMES_ENABLE_NOUS_MANAGED_TOOLS", "no");
+        test_env::set_var("HERMES_ENABLE_NOUS_MANAGED_TOOLS", "no");
         assert!(!managed_nous_tools_enabled());
     }
 
@@ -318,18 +318,18 @@ mod tests {
             "OPENAI_API_KEY",
         ]);
 
-        std::env::set_var("VOICE_TOOLS_OPENAI_KEY", "voice-key");
-        std::env::set_var("HERMES_OPENAI_API_KEY", "hermes-key");
-        std::env::set_var("OPENAI_API_KEY", "main-key");
+        test_env::set_var("VOICE_TOOLS_OPENAI_KEY", "voice-key");
+        test_env::set_var("HERMES_OPENAI_API_KEY", "hermes-key");
+        test_env::set_var("OPENAI_API_KEY", "main-key");
         assert_eq!(resolve_openai_audio_api_key(), "voice-key");
 
-        std::env::remove_var("VOICE_TOOLS_OPENAI_KEY");
+        test_env::remove_var("VOICE_TOOLS_OPENAI_KEY");
         assert_eq!(resolve_openai_audio_api_key(), "hermes-key");
 
-        std::env::remove_var("HERMES_OPENAI_API_KEY");
+        test_env::remove_var("HERMES_OPENAI_API_KEY");
         assert_eq!(resolve_openai_audio_api_key(), "main-key");
 
-        std::env::remove_var("OPENAI_API_KEY");
+        test_env::remove_var("OPENAI_API_KEY");
         assert_eq!(resolve_openai_audio_api_key(), "");
     }
 }

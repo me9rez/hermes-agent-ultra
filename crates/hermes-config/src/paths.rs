@@ -245,7 +245,7 @@ pub fn session_temp_dir() -> PathBuf {
     {
         let cache_dir = hermes_home().join("cache").join("terminal");
         let _ = std::fs::create_dir_all(&cache_dir);
-        return cache_dir;
+        cache_dir
     }
 
     #[cfg(not(windows))]
@@ -344,6 +344,7 @@ pub fn resolve_outbound_media_path(input: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hermes_core::test_env;
 
     #[test]
     fn hermes_home_respects_env() {
@@ -368,7 +369,7 @@ mod tests {
         let original_ultra = std::env::var("HERMES_AGENT_ULTRA_HOME").ok();
 
         // -- Part 1: derived paths are consistent --
-        std::env::set_var("HERMES_HOME", "/tmp/hermes-path-test");
+        test_env::set_var("HERMES_HOME", "/tmp/hermes-path-test");
         let home = hermes_home();
         assert_eq!(home, PathBuf::from("/tmp/hermes-path-test"));
         assert_eq!(state_dir(None), home);
@@ -384,28 +385,28 @@ mod tests {
         assert_eq!(env_path(), home.join(".env"));
 
         // -- Part 2: explicit home override --
-        std::env::set_var("HERMES_HOME", "/tmp/test-hermes");
+        test_env::set_var("HERMES_HOME", "/tmp/test-hermes");
         assert_eq!(hermes_home(), PathBuf::from("/tmp/test-hermes"));
         assert_eq!(config_path(), PathBuf::from("/tmp/test-hermes/config.yaml"));
 
         // -- Part 3: ultra env alias works when HERMES_HOME is absent --
-        std::env::remove_var("HERMES_HOME");
-        std::env::set_var("HERMES_AGENT_ULTRA_HOME", "/tmp/test-hermes-ultra");
+        test_env::remove_var("HERMES_HOME");
+        test_env::set_var("HERMES_AGENT_ULTRA_HOME", "/tmp/test-hermes-ultra");
         assert_eq!(hermes_home(), PathBuf::from("/tmp/test-hermes-ultra"));
         assert_eq!(
             config_path(),
             PathBuf::from("/tmp/test-hermes-ultra/config.yaml")
         );
-        std::env::remove_var("HERMES_AGENT_ULTRA_HOME");
+        test_env::remove_var("HERMES_AGENT_ULTRA_HOME");
 
         // Restore
         match original {
-            Some(v) => std::env::set_var("HERMES_HOME", v),
-            None => std::env::remove_var("HERMES_HOME"),
+            Some(v) => test_env::set_var("HERMES_HOME", v),
+            None => test_env::remove_var("HERMES_HOME"),
         }
         match original_ultra {
-            Some(v) => std::env::set_var("HERMES_AGENT_ULTRA_HOME", v),
-            None => std::env::remove_var("HERMES_AGENT_ULTRA_HOME"),
+            Some(v) => test_env::set_var("HERMES_AGENT_ULTRA_HOME", v),
+            None => test_env::remove_var("HERMES_AGENT_ULTRA_HOME"),
         }
     }
 

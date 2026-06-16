@@ -89,8 +89,8 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
     if trimmed.is_empty() {
         return None;
     }
-    let normalised = if trimmed.ends_with('Z') {
-        format!("{}+00:00", &trimmed[..trimmed.len() - 1])
+    let normalised = if let Some(stripped) = trimmed.strip_suffix('Z') {
+        format!("{}+00:00", stripped)
     } else {
         trimmed.to_string()
     };
@@ -140,23 +140,21 @@ pub fn read_nous_access_token(reader: Option<&dyn TokenReader>) -> Option<String
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
-    if let Some(ref tok) = cached {
-        if !access_token_is_expiring(
+    if let Some(ref tok) = cached
+        && !access_token_is_expiring(
             state.expires_at.as_deref(),
             NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
         ) {
             return Some(tok.clone());
         }
-    }
 
-    if let Some(reader) = reader {
-        if let Some(refreshed) = reader.refresh(NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS) {
+    if let Some(reader) = reader
+        && let Some(refreshed) = reader.refresh(NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS) {
             let trimmed = refreshed.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.to_string());
             }
         }
-    }
 
     cached
 }
@@ -193,6 +191,7 @@ pub fn peek_nous_access_token() -> Option<String> {
 mod tests {
     use super::*;
     use crate::managed_gateway::test_lock;
+    use hermes_core::test_env;
     use serde_json::json;
 
     /// Sets `HERMES_HOME` to a tempdir and writes an optional `auth.json`.
@@ -211,8 +210,8 @@ mod tests {
             let original_home = std::env::var("HERMES_HOME").ok();
             let original_token = std::env::var(TOKEN_OVERRIDE_ENV).ok();
 
-            std::env::set_var("HERMES_HOME", tmp.path());
-            std::env::remove_var(TOKEN_OVERRIDE_ENV);
+            test_env::set_var("HERMES_HOME", tmp.path());
+            test_env::remove_var(TOKEN_OVERRIDE_ENV);
 
             if let Some(payload) = auth_json {
                 let path = tmp.path().join("auth.json");
@@ -231,12 +230,12 @@ mod tests {
     impl Drop for AuthGuard {
         fn drop(&mut self) {
             match self.original_home.take() {
-                Some(v) => std::env::set_var("HERMES_HOME", v),
-                None => std::env::remove_var("HERMES_HOME"),
+                Some(v) => test_env::set_var("HERMES_HOME", v),
+                None => test_env::remove_var("HERMES_HOME"),
             }
             match self.original_token.take() {
-                Some(v) => std::env::set_var(TOKEN_OVERRIDE_ENV, v),
-                None => std::env::remove_var(TOKEN_OVERRIDE_ENV),
+                Some(v) => test_env::set_var(TOKEN_OVERRIDE_ENV, v),
+                None => test_env::remove_var(TOKEN_OVERRIDE_ENV),
             }
         }
     }

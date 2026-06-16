@@ -22,6 +22,7 @@ impl ServerLoginMethod {
 
 /// Top-level remote server settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct ServerConfig {
     /// When true, Hermes uses the remote server for LLM calls (after login).
     #[serde(default)]
@@ -38,16 +39,6 @@ pub struct ServerConfig {
     pub llm: ServerLlmConfig,
 }
 
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            base_url: String::new(),
-            auth: ServerAuthConfig::default(),
-            llm: ServerLlmConfig::default(),
-        }
-    }
-}
 
 /// Login settings for the remote server account.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -11,18 +11,15 @@ use serde::{Deserialize, Serialize};
 /// How to handle unauthorized direct messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum UnauthorizedDmBehavior {
     /// Pair the user with the bot (create a session).
     Pair,
     /// Silently ignore the message.
+    #[default]
     Ignore,
 }
 
-impl Default for UnauthorizedDmBehavior {
-    fn default() -> Self {
-        Self::Ignore
-    }
-}
 
 // ---------------------------------------------------------------------------
 // PlatformConfig
@@ -30,6 +27,7 @@ impl Default for UnauthorizedDmBehavior {
 
 /// Configuration for a specific platform (e.g. discord, slack).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct PlatformConfig {
     /// Whether this platform adapter is enabled.
     #[serde(default)]
@@ -73,22 +71,6 @@ pub struct PlatformConfig {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-impl Default for PlatformConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            token: None,
-            webhook_url: None,
-            require_mention: None,
-            unauthorized_dm_behavior: UnauthorizedDmBehavior::default(),
-            group_sessions_per_user: false,
-            home_channel: None,
-            allowed_users: Vec::new(),
-            admin_users: Vec::new(),
-            extra: HashMap::new(),
-        }
-    }
-}
 
 impl PlatformConfig {
     /// Deep-merge a JSON overlay into this configuration.
@@ -110,29 +92,26 @@ impl PlatformConfig {
             if let Some(v) = map.get("require_mention").and_then(|v| v.as_bool()) {
                 self.require_mention = Some(v);
             }
-            if let Some(v) = map.get("unauthorized_dm_behavior").and_then(|v| v.as_str()) {
-                if let Ok(behavior) = serde_json::from_value::<UnauthorizedDmBehavior>(
+            if let Some(v) = map.get("unauthorized_dm_behavior").and_then(|v| v.as_str())
+                && let Ok(behavior) = serde_json::from_value::<UnauthorizedDmBehavior>(
                     serde_json::Value::String(v.to_string()),
                 ) {
                     self.unauthorized_dm_behavior = behavior;
                 }
-            }
             if let Some(v) = map.get("group_sessions_per_user").and_then(|v| v.as_bool()) {
                 self.group_sessions_per_user = v;
             }
             if let Some(v) = map.get("home_channel").and_then(|v| v.as_str()) {
                 self.home_channel = Some(v.to_string());
             }
-            if let Some(v) = map.get("allowed_users") {
-                if let Ok(users) = serde_json::from_value::<Vec<String>>(v.clone()) {
+            if let Some(v) = map.get("allowed_users")
+                && let Ok(users) = serde_json::from_value::<Vec<String>>(v.clone()) {
                     self.allowed_users = users;
                 }
-            }
-            if let Some(v) = map.get("admin_users") {
-                if let Ok(users) = serde_json::from_value::<Vec<String>>(v.clone()) {
+            if let Some(v) = map.get("admin_users")
+                && let Ok(users) = serde_json::from_value::<Vec<String>>(v.clone()) {
                     self.admin_users = users;
                 }
-            }
             // Merge extra map recursively
             if let Some(serde_json::Value::Object(extra_overlay)) = map.get("extra") {
                 for (k, v) in extra_overlay {

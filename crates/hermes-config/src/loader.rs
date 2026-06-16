@@ -7,12 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // Re-export ConfigError for convenience
 pub use hermes_core::ConfigError;
 
-use crate::config::{
-    GatewayConfig, LlmProviderConfig, ProxyConfig, TerminalBackendType, TerminalConfig, WebConfig,
-};
+use crate::config::{GatewayConfig, ProxyConfig, TerminalBackendType, TerminalConfig, WebConfig};
 use crate::merge::merge_configs;
 use crate::paths;
-use crate::platform::PlatformConfig;
 
 // ---------------------------------------------------------------------------
 // ConfigError conversion helpers
@@ -820,7 +817,7 @@ fn apply_user_config_patch_dotted(
             let entry = config
                 .auxiliary
                 .entry((*task).to_string())
-                .or_insert_with(crate::config::AuxiliaryTaskConfig::default);
+                .or_default();
             match *field {
                 "provider" => entry.provider = value.to_string(),
                 "model" => entry.model = value.to_string(),
@@ -854,7 +851,7 @@ fn apply_user_config_patch_dotted(
             let entry = config
                 .llm_providers
                 .entry((*provider).to_string())
-                .or_insert_with(LlmProviderConfig::default);
+                .or_default();
             match *field {
                 "api_key" => entry.api_key = Some(value.to_string()),
                 "api_key_env" => entry.api_key_env = Some(value.to_string()),
@@ -1763,15 +1760,14 @@ fn parse_list_env(value: &str, split_colon: bool) -> Vec<String> {
     if trimmed.is_empty() {
         return Vec::new();
     }
-    if trimmed.starts_with('[') {
-        if let Ok(values) = serde_json::from_str::<Vec<String>>(trimmed) {
+    if trimmed.starts_with('[')
+        && let Ok(values) = serde_json::from_str::<Vec<String>>(trimmed) {
             return values
                 .into_iter()
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
                 .collect();
         }
-    }
     let delimiter = if trimmed.contains(',') || !split_colon {
         ','
     } else {
@@ -2116,11 +2112,10 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
             config.server.base_url = trimmed.to_string();
         }
     }
-    if let Ok(v) = std::env::var("HERMES_SERVER_ENABLED") {
-        if let Some(parsed) = parse_bool_env("HERMES_SERVER_ENABLED", &v) {
+    if let Ok(v) = std::env::var("HERMES_SERVER_ENABLED")
+        && let Some(parsed) = parse_bool_env("HERMES_SERVER_ENABLED", &v) {
             config.server.enabled = parsed;
         }
-    }
     if let Ok(v) = std::env::var("HERMES_SERVER_TOKEN") {
         let trimmed = v.trim();
         if !trimmed.is_empty() {
@@ -2128,11 +2123,10 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
             let _ = trimmed;
         }
     }
-    if let Ok(v) = std::env::var("HERMES_KANBAN_DISPATCH_IN_GATEWAY") {
-        if let Some(parsed) = parse_bool_env("HERMES_KANBAN_DISPATCH_IN_GATEWAY", &v) {
+    if let Ok(v) = std::env::var("HERMES_KANBAN_DISPATCH_IN_GATEWAY")
+        && let Some(parsed) = parse_bool_env("HERMES_KANBAN_DISPATCH_IN_GATEWAY", &v) {
             config.kanban.dispatch_in_gateway = parsed;
         }
-    }
     if let Ok(v) = std::env::var("HERMES_AGENT_API_MAX_RETRIES") {
         if let Ok(parsed) = v.parse::<u32>() {
             config.agent.api_max_retries = Some(parsed);
@@ -2163,23 +2157,20 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
             .get_or_insert_with(crate::config::ProxyConfig::default);
         proxy.socks_proxy = Some(v);
     }
-    if let Ok(v) = std::env::var("HERMES_LLM_API_KEY") {
-        if !v.trim().is_empty() {
+    if let Ok(v) = std::env::var("HERMES_LLM_API_KEY")
+        && !v.trim().is_empty() {
             for provider in config.llm_providers.values_mut() {
                 provider.api_key = Some(v.clone());
             }
         }
-    }
-    if let Ok(v) = std::env::var("HERMES_BUDGET_MAX_RESULT_CHARS") {
-        if let Ok(n) = v.parse::<usize>() {
+    if let Ok(v) = std::env::var("HERMES_BUDGET_MAX_RESULT_CHARS")
+        && let Ok(n) = v.parse::<usize>() {
             config.budget.max_result_size_chars = n;
         }
-    }
-    if let Ok(v) = std::env::var("HERMES_BUDGET_MAX_AGGREGATE_CHARS") {
-        if let Ok(n) = v.parse::<usize>() {
+    if let Ok(v) = std::env::var("HERMES_BUDGET_MAX_AGGREGATE_CHARS")
+        && let Ok(n) = v.parse::<usize>() {
             config.budget.max_aggregate_chars = n;
         }
-    }
 
     // Provider-specific API keys (prefer HERMES_OPENAI_API_KEY over legacy OPENAI_API_KEY).
     let openai_env = std::env::var("HERMES_OPENAI_API_KEY")
@@ -2194,7 +2185,7 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
         config
             .llm_providers
             .entry("openai".to_string())
-            .or_insert_with(LlmProviderConfig::default)
+            .or_default()
             .api_key = Some(v);
     }
     let mut env_overridden_providers = std::collections::HashSet::new();
@@ -2225,7 +2216,7 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
             config
                 .llm_providers
                 .entry(provider_name.to_string())
-                .or_insert_with(LlmProviderConfig::default)
+                .or_default()
                 .api_key = Some(v);
         }
     }
@@ -2242,37 +2233,34 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
             config
                 .llm_providers
                 .entry(provider_name.to_string())
-                .or_insert_with(LlmProviderConfig::default)
+                .or_default()
                 .base_url = Some(v);
         }
     }
 
-    if let Ok(v) = std::env::var("HERMES_BASE_URL") {
-        if !v.trim().is_empty() {
+    if let Ok(v) = std::env::var("HERMES_BASE_URL")
+        && !v.trim().is_empty() {
             for provider in config.llm_providers.values_mut() {
                 provider.base_url = Some(v.clone());
             }
         }
-    }
 
-    if let Ok(v) = std::env::var("OPENROUTER_BASE_URL") {
-        if !v.trim().is_empty() {
+    if let Ok(v) = std::env::var("OPENROUTER_BASE_URL")
+        && !v.trim().is_empty() {
             config
                 .llm_providers
                 .entry("openrouter".to_string())
-                .or_insert_with(LlmProviderConfig::default)
+                .or_default()
                 .base_url = Some(v);
         }
-    }
-    if let Ok(v) = std::env::var("MINIMAX_BASE_URL") {
-        if !v.trim().is_empty() {
+    if let Ok(v) = std::env::var("MINIMAX_BASE_URL")
+        && !v.trim().is_empty() {
             config
                 .llm_providers
                 .entry("minimax".to_string())
-                .or_insert_with(LlmProviderConfig::default)
+                .or_default()
                 .base_url = Some(v);
         }
-    }
 
     if let Ok(token) = std::env::var("SLACK_BOT_TOKEN") {
         let trimmed = token.trim();
@@ -2280,7 +2268,7 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
             let slack = config
                 .platforms
                 .entry("slack".to_string())
-                .or_insert_with(PlatformConfig::default);
+                .or_default();
             let enabled_was_explicit = slack
                 .extra
                 .remove("_enabled_explicit")
@@ -2304,6 +2292,7 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
 ///
 /// Checks:
 /// - max_turns > 0
+///
 /// Resolve the prefill JSON file using upstream-compatible precedence.
 pub fn resolve_prefill_messages_file(config: &GatewayConfig) -> Option<String> {
     env_var_nonempty("HERMES_PREFILL_MESSAGES_FILE")
@@ -2391,16 +2380,14 @@ fn trimmed_optional(value: Option<&str>) -> Option<String> {
 
 fn expand_home_path(raw: &str) -> PathBuf {
     let trimmed = raw.trim();
-    if trimmed == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
+    if trimmed == "~"
+        && let Some(home) = std::env::var_os("HOME") {
             return PathBuf::from(home);
         }
-    }
-    if let Some(rest) = trimmed.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
+    if let Some(rest) = trimmed.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME") {
             return PathBuf::from(home).join(rest);
         }
-    }
     PathBuf::from(trimmed)
 }
 
@@ -2424,13 +2411,12 @@ pub fn validate_config(config: &GatewayConfig) -> Result<(), ConfigError> {
     let _ = config.session.reset_policy.validate();
 
     for (name, provider) in &config.llm_providers {
-        if let Some(key) = &provider.api_key {
-            if key.trim().is_empty() {
+        if let Some(key) = &provider.api_key
+            && key.trim().is_empty() {
                 return Err(ConfigError::ValidationError(format!(
                     "llm_providers.{name}.api_key must not be empty"
                 )));
             }
-        }
         if let Some(api_mode) = &provider.api_mode {
             normalize_provider_api_mode(api_mode).map_err(|_| {
                 ConfigError::ValidationError(format!(
@@ -2438,22 +2424,20 @@ pub fn validate_config(config: &GatewayConfig) -> Result<(), ConfigError> {
                 ))
             })?;
         }
-        if let Some(timeout) = provider.request_timeout_seconds {
-            if !timeout.is_finite() || timeout <= 0.0 {
+        if let Some(timeout) = provider.request_timeout_seconds
+            && (!timeout.is_finite() || timeout <= 0.0) {
                 return Err(ConfigError::ValidationError(format!(
                     "llm_providers.{name}.request_timeout_seconds must be a positive finite number"
                 )));
             }
-        }
     }
 
-    if let Some(api_key) = &config.delegation.api_key {
-        if api_key.trim().is_empty() {
+    if let Some(api_key) = &config.delegation.api_key
+        && api_key.trim().is_empty() {
             return Err(ConfigError::ValidationError(
                 "delegation.api_key must not be empty".into(),
             ));
         }
-    }
 
     Ok(())
 }

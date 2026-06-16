@@ -804,7 +804,7 @@ pub fn refresh_prompt_cache_policy(
     base_url: &str,
     api_mode: &str,
 ) {
-    let (should_cache, native) = agent_runtime_helpers::anthropic_prompt_cache_policy(
+    let (should_cache, native) = agent_runtime_helpers::resolve_prompt_cache_policy(
         provider,
         base_url,
         api_mode,

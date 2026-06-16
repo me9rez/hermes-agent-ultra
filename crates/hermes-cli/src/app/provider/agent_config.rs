@@ -84,7 +84,7 @@ pub fn build_agent_config(config: &GatewayConfig, model: &str) -> AgentConfig {
         "chat_completions"
     };
     let (use_prompt_caching, use_native_cache_layout) =
-        hermes_agent::prompt_caching::anthropic_prompt_cache_policy(
+        hermes_agent::prompt_caching::resolve_prompt_cache_policy(
             &resolved_provider,
             &provider_base_url,
             api_mode_str,

@@ -29,6 +29,19 @@ pub fn anthropic_prompt_cache_policy(
     crate::agent_runtime_helpers::anthropic_prompt_cache_policy(provider, base_url, api_mode, model)
 }
 
+/// Effective prompt-cache policy including the `HERMES_FORCE_PROMPT_CACHING`
+/// opt-in for providers (e.g. `custom:`) not covered by the built-in policy.
+///
+/// See [`crate::agent_runtime_helpers::resolve_prompt_cache_policy`].
+pub fn resolve_prompt_cache_policy(
+    provider: &str,
+    base_url: &str,
+    api_mode: &str,
+    model: &str,
+) -> (bool, bool) {
+    crate::agent_runtime_helpers::resolve_prompt_cache_policy(provider, base_url, api_mode, model)
+}
+
 fn base_url_hostname(base_url: &str) -> Option<String> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
@@ -111,21 +124,49 @@ pub fn apply_anthropic_cache_control(
 }
 
 /// Record Prometheus prompt-cache telemetry from a raw provider usage object.
+///
+/// Provider-agnostic: understands both the Anthropic-wire keys
+/// (`cache_read_input_tokens` / `cache_creation_input_tokens`) and the
+/// OpenAI/chat_completions shape (`prompt_tokens_details.cached_tokens`).
+///
+/// Counts one request-level outcome: a **hit** when any prompt tokens were
+/// served from cache, otherwise a **miss** (we paid full prompt price this
+/// turn). Requests with no prompt-side tokens at all are ignored so streaming
+/// deltas and completion-only chunks don't skew the ratio.
 pub fn record_prompt_cache_telemetry(raw_usage: &serde_json::Value) {
-    let cache_read = raw_usage
-        .get("cache_read_input_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let cache_write = raw_usage
-        .get("cache_creation_input_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    if cache_read > 0 {
-        hermes_telemetry::record_prompt_cache_hit();
+    match prompt_cache_outcome(raw_usage) {
+        Some(true) => hermes_telemetry::record_prompt_cache_hit(),
+        Some(false) => hermes_telemetry::record_prompt_cache_miss(),
+        None => {}
     }
-    if cache_write > 0 {
-        hermes_telemetry::record_prompt_cache_miss();
+}
+
+/// Pure classification of a usage object into a cache outcome:
+/// `Some(true)` = hit (some prompt tokens served from cache), `Some(false)` =
+/// miss (full prompt price paid), `None` = no prompt-side tokens to score.
+fn prompt_cache_outcome(raw_usage: &serde_json::Value) -> Option<bool> {
+    let get = |k: &str| {
+        raw_usage
+            .get(k)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let details_cached = raw_usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let cache_read = get("cache_read_input_tokens")
+        .max(get("cache_read_tokens"))
+        .max(details_cached);
+    let cache_write = get("cache_creation_input_tokens").max(get("cache_write_tokens"));
+    let prompt_side = get("prompt_tokens")
+        .max(get("input_tokens"))
+        .max(cache_read + cache_write);
+    if prompt_side == 0 {
+        return None;
     }
+    Some(cache_read > 0)
 }
 
 #[cfg(test)]
@@ -219,6 +260,46 @@ mod tests {
         );
         assert!(cache);
         assert!(!native);
+    }
+
+    #[test]
+    fn outcome_anthropic_hit_and_miss() {
+        assert_eq!(
+            super::prompt_cache_outcome(&serde_json::json!({
+                "input_tokens": 100,
+                "cache_read_input_tokens": 2000,
+                "cache_creation_input_tokens": 0
+            })),
+            Some(true)
+        );
+        assert_eq!(
+            super::prompt_cache_outcome(&serde_json::json!({
+                "input_tokens": 4766,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            })),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn outcome_openai_cached_tokens_counts_as_hit() {
+        assert_eq!(
+            super::prompt_cache_outcome(&serde_json::json!({
+                "prompt_tokens": 3000,
+                "completion_tokens": 200,
+                "prompt_tokens_details": { "cached_tokens": 1800 }
+            })),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn outcome_none_when_no_prompt_side() {
+        assert_eq!(
+            super::prompt_cache_outcome(&serde_json::json!({ "completion_tokens": 200 })),
+            None
+        );
     }
 
     #[test]

@@ -54,6 +54,7 @@ pub fn usage_stats_from_raw(
     if !has_signal {
         return None;
     }
+    crate::prompt_caching::record_prompt_cache_telemetry(raw);
     let canonical = normalize_usage(raw, provider, api_mode);
     Some(usage_stats_from_canonical(&canonical))
 }

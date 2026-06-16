@@ -151,7 +151,7 @@ pub use bedrock::BedrockProvider;
 pub use inbound_prepare::AgentInboundPreparer;
 pub use prompt_caching::{
     anthropic_prompt_cache_policy, apply_anthropic_cache_control, build_cache_marker,
-    record_prompt_cache_telemetry,
+    record_prompt_cache_telemetry, resolve_prompt_cache_policy,
 };
 pub use provider::{AnthropicProvider, GenericProvider, OpenAiProvider, OpenRouterProvider};
 pub use providers_extra::{

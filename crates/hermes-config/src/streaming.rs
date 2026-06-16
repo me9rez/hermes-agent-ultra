@@ -29,7 +29,7 @@ pub struct StreamingConfig {
 impl Default for StreamingConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             edit_interval_ms: default_edit_interval_ms(),
             buffer_threshold: default_buffer_threshold(),
             max_message_length: default_max_message_length(),
@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn streaming_config_default() {
         let sc = StreamingConfig::default();
-        assert!(!sc.enabled);
+        assert!(sc.enabled);
         assert_eq!(sc.edit_interval_ms, 1000);
         assert_eq!(sc.buffer_threshold, 50);
         assert_eq!(sc.max_message_length, 4096);

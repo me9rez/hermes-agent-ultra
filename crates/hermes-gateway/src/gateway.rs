@@ -38,6 +38,14 @@ pub use crate::session_layer::{SessionTeardownContext, SessionTeardownHandler};
 /// Placeholder shown while the model is generating (WeCom native stream).
 const WECOM_NATIVE_STREAM_THINKING: &str = "思考中...";
 
+fn non_streaming_progress_interval_ms() -> u64 {
+    std::env::var("HERMES_GATEWAY_NON_STREAMING_PROGRESS_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .unwrap_or(60_000)
+}
+
 fn platform_wants_processing_ack(platform: &str) -> bool {
     matches!(
         platform.trim().to_ascii_lowercase().as_str(),
@@ -1441,6 +1449,22 @@ impl Gateway {
                             .send_message(&chat_id, "处理中，请稍候...", None)
                             .await;
                     }
+                }
+            });
+            let adapter_progress = self.get_adapter(&incoming.platform).await;
+            let chat_id_progress = incoming.chat_id.clone();
+            let done_progress = feedback_done.clone();
+            let progress_start = Instant::now();
+            let progress_interval_ms = non_streaming_progress_interval_ms();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(progress_interval_ms)).await;
+                while !done_progress.load(Ordering::Acquire) {
+                    if let Some(adapter) = adapter_progress.clone() {
+                        let elapsed_min = progress_start.elapsed().as_secs().div_euclid(60).max(1);
+                        let msg = format!("仍在处理中（已运行约 {elapsed_min} 分钟）...");
+                        let _ = adapter.send_message(&chat_id_progress, &msg, None).await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(progress_interval_ms)).await;
                 }
             });
         }

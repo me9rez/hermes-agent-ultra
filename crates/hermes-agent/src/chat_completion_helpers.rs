@@ -705,6 +705,7 @@ impl AgentLoop {
                                             self,
                                             &failover_runtime.api_mode,
                                         );
+                                        let mut failover_activated = false;
                                         let fallback_result = match crate::runtime_provider::build_llm_provider_for_runtime(self, &failover_runtime)
                                         {
                                             Ok(provider) => {
@@ -719,11 +720,32 @@ impl AgentLoop {
                                                     )
                                                     .await
                                             }
-                                            Err(build_err) => Err(build_err),
+                                            Err(build_err) => {
+                                                tracing::warn!(
+                                                    "Failover runtime provider unavailable ({build_err}); \
+                                                     using session-injected provider"
+                                                );
+                                                self.activate_runtime_fallback(failover_runtime.clone());
+                                                failover_activated = true;
+                                                crate::runtime_provider::effective_llm_provider(self)
+                                                    .chat_completion(
+                                                        &api_messages,
+                                                        tool_schemas,
+                                                        effective_max_tokens,
+                                                        self.config().temperature,
+                                                        Some(failover_model_name),
+                                                        extra_body.as_ref(),
+                                                    )
+                                                    .await
+                                            }
                                         };
                                         match fallback_result {
                                             Ok(resp) => {
-                                                self.activate_runtime_fallback(failover_runtime);
+                                                if !failover_activated {
+                                                    self.activate_runtime_fallback(
+                                                        failover_runtime,
+                                                    );
+                                                }
                                                 crate::hooks::emit_status(
                                                     self,
                                                     "lifecycle",

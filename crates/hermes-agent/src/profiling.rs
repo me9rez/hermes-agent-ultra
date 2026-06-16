@@ -71,7 +71,7 @@ impl Default for DhatGuard {
 mod tests {
     use std::time::Instant;
 
-    use hermes_core::{Message, MessageRole};
+    use hermes_core::Message;
 
     use super::*;
     use crate::api_messages::assemble_api_messages_from_ctx;
@@ -80,16 +80,8 @@ mod tests {
         let content = "x".repeat(chars_per_message);
         let mut msgs = Vec::with_capacity(turns * 2);
         for _ in 0..turns {
-            msgs.push(Message {
-                role: MessageRole::User,
-                content: Some(content.clone()),
-                ..Default::default()
-            });
-            msgs.push(Message {
-                role: MessageRole::Assistant,
-                content: Some(content.clone()),
-                ..Default::default()
-            });
+            msgs.push(Message::user(content.clone()));
+            msgs.push(Message::assistant(content.clone()));
         }
         msgs
     }

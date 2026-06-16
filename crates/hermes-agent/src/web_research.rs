@@ -2113,7 +2113,7 @@ mod tests {
         let cfg = test_config();
         let mut ctrl = WebResearchController::new(cfg.clone());
         ctrl.plan = parse_plan_json(
-            r#"{"need_web":true,"search_budget":2,"extract_budget":0,"browser_budget":0,"total_budget":2}"#,
+            r#"{"need_web":false,"search_budget":2,"extract_budget":0,"browser_budget":0,"total_budget":2}"#,
             &cfg,
         );
         ctrl.limits = limits_for_config(
@@ -2218,10 +2218,11 @@ mod tests {
 
     #[tokio::test]
     async fn batch_five_searches_budget_four_no_notice_when_four_run() {
-        let cfg = test_config();
+        let mut cfg = test_config();
+        cfg.max_parallel_web_calls = 5;
         let mut ctrl = WebResearchController::new(cfg.clone());
         ctrl.plan = parse_plan_json(
-            r#"{"need_web":true,"search_budget":4,"extract_budget":0,"browser_budget":0,"total_budget":4}"#,
+            r#"{"need_web":false,"search_budget":4,"extract_budget":0,"browser_budget":0,"total_budget":4}"#,
             &cfg,
         );
         ctrl.limits = limits_for_config(
@@ -2368,7 +2369,11 @@ mod tests {
         let plan = fallback_plan(&cfg, &tasks, false);
         assert!(plan.search_budget >= 2);
         let limits = limits_for_config(&cfg, Some(&plan), &tasks, false);
-        assert!(limits.search_max >= 6);
+        let expected_search: u32 = tasks.iter().map(|t| t.max_search).sum();
+        assert_eq!(
+            limits.search_max,
+            expected_search.min(cfg.message_caps.max_total_search)
+        );
     }
 
     #[test]

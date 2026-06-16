@@ -945,6 +945,9 @@ mod tests {
     /// with parallel cargo test workers (env is process-global).
     #[test]
     fn build_default_auxiliary_client_scenarios() {
+        let _env_lock = crate::memory_plugins::TEST_ENV_LOCK
+            .lock()
+            .expect("env lock");
         let _g = EnvGuard::clear();
 
         // Scenario 1: no keys ? empty chain.

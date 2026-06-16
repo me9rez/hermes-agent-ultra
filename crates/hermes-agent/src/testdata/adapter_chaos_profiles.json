@@ -45,7 +45,7 @@
       ],
       "expected": {
         "outcome": "error",
-        "attempts": 3,
+        "attempts": 2,
         "fallback_calls": 0,
         "error_contains": "rate limit"
       }

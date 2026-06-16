@@ -1,17 +1,20 @@
 use super::*;
+use crate::agent_config::is_stream_not_supported_error;
 use crate::governor::{GovernorRuntimeState, TurnGovernor};
 use crate::hooks::spill_hook_context_if_oversized;
 use crate::llm_caller::{
     collect_stream_llm_response, session_disable_streaming, use_streaming_llm_transport,
 };
 use crate::message_sanitization::budget_pressure_text;
-use crate::replay::{ReplayState, redact_json_value};
+use crate::plugins::HookResult;
+use crate::replay::{ReplayState, RouteLearningStats, redact_json_value};
 use crate::route_learning::{
     now_unix_ms, route_learning_effective_stats, route_learning_state_path,
 };
 use crate::tool_executor::{
     coerce_textual_tool_calls, deduplicate_tool_calls, hydrate_session_search_args,
 };
+use futures::StreamExt;
 use futures::stream::BoxStream;
 use hermes_core::JsonSchema;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -21,6 +24,22 @@ fn env_test_lock() -> MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .expect("env test lock poisoned")
+}
+
+struct IsolatedHermesHome {
+    _dir: tempfile::TempDir,
+}
+
+impl IsolatedHermesHome {
+    fn new() -> Self {
+        Self {
+            _dir: tempfile::tempdir().expect("tempdir"),
+        }
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        self._dir.path().to_path_buf()
+    }
 }
 
 fn session_search_call(args: &str) -> ToolCall {
@@ -550,6 +569,13 @@ async fn call_llm_with_retry_strips_provider_prefix_for_primary_and_fallback_mod
     use futures::stream::BoxStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    {
+        let _guard = env_test_lock();
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+    }
+
     struct RecordingProvider {
         seen_models: Arc<std::sync::Mutex<Vec<String>>>,
         call_count: AtomicUsize,
@@ -781,6 +807,13 @@ impl LlmProvider for ChaosHarnessProvider {
 }
 
 async fn run_chaos_harness_scenario(scenario: &ChaosHarnessScenario) -> ChaosHarnessRun {
+    {
+        let _guard = env_test_lock();
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+    }
+
     let mut cfg = AgentConfig::default();
     cfg.model = "nous:primary-model".to_string();
     cfg.retry.max_retries = scenario.max_retries;
@@ -1029,6 +1062,10 @@ async fn status_callback_receives_empty_response_retry_notice() {
         ) -> BoxStream<'static, Result<StreamChunk, AgentError>> {
             futures::stream::empty().boxed()
         }
+
+        fn prefers_non_streaming_transport(&self) -> bool {
+            true
+        }
     }
 
     let captured = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
@@ -1104,6 +1141,10 @@ async fn empty_stop_response_is_accepted_without_retry() {
             _extra_body: Option<&serde_json::Value>,
         ) -> BoxStream<'static, Result<StreamChunk, AgentError>> {
             futures::stream::empty().boxed()
+        }
+
+        fn prefers_non_streaming_transport(&self) -> bool {
+            true
         }
     }
 
@@ -1199,6 +1240,10 @@ async fn run_truncated_tool_call_retries_before_tool_execution() {
             _extra_body: Option<&serde_json::Value>,
         ) -> BoxStream<'static, Result<StreamChunk, AgentError>> {
             futures::stream::empty().boxed()
+        }
+
+        fn prefers_non_streaming_transport(&self) -> bool {
+            true
         }
     }
 
@@ -1727,6 +1772,7 @@ fn test_task_completion_guidance_not_injected_without_tools() {
 fn test_smart_model_routing_cheap_route_for_simple_turn() {
     use futures::stream::BoxStream;
 
+    let home = IsolatedHermesHome::new();
     type DummyProvider = crate::test_support::FixedAssistantProvider;
 
     let mut runtime_providers = HashMap::new();
@@ -1746,6 +1792,7 @@ fn test_smart_model_routing_cheap_route_for_simple_turn() {
 
     let config = AgentConfig {
         model: "openai:gpt-4o".to_string(),
+        hermes_home: Some(home.path().to_string_lossy().into_owned()),
         runtime_providers,
         smart_model_routing: SmartModelRoutingConfig {
             enabled: true,
@@ -2019,6 +2066,7 @@ fn test_runtime_provider_command_args_override_primary_acp_metadata() {
 fn test_smart_model_routing_codex_provider_alias_builds_runtime() {
     use futures::stream::BoxStream;
 
+    let home = IsolatedHermesHome::new();
     type DummyProvider = crate::test_support::FixedAssistantProvider;
 
     let mut runtime_providers = HashMap::new();
@@ -2038,6 +2086,7 @@ fn test_smart_model_routing_codex_provider_alias_builds_runtime() {
 
     let config = AgentConfig {
         model: "openai:gpt-4o".to_string(),
+        hermes_home: Some(home.path().to_string_lossy().into_owned()),
         runtime_providers,
         smart_model_routing: SmartModelRoutingConfig {
             enabled: true,
@@ -2077,6 +2126,7 @@ fn test_smart_model_routing_codex_provider_alias_builds_runtime() {
 fn test_smart_model_routing_qwen_oauth_alias_builds_runtime() {
     use futures::stream::BoxStream;
 
+    let home = IsolatedHermesHome::new();
     type DummyProvider = crate::test_support::FixedAssistantProvider;
 
     let mut runtime_providers = HashMap::new();
@@ -2096,6 +2146,7 @@ fn test_smart_model_routing_qwen_oauth_alias_builds_runtime() {
 
     let config = AgentConfig {
         model: "openai:gpt-4o".to_string(),
+        hermes_home: Some(home.path().to_string_lossy().into_owned()),
         runtime_providers,
         smart_model_routing: SmartModelRoutingConfig {
             enabled: true,
@@ -2668,6 +2719,7 @@ fn test_smart_model_routing_copilot_acp_missing_cli_falls_back() {
 fn test_smart_model_routing_copilot_acp_tcp_mode_skips_cli_check() {
     use futures::stream::BoxStream;
 
+    let home = IsolatedHermesHome::new();
     type DummyProvider = crate::test_support::FixedAssistantProvider;
 
     let mut runtime_providers = HashMap::new();
@@ -2687,6 +2739,7 @@ fn test_smart_model_routing_copilot_acp_tcp_mode_skips_cli_check() {
 
     let config = AgentConfig {
         model: "openai:gpt-4o".to_string(),
+        hermes_home: Some(home.path().to_string_lossy().into_owned()),
         runtime_providers,
         smart_model_routing: SmartModelRoutingConfig {
             enabled: true,

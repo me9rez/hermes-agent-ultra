@@ -456,6 +456,7 @@ impl SessionPersistence {
         cursor: &mut SessionFlushCursor,
     ) -> Result<(), AgentError> {
         let conn = self.conn_arc()?;
+        queries::ensure_session(&conn, session_id, "cli", None)?;
         let sid = session_id.to_string();
         write::execute_write(&conn, move |c| {
             let sql = if schema::table_has_column_pub(c, "messages", "active") {

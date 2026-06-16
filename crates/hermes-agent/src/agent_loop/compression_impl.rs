@@ -139,6 +139,11 @@ impl AgentLoop {
         }
         let pct = (total_chars * 100) / max_c;
         tracing::info!("Context pressure at {}%, triggering compression", pct);
+        crate::hooks::emit_status(
+            self,
+            "lifecycle",
+            &format!("Context pressure at {}% — triggering compression", pct),
+        );
         self.compress_context(ctx).await;
         let after_chars = ctx.total_chars();
         self.emit_compaction_contextlattice_checkpoint(total_chars, after_chars, max_c);
@@ -300,6 +305,14 @@ impl AgentLoop {
                 context_usage_pct = before_pct,
                 "Preflight compression check: no compression needed"
             );
+            crate::hooks::emit_status(
+                self,
+                "lifecycle",
+                &format!(
+                    "Preflight compression check: no compression needed ({}% of context)",
+                    before_pct
+                ),
+            );
             return;
         }
         tracing::info!(
@@ -310,6 +323,14 @@ impl AgentLoop {
             gateway_messages = gateway_msgs,
             context_usage_pct = before_pct,
             "📦 Preflight compression: preparing session"
+        );
+        crate::hooks::emit_status(
+            self,
+            "lifecycle",
+            &format!(
+                "Preflight: compressing before first turn ({}% of context)",
+                before_pct
+            ),
         );
         // Avoid auxiliary summarisation on multi-megabyte histories (very slow, often ineffective).
         if before_pct > 150 {
@@ -341,6 +362,14 @@ impl AgentLoop {
             "Preflight compression complete: {}% -> {}% context usage",
             before_pct,
             after_pct
+        );
+        crate::hooks::emit_status(
+            self,
+            "lifecycle",
+            &format!(
+                "Preflight compression complete: {}% -> {}% context usage",
+                before_pct, after_pct
+            ),
         );
         if after_pct >= threshold_pct {
             crate::hooks::emit_status(

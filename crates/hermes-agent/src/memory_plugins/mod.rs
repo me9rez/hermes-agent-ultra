@@ -15,6 +15,9 @@ pub mod openviking;
 pub mod retaindb;
 pub mod supermemory;
 
+#[cfg(test)]
+pub(crate) use config_io::TEST_ENV_LOCK;
+
 use std::sync::{Arc, Mutex, OnceLock};
 
 use hermes_config::InterestConfig;

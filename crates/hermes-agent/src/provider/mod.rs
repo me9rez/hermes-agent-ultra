@@ -459,7 +459,7 @@ mod tests {
         });
         assert_eq!(
             nous_body["tags"],
-            serde_json::json!(["product=hermes-agent"])
+            crate::provider_profiles::nous_portal_tags()
         );
         assert!(nous_body.get("reasoning").is_none());
 

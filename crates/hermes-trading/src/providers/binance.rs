@@ -41,7 +41,7 @@ impl BinanceProvider {
     }
 
     /// Convert user-facing symbol (e.g. `"BTC-USDT"`) to Binance format (`"BTCUSDT"`).
-    fn to_binance_symbol(symbol: &str) -> String {
+    pub(crate) fn to_binance_symbol(symbol: &str) -> String {
         symbol.replace('-', "")
     }
 

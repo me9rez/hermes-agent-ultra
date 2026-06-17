@@ -41,12 +41,25 @@ pub fn is_us_share(symbol: &str) -> bool {
 /// Normalize alternate symbol formats to canonical form (`HK_00700` → `0700.HK`).
 #[must_use]
 pub fn normalize_symbol(symbol: &str) -> String {
-    let upper = symbol.to_uppercase();
-    if let Some(suffix) = upper.strip_prefix("HK_") {
-        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-            let code: u32 = suffix.parse().unwrap_or(0);
-            return format!("{code:04}.HK");
-        }
+    let trimmed = symbol.trim();
+    // ponytail: tiny alias table; extend when agents keep passing bare crypto tickers.
+    match trimmed {
+        "比特币" => return "BTC-USDT".to_string(),
+        "以太坊" => return "ETH-USDT".to_string(),
+        _ => {}
+    }
+    let upper = trimmed.to_uppercase();
+    match upper.as_str() {
+        "BTC" => return "BTC-USDT".to_string(),
+        "ETH" => return "ETH-USDT".to_string(),
+        _ => {}
+    }
+    if let Some(suffix) = upper.strip_prefix("HK_")
+        && !suffix.is_empty()
+        && suffix.chars().all(|c| c.is_ascii_digit())
+    {
+        let code: u32 = suffix.parse().unwrap_or(0);
+        return format!("{code:04}.HK");
     }
     upper
 }
@@ -76,5 +89,12 @@ mod tests {
     fn normalize_hk_underscore() {
         assert_eq!(normalize_symbol("HK_00700"), "0700.HK");
         assert_eq!(normalize_symbol("0700.HK"), "0700.HK");
+    }
+
+    #[test]
+    fn normalize_crypto_aliases() {
+        assert_eq!(normalize_symbol("BTC"), "BTC-USDT");
+        assert_eq!(normalize_symbol("eth"), "ETH-USDT");
+        assert_eq!(normalize_symbol("比特币"), "BTC-USDT");
     }
 }

@@ -26,6 +26,13 @@ pub fn register(ctx: &RegistryContext<'_>) {
         reg(
             ctx,
             "trading",
+            Arc::new(crate::tools::trading_quote::GetQuoteHandler::new()),
+            "💹",
+            vec![],
+        );
+        reg(
+            ctx,
+            "trading",
             Arc::new(crate::tools::trading_market_data::GetMarketDataHandler::new()),
             "📈",
             vec![],

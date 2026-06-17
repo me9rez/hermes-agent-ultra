@@ -111,9 +111,12 @@
   - 验收：frontmatter `name: trading-debate`。
   - 验收：使用 `delegate_task` 触发 bull/bear 两个子 agent。
   - 验收：输出格式为 pros/cons 结论摘要。
-- [x] 更新 `finance/stocks` SKILL
-  - 验收：When to Use 明确 “历史 OHLCV / 回测” 走 `trading-research`。
-  - 验收：保留 stocks skill 对 quote/company search 的职责。
+- [x] 更新 `finance/stocks` SKILL（optional）
+  - 验收：现货查价走 `get_quote`；本 skill 仅 search/compare/history。
+  - 验收：路径 `optional-skills/finance/stocks/`（非 bundled）。
+- [x] WeCom 查价路由（`get_quote` 优先）
+  - 验收：gateway finance quote hint + `trading-quote` toolset；`web_search` 仅作失败回退。
+  - 验收：`stocks` 降回 optional；现货不再依赖 Python / `terminal`。
 
 ### Hermes 能力启用
 
@@ -161,7 +164,7 @@
 - [ ] `compare_benchmark` — 策略 vs SPY/CSI300
 - [ ] `analyze_trade_journal` — 券商 CSV → 行为统计
 - [ ] `run_factor_ic` — 风格因子 IC 子集（toraniko + factors）
-- [ ] `get_quote` — 轻量现价查询
+- [x] `get_quote` — 轻量现价查询（Rust `hermes-trading`，`trading-quote` toolset，gateway hint）
 - [ ] `trading_account_read` — 券商只读账户/持仓（alpacars / ibapi）
 
 ### 新增 Skills

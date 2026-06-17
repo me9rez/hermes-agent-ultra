@@ -600,6 +600,7 @@ const BUNDLED_SKILL_NAMES_FALLBACK: &[&str] = &[
     "songwriting-and-ai-music",
     "spike",
     "spotify",
+    "spot-quote",
     "subagent-driven-development",
     "systematic-debugging",
     "technical-indicators",

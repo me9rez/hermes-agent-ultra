@@ -1,7 +1,7 @@
 ---
 name: stocks
-description: Stock quotes, history, search, compare, crypto via Yahoo.
-version: 0.2.0
+description: Stock search, compare, history via Yahoo (optional). Spot quotes → use bundled spot-quote + get_quote.
+version: 0.2.1
 author: Mibay (Mibayy), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -9,29 +9,33 @@ metadata:
   hermes:
     tags: [Stocks, Finance, Market, Crypto, Investing]
     category: finance
-    related_skills: [trading-research, trading-debate, dcf-model, comps-analysis, lbo-model]
+    related_skills: [trading-research, trading-debate, spot-quote, dcf-model, comps-analysis, lbo-model]
     requires_toolsets: [terminal]
 ---
 
-# Stocks Skill
+# Stocks Skill (optional)
 
 Read-only market data via Yahoo Finance. Five commands: `quote`, `search`,
 `history`, `compare`, `crypto`. Python stdlib only — no API key, no pip
 installs. Yahoo's endpoint is unofficial and may rate-limit or change.
 
-**Install:** This skill lives in `optional-skills/`. Use `skills_install` (or copy
-to `~/.hermes/skills/finance/stocks/`) before first use. Requires `terminal`
-toolset and Python 3 on the host.
+**Spot quotes:** Use the built-in **`get_quote`** tool for live prices (no Python).
+Install this optional skill only for **search**, **compare**, or **history** browse.
+
+**Optional:** Install with `hermes skills install stocks`. Requires `terminal` toolset
+and Python 3 on the host.
 
 ## When to Use
 
-- User asks for a **current stock price** (AAPL, TSLA, MSFT, ...)
 - User wants to **look up a ticker by company name** (`search`)
 - User wants to **compare several tickers** side by side (`compare`)
 - User asks for a **crypto spot price** via Yahoo (`crypto` — pass `BTC`, script appends `-USD`)
 - User wants a **quick price history browse** (`history` — light Yahoo chart only; see routing table)
 
 ## When NOT to Use
+
+- User asks for a **current stock price** (AAPL, TSLA, MSFT, ...) → use built-in **`get_quote`**
+- User asks **多少钱 / 股价 / 现价** for a ticker → use **`get_quote`**
 
 - User wants **historical OHLCV for backtesting**, Sharpe, drawdown, or T+1 rules → use **`trading-research`** (`get_market_data` / `run_backtest`)
 - User wants **A-share research with Eastmoney live data** → **`trading-research`**
@@ -43,15 +47,14 @@ toolset and Python 3 on the host.
 
 | User intent | Skill | Tool / command |
 |-------------|-------|----------------|
-| 「苹果现在多少钱」 | **stocks** | `terminal` → `stocks_client.py quote AAPL` |
+| 「苹果现在多少钱」 | **`get_quote`** (built-in) | `get_quote(symbol="AAPL")` |
 | 「特斯拉代码是什么」 | **stocks** | `search "Tesla"` |
 | 「比一下 AAPL MSFT GOOGL」 | **stocks** | `compare` |
 | 「拉 000001.SZ 180 天日 K 并回测 RSI」 | **trading-research** | `run_backtest` |
 | 「0700.HK / AAPL 历史回测」 | **trading-research** | `get_market_data` + `run_backtest` |
 | 「BTC-USDT 最近 30 天 K 线」 | **trading-research** | `get_market_data` |
 
-If this skill is **not installed**, suggest `skills_install` for quick quotes, or use
-`web_search` / `trading-research` as fallback depending on intent.
+If `terminal` or Yahoo fails, fall back to `web_search` — **not** `execute_code` with ad-hoc yfinance.
 
 ## Prerequisites
 
@@ -59,27 +62,42 @@ Python 3.8+ stdlib only. Optional: set `ALPHA_VANTAGE_KEY` to enrich
 `market_cap`, `pe_ratio`, and 52-week levels when Yahoo's crumb-protected
 fields come back null. Free key: https://www.alphavantage.co/support/#api-key
 
+Script path (after sync): `{HERMES_HOME}/skills/finance/stocks/scripts/stocks_client.py`
+
 ## How to Run
 
-Invoke through the `terminal` tool. Once installed:
+Invoke through the **`terminal`** tool only. Do **not** use `execute_code` to
+reimplement Yahoo/yfinance.
 
-```
-SCRIPT=~/.hermes/skills/finance/stocks/scripts/stocks_client.py
-python3 $SCRIPT quote AAPL
+**Unix / macOS:**
+
+```bash
+python3 "$HERMES_HOME/skills/finance/stocks/scripts/stocks_client.py" quote AAPL
 ```
 
-All output is JSON on stdout — pipe through `jq` if you want to slice it.
+**Windows (cmd):**
+
+```bat
+python "%HERMES_HOME%\skills\finance\stocks\scripts\stocks_client.py" quote AAPL
+```
+
+Use `python` first on Windows; try `python3` on Unix. `HERMES_HOME` is set by
+Hermes at runtime (e.g. `%LOCALAPPDATA%\hermes-agent-ultra` on Windows).
+
+All output is JSON on stdout.
 
 ## Quick Reference
 
 ```
-python3 $SCRIPT quote AAPL
-python3 $SCRIPT quote AAPL MSFT GOOGL TSLA
-python3 $SCRIPT search "Tesla"
-python3 $SCRIPT history NVDA --range 6mo
-python3 $SCRIPT compare AAPL MSFT GOOGL
-python3 $SCRIPT crypto BTC ETH SOL
+quote AAPL
+quote AAPL MSFT GOOGL TSLA
+search "Tesla"
+history NVDA --range 6mo
+compare AAPL MSFT GOOGL
+crypto BTC ETH SOL
 ```
+
+(Prepend the script path from **How to Run** to each command.)
 
 ## Commands
 
@@ -119,11 +137,11 @@ For crypto **backtests**, use **`trading-research`** with `BTC-USDT`.
 
 ## Verification
 
-```
-python3 ~/.hermes/skills/finance/stocks/scripts/stocks_client.py quote AAPL
+```bash
+python3 "$HERMES_HOME/skills/finance/stocks/scripts/stocks_client.py" quote AAPL
 ```
 
 Returns a JSON object with `symbol: "AAPL"` and a numeric `price` field.
 
 Ask: "AAPL 现在多少钱"
-Expected: Agent uses this skill (`quote AAPL`) or prompts to install if missing — **not** `run_backtest`.
+Expected: Agent calls `get_quote(symbol="AAPL")` — **not** `run_backtest`, `execute_code`, or this optional skill.

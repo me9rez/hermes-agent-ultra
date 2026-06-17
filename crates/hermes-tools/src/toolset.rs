@@ -98,6 +98,8 @@ pub const TOOLSET_FEISHU: &[&str] = &[
 ];
 /// Quick capture inbox (fragments + optional reminders).
 pub const TOOLSET_CAPTURE: &[&str] = &["capture"];
+/// Live spot quote (no backtest / OHLCV).
+pub const TOOLSET_TRADING_QUOTE: &[&str] = &["get_quote"];
 
 // ---------------------------------------------------------------------------
 // Toolset
@@ -322,6 +324,13 @@ impl ToolsetManager {
             "computer_use",
             TOOLSET_COMPUTER_USE.iter().map(|s| s.to_string()).collect(),
         ));
+        self.register(Toolset::new(
+            "trading-quote",
+            TOOLSET_TRADING_QUOTE
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        ));
 
         // Platform composite toolsets
         self.register(Toolset::with_includes(
@@ -349,6 +358,7 @@ impl ToolsetManager {
                 "homeassistant",
                 "tts",
                 "computer_use",
+                "trading-quote",
             ]
             .into_iter()
             .map(String::from)
@@ -719,6 +729,7 @@ mod tests {
         assert!(tools.contains(&"send_message".to_string()));
         assert!(tools.contains(&"ha_call_service".to_string()));
         assert!(tools.contains(&"cronjob".to_string()));
+        assert!(tools.contains(&"get_quote".to_string()));
     }
 
     #[test]

@@ -43,7 +43,7 @@ impl EastmoneyProvider {
     ///
     /// - `"000001.SZ"` → `"0.000001"` (深市 / Shenzhen = market 0)
     /// - `"600519.SH"` → `"1.600519"` (沪市 / Shanghai = market 1)
-    fn to_secid(symbol: &str) -> Result<String, TradingError> {
+    pub(crate) fn to_secid(symbol: &str) -> Result<String, TradingError> {
         let parts: Vec<&str> = symbol.split('.').collect();
         if parts.len() != 2 {
             return Err(TradingError::SymbolNotFound(format!(

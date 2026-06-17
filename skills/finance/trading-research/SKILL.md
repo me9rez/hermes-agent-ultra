@@ -9,7 +9,7 @@ metadata:
   hermes:
     tags: [Finance, Quantitative, Backtest, Market-Data, A-Share, Crypto, HK, US]
     category: finance
-    related_skills: [stocks, trading-debate]
+    related_skills: [stocks, trading-debate, spot-quote]
 ---
 
 # Trading Research Skill
@@ -29,7 +29,7 @@ backtests without any API key or Python dependency.
 ## When NOT to Use
 
 - User asks for **news or research reports** → use `web_search`
-- User asks for **real-time quote only** (no backtest/history pipeline) → use **`stocks`** skill (`quote`) if installed; otherwise `web_search`
+- User asks for **real-time quote only** (no backtest/history pipeline) → use bundled **`spot-quote`** skill + **`get_quote`**; `web_search` only on failure (e.g. Yahoo blocked without VPN) or for retail goods (shoes, rent, etc.)
 - User asks for **investment-committee bull/bear debate** → use **`trading-debate`** (after `run_backtest`)
 - User asks to **place orders or trade** → not supported
 - User asks about **fundamentals** (PE, revenue) → use `web_search`
@@ -123,15 +123,16 @@ Load a previously saved RunCard by `id` from `~/.hermes/trading/runs/{id}/run_ca
 - If a tool returns an error, report the error honestly to the user.
 - Do not claim support for markets/strategies that are not implemented.
 
-## Relationship with `stocks` Skill
+## Relationship with `spot-quote`, `get_quote`, and optional `stocks` Skill
 
-| Scenario | Use this skill | Use `stocks` |
-|----------|---------------|--------------|
+| Scenario | Use this skill | Use `spot-quote` / `get_quote` / `stocks` |
+|----------|---------------|---------------------------------------------|
 | Historical OHLCV (A-share/crypto/HK/US) | ✅ | — |
 | Backtest / Sharpe / T+1 | ✅ | — |
-| Quick US/HK quote (no backtest) | — | ✅ (`skills_install` required) |
-| Company search by name | — | ✅ |
-| `stocks` not installed | `web_search` for spot price | — |
+| Quick US/HK/A-share/crypto spot quote | — | ✅ **`spot-quote`** → **`get_quote`** (`source=auto`) |
+| Retail goods price (shoes, phones) | — | **`web_search`** (not `get_quote`) |
+| Company search by name | — | optional **`stocks`** (`skills install stocks`) |
+| `get_quote` failed | — | `web_search` for spot price |
 
 ## Relationship with `trading-debate` Skill
 
@@ -153,7 +154,10 @@ Expected: Agent calls `run_backtest` with symbol="000001.SZ", strategy="sma_cros
 params={"short_window":20,"long_window":50}, returns RunCard JSON.
 
 Ask: "AAPL 现在多少钱"
-Expected: Agent uses **`stocks`** skill or `web_search` — **not** `get_market_data` / `run_backtest`.
+Expected: Follow **`spot-quote`** — `get_quote(symbol="AAPL", source="auto")`, report `price`. Use `web_search` only if Yahoo fails — **not** `get_market_data` / `run_backtest` / `execute_code`.
+
+Ask: "000001.SZ 现在多少钱"
+Expected: Agent calls `get_quote(symbol="000001.SZ")`, reports `price` from JSON.
 
 ## Limitations
 

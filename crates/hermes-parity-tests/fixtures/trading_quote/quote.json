@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "fixture_group": "trading_quote",
+  "python_module": "N/A (Rust-native hermes-trading)",
+  "cases": [
+    {
+      "id": "aapl_yahoo_auto",
+      "op": "get_quote",
+      "input": {
+        "symbol": "AAPL"
+      },
+      "expected": {
+        "has_symbol": "AAPL",
+        "source_eq": "yahoo",
+        "price_eq": 291.58,
+        "partial_eq": false,
+        "has_market_date": true,
+        "has_as_of": true
+      },
+      "skip": false
+    },
+    {
+      "id": "a_share_eastmoney_auto",
+      "op": "get_quote",
+      "input": {
+        "symbol": "000001.SZ"
+      },
+      "expected": {
+        "has_symbol": "000001.SZ",
+        "source_eq": "eastmoney",
+        "price_eq": 10.5,
+        "partial_eq": false,
+        "has_market_date": true,
+        "has_as_of": true
+      },
+      "skip": false
+    },
+    {
+      "id": "btc_binance_auto",
+      "op": "get_quote",
+      "input": {
+        "symbol": "BTC-USDT"
+      },
+      "expected": {
+        "has_symbol": "BTC-USDT",
+        "source_eq": "binance",
+        "price_eq": 65000.0,
+        "partial_eq": false,
+        "has_market_date": true,
+        "has_as_of": true
+      },
+      "skip": false
+    },
+    {
+      "id": "hk_yahoo_auto",
+      "op": "get_quote",
+      "input": {
+        "symbol": "0700.HK"
+      },
+      "expected": {
+        "has_symbol": "0700.HK",
+        "source_eq": "yahoo",
+        "partial_eq": false,
+        "has_market_date": true,
+        "has_as_of": true
+      },
+      "skip": false
+    },
+    {
+      "id": "invalid_symbol",
+      "op": "get_quote",
+      "input": {
+        "symbol": "INVALID_XYZ"
+      },
+      "expected": {
+        "error_contains": "not found"
+      },
+      "skip": false
+    },
+    {
+      "id": "source_yahoo_explicit",
+      "op": "get_quote",
+      "input": {
+        "symbol": "AAPL",
+        "source": "yahoo"
+      },
+      "expected": {
+        "has_symbol": "AAPL",
+        "source_eq": "yahoo",
+        "price_eq": 291.58,
+        "has_market_date": true,
+        "has_as_of": true
+      },
+      "skip": false
+    }
+  ]
+}

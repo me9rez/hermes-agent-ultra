@@ -81,10 +81,7 @@
         "end_date": "2026-06-01"
       },
       "expected": {
-        "has_fields": ["id", "created_at", "symbol", "strategy", "params", "total_return_pct", "max_drawdown_pct", "trade_count", "sharpe_ratio", "win_rate_pct", "period"],
-        "strategy_eq": "sma_cross",
-        "trade_count_gte": 1,
-        "max_drawdown_lte": 0.0
+        "error_contains": "not supported"
       },
       "skip": false
     },
@@ -99,10 +96,7 @@
         "end_date": "2026-06-01"
       },
       "expected": {
-        "has_fields": ["id", "created_at", "symbol", "strategy", "params", "total_return_pct", "max_drawdown_pct", "trade_count", "sharpe_ratio", "win_rate_pct", "period"],
-        "strategy_eq": "sma_cross",
-        "trade_count_gte": 1,
-        "max_drawdown_lte": 0.0
+        "error_contains": "not supported"
       },
       "skip": false
     }

@@ -51,7 +51,7 @@ and Python 3 on the host.
 | 「特斯拉代码是什么」 | **stocks** | `search "Tesla"` |
 | 「比一下 AAPL MSFT GOOGL」 | **stocks** | `compare` |
 | 「拉 000001.SZ 180 天日 K 并回测 RSI」 | **trading-research** | `run_backtest` |
-| 「0700.HK / AAPL 历史回测」 | **trading-research** | `get_market_data` + `run_backtest` |
+| 「0700.HK / AAPL 历史回测」 | **not supported** | use **`get_quote`** for spot; backtest A-share/crypto only |
 | 「BTC-USDT 最近 30 天 K 线」 | **trading-research** | `get_market_data` |
 
 If `terminal` or Yahoo fails, fall back to `web_search` — **not** `execute_code` with ad-hoc yfinance.

@@ -110,11 +110,7 @@
         "interval": "daily"
       },
       "expected": {
-        "has_symbol": "0700.HK",
-        "has_interval": "daily",
-        "partial_eq": false,
-        "min_rows": 5,
-        "columns": ["date", "open", "high", "low", "close", "volume"]
+        "error_contains": "not supported"
       },
       "skip": false
     },
@@ -128,9 +124,7 @@
         "interval": "daily"
       },
       "expected": {
-        "has_symbol": "0700.HK",
-        "has_interval": "daily",
-        "min_rows": 5
+        "error_contains": "not supported"
       },
       "skip": false
     },
@@ -144,11 +138,7 @@
         "interval": "daily"
       },
       "expected": {
-        "has_symbol": "AAPL",
-        "has_interval": "daily",
-        "partial_eq": false,
-        "min_rows": 5,
-        "columns": ["date", "open", "high", "low", "close", "volume"]
+        "error_contains": "not supported"
       },
       "skip": false
     }

@@ -76,7 +76,7 @@ impl ToolHandler for GetMarketDataHandler {
             "symbol".into(),
             json!({
                 "type": "string",
-                "description": "Symbol identifier. Examples: 'BTC-USDT' (crypto), '000001.SZ' (A-share), '0700.HK' (HK), 'AAPL' (US)"
+                "description": "Symbol identifier. Examples: 'BTC-USDT' (crypto), '000001.SZ' (A-share)"
             }),
         );
         props.insert(
@@ -105,8 +105,8 @@ impl ToolHandler for GetMarketDataHandler {
             "source".into(),
             json!({
                 "type": "string",
-                "description": "Data source: 'auto' (default), 'binance', 'eastmoney', or 'stub'",
-                "enum": ["auto", "binance", "eastmoney", "stub"]
+                "description": "Data source: 'auto' (default), 'binance', or 'eastmoney'",
+                "enum": ["auto", "binance", "eastmoney"]
             }),
         );
         props.insert(
@@ -120,7 +120,7 @@ impl ToolHandler for GetMarketDataHandler {
         tool_schema(
             "get_market_data",
             "Fetch OHLCV (Open/High/Low/Close/Volume) market data for a symbol. \
-             Supports A-shares, crypto, HK (0700.HK), and US (AAPL) symbols. \
+             Supports A-shares and crypto. US/HK historical data is not available — use get_quote for spot prices. \
              No API key required.",
             JsonSchema::object(props, vec!["symbol".into()]),
         )

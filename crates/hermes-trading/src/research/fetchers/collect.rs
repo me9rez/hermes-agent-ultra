@@ -6,6 +6,7 @@ use super::bridge::apply_dims_to_snapshot;
 use super::context::FetchContext;
 use super::registry::{EXEC_ORDER, build_registry, fetcher_for};
 use super::types::CollectOutput;
+use crate::quote_data::QuoteData;
 use crate::research::types::FundamentalsSnapshot;
 
 /// Options for dimension collection.
@@ -16,9 +17,16 @@ pub struct CollectOptions {
 }
 
 /// Collect registered HTTP dimensions for one symbol.
-pub async fn collect_dims(symbol: &str, opts: &CollectOptions) -> CollectOutput {
+pub async fn collect_dims(
+    symbol: &str,
+    opts: &CollectOptions,
+    cached_quote: Option<QuoteData>,
+) -> CollectOutput {
     let registry = build_registry();
     let mut ctx = FetchContext::new(symbol);
+    if let Some(q) = cached_quote {
+        ctx = ctx.with_cached_quote(q);
+    }
     let mut output = CollectOutput {
         ticker: ctx.symbol.clone(),
         market: ctx.market,
@@ -45,8 +53,12 @@ pub async fn collect_dims(symbol: &str, opts: &CollectOptions) -> CollectOutput 
 }
 
 /// Collect HTTP dims, merge snapshot, return raw_dims for scoring.
-pub async fn enrich_snapshot(snap: &mut FundamentalsSnapshot, symbol: &str) -> serde_json::Value {
-    let output = collect_dims(symbol, &CollectOptions::default()).await;
+pub async fn enrich_snapshot(
+    snap: &mut FundamentalsSnapshot,
+    symbol: &str,
+    cached_quote: Option<QuoteData>,
+) -> serde_json::Value {
+    let output = collect_dims(symbol, &CollectOptions::default(), cached_quote).await;
     apply_dims_to_snapshot(snap, &output);
     output.build_raw_dims()
 }

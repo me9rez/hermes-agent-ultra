@@ -3,7 +3,7 @@
 > **更新时间**：2026-06-18
 > **总体状态**：P0a/b/c 已完成；P1 取数 **部分完成**（HTTP transport 层 P1a 进行中，见 [`docs/sop/equity_research_data.md`](docs/sop/equity_research_data.md)）
 > **目标**：把 UZI-Skill(`wbh604/UZI-Skill`)的 **确定性分析大脑 + 结构化研报** 用纯 Rust 重写进 `hermes-trading`，**不引入 Python 运行时**。
-> **不做**：装 Python 包 / Playwright / akshare 作运行时依赖。
+> **不做**：装 Python 包 / Playwright。**akshare-rs**（纯 Rust crate `akshare = "0.1.7"`）已作 A 股硬数据主路，非 Python akshare。
 
 ---
 
@@ -103,12 +103,13 @@ akshare-free(7): macro moat sentiment similar_stocks trap_signals policy contest
 - [ ] 新浪 hq / baidu / baostock（P2）
 
 ### 🔲 P1 — 硬数据替换 web_search（取数层）
-逆向 4 个高价值 provider（沿用 `eastmoney_quote.rs` 模式，抓原始 JSON 自解析）：
-- [ ] `financials`（财务三表）— xueqiu / em_data
+
+**akshare-rs 主路已接入**（2026-06）：`basic`、`kline`、`financials`、`capital_flow`、`lhb`、`research`、`events` — 失败时回退现有 eastmoney 层。
+
+仍待逆向/增强：
 - [ ] `valuation`（PE/PB 历史分位）— em_data
-- [ ] `capital_flow`（北向/融资融券）— em_data（注意 UZI 这里 9 个 akshare 调用 = 9 端点）
-- [ ] `lhb`（龙虎榜）— em_data / akshare_lhb 底层端点
-- **验收**：`FundamentalsSnapshot` 这 4 类字段 provenance 从 `web` 变 `provider`，`data_confidence` 显著上升
+- [ ] `fund_holders`、行业/同行等长尾维度
+- **验收**：`FundamentalsSnapshot` 硬数据字段 provenance 从 `web` 变 `provider`，`data_confidence` 显著上升
 
 ### 🔲 P2 — 长尾维度（逼近 UZI 完整度）
 - [ ] `accretion_dilution`（M&A）+ 分部建模 `segmental`
@@ -122,7 +123,7 @@ akshare-free(7): macro moat sentiment similar_stocks trap_signals policy contest
 
 | 项 | 原因 | 替代 |
 |---|---|---|
-| akshare / baostock 作运行时 | 端点维护地狱 + 违反 0py | 逐端点逆向（P1）|
+| akshare Python / baostock 作运行时 | 端点维护 + 违反 0py | **akshare-rs** 纯 Rust crate（P1 已接入 7 维）|
 | Playwright 源(iwencai/ths_f10/雪球/legulegu/futu) | Rust 无浏览器引擎 | 放弃，或 LLM+web_search |
 | ddgs 搜索 | hermes 已有 `web_search`/`web_extract` | 复用现有工具 |
 | 66 人格**评语** / 护城河 / 政策叙事 / 杀猪盘**判断** | LLM 推理，确定性化会变差 | SKILL.md + LLM |

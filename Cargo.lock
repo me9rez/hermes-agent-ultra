@@ -73,6 +73,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "akshare"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "892157dba16a73f75a018b55dc723c6461245eee47c810ebe0e259803d58f2b1"
+dependencies = [
+ "chrono",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3119,6 +3133,7 @@ dependencies = [
 name = "hermes-trading"
 version = "0.16.0"
 dependencies = [
+ "akshare",
  "async-trait",
  "chrono",
  "hermes-config",

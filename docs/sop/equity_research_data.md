@@ -4,7 +4,21 @@
 |------|-----|
 | Scope | `hermes-trading` A-share fetchers / providers |
 | UZI repo | `wbh604/UZI-Skill` → `skills/deep-analysis/scripts/` |
-| Rust | `crates/hermes-trading/src/providers/eastmoney_http.rs` |
+| Rust | `crates/hermes-trading/src/providers/akshare/` + `eastmoney_http.rs` |
+
+## 数据源优先级（A 股硬数据）
+
+| 维度 | 主路 (akshare-rs 0.1.7) | Fallback |
+|------|-------------------------|----------|
+| basic / get_quote | `a_share_quote` | `eastmoney_http` push2 → 腾讯 qt |
+| kline | `a_share_candles` + 本地 MA/RSI | push2his |
+| financials | `stock_financial_abstract` + `stock_financial_analysis_indicator` | emweb F10 |
+| capital_flow | `a_share_capital_flow` + `stock_hsgt_individual_em` + margin SSE/SZSE | push2 fflow |
+| lhb | `stock_lhb_stock_detail_date_em` | datacenter |
+| research | `stock_research_report_em` | — (非 A 股 web_search) |
+| events | `a_share_announcements` + `stock_news_em` | — (非 A 股 web_search) |
+
+技术指标（MA/RSI/stage）始终由 `kline_util` 从 OHLCV 本地计算，不依赖 akshare 指标端点。
 
 ## 必读 UZI 文件（按优先级）
 
@@ -24,13 +38,14 @@
 | push2 fflow | `eastmoney_http::fetch_push2_fflow_klines` | `ut` + Referer |
 | `parse_ticker` | `symbol::normalize_symbol` | `.SS`→`.SH` 等 |
 | 合并 snapshot | `eastmoney_http::fetch_a_share_snapshot` | push2 → 腾讯 |
-| basic 维 fallback | `research/fetchers/dims/basic.rs` | basic 失败 → `QuoteRouter` |
+| akshare 主路 | `providers/akshare/*` | akshare-rs → eastmoney fallback |
+| basic 维 fallback | `research/fetchers/dims/basic.rs` | akshare → basic → QuoteRouter |
 
 ## P1a HTTP Transport Gate（blocking）
 
 在**新增或修改**任何 `research/fetchers/dims/*.rs` 之前：
 
-1. 所有 `push2.eastmoney.com` / `push2his.eastmoney.com` 调用必须经 [`eastmoney_http.rs`](../../crates/hermes-trading/src/providers/eastmoney_http.rs)
+1. 所有 `push2.eastmoney.com` / `push2his.eastmoney.com` **fallback 路径**调用必须经 [`eastmoney_http.rs`](../../crates/hermes-trading/src/providers/eastmoney_http.rs)（akshare 主路失败时触发）
 2. `cargo test -p hermes-trading` 通过
 3. `cargo clippy -p hermes-trading -- -D warnings` 通过
 4. 本地可选：`cargo test -p hermes-trading -- --ignored live_`

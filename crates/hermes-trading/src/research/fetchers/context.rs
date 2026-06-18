@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use super::types::{DimResult, Market};
+use crate::quote_data::QuoteData;
 
 /// Context for a single symbol collection run (prior dims for `depends_on`).
 #[derive(Debug, Clone)]
@@ -10,6 +11,8 @@ pub struct FetchContext {
     pub symbol: String,
     pub market: Market,
     pub prior: BTreeMap<String, DimResult>,
+    /// Quote already fetched by caller (e.g. `analyze_stock`) — basic dim reuses it.
+    pub cached_quote: Option<QuoteData>,
 }
 
 impl FetchContext {
@@ -21,7 +24,14 @@ impl FetchContext {
             symbol,
             market,
             prior: BTreeMap::new(),
+            cached_quote: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_cached_quote(mut self, quote: QuoteData) -> Self {
+        self.cached_quote = Some(quote);
+        self
     }
 
     #[must_use]

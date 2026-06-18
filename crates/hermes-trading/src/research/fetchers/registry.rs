@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use super::dims::{
-    BasicFetcher, CapitalFlowFetcher, FinancialsFetcher, FundHoldersFetcher, IndustryFetcher,
-    KlineFetcher, LhbFetcher, PeersFetcher, ValuationFetcher, chain_fetcher, contests_fetcher,
-    events_fetcher, futures_fetcher, governance_fetcher, macro_fetcher, materials_fetcher,
-    moat_fetcher, policy_fetcher, research_fetcher, sentiment_fetcher, trap_fetcher,
+    BasicFetcher, CapitalFlowFetcher, EventsFetcher, FinancialsFetcher, FundHoldersFetcher,
+    IndustryFetcher, KlineFetcher, LhbFetcher, PeersFetcher, ResearchFetcher, ValuationFetcher,
+    chain_fetcher, contests_fetcher, futures_fetcher, governance_fetcher, macro_fetcher,
+    materials_fetcher, moat_fetcher, policy_fetcher, sentiment_fetcher, trap_fetcher,
 };
 use super::r#trait::DimFetcher;
 use crate::research::fetchers::dim_keys;
@@ -16,23 +16,23 @@ use crate::research::fetchers::dim_keys;
 pub fn build_registry() -> Vec<Arc<dyn DimFetcher>> {
     vec![
         Arc::new(BasicFetcher::new()),
-        Arc::new(FinancialsFetcher::new()),
+        Arc::new(FinancialsFetcher),
         Arc::new(KlineFetcher),
         Arc::new(macro_fetcher()),
         Arc::new(PeersFetcher),
         Arc::new(chain_fetcher()),
         Arc::new(FundHoldersFetcher),
-        Arc::new(research_fetcher()),
+        Arc::new(ResearchFetcher),
         Arc::new(IndustryFetcher),
         Arc::new(materials_fetcher()),
         Arc::new(futures_fetcher()),
         Arc::new(ValuationFetcher::new()),
         Arc::new(governance_fetcher()),
-        Arc::new(CapitalFlowFetcher::new()),
+        Arc::new(CapitalFlowFetcher),
         Arc::new(policy_fetcher()),
         Arc::new(moat_fetcher()),
-        Arc::new(events_fetcher()),
-        Arc::new(LhbFetcher::new()),
+        Arc::new(EventsFetcher),
+        Arc::new(LhbFetcher),
         Arc::new(sentiment_fetcher()),
         Arc::new(trap_fetcher()),
         Arc::new(contests_fetcher()),

@@ -17,7 +17,7 @@ impl KlineFetcher {
         dim_key: dim_keys::KLINE,
         depends_on: &[],
         markets: &[Market::A, Market::H, Market::U],
-        sources: &["eastmoney_push2his", "yahoo_chart_v8"],
+        sources: &["akshare", "eastmoney_push2his", "yahoo_chart_v8"],
         web_only: false,
     };
 }
@@ -37,7 +37,7 @@ impl DimFetcher for KlineFetcher {
             );
         }
         match compute_kline_stats(&ctx.symbol).await {
-            Ok(stats) => DimResult::ok(
+            Ok((stats, source)) => DimResult::ok(
                 dim_keys::KLINE,
                 &ctx.symbol,
                 json!({
@@ -49,7 +49,7 @@ impl DimFetcher for KlineFetcher {
                     "rsi14": stats.rsi14,
                     "kline_stats": { "max_drawdown": stats.max_drawdown },
                 }),
-                "eastmoney_push2his",
+                source,
                 if stats.stage.is_empty() {
                     DimQuality::Partial
                 } else {

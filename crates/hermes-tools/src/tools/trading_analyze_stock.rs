@@ -47,7 +47,7 @@ impl ToolHandler for AnalyzeStockHandler {
 
         let mut snap = snapshot_from_inputs(&quote, fundamentals);
         let raw_dims = if use_providers {
-            Some(enrich_snapshot(&mut snap, symbol).await)
+            Some(enrich_snapshot(&mut snap, symbol, Some(quote)).await)
         } else {
             None
         };

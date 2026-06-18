@@ -1,12 +1,8 @@
 //! K-line technical stats for dimension 2.
 
-use chrono::{Duration, Utc};
-
 use crate::error::TradingError;
 use crate::indicators::{rsi, sma};
-use crate::provider::MarketDataProvider;
-use crate::providers::EastmoneyProvider;
-use crate::types::{Interval, OhlcvRequest};
+use crate::providers::akshare::fetch_a_share_closes;
 
 #[derive(Debug, Clone)]
 pub struct KlineStats {
@@ -19,19 +15,10 @@ pub struct KlineStats {
     pub rsi14: Option<f64>,
 }
 
-/// Compute UZI-shaped kline dim from OHLCV (A-share via existing Eastmoney provider).
-pub async fn compute_kline_stats(symbol: &str) -> Result<KlineStats, TradingError> {
-    let provider = EastmoneyProvider::new();
-    let end = Utc::now().date_naive();
-    let start = end - Duration::days(365);
-    let req = OhlcvRequest {
-        symbol: symbol.to_string(),
-        start,
-        end,
-        interval: Interval::Daily,
-    };
-    let data = provider.fetch_ohlcv(&req).await?;
-    let closes: Vec<f64> = data.rows.iter().map(|r| r.close).collect();
+/// Compute UZI-shaped kline dim from OHLCV (akshare primary, eastmoney fallback).
+pub async fn compute_kline_stats(symbol: &str) -> Result<(KlineStats, &'static str), TradingError> {
+    let (closes, source) = fetch_a_share_closes(symbol).await?;
+
     if closes.len() < 20 {
         return Err(TradingError::NoData);
     }
@@ -42,19 +29,18 @@ pub async fn compute_kline_stats(symbol: &str) -> Result<KlineStats, TradingErro
     let price = *closes.last().unwrap_or(&0.0);
     let rsi14 = rsi(&closes, 14).last().and_then(|x| *x);
 
-    let stage = classify_stage(price, ma20, ma60);
-    let ma_align = classify_ma_align(ma5, ma20, ma60);
-    let max_drawdown = max_drawdown_pct(&closes);
-
-    Ok(KlineStats {
-        stage,
-        ma_align,
-        max_drawdown,
-        ma5,
-        ma20,
-        ma60,
-        rsi14,
-    })
+    Ok((
+        KlineStats {
+            stage: classify_stage(price, ma20, ma60),
+            ma_align: classify_ma_align(ma5, ma20, ma60),
+            max_drawdown: max_drawdown_pct(&closes),
+            ma5,
+            ma20,
+            ma60,
+            rsi14,
+        },
+        source,
+    ))
 }
 
 fn classify_stage(price: f64, ma20: Option<f64>, ma60: Option<f64>) -> String {

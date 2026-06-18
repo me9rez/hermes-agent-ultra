@@ -53,7 +53,7 @@ No gateway keyword routing — **you** decide whether this skill applies:
 
 **Symbol format:** A-shares use `.SH` / `.SZ` (e.g. `600519.SH`). Do **not** use Yahoo suffix `.SS` — Hermes normalizes it, but prefer `.SH` in tool calls.
 
-1. **`get_quote(symbol)`** — live price + PE (A-share via Eastmoney push2, Tencent qt fallback)
+1. **`get_quote(symbol)`** — live price + PE (A-share: **akshare-rs** primary → Eastmoney push2 → Tencent qt fallback)
    - If Eastmoney quote API fails → note as blocked, continue to fallback section below
 2. **`web_search`** — supplement fundamentals if `data_confidence` will be low:
    revenue, FCF, debt, ROE, peers, industry
@@ -66,7 +66,7 @@ No gateway keyword routing — **you** decide whether this skill applies:
 
 ### Eastmoney API fallback
 
-Tool layer (`get_quote`, `analyze_stock` basic dim) tries **push2 → Tencent qt** automatically.
+Tool layer (`get_quote`, `analyze_stock` basic/kline/financials dims) tries **akshare-rs → push2 → Tencent qt** automatically.
 
 If both fail (push2.eastmoney.com unreachable):
 

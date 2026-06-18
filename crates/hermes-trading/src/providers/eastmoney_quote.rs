@@ -3,28 +3,23 @@
 use async_trait::async_trait;
 
 use crate::error::TradingError;
-use crate::http::default_client;
-use crate::providers::eastmoney_http::{self, AshareSnapshot};
+use crate::providers::eastmoney_http::AshareSnapshot;
 use crate::quote_data::QuoteData;
 use crate::quote_provider::QuoteProvider;
 use crate::settlement::is_a_share;
 use crate::symbol::normalize_symbol;
 
-/// Realtime A-share quote via Eastmoney push2 + Tencent qt fallback.
-#[derive(Debug, Clone)]
-pub struct EastmoneyQuoteProvider {
-    client: reqwest::Client,
-}
+/// Realtime A-share quote via akshare primary + Eastmoney push2 / Tencent qt fallback.
+#[derive(Debug, Clone, Default)]
+pub struct EastmoneyQuoteProvider;
 
 impl EastmoneyQuoteProvider {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            client: default_client(),
-        }
+        Self
     }
 
-    fn snapshot_to_quote(snap: AshareSnapshot) -> QuoteData {
+    pub(crate) fn snapshot_to_quote(snap: AshareSnapshot) -> QuoteData {
         let mut out = QuoteData::new(snap.symbol, snap.source);
         out.short_name = snap.name;
         out.price = snap.price;
@@ -38,12 +33,6 @@ impl EastmoneyQuoteProvider {
     }
 }
 
-impl Default for EastmoneyQuoteProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[async_trait]
 impl QuoteProvider for EastmoneyQuoteProvider {
     async fn fetch_quote(&self, symbol: &str) -> Result<QuoteData, TradingError> {
@@ -53,8 +42,7 @@ impl QuoteProvider for EastmoneyQuoteProvider {
                 "Eastmoney quote only supports A-shares: {symbol}"
             )));
         }
-        let snap = eastmoney_http::fetch_a_share_snapshot(&self.client, &canonical).await?;
-        Ok(Self::snapshot_to_quote(snap))
+        crate::providers::akshare::fetch_a_share_quote_chain(&canonical).await
     }
 
     fn name(&self) -> &str {

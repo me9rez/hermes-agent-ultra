@@ -155,11 +155,27 @@ pub(crate) async fn run_gateway(
                     .iter()
                     .map(|dep| format!("{} ({})", dep, hermes_config::dep_check::description(*dep)))
                     .collect();
-                tracing::warn!(
+                tracing::info!(
                     deps = %labels.join(", "),
-                    "runtime dependencies missing on PATH; run `hermes gateway setup` to install, \
-                     or place binaries under $HERMES_HOME/bin"
+                    "runtime dependencies missing; attempting silent install"
                 );
+                let results = hermes_cli::runtime_dep_install::ensure_missing_runtime_deps(
+                    &missing_runtime_deps,
+                    true,
+                )
+                .await;
+                let still_missing: Vec<String> = results
+                    .into_iter()
+                    .filter(|(_, ok)| !ok)
+                    .map(|(dep, _)| dep.to_string())
+                    .collect();
+                if !still_missing.is_empty() {
+                    tracing::warn!(
+                        deps = %still_missing.join(", "),
+                        "runtime dependencies still missing after auto-install; \
+                         run `hermes gateway setup` or place binaries under $HERMES_HOME/bin"
+                    );
+                }
             }
             drop(_p2);
 

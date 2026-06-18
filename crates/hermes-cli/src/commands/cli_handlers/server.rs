@@ -24,16 +24,10 @@ pub async fn handle_cli_server(
         .to_ascii_lowercase();
 
     match action.as_str() {
-        "config" => {
-            server_config::handle_server_config(&rest, config_dir, &config.server).await
-        }
+        "config" => server_config::handle_server_config(&rest, config_dir, &config.server).await,
         "init" | "setup" => {
-            server_config::handle_server_config(
-                &["init".to_string()],
-                config_dir,
-                &config.server,
-            )
-            .await
+            server_config::handle_server_config(&["init".to_string()], config_dir, &config.server)
+                .await
         }
         "login" => server_login(&config.server, method.as_deref()).await,
         "logout" => server_logout(&config.server).await,

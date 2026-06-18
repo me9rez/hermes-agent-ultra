@@ -257,6 +257,11 @@ pub enum ShallowCommand {
         #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
+    #[command(name = "_ensure-dep", hide = true, disable_help_flag = true)]
+    EnsureDep {
+        #[arg(trailing_var_arg = true, hide = true, allow_hyphen_values = true)]
+        _rest: Vec<String>,
+    },
     Status,
     Version,
     #[command(external_subcommand)]

@@ -17,10 +17,6 @@ name = "hermes"
 path = "src/bin/hermes.rs"
 
 [[bin]]
-name = "hermes-ultra"
-path = "src/bin/hermes-ultra.rs"
-
-[[bin]]
 name = "hermes-agent-ultra"
 path = "src/main.rs"
 
@@ -79,9 +75,11 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 dirs = "6"
-reqwest = { workspace = true, features = ["blocking"] }
+reqwest = { workspace = true, features = ["blocking", "stream"] }
 flate2 = "1"
 tar = "0.4"
+xz2 = "0.1"
+sevenz-rust = "0.6"
 serde_yaml = "0.9"
 regex = { workspace = true }
 urlencoding = "2"

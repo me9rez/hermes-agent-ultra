@@ -1,9 +1,9 @@
-//! Interactive dependency install orchestration, ported from Python
-//! `hermes_cli/dep_ensure.py`.
+//! Interactive dependency install orchestration
+//! mirrors python `hermes_cli/dep_ensure.py`.
 //!
-//! Uses [`hermes_config::dep_check`] for availability detection and delegates
-//! actual installation to `scripts/install.ps1` (Windows) or
-//! `scripts/install.sh` (POSIX).
+//! Uses [`hermes_config::dep_check`] for availability detection. FFmpeg installs
+//! run in-process via [`crate::runtime_dep_install`]; other deps may delegate to
+//! `scripts/install.ps1` / `scripts/install.sh` when interactive.
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -13,6 +13,8 @@ use hermes_config::hermes_home;
 use tokio::process::Command;
 use tracing::{debug, warn};
 
+use crate::runtime_dep_install::{auto_ensure_enabled, ensure_runtime_dep};
+
 /// Shell type used to invoke the install script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellKind {
@@ -20,11 +22,18 @@ pub enum ShellKind {
     Bash,
 }
 
+/// Parse a runtime dependency name (`ffmpeg`, `node`, ...).
+pub fn parse_runtime_dep_name(name: &str) -> Option<RuntimeDep> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "node" => Some(RuntimeDep::Node),
+        "browser" => Some(RuntimeDep::Browser),
+        "ripgrep" | "rg" => Some(RuntimeDep::Ripgrep),
+        "ffmpeg" => Some(RuntimeDep::Ffmpeg),
+        _ => None,
+    }
+}
+
 /// Locate the install script (`install.ps1` or `install.sh`).
-///
-/// Mirrors Python `_find_install_script()`.  Walks up from the current
-/// executable directory looking for a `scripts/` folder containing the
-/// platform-preferred install script.
 pub fn find_install_script() -> Option<(PathBuf, ShellKind)> {
     let (preferred, preferred_kind, fallback, fallback_kind): (&str, ShellKind, &str, ShellKind) =
         if cfg!(windows) {
@@ -43,7 +52,6 @@ pub fn find_install_script() -> Option<(PathBuf, ShellKind)> {
             )
         };
 
-    // Walk up from the current executable directory.
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(PathBuf::from);
         while let Some(d) = dir {
@@ -59,7 +67,6 @@ pub fn find_install_script() -> Option<(PathBuf, ShellKind)> {
         }
     }
 
-    // Also check relative to the current working directory (dev workflow).
     let cwd = std::env::current_dir().ok()?;
     let candidate = cwd.join("scripts").join(preferred);
     if candidate.is_file() {
@@ -73,9 +80,6 @@ pub fn find_install_script() -> Option<(PathBuf, ShellKind)> {
     None
 }
 
-/// Prompt the user with a `[Y/n]` question on stdin.
-///
-/// Returns `true` if the user answered yes (empty or `y`/`yes`).
 fn prompt_yes_no(prompt: &str) -> bool {
     print!("{prompt} [Y/n] ");
     let _ = io::stdout().flush();
@@ -89,23 +93,41 @@ fn prompt_yes_no(prompt: &str) -> bool {
 }
 
 /// Ensure a runtime dependency is available, optionally prompting for install.
-///
-/// Mirrors Python `ensure_dependency(dep, interactive)`.
-///
-/// Returns `true` if the dependency is (or becomes) available.
 pub async fn ensure_dependency(dep: RuntimeDep, interactive: bool) -> bool {
-    // Already installed?
     if is_available(dep) {
         debug!(%dep, "dependency already available");
         return true;
     }
 
-    if !interactive {
+    if dep == RuntimeDep::Ffmpeg {
+        if interactive {
+            if !atty_is_tty() {
+                warn!("not a TTY, skipping install prompt for {}", dep);
+                return false;
+            }
+            if !prompt_yes_no(&format!(
+                "{} is not installed. Install now?",
+                description(dep)
+            )) {
+                return false;
+            }
+            return ensure_runtime_dep(dep, false).await;
+        }
+        if auto_ensure_enabled() {
+            return ensure_runtime_dep(dep, true).await;
+        }
         warn!(%dep, "{} is not installed", description(dep));
         return false;
     }
 
-    // Locate install script.
+    if !interactive {
+        if auto_ensure_enabled() {
+            return ensure_runtime_dep(dep, true).await;
+        }
+        warn!(%dep, "{} is not installed", description(dep));
+        return false;
+    }
+
     let (script, shell) = match find_install_script() {
         Some(pair) => pair,
         None => {
@@ -117,7 +139,6 @@ pub async fn ensure_dependency(dep: RuntimeDep, interactive: bool) -> bool {
         }
     };
 
-    // Interactive TTY prompt.
     if !atty_is_tty() {
         warn!("not a TTY, skipping install prompt for {}", dep);
         return false;
@@ -129,7 +150,6 @@ pub async fn ensure_dependency(dep: RuntimeDep, interactive: bool) -> bool {
         return false;
     }
 
-    // Build command.
     let dep_name = dep.to_string();
     let home = hermes_home();
     let mut cmd = match shell {
@@ -163,21 +183,11 @@ pub async fn ensure_dependency(dep: RuntimeDep, interactive: bool) -> bool {
         }
     };
 
-    // Prevent recursive prompts in the child process.
     cmd.env("IS_INTERACTIVE", "false");
 
     debug!(%dep, "running install script");
     match cmd.status().await {
-        Ok(status) if status.success() => {
-            // Re-check after install.
-            let ok = is_available(dep);
-            if ok {
-                debug!(%dep, "dependency installed successfully");
-            } else {
-                warn!(%dep, "install script succeeded but dependency still not found");
-            }
-            ok
-        }
+        Ok(status) if status.success() => is_available(dep),
         Ok(status) => {
             warn!(%dep, code = ?status.code(), "install script failed");
             false
@@ -199,53 +209,28 @@ pub async fn ensure_all(deps: &[RuntimeDep], interactive: bool) -> Vec<(RuntimeD
     results
 }
 
-/// Minimal TTY detection (stdin is a terminal).
 fn atty_is_tty() -> bool {
-    // Use a simple heuristic: on most platforms, if `TERM` is set or on Windows
-    // assume TTY.  For a more robust check we could use the `atty` crate, but
-    // this avoids adding another dependency.
     if cfg!(windows) {
         return true;
     }
     std::env::var("TERM").is_ok()
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_runtime_dep_names() {
+        assert_eq!(parse_runtime_dep_name("ffmpeg"), Some(RuntimeDep::Ffmpeg));
+        assert_eq!(parse_runtime_dep_name("rg"), Some(RuntimeDep::Ripgrep));
+        assert_eq!(parse_runtime_dep_name("unknown"), None);
+    }
+
     #[tokio::test]
     async fn ensure_returns_true_when_available() {
-        // Node is commonly installed; if it's on PATH this should return true
-        // immediately without prompting.
         if is_available(RuntimeDep::Node) {
             assert!(ensure_dependency(RuntimeDep::Node, false).await);
         }
-    }
-
-    #[tokio::test]
-    async fn ensure_returns_false_non_interactive_when_missing() {
-        // Use a non-interactive call for a dep that might be missing.
-        // Even if all deps are present, the non-interactive path is tested
-        // by the early-return in `ensure_dependency`.
-        // Pick ffmpeg as it's less commonly installed.
-        if !is_available(RuntimeDep::Ffmpeg) {
-            assert!(!ensure_dependency(RuntimeDep::Ffmpeg, false).await);
-        }
-    }
-
-    #[test]
-    fn find_install_script_in_empty_cwd_returns_none_or_some() {
-        // We cannot guarantee the CWD has no scripts (the repo does have them),
-        // so just verify the function does not panic and returns a consistent
-        // result.
-        let result = find_install_script();
-        // If running inside the repo, scripts/ exists and we get Some.
-        // If running elsewhere, we get None.  Either is fine.
-        let _ = result;
     }
 }

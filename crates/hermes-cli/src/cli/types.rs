@@ -316,6 +316,11 @@ pub enum CliCommand {
         /// Enable pyannote speaker diarization.
         diarize: bool,
     },
+    /// Hidden hook for `scripts/install.ps1` / `install.sh --ensure`.
+    EnsureDep {
+        dep: String,
+        quiet: bool,
+    },
     PluginExternal(Vec<String>),
 }
 

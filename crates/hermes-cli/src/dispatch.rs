@@ -483,14 +483,13 @@ pub(crate) async fn run(cli: Cli) {
             )
             .await
         }
-        CliCommand::Server { action, rest, method } => {
-            hermes_cli::commands::handle_cli_server(
-                action,
-                rest,
-                method,
-                cli.config_dir.as_deref(),
-            )
-            .await
+        CliCommand::Server {
+            action,
+            rest,
+            method,
+        } => {
+            hermes_cli::commands::handle_cli_server(action, rest, method, cli.config_dir.as_deref())
+                .await
         }
         CliCommand::Mcp {
             action,
@@ -624,6 +623,16 @@ pub(crate) async fn run(cli: Cli) {
             .await
         }
         CliCommand::Dump { session, output } => run_dump(cli, session, output).await,
+        CliCommand::EnsureDep { dep, quiet } => {
+            let Some(runtime_dep) = hermes_cli::dep_ensure::parse_runtime_dep_name(&dep) else {
+                eprintln!("Unknown runtime dependency: {dep}");
+                std::process::exit(1);
+            };
+            if !hermes_cli::runtime_dep_install::ensure_runtime_dep(runtime_dep, quiet).await {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         CliCommand::Completion { shell } => run_completion(shell),
         CliCommand::Uninstall { yes } => run_uninstall(yes).await,
         CliCommand::Lumio { action, model } => run_lumio(action, model).await,

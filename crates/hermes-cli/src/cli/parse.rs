@@ -110,6 +110,7 @@ fn parse_shallow_command(
         ShallowCommand::Completion { .. } => commands::parse_completion(args),
         ShallowCommand::Uninstall { .. } => commands::parse_uninstall(args),
         ShallowCommand::Lumio { .. } => commands::parse_lumio(args),
+        ShallowCommand::EnsureDep { .. } => commands::parse_ensure_dep(args),
         ShallowCommand::Hermes
         | ShallowCommand::Setup { .. }
         | ShallowCommand::Status

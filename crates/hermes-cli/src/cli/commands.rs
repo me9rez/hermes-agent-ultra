@@ -1087,6 +1087,21 @@ pub fn parse_lumio(args: &[OsString]) -> Result<CliCommand, clap::Error> {
     })
 }
 
+#[derive(Parser, Debug, Clone)]
+#[command(name = "_ensure-dep", about = "hidden runtime dependency installer")]
+struct EnsureDepArgs {
+    dep: String,
+    #[arg(long)]
+    quiet: bool,
+}
+
+pub fn parse_ensure_dep(args: &[OsString]) -> Result<CliCommand, clap::Error> {
+    parse_subcommand::<EnsureDepArgs, _>(args, |a| CliCommand::EnsureDep {
+        dep: a.dep,
+        quiet: a.quiet,
+    })
+}
+
 /// Fully-specified subcommands for shell completion (built on demand, not at startup).
 pub fn all_subcommand_commands() -> Vec<clap::Command> {
     macro_rules! commands {

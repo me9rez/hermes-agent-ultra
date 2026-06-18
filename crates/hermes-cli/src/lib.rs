@@ -40,6 +40,7 @@ pub mod plan_mode;
 pub mod platform_toolsets;
 pub mod profiles;
 pub mod providers;
+pub mod runtime_dep_install;
 pub mod runtime_tool_wiring;
 pub mod skills_config;
 pub mod skin_engine;

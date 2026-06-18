@@ -73,6 +73,7 @@ Options:
   --version TAG          Release tag to install (same as positional version)
   --setup                Run post-install setup flow without prompting
   --skip-setup           Skip post-install setup flow
+  --ensure NAME          Install runtime dependency NAME (ffmpeg|node|browser|ripgrep)
   --dir PATH             Install directory for binaries/symlink (explicit override)
   --hermes-home PATH     Hermes home directory for SOUL.md bootstrap
   -h, --help             Show this help
@@ -136,6 +137,14 @@ while [[ $# -gt 0 ]]; do
       fi
       HERMES_HOME="$2"
       shift 2
+      ;;
+    --ensure)
+      if [[ $# -lt 2 ]]; then
+        echo "--ensure requires a dependency name (ffmpeg|node|browser|ripgrep)" >&2
+        exit 1
+      fi
+      export HERMES_HOME
+      exec bash "$(dirname "$0")/ensure-runtime-dep.sh" "$2"
       ;;
     --*)
       echo "Unknown option: $1" >&2

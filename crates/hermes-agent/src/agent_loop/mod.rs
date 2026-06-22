@@ -105,7 +105,7 @@ pub(crate) use crate::window_stats::{push_window_f64, push_window_u64};
 pub(crate) const CONVERSATIONAL_SUPPORT_GUIDANCE: &str = "# Conversational support protocol\nWhen users share personal stress, emotions, or difficult decisions, start with a brief non-judgmental acknowledgment, ask one clarifying question if context is missing, then offer practical options with trade-offs. Keep factual or technical requests direct and do not force emotional language where it does not fit. Do not present yourself as a therapist or crisis service; when safety risk appears, urge the user to seek immediate professional or emergency help.";
 pub(crate) const OAUTH_REFRESH_BACKOFF_SECS: u64 = 60;
 pub(crate) use crate::objective_guard::{
-    OBJECTIVE_DEEP_AUDIT_MAX_RETRIES, OBJECTIVE_DEEP_AUDIT_TAG, OBJECTIVE_GUARD_MAX_RETRIES,
+    OBJECTIVE_DEEP_AUDIT_MAX_RETRIES, OBJECTIVE_GUARD_MAX_RETRIES,
     detect_repo_review_intent, exploratory_problem_solving_system_hint, extract_session_objective,
     objective_guard_policy, objective_guard_retry_prompt, objective_guard_satisfied,
     objective_mode_system_hint,
@@ -1750,7 +1750,7 @@ pub(crate) use finalizer_fns::{
     finalizer_action_execution_requires_retry, finalizer_claim_requires_evidence_retry,
     finalizer_output_quality_requires_retry, inject_runtime_tool_params,
     is_contextlattice_shell_invocation, latest_user_content, objective_eval_score,
-    session_search_has_query, summarize_background_review_result,
+    session_search_has_query,
 };
 
 pub(crate) use cost_fns::{

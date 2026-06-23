@@ -207,6 +207,25 @@ impl AgentLoop {
                             }
                         }
                     }
+                    // Cache diagnostics: capture prefix shape, compare with
+                    // previous turn, log hit/miss breakdown.
+                    if let Ok(mut state) = self.state.lock() {
+                        let prev = state.last_prefix_shape.clone();
+                        let s_hit = state.session_cache_hit;
+                        let s_miss = state.session_cache_miss;
+                        let (new_shape, _diag) = crate::cache_diagnostics::trace_turn(
+                            ctx.get_messages(),
+                            tool_schemas,
+                            0, // log_rewrite_version — TODO: wire compression count
+                            response.usage.as_ref(),
+                            prev.as_ref(),
+                            s_hit,
+                            s_miss,
+                        );
+                        state.last_prefix_shape = Some(new_shape);
+                        state.session_cache_hit = _diag.session_hit;
+                        state.session_cache_miss = _diag.session_miss;
+                    }
                     return Ok(response);
                 }
                 Err(e) => {

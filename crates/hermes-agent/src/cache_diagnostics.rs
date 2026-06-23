@@ -5,9 +5,9 @@
 //! start of each turn, then compares against the previous turn to explain
 //! cache misses.
 
-use hermes_core::{ToolSchema, UsageStats};
+use hermes_core::{MessageRole, ToolSchema, UsageStats};
 use sha2::{Digest, Sha256};
-use tracing::debug;
+use tracing::{debug, info};
 
 // ---------------------------------------------------------------------------
 // PrefixShape
@@ -142,6 +142,106 @@ pub fn compare_shape(
         session_hit: 0,  // filled by caller from AgentSharedState
         session_miss: 0, // filled by caller from AgentSharedState
     }
+}
+
+// ---------------------------------------------------------------------------
+// trace_turn — convenience function for production wiring
+// ---------------------------------------------------------------------------
+
+/// Capture the current prefix shape from context messages + tool schemas,
+/// compare against the previous turn's shape (stored in `prev_shape`),
+/// log a structured diagnostic line, and return the new shape + cumulative
+/// session counters.
+///
+/// Call this right after receiving an LLM response, passing the usage stats
+/// from the response. The `log_rewrite_version` should come from the
+/// compression module (increments on each compaction).
+pub fn trace_turn(
+    messages: &[hermes_core::types::Message],
+    tool_schemas: &[ToolSchema],
+    log_rewrite_version: u32,
+    usage: Option<&UsageStats>,
+    prev_shape: Option<&PrefixShape>,
+    session_hit: u64,
+    session_miss: u64,
+) -> (PrefixShape, CacheDiagnostics) {
+    // Extract system prompt from messages (first system message).
+    let system_prompt: String = messages
+        .iter()
+        .find(|m| m.role == MessageRole::System)
+        .and_then(|m| m.content.as_deref())
+        .unwrap_or("")
+        .to_string();
+
+    let cur_shape = capture_shape(&system_prompt, tool_schemas, log_rewrite_version);
+    let mut diag = if let Some(prev) = prev_shape {
+        compare_shape(prev, &cur_shape, usage)
+    } else {
+        // First turn — no previous shape to compare.
+        let (hit, miss) = usage
+            .map(|u| (u.cache_read_tokens, u.cache_write_tokens))
+            .unwrap_or((0, 0));
+        CacheDiagnostics {
+            prefix_hash: cur_shape.prefix_hash.clone(),
+            prefix_changed: false,
+            prefix_change_reasons: vec![],
+            system_hash: cur_shape.system_hash.clone(),
+            tools_hash: cur_shape.tools_hash.clone(),
+            log_rewrite_version: cur_shape.log_rewrite_version,
+            tool_schema_tokens: cur_shape.tool_schema_tokens,
+            cache_miss_tokens: miss,
+            cache_hit_tokens: hit,
+            session_hit,
+            session_miss,
+        }
+    };
+
+    // Update cumulative session counters.
+    diag.session_hit = session_hit + diag.cache_hit_tokens;
+    diag.session_miss = session_miss + diag.cache_miss_tokens;
+
+    // Structured log line for diagnostics.
+    let total = diag.session_hit + diag.session_miss;
+    let session_rate = if total > 0 {
+        diag.session_hit * 100 / total
+    } else {
+        0
+    };
+    let turn_total = diag.cache_hit_tokens + diag.cache_miss_tokens;
+    let turn_rate = if turn_total > 0 {
+        diag.cache_hit_tokens * 100 / turn_total
+    } else {
+        0
+    };
+
+    if diag.prefix_changed {
+        info!(
+            target: "cache_diag",
+            turn_hit = diag.cache_hit_tokens,
+            turn_miss = diag.cache_miss_tokens,
+            turn_rate = %format!("{}%", turn_rate),
+            session_hit = diag.session_hit,
+            session_miss = diag.session_miss,
+            session_rate = %format!("{}%", session_rate),
+            reasons = ?diag.prefix_change_reasons,
+            tool_schema_tokens = diag.tool_schema_tokens,
+            "Cache prefix CHANGED — expect cache miss"
+        );
+    } else {
+        info!(
+            target: "cache_diag",
+            turn_hit = diag.cache_hit_tokens,
+            turn_miss = diag.cache_miss_tokens,
+            turn_rate = %format!("{}%", turn_rate),
+            session_hit = diag.session_hit,
+            session_miss = diag.session_miss,
+            session_rate = %format!("{}%", session_rate),
+            tool_schema_tokens = diag.tool_schema_tokens,
+            "Cache prefix stable"
+        );
+    }
+
+    (cur_shape, diag)
 }
 
 // ---------------------------------------------------------------------------

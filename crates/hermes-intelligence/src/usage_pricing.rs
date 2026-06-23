@@ -551,6 +551,29 @@ pub fn normalize_usage(
         };
     }
 
+    // DeepSeek automatic prefix caching: prompt_cache_hit_tokens / prompt_cache_miss_tokens
+    // These are top-level fields in the usage object, not nested under prompt_tokens_details.
+    // DeepSeek has no separate "cache write" phase — miss tokens are simply uncached input.
+    let deepseek_hit = get_u64(raw_usage, "prompt_cache_hit_tokens");
+    let deepseek_miss = get_u64(raw_usage, "prompt_cache_miss_tokens");
+    if deepseek_hit > 0 || deepseek_miss > 0 {
+        let _prompt_total = first_nonzero(raw_usage, &["prompt_tokens", "input_tokens"]);
+        let completion_tokens = first_nonzero(raw_usage, &["completion_tokens", "output_tokens"]);
+        let reasoning_tokens = raw_usage
+            .get("output_tokens_details")
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        return CanonicalUsage {
+            input_tokens: deepseek_miss,
+            output_tokens: completion_tokens,
+            cache_read_tokens: deepseek_hit,
+            cache_write_tokens: 0, // DeepSeek has no separate write phase
+            reasoning_tokens,
+            request_count: 1,
+        };
+    }
+
     // OpenAI Chat Completions (default)
     let prompt_total = first_nonzero(raw_usage, &["prompt_tokens", "input_tokens"]);
     let completion_tokens = first_nonzero(raw_usage, &["completion_tokens", "output_tokens"]);
@@ -779,6 +802,41 @@ mod tests {
         let result = calculate_cost("deepseek-v4-pro", &usage, Some("deepseek"), None);
         assert_eq!(result.status, CostStatus::Estimated);
         assert_eq!(result.amount_usd, Some(3.48));
+    }
+
+    #[test]
+    fn test_normalize_usage_deepseek_cache_fields() {
+        // DeepSeek returns prompt_cache_hit_tokens / prompt_cache_miss_tokens
+        // as top-level fields in the usage object.
+        let raw = serde_json::json!({
+            "prompt_tokens": 5000,
+            "completion_tokens": 300,
+            "total_tokens": 5300,
+            "prompt_cache_hit_tokens": 3500,
+            "prompt_cache_miss_tokens": 1500
+        });
+        let usage = normalize_usage(&raw, Some("deepseek"), Some("chat_completions"));
+        assert_eq!(usage.cache_read_tokens, 3500);
+        assert_eq!(usage.cache_write_tokens, 0); // DeepSeek has no write phase
+        assert_eq!(usage.input_tokens, 1500); // miss tokens = uncached input
+        assert_eq!(usage.output_tokens, 300);
+        assert_eq!(usage.prompt_tokens(), 5000); // hit + miss = total prompt
+    }
+
+    #[test]
+    fn test_normalize_usage_deepseek_all_miss() {
+        // First turn: everything is a cache miss.
+        let raw = serde_json::json!({
+            "prompt_tokens": 2000,
+            "completion_tokens": 100,
+            "total_tokens": 2100,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 2000
+        });
+        let usage = normalize_usage(&raw, Some("deepseek"), Some("chat_completions"));
+        assert_eq!(usage.cache_read_tokens, 0);
+        assert_eq!(usage.input_tokens, 2000);
+        assert_eq!(usage.prompt_tokens(), 2000);
     }
 
     #[test]

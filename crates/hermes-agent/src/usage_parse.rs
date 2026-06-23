@@ -50,6 +50,9 @@ pub fn usage_stats_from_raw(
     .any(|k| raw.get(*k).and_then(|v| v.as_u64()).unwrap_or(0) > 0)
         || ["cache_read_input_tokens", "cache_creation_input_tokens"]
             .iter()
+            .any(|k| raw.get(*k).and_then(|v| v.as_u64()).unwrap_or(0) > 0)
+        || ["prompt_cache_hit_tokens", "prompt_cache_miss_tokens"]
+            .iter()
             .any(|k| raw.get(*k).and_then(|v| v.as_u64()).unwrap_or(0) > 0);
     if !has_signal {
         return None;

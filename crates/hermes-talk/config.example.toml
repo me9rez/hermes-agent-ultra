@@ -1,0 +1,148 @@
+# ============================================================
+# hermes-talk 配置示例（`hermes talk init` 会复制到 $HERMES_HOME/hermes-talk/）
+# 本地 TTS + ASR 基于 Rockchip NPU（RK3588）；云后端使用阿里云百炼
+# ============================================================
+
+# ============================================================
+# 语音识别 (ASR)
+# ============================================================
+[asr]
+
+# ASR 后端: "local"（本地 NPU）或 "bailian"（阿里云）
+backend = "local"
+
+[asr.local]
+
+# ASR 模型文件目录，包含 llmasr.rkllm、asr_llm.data 等 10 个文件
+data_path = "data"
+
+# 认证配置
+# trial=1 为试用模式；填入 license_path 则为正式授权
+# 格式: { "trial": 1, "rkauth_modules_config": [{ "module": "asr", "license_path": "/path/to/lic" }] }
+auth_config = '{ "trial": 1, "rkauth_modules_config": [{ "module": "asr", "license_path": "/home/key.lic" }] }'
+
+# ============================================================
+# 语音合成 (TTS)
+# ============================================================
+[tts]
+
+# TTS 后端: "local"（本地 NPU）或 "bailian"（阿里云）
+backend = "local"
+
+[tts.local]
+
+# 认证配置，格式与 ASR 不同，参考 Rockchip SDK 文档
+auth_config = '{ "trial": 1, "license_path": "key.lic" }'
+
+# TTS 模型目录，包含 am_part1.data / am_part2.data / voc.data
+model_path = "models/rk3588"
+
+# 发音词典目录（中文拼音、英文 CMU、日文、韩文）
+dicts_path = "frontend_extras"
+
+# 音色编号，仅支持 0 / 1 / 2
+# speaker_id = 0
+
+# 语速，1.0 为正常
+# alpha = 1.0
+
+# ============================================================
+# 大语言模型 (LLM)
+# ============================================================
+[llm]
+
+# OpenAI 兼容 API 地址
+base_url = "http://127.0.0.1:8080/v1"
+
+# API Key
+api_key = "sk-your-key"
+
+# 模型名称
+model = "your-model"
+
+# 系统提示词
+system_prompt = "语音助手，先短答。"
+
+# 每次回复的最大 token 数
+max_tokens = 80
+
+# 启用 function calling（执行命令、调用 Hermes）
+# tools_enabled = true
+
+# [llm.aipc_talk]
+# call_hermes 工具连接的 Gateway WebSocket（需 gateway 启用 aipc_talk，尚未内置）
+# url = "ws://127.0.0.1:9100"
+
+# 启用深度思考（思维链）
+# thinking_enabled = true
+
+# ============================================================
+# 唤醒词
+# ============================================================
+[wake]
+
+# 是否启用唤醒词
+enabled = true
+
+# 唤醒词列表（模型已预置在二进制中，首次运行自动解压到缓存）
+phrases = ["小白小白"]
+
+# 唤醒成功后的语音提示
+# ack_reply = "哎，我在！"
+
+# 唤醒后等待语音输入的秒数
+# grace_after_wake_sec = 5
+
+# 一轮对话结束后静默多少秒回到休眠
+# idle_after_turn_sec = 30
+
+# ============================================================
+# 以下配置项均有代码中的合理默认值，可按需取消注释
+# ============================================================
+
+# [dashscope]
+#
+# 阿里云 DashScope API key（仅云后端需要）
+# api_key = "sk-your-key"
+# WebSocket 地址
+# ws_url = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+
+# [orchestrator]
+#
+# 用户停顿时长(ms)后触发 LLM 请求，越大越不灵敏但有助收完整句话
+# endpoint_silence_ms = 1200
+# 触发 LLM 的最小字数，避免"呃"、"好"等短音误触发
+# min_final_chars = 4
+# TTS 分句的最小字符数
+# sentence_min_len = 12
+# TTS 首包提前发送的字符数（减少首音延迟）
+# tts_first_chunk_chars = 6
+# 是否允许打断（barge-in）
+# barge_in_enabled = true
+
+# [audio]
+#
+# 音频输入设备名，留空用系统默认
+# input_device = ""
+# 音频输出设备名，留空用系统默认
+# output_device = ""
+
+# [denoise]
+#
+# 启用降噪（模型已预置）
+# enabled = true
+
+# [vad]
+#
+# VAD 语音活动检测灵敏度，0.0-1.0，越低越敏感
+# threshold = 0.5
+
+# [aec]
+#
+# 启用回声消除（Speex）
+# enabled = true
+
+# [speaker]
+#
+# 声纹验证（需先运行 `hermes talk enroll` 注册声纹）
+# enabled = false

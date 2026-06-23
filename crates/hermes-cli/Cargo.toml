@@ -11,6 +11,8 @@ autobins = false
 default = []
 otlp = ["hermes-telemetry/otlp"]
 swarms = ["hermes-intelligence/swarms"]
+talk = ["dep:hermes-talk"]
+talk-rockchip = ["talk", "hermes-talk/rockchip"]
 
 [[bin]]
 name = "hermes"
@@ -59,6 +61,7 @@ hermes-acp-server = { workspace = true }
 hermes-intelligence = { workspace = true }
 hermes-insights = { workspace = true }
 hermes-server-client = { workspace = true }
+hermes-talk = { workspace = true, optional = true }
 clap = { workspace = true }
 clap_complete = "4"
 ratatui = { workspace = true }

@@ -643,6 +643,12 @@ pub(crate) async fn run(cli: Cli) {
             mode,
             diarize,
         } => hermes_cli::commands::handle_cli_meeting(action, audio, title, mode, diarize).await,
+        #[cfg(feature = "talk")]
+        CliCommand::Talk {
+            action,
+            config,
+            seconds,
+        } => hermes_cli::commands::handle_cli_talk(action, config, seconds).await,
         CliCommand::PluginExternal(raw) => {
             hermes_cli::commands::handle_cli_external_plugin_subcommand(raw).await
         }

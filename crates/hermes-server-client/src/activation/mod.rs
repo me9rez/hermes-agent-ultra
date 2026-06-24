@@ -104,8 +104,12 @@ impl DeviceActivation {
             );
         }
 
-        let mut request =
-            build_activate_request(api.config().channel.as_str(), &fingerprint, geo.as_ref());
+        let mut request = build_activate_request(
+            api.config().app.as_str(),
+            api.config().channel.as_str(),
+            &fingerprint,
+            geo.as_ref(),
+        );
         request.sn = state.sn.clone();
 
         match api.device_activate(session, &request).await {

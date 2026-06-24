@@ -41,11 +41,13 @@ pub fn collect_fingerprint(
 }
 
 pub fn build_activate_request(
+    app: &str,
     channel: &str,
     fingerprint: &DeviceFingerprint,
     geo: Option<&GeoIpInfo>,
 ) -> DeviceActivateRequest {
     let mut request = DeviceActivateRequest {
+        app: app.to_string(),
         channel: channel.to_string(),
         mac: fingerprint.mac.clone(),
         sn: fingerprint.sn.clone(),
@@ -286,7 +288,8 @@ mod tests {
             operator: "China Mobile".into(),
             ..Default::default()
         };
-        let req = build_activate_request("flowy", &fp, Some(&geo));
+        let req = build_activate_request("flowymes", "flowy", &fp, Some(&geo));
+        assert_eq!(req.app, "flowymes");
         assert_eq!(req.country, "China");
         assert_eq!(req.province, "Beijing");
         assert_eq!(req.operator, "China Mobile");

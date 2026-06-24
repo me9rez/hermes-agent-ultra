@@ -175,6 +175,9 @@ pub struct BindEmailRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceActivateRequest {
+    /// Client app identifier (`flowymes`, `herdsman`, `aipc`, …).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub app: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub channel: String,
     pub mac: String,

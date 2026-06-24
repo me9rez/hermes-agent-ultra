@@ -121,12 +121,23 @@ impl FlowyApiClient {
         session: &ServerSession,
         body: Value,
     ) -> Result<VideoTaskRecord, ServerClientError> {
+        self.generate_video_with_timeout(session, body, DEFAULT_VIDEO_POLL_TIMEOUT_SECS)
+            .await
+    }
+
+    /// Create a Seedance video task and poll until completion with a custom timeout.
+    pub async fn generate_video_with_timeout(
+        &self,
+        session: &ServerSession,
+        body: Value,
+        timeout_secs: u64,
+    ) -> Result<VideoTaskRecord, ServerClientError> {
         let created: CreateVideoTaskResponse = self.create_video_task(session, body).await?;
         self.poll_video_task(
             session,
             created.id,
             DEFAULT_VIDEO_POLL_INTERVAL_SECS,
-            DEFAULT_VIDEO_POLL_TIMEOUT_SECS,
+            timeout_secs.max(30),
         )
         .await
     }
@@ -218,12 +229,16 @@ pub fn video_task_status_label(status: i32) -> &'static str {
 
 /// Error message for terminal non-success video statuses.
 pub fn video_task_failure_message(record: &VideoTaskRecord) -> String {
+    let detail = record
+        .failure_detail()
+        .map(|d| format!(": {d}"))
+        .unwrap_or_default();
     match record.status {
-        VIDEO_TASK_STATUS_FAILED => "video generation failed".to_string(),
-        VIDEO_TASK_STATUS_EXPIRED => "video task expired".to_string(),
-        VIDEO_TASK_STATUS_CANCELLED => "video task cancelled".to_string(),
+        VIDEO_TASK_STATUS_FAILED => format!("video generation failed{detail}"),
+        VIDEO_TASK_STATUS_EXPIRED => format!("video task expired{detail}"),
+        VIDEO_TASK_STATUS_CANCELLED => format!("video task cancelled{detail}"),
         _ => format!(
-            "video task ended with status {} ({})",
+            "video task ended with status {} ({}){detail}",
             record.status,
             video_task_status_label(record.status)
         ),

@@ -24,7 +24,7 @@ pub use error::ServerClientError;
 pub use flowy::{
     ClawModelEntry, CreateVideoTaskResponse, CreditsBalance, CreditsCheckinResponse,
     FlowyApiClient, ImageGenerationRequest, MODEL_CATEGORY_IMAGE, MODEL_CATEGORY_VIDEO, UserMe,
-    VideoTaskRecord,
+    VideoTaskRecord, resolve_model_in_catalog,
 };
 pub use llm::ServerLlmProvider;
 pub use profile::ProfileStore;

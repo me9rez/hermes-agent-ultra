@@ -26,7 +26,7 @@ fn default_media_provider() -> String {
 /// Image generation defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageGenSettings {
-    /// Model id from `GET /model/availableListClaw?category=6` (e.g. `AIPC-z-image-turbo`).
+    /// List `id` from `GET /model/availableListClaw?category=6` (e.g. `AIPC-z-image-turbo`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
 
@@ -46,6 +46,7 @@ impl Default for ImageGenSettings {
 /// Video generation defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VideoGenSettings {
+    /// List `id` from `GET /model/availableListClaw?category=4` (e.g. `AIPC-doubao-seedance-...`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
 

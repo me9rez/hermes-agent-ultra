@@ -154,7 +154,13 @@ fn print_model_entry(entry: &ClawModelEntry) {
         MODEL_CATEGORY_VIDEO => "video",
         _ => "other",
     };
-    println!("  - {} [{}] {}", entry.name, kind, entry.id);
+    println!(
+        "  - {} [{}] id={} (or {})",
+        entry.name,
+        kind,
+        entry.id,
+        entry.flowy_model_id()
+    );
 }
 
 async fn pick_and_save_model(
@@ -201,7 +207,7 @@ pub(crate) async fn interactive_model_pick(
 
     println!("Available {kind} models:");
     for (idx, entry) in models.iter().enumerate() {
-        println!("  [{}] {} — {}", idx + 1, entry.name, entry.id);
+        println!("  [{}] {} — id={}", idx + 1, entry.name, entry.id);
     }
     let current = if kind == "video" {
         &config.media.video.model

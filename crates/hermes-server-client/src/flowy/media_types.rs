@@ -63,6 +63,27 @@ impl VideoTaskRecord {
     pub fn is_success(&self) -> bool {
         self.status == VIDEO_TASK_STATUS_SUCCEEDED
     }
+
+    /// Best-effort upstream failure reason from `result` JSON.
+    pub fn failure_detail(&self) -> Option<String> {
+        let result = self.result.as_ref()?;
+        for key in ["error", "message", "fail_reason", "reason"] {
+            if let Some(s) = result.get(key).and_then(|v| v.as_str()) {
+                let t = s.trim();
+                if !t.is_empty() {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        result
+            .get("status")
+            .and_then(|v| v.as_str())
+            .filter(|s| {
+                let lower = s.to_ascii_lowercase();
+                lower.contains("fail") || lower.contains("error")
+            })
+            .map(str::to_string)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -2,7 +2,9 @@
 
 pub mod assets;
 pub mod backends;
+pub mod flowy_params;
 pub mod register;
+pub mod tool_schemas;
 pub mod tools;
 pub mod workflows;
 

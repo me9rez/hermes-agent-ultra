@@ -237,6 +237,59 @@ pub struct ClawModelEntry {
     pub category: i32,
 }
 
+impl ClawModelEntry {
+    /// List API `id` — pass verbatim as image/video request `model`.
+    pub fn api_model_id(&self) -> String {
+        self.id.clone()
+    }
+
+    /// `tb_model.name` parsed from list `id` (`AIPC-<name>`).
+    pub fn tb_model_name(&self) -> String {
+        let id = self.id.trim();
+        let name = id
+            .strip_prefix("AIPC-")
+            .or_else(|| id.strip_prefix("aipc-"))
+            .unwrap_or(id);
+        name.to_ascii_lowercase()
+    }
+
+    /// Equivalent `flowy/<tb_model.name>` form accepted by the server.
+    pub fn flowy_model_id(&self) -> String {
+        format!("flowy/{}", self.tb_model_name())
+    }
+
+    /// Whether `candidate` matches this catalog entry (`id` or `flowy/<name>`).
+    pub fn matches_model_candidate(&self, candidate: &str) -> bool {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            return false;
+        }
+        if self.id == candidate || self.id.eq_ignore_ascii_case(candidate) {
+            return true;
+        }
+        if self.flowy_model_id().eq_ignore_ascii_case(candidate) {
+            return true;
+        }
+        if let Some(name) = candidate
+            .strip_prefix("flowy/")
+            .or_else(|| candidate.strip_prefix("FLOWY/"))
+        {
+            if name == self.tb_model_name() {
+                return true;
+            }
+        }
+        if let Some(name) = candidate
+            .strip_prefix("AIPC-")
+            .or_else(|| candidate.strip_prefix("aipc-"))
+        {
+            if name.eq_ignore_ascii_case(&self.tb_model_name()) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatSessionReportRequest {

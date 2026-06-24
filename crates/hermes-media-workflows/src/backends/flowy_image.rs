@@ -30,10 +30,10 @@ impl ImageGenBackend for FlowyImageGenBackend {
     async fn generate(&self, request: ImageGenRequest) -> Result<String, ToolError> {
         self.services.require_token().await?;
 
-        let model = match request.model.as_deref() {
-            Some(m) if !m.trim().is_empty() => m.trim().to_string(),
-            _ => self.services.default_image_model().await?,
-        };
+        let model = self
+            .services
+            .resolve_image_model(request.model.as_deref())
+            .await?;
 
         let flowy_req = ImageGenerationRequest {
             model: model.clone(),
@@ -59,8 +59,27 @@ impl ImageGenBackend for FlowyImageGenBackend {
         } else {
             for url in urls {
                 if self.services.media.image.save_locally {
-                    let artifact = persist_from_url(&url, "flowy", &model).await?;
-                    artifacts.push(artifact);
+                    match persist_from_url(&url, "flowy", &model).await {
+                        Ok(artifact) => artifacts.push(artifact),
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                url = %url,
+                                "image generated but local persist failed; keeping remote URL"
+                            );
+                            artifacts.push(crate::assets::MediaArtifact {
+                                local_path: std::path::PathBuf::new(),
+                                remote_url: Some(url),
+                                mime: "image/png".into(),
+                                width: None,
+                                height: None,
+                                duration_secs: None,
+                                provider: "flowy".into(),
+                                model: model.clone(),
+                                job_id: uuid::Uuid::new_v4().to_string(),
+                            });
+                        }
+                    }
                 } else {
                     artifacts.push(crate::assets::MediaArtifact {
                         local_path: std::path::PathBuf::new(),

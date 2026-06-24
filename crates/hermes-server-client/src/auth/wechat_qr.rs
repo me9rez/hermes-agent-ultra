@@ -69,9 +69,8 @@ impl AuthProvider for WeChatQrAuthProvider {
                 ServerClientError::InvalidResponse("WeChat login missing provider state".into())
             })
             .and_then(|raw| {
-                serde_json::from_str(raw).map_err(|e| {
-                    ServerClientError::InvalidResponse(e.to_string())
-                })
+                serde_json::from_str(raw)
+                    .map_err(|e| ServerClientError::InvalidResponse(e.to_string()))
             })?;
 
         if let Some(expires_at) = pending.expires_at

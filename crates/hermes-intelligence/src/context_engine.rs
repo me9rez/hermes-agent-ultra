@@ -457,7 +457,8 @@ impl ContextEngine for DefaultContextEngine {
 /// destroy the byte-stable cache prefix across compaction boundaries.
 fn is_compression_summary(msg: &Value) -> bool {
     msg.get("role").and_then(|r| r.as_str()) == Some("user")
-        && msg.get("content")
+        && msg
+            .get("content")
             .and_then(|c| c.as_str())
             .is_some_and(|c| c.trim_start().starts_with("<compression-summary>"))
 }
@@ -473,12 +474,7 @@ fn pinned_prefix_len(messages: &[Value], target_tokens: u64) -> usize {
     let n = messages.len();
 
     // 1. System prompt is always first, always pinned.
-    if i < n
-        && messages[i]
-            .get("role")
-            .and_then(|r| r.as_str())
-            == Some("system")
-    {
+    if i < n && messages[i].get("role").and_then(|r| r.as_str()) == Some("system") {
         i += 1;
     }
 
@@ -488,10 +484,7 @@ fn pinned_prefix_len(messages: &[Value], target_tokens: u64) -> usize {
     let max_tok = MAX_PINNED_FIRST_USER_TOKENS
         .min((target_tokens as f64 * PINNED_FIRST_USER_WINDOW_FRAC) as u64);
     if i < n
-        && messages[i]
-            .get("role")
-            .and_then(|r| r.as_str())
-            == Some("user")
+        && messages[i].get("role").and_then(|r| r.as_str()) == Some("user")
         && !is_compression_summary(&messages[i])
     {
         let content = messages[i]

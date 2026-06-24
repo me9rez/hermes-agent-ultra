@@ -110,20 +110,23 @@ pub async fn run_doctor(
                                         manager.session(),
                                         profile.id,
                                     )
-                                    .await {
+                                    .await
+                                {
                                     Ok(true) => {
                                         checks.push(DoctorCheck {
                                             name: "device.activation",
                                             ok: true,
-                                            detail: "device activation reported for this user/version"
-                                                .to_string(),
+                                            detail:
+                                                "device activation reported for this user/version"
+                                                    .to_string(),
                                         });
                                     }
                                     Ok(false) => {
                                         checks.push(DoctorCheck {
                                             name: "device.activation",
                                             ok: true,
-                                            detail: "device activation already up to date".to_string(),
+                                            detail: "device activation already up to date"
+                                                .to_string(),
                                         });
                                     }
                                     Err(err) => {
@@ -173,9 +176,7 @@ pub async fn run_doctor(
             });
 
             let stored = config.auth.wechat_app_id.trim();
-            if !stored.is_empty()
-                && !hermes_config::is_valid_wechat_open_app_id(stored)
-            {
+            if !stored.is_empty() && !hermes_config::is_valid_wechat_open_app_id(stored) {
                 checks.push(DoctorCheck {
                     name: "server.wechat_app_id",
                     ok: false,

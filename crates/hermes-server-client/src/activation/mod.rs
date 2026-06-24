@@ -100,9 +100,7 @@ impl DeviceActivation {
         if force_fresh_geo {
             debug!(
                 user_id,
-                app_version,
-                current_ip,
-                "public IP changed — re-reporting device activation"
+                app_version, current_ip, "public IP changed — re-reporting device activation"
             );
         }
 
@@ -124,7 +122,11 @@ impl DeviceActivation {
         }
     }
 
-    async fn resolve_geo(&self, state: &mut DeviceStateFile, force_refresh: bool) -> Option<GeoIpInfo> {
+    async fn resolve_geo(
+        &self,
+        state: &mut DeviceStateFile,
+        force_refresh: bool,
+    ) -> Option<GeoIpInfo> {
         if !force_refresh
             && let Some(cache) = &state.geo_cache
             && geo_cache_fresh(cache)
@@ -156,8 +158,8 @@ impl DeviceActivation {
         let raw = tokio::fs::read_to_string(&self.state_path)
             .await
             .map_err(|e| ServerClientError::Agent(hermes_core::AgentError::Io(e.to_string())))?;
-        let mut state: DeviceStateFile =
-            serde_json::from_str(&raw).map_err(|e| ServerClientError::InvalidResponse(e.to_string()))?;
+        let mut state: DeviceStateFile = serde_json::from_str(&raw)
+            .map_err(|e| ServerClientError::InvalidResponse(e.to_string()))?;
         migrate_legacy_activation(&mut state);
         Ok(state)
     }
@@ -225,7 +227,9 @@ fn geo_cache_fresh(cache: &GeoIpCacheEntry) -> bool {
 }
 
 fn geo_cache_age_ms(cache: &GeoIpCacheEntry) -> i64 {
-    Utc::now().timestamp_millis().saturating_sub(cache.fetched_at_ms)
+    Utc::now()
+        .timestamp_millis()
+        .saturating_sub(cache.fetched_at_ms)
 }
 
 /// Migrate pre-user-tracking activation flags into a synthetic legacy user bucket.
@@ -267,7 +271,12 @@ mod tests {
     fn reactivate_when_ip_changes() {
         let mut state = DeviceStateFile::default();
         record_activation(&mut state, 42, "0.16.0", "203.0.113.1");
-        assert!(!should_skip_activation(&state, 42, "0.16.0", "203.0.113.99"));
+        assert!(!should_skip_activation(
+            &state,
+            42,
+            "0.16.0",
+            "203.0.113.99"
+        ));
     }
 
     #[test]
@@ -291,10 +300,12 @@ mod tests {
             ..Default::default()
         };
         migrate_legacy_activation(&mut state);
-        assert!(state
-            .activations_by_user
-            .get("_legacy_device")
-            .is_some_and(|v| v.contains("0.15.0")));
+        assert!(
+            state
+                .activations_by_user
+                .get("_legacy_device")
+                .is_some_and(|v| v.contains("0.15.0"))
+        );
     }
 
     #[test]

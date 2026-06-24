@@ -79,9 +79,7 @@ pub fn capture_shape(
     let tool_schema_tokens = schemas
         .iter()
         .map(|s| {
-            let json_len = serde_json::to_string(s)
-                .map(|j| j.len())
-                .unwrap_or(0);
+            let json_len = serde_json::to_string(s).map(|j| j.len()).unwrap_or(0);
             (json_len as f64 * 0.25) as u64
         })
         .sum();
@@ -141,8 +139,8 @@ pub fn compare_shape(
         tool_schema_tokens: cur.tool_schema_tokens,
         cache_miss_tokens,
         cache_hit_tokens,
-        session_hit: 0,   // filled by caller from AgentSharedState
-        session_miss: 0,  // filled by caller from AgentSharedState
+        session_hit: 0,  // filled by caller from AgentSharedState
+        session_miss: 0, // filled by caller from AgentSharedState
     }
 }
 
@@ -182,7 +180,7 @@ fn hash_normalized_tool_schemas(schemas: &[ToolSchema]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hermes_core::{tool_schema, JsonSchema};
+    use hermes_core::{JsonSchema, tool_schema};
 
     fn sample_schema(name: &str, desc: &str) -> ToolSchema {
         tool_schema(name, desc, JsonSchema::new("object"))
@@ -213,11 +211,7 @@ mod tests {
 
     #[test]
     fn changed_tools_gives_different_prefix() {
-        let a = capture_shape(
-            "system",
-            &[sample_schema("tool_a", "A")],
-            0,
-        );
+        let a = capture_shape("system", &[sample_schema("tool_a", "A")], 0);
         let b = capture_shape(
             "system",
             &[sample_schema("tool_a", "A"), sample_schema("tool_b", "B")],
@@ -230,16 +224,8 @@ mod tests {
 
     #[test]
     fn schema_order_independent() {
-        let a = capture_shape(
-            "s",
-            &[sample_schema("b", "B"), sample_schema("a", "A")],
-            0,
-        );
-        let b = capture_shape(
-            "s",
-            &[sample_schema("a", "A"), sample_schema("b", "B")],
-            0,
-        );
+        let a = capture_shape("s", &[sample_schema("b", "B"), sample_schema("a", "A")], 0);
+        let b = capture_shape("s", &[sample_schema("a", "A"), sample_schema("b", "B")], 0);
         assert_eq!(a.tools_hash, b.tools_hash);
         assert_eq!(a.prefix_hash, b.prefix_hash);
     }
@@ -251,7 +237,10 @@ mod tests {
         let cur = capture_shape("system", &schemas, 1);
         let diag = compare_shape(&prev, &cur, None);
         assert!(diag.prefix_changed);
-        assert!(diag.prefix_change_reasons.contains(&"log_rewrite".to_string()));
+        assert!(
+            diag.prefix_change_reasons
+                .contains(&"log_rewrite".to_string())
+        );
     }
 
     #[test]

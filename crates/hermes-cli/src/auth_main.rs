@@ -4,14 +4,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use aes_gcm::Aes256Gcm;
-use aes_gcm::aead::{Aead, KeyInit};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use chrono::{DateTime, Utc};
-use hermes_auth::{
-    AuthManager, FileTokenStore, OAuth2Endpoints, OAuthCredential, exchange_refresh_token,
-};
 use crate::Cli;
 use crate::app::provider_api_key_from_env;
 use crate::auth::{
@@ -31,6 +23,14 @@ use crate::auth::{
 };
 use crate::paths::CliStateRoot;
 use crate::providers::{OAUTH_CAPABLE_PROVIDERS, known_providers};
+use aes_gcm::Aes256Gcm;
+use aes_gcm::aead::{Aead, KeyInit};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use chrono::{DateTime, Utc};
+use hermes_auth::{
+    AuthManager, FileTokenStore, OAuth2Endpoints, OAuthCredential, exchange_refresh_token,
+};
 use hermes_config::{
     GatewayConfig, PlatformConfig, hermes_home, load_config, load_user_config_file,
     save_config_yaml, validate_config,
@@ -369,10 +369,7 @@ pub async fn lookup_secret_from_vault(
     None
 }
 
-pub async fn resolve_llm_login_token(
-    cli: &Cli,
-    provider: &str,
-) -> Result<String, AgentError> {
+pub async fn resolve_llm_login_token(cli: &Cli, provider: &str) -> Result<String, AgentError> {
     if let Some(k) = provider_api_key_from_env(provider) {
         return Ok(k);
     }
@@ -436,10 +433,7 @@ pub async fn hydrate_provider_env_from_vault_for_cli(cli: &Cli) -> Result<(), Ag
             Ok(creds) => {
                 crate::env_vars::set_var("NOUS_API_KEY", creds.api_key.clone());
                 if !creds.base_url.trim().is_empty() {
-                    crate::env_vars::set_var(
-                        "NOUS_INFERENCE_BASE_URL",
-                        creds.base_url.clone(),
-                    );
+                    crate::env_vars::set_var("NOUS_INFERENCE_BASE_URL", creds.base_url.clone());
                 }
                 let expires_at = parse_rfc3339_utc(creds.expires_at.as_deref());
                 let _ = manager
@@ -649,9 +643,7 @@ pub fn save_persisted_weixin_account(
     Ok(())
 }
 
-pub async fn weixin_token_from_env_or_prompt(
-    account_id: &str,
-) -> Result<String, AgentError> {
+pub async fn weixin_token_from_env_or_prompt(account_id: &str) -> Result<String, AgentError> {
     if let Ok(v) = std::env::var("WEIXIN_TOKEN") {
         let v = v.trim().to_string();
         if !v.is_empty() {
@@ -681,9 +673,7 @@ pub async fn weixin_token_from_env_or_prompt(
     Ok(v)
 }
 
-pub async fn qqbot_app_id_from_env_or_prompt(
-    existing: Option<&str>,
-) -> Result<String, AgentError> {
+pub async fn qqbot_app_id_from_env_or_prompt(existing: Option<&str>) -> Result<String, AgentError> {
     if let Ok(v) = std::env::var("QQ_APP_ID") {
         let v = v.trim().to_string();
         if !v.is_empty() {
@@ -1075,9 +1065,7 @@ pub fn wecom_qr_page_url(scode: &str) -> String {
     )
 }
 
-pub async fn wecom_bot_id_from_env_or_prompt(
-    existing: Option<&str>,
-) -> Result<String, AgentError> {
+pub async fn wecom_bot_id_from_env_or_prompt(existing: Option<&str>) -> Result<String, AgentError> {
     if let Some(v) = existing.map(str::trim).filter(|s| !s.is_empty()) {
         return Ok(v.to_string());
     }
@@ -1097,9 +1085,7 @@ pub async fn wecom_bot_id_from_env_or_prompt(
     Ok(s.to_string())
 }
 
-pub async fn wecom_secret_from_env_or_prompt(
-    existing: Option<&str>,
-) -> Result<String, AgentError> {
+pub async fn wecom_secret_from_env_or_prompt(existing: Option<&str>) -> Result<String, AgentError> {
     if let Some(v) = existing.map(str::trim).filter(|s| !s.is_empty()) {
         return Ok(v.to_string());
     }
@@ -1119,9 +1105,7 @@ pub async fn wecom_secret_from_env_or_prompt(
     Ok(s.to_string())
 }
 
-pub async fn wecom_qr_login_flow(
-    timeout_seconds: u64,
-) -> Result<(String, String), AgentError> {
+pub async fn wecom_qr_login_flow(timeout_seconds: u64) -> Result<(String, String), AgentError> {
     const WECOM_QR_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
     let client = reqwest::Client::builder()
@@ -1475,10 +1459,7 @@ pub async fn fetch_weixin_qr(
         .map_err(|e| AgentError::Io(format!("weixin qr get_bot_qrcode parse: {e}")))
 }
 
-pub async fn print_auth_status_matrix(
-    cli: &Cli,
-    manager: &AuthManager,
-) -> Result<(), AgentError> {
+pub async fn print_auth_status_matrix(cli: &Cli, manager: &AuthManager) -> Result<(), AgentError> {
     let cfg_path = hermes_state_root(cli).join("config.yaml");
     let disk = load_user_config_file(&cfg_path).map_err(|e| AgentError::Config(e.to_string()))?;
 

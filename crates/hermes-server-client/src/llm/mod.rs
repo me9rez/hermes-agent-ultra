@@ -85,16 +85,16 @@ impl ServerLlmProvider {
             .access_token()
             .await?
             .filter(|t| !t.is_empty())
-            .ok_or_else(|| ServerClientError::AuthRequired("not logged in to remote server".into()))?;
+            .ok_or_else(|| {
+                ServerClientError::AuthRequired("not logged in to remote server".into())
+            })?;
 
         let base = self.config.effective_llm_base_url();
         let model = self.config.effective_default_llm_model();
 
         Ok(GenericProvider::new(base, token.clone(), model)
             .with_header("token", token)
-            .with_request_timeout_seconds(
-                self.config.llm.request_timeout_seconds.max(1) as f64,
-            ))
+            .with_request_timeout_seconds(self.config.llm.request_timeout_seconds.max(1) as f64))
     }
 
     async fn resolve_model(&self, model: Option<&str>) -> Result<String, ServerClientError> {
@@ -202,7 +202,9 @@ impl From<ServerClientError> for AgentError {
     fn from(value: ServerClientError) -> Self {
         match value {
             ServerClientError::Agent(e) => e,
-            ServerClientError::AuthRequired(msg) => AgentError::Config(format!("auth required: {msg}")),
+            ServerClientError::AuthRequired(msg) => {
+                AgentError::Config(format!("auth required: {msg}"))
+            }
             other => AgentError::Config(other.to_string()),
         }
     }

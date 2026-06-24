@@ -13,7 +13,7 @@ use hermes_agent::agent_runtime_helpers::{
 use hermes_agent::cache_diagnostics::{capture_shape, compare_shape};
 use hermes_core::{Message, UsageStats};
 use hermes_intelligence::context_engine::{ContextEngine, DefaultContextEngine};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // Task 1 — DeepSeek is recognised in the cache policy
@@ -21,10 +21,17 @@ use serde_json::{json, Value};
 
 #[test]
 fn deepseek_policy_returns_cache_without_native_layout() {
-    let (use_cache, native) =
-        anthropic_prompt_cache_policy("deepseek", "https://api.deepseek.com/v1", "openai_chat", "deepseek-chat");
+    let (use_cache, native) = anthropic_prompt_cache_policy(
+        "deepseek",
+        "https://api.deepseek.com/v1",
+        "openai_chat",
+        "deepseek-chat",
+    );
     assert!(use_cache, "DeepSeek should enable prompt caching");
-    assert!(!native, "DeepSeek should NOT use native cache_control markers");
+    assert!(
+        !native,
+        "DeepSeek should NOT use native cache_control markers"
+    );
 
     // Also test host-based detection via api.deepseek.com
     let (use_cache2, _) = anthropic_prompt_cache_policy(
@@ -38,15 +45,26 @@ fn deepseek_policy_returns_cache_without_native_layout() {
 
 #[test]
 fn deepseek_policy_detected_via_model_name() {
-    let (use_cache, _) =
-        anthropic_prompt_cache_policy("openai", "https://api.openai.com/v1", "openai_chat", "deepseek-r1-distill");
-    assert!(use_cache, "Model name containing 'deepseek' should enable caching");
+    let (use_cache, _) = anthropic_prompt_cache_policy(
+        "openai",
+        "https://api.openai.com/v1",
+        "openai_chat",
+        "deepseek-r1-distill",
+    );
+    assert!(
+        use_cache,
+        "Model name containing 'deepseek' should enable caching"
+    );
 }
 
 #[test]
 fn anthropic_native_unchanged_by_deepseek_addition() {
-    let (use_cache, native) =
-        anthropic_prompt_cache_policy("anthropic", "https://api.anthropic.com", "anthropic_messages", "claude-sonnet-4-20250514");
+    let (use_cache, native) = anthropic_prompt_cache_policy(
+        "anthropic",
+        "https://api.anthropic.com",
+        "anthropic_messages",
+        "claude-sonnet-4-20250514",
+    );
     assert!(use_cache);
     assert!(native);
 }
@@ -55,7 +73,10 @@ fn anthropic_native_unchanged_by_deepseek_addition() {
 fn resolve_policy_honors_env_override() {
     // Without override
     let (use_cache, _native) = resolve_prompt_cache_policy(
-        "deepseek", "https://api.deepseek.com/v1", "openai_chat", "deepseek-chat",
+        "deepseek",
+        "https://api.deepseek.com/v1",
+        "openai_chat",
+        "deepseek-chat",
     );
     assert!(use_cache);
 

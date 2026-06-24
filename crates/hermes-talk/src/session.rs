@@ -115,6 +115,7 @@ impl Session {
         let sleep_phrases = wake_cfg.effective_sleep_phrases();
 
         let asr_backend = AsrBackend::from_config(&self.cfg.asr);
+        let asr_offline = matches!(asr_backend, AsrBackend::Sherpa);
         let (asr, mut asr_rx) = create_asr(
             &self.cfg.dashscope,
             &self.cfg.asr,
@@ -310,6 +311,8 @@ impl Session {
         let mut partial_stable_since: Option<Instant> = None;
         let mut last_asr_event_at: Option<Instant> = None;
         let mut input_gated: bool = false;
+        let mut utterance_active: bool = false;
+        let mut pending_offline_flush: Option<Instant> = None;
 
         let (done_tx, mut done_rx) = mpsc::channel::<(String, u64, bool)>(4);
 
@@ -386,6 +389,8 @@ impl Session {
         let idle_after_turn = Duration::from_secs(wake_cfg.idle_after_turn_sec);
         let mut diag_tick: u32 = 0;
         let mut last_barge_in_suppress_warn: Option<Instant> = None;
+        let wake_ack_playing = Arc::new(AtomicBool::new(false));
+        let (wake_ack_done_tx, mut wake_ack_done_rx) = mpsc::channel::<()>(1);
 
         loop {
             tokio::select! {
@@ -444,47 +449,44 @@ impl Session {
                             _last_wake_at = Some(Instant::now());
                             if matches!(wake_phase, WakePhase::Dormant) {
                                 info!("wake: waking from dormant — connecting ASR");
-                                let asr_ok = {
-                                    let mut retries = 3u32;
-                                    loop {
-                                        match asr.resume().await {
-                                            Ok(()) => break true,
-                                            Err(e) => {
-                                                retries = retries.saturating_sub(1);
-                                                if retries == 0 {
-                                                    error!(error = %e, "asr resume failed, giving up");
-                                                    break false;
-                                                }
-                                                warn!(error = %e, remaining = retries, "asr resume failed, retrying");
-                                                tokio::time::sleep(Duration::from_millis(500)).await;
-                                            }
-                                        }
-                                    }
+                                let has_ack = !wake_cfg.ack_reply.trim().is_empty();
+                                let _ = asr.set_gate(true).await;
+                                let _ = asr.reconnect().await;
+                                utterance_active = false;
+                                input_gated = has_ack;
+                                if has_ack {
+                                    wake_ack_playing.store(true, Ordering::SeqCst);
+                                } else if !resume_asr_with_retry(asr.clone()).await {
+                                    warn!("wake: ASR resume failed; staying dormant");
+                                    continue;
+                                } else {
+                                    let _ = asr.set_gate(false).await;
+                                }
+                                let ack_extra = if has_ack {
+                                    Duration::from_secs(3)
+                                } else {
+                                    Duration::ZERO
                                 };
-                                if asr_ok {
-                                    let ack_extra = if wake_cfg.ack_reply.trim().is_empty() {
-                                        Duration::ZERO
-                                    } else {
-                                        Duration::from_secs(3)
-                                    };
-                                    wake_phase = WakePhase::AwakeGrace {
-                                        deadline: Instant::now() + grace_after_wake + ack_extra,
-                                    };
-                                    info!(
-                                        grace_sec = wake_cfg.grace_after_wake_sec,
-                                        ack = %wake_cfg.ack_reply,
-                                        "wake: accepted, now in AwakeGrace; speak within grace period"
-                                    );
-                                    if !wake_cfg.ack_reply.trim().is_empty() {
-                                        let ack = wake_cfg.ack_reply.clone();
-                                        let tts_ack = tts.clone();
-                                        let playback_ack = playback.clone();
-                                        let play_gen_ack = play_gen.clone();
-                                        tokio::spawn(async move {
-                                            play_wake_ack(&ack, tts_ack, &playback_ack, &play_gen_ack)
-                                                .await;
-                                        });
-                                    }
+                                wake_phase = WakePhase::AwakeGrace {
+                                    deadline: Instant::now() + grace_after_wake + ack_extra,
+                                };
+                                info!(
+                                    grace_sec = wake_cfg.grace_after_wake_sec,
+                                    ack = %wake_cfg.ack_reply,
+                                    has_ack,
+                                    "wake: accepted, now in AwakeGrace; speak within grace period"
+                                );
+                                if has_ack {
+                                    let ack = wake_cfg.ack_reply.clone();
+                                    let tts_ack = tts.clone();
+                                    let playback_ack = playback.clone();
+                                    let play_gen_ack = play_gen.clone();
+                                    let done_tx = wake_ack_done_tx.clone();
+                                    tokio::spawn(async move {
+                                        play_wake_ack(&ack, tts_ack, &playback_ack, &play_gen_ack)
+                                            .await;
+                                        let _ = done_tx.send(()).await;
+                                    });
                                 }
                             } else if orch.barge_in_enabled {
                                 if let Some(last) = last_barge_in_at {
@@ -518,7 +520,9 @@ impl Session {
                             }
                         }
 
-                        if !input_gated && wake_phase.allows_asr() {
+                        let ack_playing = wake_ack_playing.load(Ordering::SeqCst);
+
+                        if !input_gated && !ack_playing && wake_phase.allows_asr() {
                             let do_send = match speaker_gate {
                                 SpeakerGate::Idle => false,
                                 SpeakerGate::Verifying => {
@@ -553,10 +557,17 @@ impl Session {
                             }
                         }
 
-                        if user_speech_activity(&mut vad, None, orch.min_final_chars, &wake_phase, orch.grace_min_final_chars) {
-                            if promote_wake_on_speech(&mut wake_phase) {
-                                partial_stable_since = None;
-                                last_partial.clear();
+                        if !ack_playing {
+                            if wake_phase.allows_asr() && (speech_just_started || vad.in_speech()) {
+                                utterance_active = true;
+                                pending_offline_flush = None;
+                            }
+
+                            if user_speech_activity(&mut vad, None, orch.min_final_chars, &wake_phase, orch.grace_min_final_chars) {
+                                if promote_wake_on_speech(&mut wake_phase) {
+                                    partial_stable_since = None;
+                                    last_partial.clear();
+                                }
                             }
                         }
 
@@ -628,15 +639,36 @@ impl Session {
                             }
                         }
 
-                        if !input_gated
-                            && vad.trailing_silence_ms() >= orch.endpoint_silence_ms()
-                            && last_final.as_ref().map_or(false, |t| t.trim().chars().count() >= orch.min_final_chars)
-                        {
+                        let flush_now = if asr_offline {
+                            update_pending_offline_flush(
+                                utterance_active,
+                                input_gated,
+                                &vad,
+                                speech_just_started,
+                                orch.endpoint_silence_ms(),
+                                orch.offline_continuation_ms,
+                                &mut pending_offline_flush,
+                            )
+                        } else {
+                            ready_to_flush_asr(
+                                false,
+                                input_gated,
+                                &vad,
+                                orch.endpoint_silence_ms(),
+                                utterance_active,
+                                &last_final,
+                                orch.min_final_chars,
+                            )
+                        };
+
+                        if flush_now {
+                            pending_offline_flush = None;
                             input_gated = true;
                             info!("end of speech: gating audio, flushing ASR");
                             if let Err(e) = asr.finish_utterance().await {
                                 warn!(error = %e, "finish_utterance failed");
                             }
+                            utterance_active = false;
                             while let Ok(ev) = asr_rx.try_recv() {
                                 match ev {
                                     AsrEvent::Final { text } => {
@@ -1261,6 +1293,46 @@ impl Session {
                             }
                         }
                     }
+                    _ = wake_ack_done_rx.recv() => {
+                        wake_ack_playing.store(false, Ordering::SeqCst);
+                        if resume_asr_with_retry(asr.clone()).await {
+                            let _ = asr.set_gate(false).await;
+                            let _ = asr.reconnect().await;
+                            input_gated = false;
+                            utterance_active = false;
+                            last_final = None;
+                            asr_final_at = None;
+                            partial_stable_since = None;
+                            last_partial.clear();
+                            vad.reset_barge_in_state();
+                            pending_offline_flush = None;
+                            if matches!(wake_phase, WakePhase::Active) {
+                                wake_phase = WakePhase::AwakeGrace {
+                                    deadline: Instant::now() + grace_after_wake,
+                                };
+                            }
+                            info!("wake ack done; ASR listening for user speech");
+                        } else {
+                            warn!("wake ack done but ASR resume failed; returning to dormant");
+                            enter_dormant(
+                                asr.clone(),
+                                &mut wake_phase,
+                                &mut state,
+                                &mut active_turn,
+                                &mut last_final,
+                                &mut asr_final_at,
+                                &mut partial_stable_since,
+                                &mut last_partial,
+                                &mut llm_cancel,
+                                &current_latency,
+                                &mut asr_rx,
+                                &mut speaker_gate,
+                                &mut speaker_verify_buffer,
+                                speaker_verify_gate,
+                            )
+                            .await;
+                        }
+                    }
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {
                         if wake_phase.check_timeout(Instant::now()) {
                             enter_dormant(
@@ -1297,15 +1369,101 @@ fn user_speech_activity(
     wake_phase: &WakePhase,
     grace_min_chars: usize,
 ) -> bool {
+    if vad.speech_start() || vad.in_speech() {
+        return true;
+    }
     let in_grace = matches!(
         *wake_phase,
         WakePhase::AwakeGrace { .. } | WakePhase::IdleAfterTurn { .. }
     );
-    if !in_grace && (vad.speech_start() || vad.in_speech()) {
-        return true;
-    }
     let min = if in_grace { grace_min_chars } else { min_chars };
     text.is_some_and(|t| t.trim().chars().count() >= min)
+}
+
+fn update_pending_offline_flush(
+    utterance_active: bool,
+    input_gated: bool,
+    vad: &VadEngine,
+    speech_just_started: bool,
+    endpoint_silence_ms: u32,
+    continuation_ms: u32,
+    pending: &mut Option<Instant>,
+) -> bool {
+    if !utterance_active || input_gated {
+        *pending = None;
+        return false;
+    }
+    if vad.in_speech() || speech_just_started {
+        *pending = None;
+        return false;
+    }
+    if vad.trailing_silence_ms() >= endpoint_silence_ms {
+        pending.get_or_insert_with(|| {
+            debug!(
+                continuation_ms,
+                trailing_silence_ms = vad.trailing_silence_ms(),
+                "offline ASR: endpoint pause, waiting for user to resume utterance"
+            );
+            Instant::now() + Duration::from_millis(continuation_ms as u64)
+        });
+    } else {
+        *pending = None;
+    }
+    pending.is_some_and(|deadline| Instant::now() >= deadline)
+}
+
+fn tool_calls_from_stream_map(map: &HashMap<u32, AccumulatedToolCall>) -> Vec<ToolCall> {
+    let mut indices: Vec<u32> = map.keys().copied().collect();
+    indices.sort();
+    indices
+        .into_iter()
+        .filter_map(|idx| {
+            map.get(&idx).map(|acc| ToolCall {
+                id: if acc.id.is_empty() {
+                    format!("call_{idx}")
+                } else {
+                    acc.id.clone()
+                },
+                r#type: "function".to_string(),
+                function: crate::llm::ToolCallFunction {
+                    name: acc.name.clone(),
+                    arguments: acc.arguments.clone(),
+                },
+            })
+        })
+        .collect()
+}
+
+fn core_tool_call_to_talk(tc: hermes_core::ToolCall) -> ToolCall {
+    ToolCall {
+        id: tc.id,
+        r#type: "function".to_string(),
+        function: crate::llm::ToolCallFunction {
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+        },
+    }
+}
+
+fn ready_to_flush_asr(
+    asr_offline: bool,
+    input_gated: bool,
+    vad: &VadEngine,
+    endpoint_silence_ms: u32,
+    utterance_active: bool,
+    last_final: &Option<String>,
+    min_final_chars: usize,
+) -> bool {
+    if input_gated || vad.trailing_silence_ms() < endpoint_silence_ms {
+        return false;
+    }
+    if asr_offline {
+        utterance_active
+    } else {
+        last_final
+            .as_ref()
+            .is_some_and(|t| t.trim().chars().count() >= min_final_chars)
+    }
 }
 
 fn promote_wake_on_speech(wake: &mut WakePhase) -> bool {
@@ -1437,6 +1595,24 @@ async fn enter_dormant(
         drained_asr_events = drained,
         "enter dormant; say wake word to resume"
     );
+}
+
+async fn resume_asr_with_retry(asr: Arc<dyn AsrEngine>) -> bool {
+    let mut retries = 3u32;
+    loop {
+        match asr.resume().await {
+            Ok(()) => return true,
+            Err(e) => {
+                retries = retries.saturating_sub(1);
+                if retries == 0 {
+                    error!(error = %e, "asr resume failed, giving up");
+                    return false;
+                }
+                warn!(error = %e, remaining = retries, "asr resume failed, retrying");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
 }
 
 async fn play_wake_ack(
@@ -1981,8 +2157,28 @@ async fn start_reply_turn(
                 }
             }
 
-            if tool_call_map.is_empty() {
-                if let Some(rest) = flush_remainder(&mut buf) {
+            let mut tool_calls = tool_calls_from_stream_map(&tool_call_map);
+            let mut speakable_buf = buf.clone();
+
+            if tool_calls.is_empty() {
+                let (plain, inline) = hermes_core::separate_text_and_calls(&buf);
+                speakable_buf = plain;
+                if !inline.is_empty() {
+                    info!(
+                        count = inline.len(),
+                        "parsed inline tool_calls from assistant content"
+                    );
+                    tool_calls.extend(inline.into_iter().map(core_tool_call_to_talk));
+                }
+            }
+
+            if tool_calls.is_empty() {
+                if tools_enabled && round == 0 {
+                    warn!(
+                        chars = speakable_buf.chars().count(),
+                        "tools enabled but no tool_calls parsed; suppressing assistant TTS"
+                    );
+                } else if let Some(rest) = flush_remainder(&mut speakable_buf) {
                     let _ = tts.append_text(&normalize_tts_text(&rest)).await;
                 }
                 if let Err(e) = tts.finish_turn().await {
@@ -1996,35 +2192,21 @@ async fn start_reply_turn(
             }
 
             // --- Tool call handling ---
-            // Discard content buffer (tool call scaffolding, not for TTS)
+            // Discard content buffer (tool call scaffolding / reasoning, not for TTS)
             buf.clear();
 
-            let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut spoken_list: Vec<String> = Vec::new();
 
-            let mut indices: Vec<u32> = tool_call_map.keys().copied().collect();
-            indices.sort();
-
-            for idx in indices {
-                if let Some(acc) = tool_call_map.get(&idx) {
-                    let mut has_spoken = false;
-                    if let Some(spoken) = tools::extract_spoken(&acc.arguments) {
+            for tc in &tool_calls {
+                let mut has_spoken = false;
+                if let Some(spoken) = tools::extract_spoken(&tc.function.arguments) {
+                    spoken_list.push(spoken);
+                    has_spoken = true;
+                }
+                if !has_spoken && tc.function.name == "call_hermes" {
+                    if let Some(spoken) = tools::generate_hermes_spoken(&tc.function.arguments) {
                         spoken_list.push(spoken);
-                        has_spoken = true;
                     }
-                    if !has_spoken && acc.name == "call_hermes" {
-                        if let Some(spoken) = tools::generate_hermes_spoken(&acc.arguments) {
-                            spoken_list.push(spoken);
-                        }
-                    }
-                    tool_calls.push(ToolCall {
-                        id: acc.id.clone(),
-                        r#type: "function".to_string(),
-                        function: crate::llm::ToolCallFunction {
-                            name: acc.name.clone(),
-                            arguments: acc.arguments.clone(),
-                        },
-                    });
                 }
             }
 

@@ -9,11 +9,11 @@
 //!
 //! Inbound message loops live in `crate::gateway_runtime`.
 
-use hermes_agent::AgentLoop;
-use hermes_agent::session_persistence::SessionPersistence;
 use crate::app::{async_tool_dispatch_for, build_agent_config, build_provider};
 use crate::cli::Cli;
 use crate::whatsapp_wizard;
+use hermes_agent::AgentLoop;
+use hermes_agent::session_persistence::SessionPersistence;
 use hermes_config::{
     GatewayConfig, PlatformConfig, UnauthorizedDmBehavior, hermes_home, load_user_config_file,
 };
@@ -972,7 +972,8 @@ pub(crate) async fn configure_platform_basic_prompts(
             let app_id = crate::prompt::prompt_line("Discord application_id (optional): ").await?;
             set_extra_string_if_nonempty(p, "application_id", &app_id);
             let allowed =
-                crate::prompt::prompt_line("Discord allowed users (comma-separated, optional): ").await?;
+                crate::prompt::prompt_line("Discord allowed users (comma-separated, optional): ")
+                    .await?;
             if !allowed.trim().is_empty() {
                 p.allowed_users = parse_csv_list(&allowed);
             }
@@ -986,7 +987,8 @@ pub(crate) async fn configure_platform_basic_prompts(
             if !token.trim().is_empty() {
                 p.token = Some(token.trim().to_string());
             }
-            let app_token = crate::prompt::prompt_line("Slack app token (xapp-..., optional): ").await?;
+            let app_token =
+                crate::prompt::prompt_line("Slack app token (xapp-..., optional): ").await?;
             set_extra_string_if_nonempty(p, "app_token", &app_token);
             let socket_mode = prompt_yes_no("Slack use socket_mode?", true).await?;
             p.extra.insert(
@@ -996,9 +998,11 @@ pub(crate) async fn configure_platform_basic_prompts(
         }
         "matrix" => {
             let homeserver =
-                crate::prompt::prompt_line("Matrix homeserver_url (e.g. https://matrix.org): ").await?;
+                crate::prompt::prompt_line("Matrix homeserver_url (e.g. https://matrix.org): ")
+                    .await?;
             set_extra_string_if_nonempty(p, "homeserver_url", &homeserver);
-            let user_id = crate::prompt::prompt_line("Matrix user_id (e.g. @bot:matrix.org): ").await?;
+            let user_id =
+                crate::prompt::prompt_line("Matrix user_id (e.g. @bot:matrix.org): ").await?;
             set_extra_string_if_nonempty(p, "user_id", &user_id);
             let token = crate::prompt::prompt_line("Matrix access token: ").await?;
             if !token.trim().is_empty() {
@@ -1023,10 +1027,12 @@ pub(crate) async fn configure_platform_basic_prompts(
         }
         "signal" => {
             let account =
-                crate::prompt::prompt_line("Signal phone_number/account (e.g. +15551234567): ").await?;
+                crate::prompt::prompt_line("Signal phone_number/account (e.g. +15551234567): ")
+                    .await?;
             set_extra_string_if_nonempty(p, "phone_number", &account);
             let api_url =
-                crate::prompt::prompt_line("Signal api_url (default http://localhost:8080): ").await?;
+                crate::prompt::prompt_line("Signal api_url (default http://localhost:8080): ")
+                    .await?;
             set_extra_string_if_nonempty(p, "api_url", &api_url);
         }
         "dingtalk" => {
@@ -1040,7 +1046,8 @@ pub(crate) async fn configure_platform_basic_prompts(
             set_extra_string_if_nonempty(p, "app_id", &app_id);
             let app_secret = crate::prompt::prompt_line("Feishu/Lark app_secret: ").await?;
             set_extra_string_if_nonempty(p, "app_secret", &app_secret);
-            let verify = crate::prompt::prompt_line("Feishu verification_token (optional): ").await?;
+            let verify =
+                crate::prompt::prompt_line("Feishu verification_token (optional): ").await?;
             set_extra_string_if_nonempty(p, "verification_token", &verify);
             let encrypt_key = crate::prompt::prompt_line("Feishu encrypt_key (optional): ").await?;
             set_extra_string_if_nonempty(p, "encrypt_key", &encrypt_key);
@@ -1069,7 +1076,8 @@ pub(crate) async fn configure_platform_basic_prompts(
             set_extra_string_if_nonempty(p, "token", &token);
             let aes = crate::prompt::prompt_line("WeCom callback encoding_aes_key: ").await?;
             set_extra_string_if_nonempty(p, "encoding_aes_key", &aes);
-            let host = crate::prompt::prompt_line("WeCom callback host (default 0.0.0.0): ").await?;
+            let host =
+                crate::prompt::prompt_line("WeCom callback host (default 0.0.0.0): ").await?;
             set_extra_string_if_nonempty(p, "host", &host);
             let port = crate::prompt::prompt_line("WeCom callback port (default 8645): ").await?;
             if let Ok(v) = port.trim().parse::<u16>() {
@@ -1077,7 +1085,8 @@ pub(crate) async fn configure_platform_basic_prompts(
                     .insert("port".to_string(), serde_json::Value::from(v));
             }
             let path =
-                crate::prompt::prompt_line("WeCom callback path (default /wecom/callback): ").await?;
+                crate::prompt::prompt_line("WeCom callback path (default /wecom/callback): ")
+                    .await?;
             set_extra_string_if_nonempty(p, "path", &path);
         }
         "qqbot" => {
@@ -1127,13 +1136,15 @@ pub(crate) async fn configure_platform_basic_prompts(
         }
         "homeassistant" => {
             let base_url =
-                crate::prompt::prompt_line("HomeAssistant base_url (e.g. http://127.0.0.1:8123): ").await?;
+                crate::prompt::prompt_line("HomeAssistant base_url (e.g. http://127.0.0.1:8123): ")
+                    .await?;
             set_extra_string_if_nonempty(p, "base_url", &base_url);
             let token = crate::prompt::prompt_line("HomeAssistant long_lived_token: ").await?;
             if !token.trim().is_empty() {
                 p.token = Some(token.trim().to_string());
             }
-            let webhook_id = crate::prompt::prompt_line("HomeAssistant webhook_id (optional): ").await?;
+            let webhook_id =
+                crate::prompt::prompt_line("HomeAssistant webhook_id (optional): ").await?;
             set_extra_string_if_nonempty(p, "webhook_id", &webhook_id);
         }
         "webhook" => {
@@ -1155,9 +1166,10 @@ pub(crate) async fn configure_platform_basic_prompts(
                 p.extra
                     .insert("port".to_string(), serde_json::Value::from(v));
             }
-            let token =
-                crate::prompt::prompt_line("API server auth_token (required for non-loopback host): ")
-                    .await?;
+            let token = crate::prompt::prompt_line(
+                "API server auth_token (required for non-loopback host): ",
+            )
+            .await?;
             set_extra_string_if_nonempty(p, "auth_token", &token);
         }
         _ => {}
@@ -1202,7 +1214,8 @@ pub(crate) async fn configure_gateway_platform(
                 }
                 "3" => {
                     let ids = parse_csv_list(
-                        &crate::prompt::prompt_line("Allowed Weixin user IDs (comma-separated): ").await?,
+                        &crate::prompt::prompt_line("Allowed Weixin user IDs (comma-separated): ")
+                            .await?,
                     );
                     wx.extra
                         .insert("dm_policy".to_string(), serde_json::json!("allowlist"));
@@ -1237,7 +1250,8 @@ pub(crate) async fn configure_gateway_platform(
                 }
                 "3" => {
                     let ids = parse_csv_list(
-                        &crate::prompt::prompt_line("Allowed Weixin group IDs (comma-separated): ").await?,
+                        &crate::prompt::prompt_line("Allowed Weixin group IDs (comma-separated): ")
+                            .await?,
                     );
                     wx.extra
                         .insert("group_policy".to_string(), serde_json::json!("allowlist"));
@@ -1318,9 +1332,10 @@ pub(crate) async fn configure_gateway_platform(
                 );
             }
 
-            let group_chats =
-                crate::prompt::prompt_line("Telegram allowed group chat IDs (comma-separated, optional): ")
-                    .await?;
+            let group_chats = crate::prompt::prompt_line(
+                "Telegram allowed group chat IDs (comma-separated, optional): ",
+            )
+            .await?;
             let group_chat_ids = parse_csv_list(&group_chats);
             if !group_chat_ids.is_empty() {
                 tg.extra.insert(
@@ -1370,7 +1385,8 @@ pub(crate) async fn configure_gateway_platform(
                 );
 
                 let port =
-                    crate::prompt::prompt_line("Telegram webhook listen port (default 8443): ").await?;
+                    crate::prompt::prompt_line("Telegram webhook listen port (default 8443): ")
+                        .await?;
                 if let Ok(v) = port.trim().parse::<u16>() {
                     tg.extra
                         .insert("webhook_port".to_string(), serde_json::Value::from(v));

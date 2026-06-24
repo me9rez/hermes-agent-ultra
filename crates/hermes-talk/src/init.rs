@@ -1,13 +1,10 @@
-//! Initialize `$HERMES_HOME/hermes-talk` layout.
+//! Initialize `$HERMES_HOME` (`.hermes-agent-ultra`) and `hermes-talk` layout.
 
 use std::fs;
 use std::path::Path;
 
 use crate::error::{DemoError, Result};
 
-#[cfg(windows)]
-const CONFIG_EXAMPLE: &str = include_str!("../config.example.windows.toml");
-#[cfg(not(windows))]
 const CONFIG_EXAMPLE: &str = include_str!("../config.example.toml");
 
 const SUBDIRS: &[&str] = &[
@@ -23,8 +20,11 @@ const SUBDIRS: &[&str] = &[
     "models/kokoro",
 ];
 
-/// Create talk home directory tree and default `config.toml` if missing (quiet; for auto-init).
+/// Create Hermes home + talk directory tree and default configs if missing (quiet; auto-init).
 pub fn ensure_talk_home() -> Result<()> {
+    let hermes_home = hermes_config::ensure_hermes_home_layout(None);
+    tracing::debug!(path = %hermes_home.display(), "ensured hermes home layout");
+
     let home = hermes_config::talk_dir();
     fs::create_dir_all(&home)
         .map_err(|e| DemoError::Config(format!("mkdir {}: {e}", home.display())))?;
@@ -44,6 +44,12 @@ pub fn ensure_talk_home() -> Result<()> {
             .map_err(|e| DemoError::Config(format!("write {}: {e}", config_path.display())))?;
         tracing::info!("created talk config at {}", config_path.display());
     }
+
+    let example_path = home.join("config.toml.example");
+    fs::write(&example_path, CONFIG_EXAMPLE).map_err(|e| {
+        DemoError::Config(format!("write {}: {e}", example_path.display()))
+    })?;
+    tracing::debug!(path = %example_path.display(), "refreshed talk config example");
     Ok(())
 }
 
@@ -146,24 +152,38 @@ fn bundle_root_for_talk_home() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Create talk home directory tree and default `config.toml` if missing.
+/// Create Hermes home + talk directory tree and default configs if missing.
 pub fn init_talk_home() -> Result<()> {
-    let home = hermes_config::talk_dir();
-    let config_path = hermes_config::talk_config_path();
-    let created = !config_path.exists();
+    let talk_config_path = hermes_config::talk_config_path();
+    let gateway_config_path = hermes_config::config_path();
+    let talk_created = !talk_config_path.exists();
+    let gateway_created = !gateway_config_path.exists();
     ensure_talk_home()?;
-    if created {
-        println!("Created {}", config_path.display());
-    } else {
-        println!("Config already exists: {}", config_path.display());
+    let hermes_home = hermes_config::hermes_home();
+    let talk_home = hermes_config::talk_dir();
+    if gateway_created && gateway_config_path.exists() {
+        println!("Created {}", gateway_config_path.display());
+    } else if gateway_config_path.exists() {
+        println!("Config already exists: {}", gateway_config_path.display());
     }
-    print_post_init_notes(&home);
+    if talk_created {
+        println!("Created {}", talk_config_path.display());
+    } else {
+        println!("Config already exists: {}", talk_config_path.display());
+        println!(
+            "  Full template refreshed at {}",
+            talk_home.join("config.toml.example").display()
+        );
+        println!("  Merge missing sections (e.g. [orchestrator]) from that file, or delete config.toml and re-run init.");
+    }
+    print_post_init_notes(&hermes_home, &talk_home);
     Ok(())
 }
 
-fn print_post_init_notes(home: &Path) {
+fn print_post_init_notes(hermes_home: &Path, talk_home: &Path) {
     println!();
-    println!("Talk home: {}", home.display());
+    println!("Hermes home: {}", hermes_home.display());
+    println!("Talk home: {}", talk_home.display());
     println!();
     println!("Next steps:");
     println!(
@@ -171,18 +191,23 @@ fn print_post_init_notes(home: &Path) {
         hermes_config::talk_config_path().display()
     );
     println!(
-        "  2. Place ONNX models under {}/models/ (vad, denoise, speaker, kws).",
-        home.display()
+        "  2. Edit {} for embedded Hermes / gateway settings (if using channel transport).",
+        hermes_config::config_path().display()
     );
-    println!("     For `make package-talk-rockchip`, mirror the same tree under <repo>/.models/.");
+    println!("  3. Download sherpa-onnx models: make download-talk-models (into <repo>/.models/).");
     println!(
-        "  3. For Rockchip local ASR/TTS, copy SDK data to {}/data, {}/models/rk3588, and licenses to {}/auth/.",
-        home.display(),
-        home.display(),
-        home.display()
+        "     Then copy or package into {}/models/ (sensevoice, kokoro, kws-zh-en, vad, …).",
+        talk_home.display()
     );
-    println!("  4. Run `hermes talk list-devices` to verify audio devices.");
-    println!("  5. Run `hermes talk` to start the voice dialog loop.");
+    println!("     Docs: https://k2-fsa.github.io/sherpa/onnx/index.html");
+    println!(
+        "  4. For Rockchip local ASR/TTS, copy SDK data to {}/data, {}/models/rk3588, and licenses to {}/auth/.",
+        talk_home.display(),
+        talk_home.display(),
+        talk_home.display()
+    );
+    println!("  5. Run `hermes talk list-devices` to verify audio devices.");
+    println!("  6. Run `hermes talk` to start the voice dialog loop.");
     println!();
     println!(
         "Note: `call_hermes` uses in-process channel transport by default (transport = \"channel\")."

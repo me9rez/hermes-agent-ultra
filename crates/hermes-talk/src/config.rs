@@ -394,6 +394,10 @@ pub struct OrchestratorConfig {
     /// Max conversation messages to keep in LLM context (0 = unlimited)
     #[serde(default = "default_max_context_messages")]
     pub max_context_messages: usize,
+    /// Offline sherpa ASR: after endpoint silence, wait this long for the user to resume
+    /// the same utterance before flush (avoids cutting "现在几[pause]点了").
+    #[serde(default = "default_offline_continuation_ms")]
+    pub offline_continuation_ms: u32,
     /// WebRTC VAD aggressiveness: 0=Quality, 1=LowBitrate, 2=Aggressive, 3=VeryAggressive
     #[serde(default = "default_vad_mode")]
     pub vad_mode: u8,
@@ -420,6 +424,7 @@ impl Default for OrchestratorConfig {
             barge_in_cooldown_ms: default_barge_cooldown(),
             barge_in_requires_wake: true,
             max_context_messages: default_max_context_messages(),
+            offline_continuation_ms: default_offline_continuation_ms(),
             vad_mode: default_vad_mode(),
         }
     }
@@ -800,6 +805,9 @@ fn default_barge_cooldown() -> u64 {
 }
 fn default_max_context_messages() -> usize {
     20
+}
+fn default_offline_continuation_ms() -> u32 {
+    800
 }
 fn default_vad_mode() -> u8 {
     3
@@ -1266,8 +1274,8 @@ url = "ws://127.0.0.1:9100"
 mod sherpa_backend_config_tests {
     use super::Config;
     use crate::asr::AsrBackend;
-    use crate::backends::classify_talk_backend;
     use crate::backends::TalkBackendKind;
+    use crate::backends::classify_talk_backend;
     use crate::tts::TtsBackend;
 
     #[test]
@@ -1281,7 +1289,8 @@ mod sherpa_backend_config_tests {
     #[test]
     fn cloud_backend_aliases_map_to_bailian() {
         for alias in ["bailian", "cloud", "dashscope", "aliyun"] {
-            let asr: super::AsrConfig = toml::from_str(&format!("backend = \"{alias}\"\n")).unwrap();
+            let asr: super::AsrConfig =
+                toml::from_str(&format!("backend = \"{alias}\"\n")).unwrap();
             assert_eq!(
                 AsrBackend::from_config(&asr),
                 AsrBackend::Bailian,
@@ -1292,7 +1301,8 @@ mod sherpa_backend_config_tests {
                 TalkBackendKind::Cloud,
                 "classify {alias}"
             );
-            let tts: super::TtsConfig = toml::from_str(&format!("backend = \"{alias}\"\n")).unwrap();
+            let tts: super::TtsConfig =
+                toml::from_str(&format!("backend = \"{alias}\"\n")).unwrap();
             assert_eq!(
                 TtsBackend::from_config(&tts),
                 TtsBackend::Bailian,
@@ -1325,5 +1335,15 @@ model = "m"
         assert!(asr.model.contains("sensevoice"));
         let tts = cfg.tts.effective_sherpa();
         assert!(tts.model.contains("kokoro"));
+    }
+
+    #[test]
+    fn config_example_template_parses() {
+        let raw = include_str!("../config.example.toml");
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.asr.backend, "sherpa");
+        assert_eq!(cfg.tts.backend, "sherpa");
+        assert!(cfg.wake.enabled);
+        assert_eq!(cfg.orchestrator.endpoint_silence_ms, 800);
     }
 }

@@ -80,7 +80,13 @@ impl SherpaAsr {
             "sherpa SenseVoice ASR ready"
         );
 
-        Ok((Self { cmd_tx, _thread: thread }, event_rx))
+        Ok((
+            Self {
+                cmd_tx,
+                _thread: thread,
+            },
+            event_rx,
+        ))
     }
 
     fn send_cmd(&self, cmd: AsrCommand) -> Result<()> {

@@ -3262,10 +3262,7 @@ custom_providers:
         apply_user_config_patch(&mut c, "server.channel", "flowy").unwrap();
         apply_user_config_patch(&mut c, "server.app", "flowymes").unwrap();
         apply_user_config_patch(&mut c, "server.auth.preferred_method", "email").unwrap();
-        assert_eq!(
-            c.server.base_url,
-            "https://server.flowyaipc.cn/claw"
-        );
+        assert_eq!(c.server.base_url, "https://server.flowyaipc.cn/claw");
         assert_eq!(c.server.channel, "flowy");
         assert_eq!(c.server.app, "flowymes");
         assert_eq!(

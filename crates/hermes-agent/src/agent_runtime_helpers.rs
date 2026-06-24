@@ -1367,10 +1367,7 @@ pub fn prepare_wire_messages_for_api(
         // messages strip reasoning as before.
         for msg in &mut out {
             if msg.role == MessageRole::Assistant {
-                let has_tool_calls = msg
-                    .tool_calls
-                    .as_ref()
-                    .is_some_and(|tc| !tc.is_empty());
+                let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
                 if !has_tool_calls {
                     msg.reasoning_content = None;
                 }

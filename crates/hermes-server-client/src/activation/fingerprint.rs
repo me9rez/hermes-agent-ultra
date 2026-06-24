@@ -5,10 +5,10 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
+use super::GeoIpInfo;
 use crate::error::ServerClientError;
 use crate::flowy::DeviceActivateRequest;
 use crate::platform;
-use super::GeoIpInfo;
 
 #[derive(Debug, Clone)]
 pub struct DeviceFingerprint {

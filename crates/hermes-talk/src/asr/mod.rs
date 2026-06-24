@@ -30,7 +30,7 @@ pub trait AsrEngine: Send + Sync {
     async fn finish_utterance(&self) -> Result<()>;
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsrBackend {
     Bailian,
     Sherpa,

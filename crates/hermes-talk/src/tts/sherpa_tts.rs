@@ -1,9 +1,7 @@
 //! Offline Kokoro TTS via sherpa-onnx (Windows / x86 CPU).
 
 use async_trait::async_trait;
-use sherpa_onnx::{
-    GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig,
-};
+use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info};
 
@@ -162,11 +160,7 @@ fn synthesize_turn(
     };
 
     let audio = tts
-        .generate_with_config(
-            text,
-            &gen_config,
-            Option::<fn(&[f32], f32) -> bool>::None,
-        )
+        .generate_with_config(text, &gen_config, Option::<fn(&[f32], f32) -> bool>::None)
         .ok_or_else(|| DemoError::Tts("kokoro generate failed".into()))?;
 
     let pcm = f32_to_i16_pcm_bytes(audio.samples());

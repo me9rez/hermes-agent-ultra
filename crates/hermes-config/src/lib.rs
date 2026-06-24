@@ -57,7 +57,10 @@ pub use managed_gateway::{
     resolve_openai_audio_api_key,
 };
 pub use merge::{deep_merge, merge_configs};
-pub use migrate::{ensure_migrated_hermes_home, legacy_hermes_home_candidates, project_hermes_dir};
+pub use migrate::{
+    HOME_LAYOUT_SUBDIRS, ensure_hermes_home_layout, ensure_migrated_hermes_home,
+    legacy_hermes_home_candidates, project_hermes_dir,
+};
 pub use paths::{
     INTERMEDIATE_HOME_DIR, LEGACY_HOME_DIR, LEGACY_PROJECT_HOME_DIR,
     LOCALAPPDATA_SUBDIR_INTERMEDIATE, LOCALAPPDATA_SUBDIR_LEGACY, LOCALAPPDATA_SUBDIR_NEW,

@@ -333,8 +333,7 @@ impl ContextCompressor {
         let tokens = current_prompt_tokens.unwrap_or(self.last_prompt_tokens);
 
         // Soft notice: warn once when context crosses the soft ratio.
-        let soft_tokens =
-            (self.config.context_length as f64 * self.config.soft_ratio) as u64;
+        let soft_tokens = (self.config.context_length as f64 * self.config.soft_ratio) as u64;
         if tokens >= soft_tokens && tokens < self.threshold_tokens && !self.soft_noticed {
             self.soft_noticed = true;
             if !self.config.quiet_mode {

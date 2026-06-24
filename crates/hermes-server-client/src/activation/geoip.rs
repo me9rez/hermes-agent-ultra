@@ -50,7 +50,10 @@ pub async fn resolve_geo_ip() -> Option<GeoIpInfo> {
                 debug!(provider = provider.name, ip = %info.public_ip, "geoip resolved");
                 return Some(info);
             }
-            Some(_) => debug!(provider = provider.name, "geoip response missing location fields"),
+            Some(_) => debug!(
+                provider = provider.name,
+                "geoip response missing location fields"
+            ),
             None => debug!(provider = provider.name, "geoip provider unavailable"),
         }
     }
@@ -155,14 +158,8 @@ fn parse_ip_sb(body: &str) -> Option<GeoIpInfo> {
         city: city.clone(),
         region: city,
         operator,
-        latitude: raw
-            .latitude
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        longitude: raw
-            .longitude
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
+        latitude: raw.latitude.map(|v| v.to_string()).unwrap_or_default(),
+        longitude: raw.longitude.map(|v| v.to_string()).unwrap_or_default(),
         ..GeoIpInfo::default()
     })
 }
@@ -219,14 +216,8 @@ fn parse_ipapi_co(body: &str) -> Option<GeoIpInfo> {
         region: city,
         operator: raw.org.unwrap_or_default().trim().to_string(),
         postal: raw.postal.unwrap_or_default().trim().to_string(),
-        latitude: raw
-            .latitude
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        longitude: raw
-            .longitude
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
+        latitude: raw.latitude.map(|v| v.to_string()).unwrap_or_default(),
+        longitude: raw.longitude.map(|v| v.to_string()).unwrap_or_default(),
         timezone: raw.timezone.unwrap_or_default().trim().to_string(),
         currency: raw.currency.unwrap_or_default().trim().to_string(),
     })

@@ -107,9 +107,7 @@ impl ServerConfig {
 /// WeChat Open Platform website app id (`wx` + 16 hex chars).
 pub fn is_valid_wechat_open_app_id(value: &str) -> bool {
     let v = value.trim();
-    v.len() == 18
-        && v.starts_with("wx")
-        && v.as_bytes()[2..].iter().all(|b| b.is_ascii_hexdigit())
+    v.len() == 18 && v.starts_with("wx") && v.as_bytes()[2..].iter().all(|b| b.is_ascii_hexdigit())
 }
 
 pub fn default_wechat_app_id_for_channel(channel: &str) -> String {

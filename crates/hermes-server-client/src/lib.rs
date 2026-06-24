@@ -21,9 +21,7 @@ pub use auth::{
 };
 pub use doctor::{DoctorReport, run_doctor};
 pub use error::ServerClientError;
-pub use flowy::{
-    ClawModelEntry, CreditsBalance, CreditsCheckinResponse, FlowyApiClient, UserMe,
-};
+pub use flowy::{ClawModelEntry, CreditsBalance, CreditsCheckinResponse, FlowyApiClient, UserMe};
 pub use llm::ServerLlmProvider;
 pub use profile::ProfileStore;
 pub use session::{SERVER_TOKEN_PROVIDER, ServerSession, ServerTokens, TokenSource};

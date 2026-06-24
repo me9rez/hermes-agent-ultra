@@ -28,15 +28,12 @@ static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
 static G_UUID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#",G="([0-9a-zA-Z]{10,32})""#).expect("G uuid regex"));
 static APPID_ERROR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)appid\s*参数错误|appid\s*不合法|invalid\s*appid")
-        .expect("appid error regex")
+    Regex::new(r"(?i)appid\s*参数错误|appid\s*不合法|invalid\s*appid").expect("appid error regex")
 });
-static REDIRECT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"wx_redirecturl\s*=\s*'([^']+)'"#).expect("redirect regex")
-});
-static WX_ERRCODE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"wx_err(?:or_)?code\s*=\s*(\d+)").expect("wx errcode regex")
-});
+static REDIRECT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"wx_redirecturl\s*=\s*'([^']+)'"#).expect("redirect regex"));
+static WX_ERRCODE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"wx_err(?:or_)?code\s*=\s*(\d+)").expect("wx errcode regex"));
 static WX_CODE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"wx_code\s*=\s*'([^']+)'").expect("wx code regex"));
 
@@ -401,9 +398,7 @@ mod tests {
         let result = parse_wechat_poll_response(body);
         assert_eq!(
             result.status,
-            WeChatPollStatus::Authorized {
-                code: "XYZ".into()
-            }
+            WeChatPollStatus::Authorized { code: "XYZ".into() }
         );
     }
 

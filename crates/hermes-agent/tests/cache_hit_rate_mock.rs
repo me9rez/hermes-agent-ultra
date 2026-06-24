@@ -108,55 +108,54 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<MockState>>) {
     // ---- Parse messages and compute cache hit ----
     let mut s = state.lock().unwrap();
 
-    let (_usage, response_body) = if let Ok(req) =
-        serde_json::from_slice::<serde_json::Value>(&body)
-    {
-        let msgs: Vec<Value> = req
-            .get("messages")
-            .and_then(|m| m.as_array())
-            .cloned()
-            .unwrap_or_default();
+    let (_usage, response_body) =
+        if let Ok(req) = serde_json::from_slice::<serde_json::Value>(&body) {
+            let msgs: Vec<Value> = req
+                .get("messages")
+                .and_then(|m| m.as_array())
+                .cloned()
+                .unwrap_or_default();
 
-        let total_chars: usize = msgs.iter().map(|m| m.to_string().len()).sum();
-        let common = common_prefix_msgs(&s.prev_messages, &msgs);
-        let hit_chars: usize = msgs[..common].iter().map(|m| m.to_string().len()).sum();
+            let total_chars: usize = msgs.iter().map(|m| m.to_string().len()).sum();
+            let common = common_prefix_msgs(&s.prev_messages, &msgs);
+            let hit_chars: usize = msgs[..common].iter().map(|m| m.to_string().len()).sum();
 
-        // First turn: no previous messages to compare against → 0 cache hit.
-        if s.first_turn {
-            s.first_turn = false;
-        }
+            // First turn: no previous messages to compare against → 0 cache hit.
+            if s.first_turn {
+                s.first_turn = false;
+            }
 
-        s.prev_messages = msgs;
-        s.req_chars.push(total_chars);
-        s.hit_chars.push(hit_chars);
+            s.prev_messages = msgs;
+            s.req_chars.push(total_chars);
+            s.hit_chars.push(hit_chars);
 
-        let prompt_tok = total_chars / 4;
-        let hit_tok = hit_chars / 4;
-        let miss_tok = prompt_tok.saturating_sub(hit_tok);
-        let completion_tok = 20;
+            let prompt_tok = total_chars / 4;
+            let hit_tok = hit_chars / 4;
+            let miss_tok = prompt_tok.saturating_sub(hit_tok);
+            let completion_tok = 20;
 
-        let usage = TurnUsage {
-            prompt_tokens: prompt_tok,
-            completion_tokens: completion_tok,
-            hit_tokens: hit_tok,
-            miss_tokens: miss_tok,
+            let usage = TurnUsage {
+                prompt_tokens: prompt_tok,
+                completion_tokens: completion_tok,
+                hit_tokens: hit_tok,
+                miss_tokens: miss_tok,
+            };
+            s.turn_usage.push(usage.clone());
+
+            // Build SSE response matching DeepSeek's chat/completions streaming format.
+            let sse = build_sse_response(prompt_tok, completion_tok, hit_tok, miss_tok);
+            (usage, sse)
+        } else {
+            // Invalid body → return error SSE.
+            let usage = TurnUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                hit_tokens: 0,
+                miss_tokens: 0,
+            };
+            let sse = "data: {\"error\":\"invalid request\"}\n\ndata: [DONE]\n\n".to_string();
+            (usage, sse)
         };
-        s.turn_usage.push(usage.clone());
-
-        // Build SSE response matching DeepSeek's chat/completions streaming format.
-        let sse = build_sse_response(prompt_tok, completion_tok, hit_tok, miss_tok);
-        (usage, sse)
-    } else {
-        // Invalid body → return error SSE.
-        let usage = TurnUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            hit_tokens: 0,
-            miss_tokens: 0,
-        };
-        let sse = "data: {\"error\":\"invalid request\"}\n\ndata: [DONE]\n\n".to_string();
-        (usage, sse)
-    };
 
     drop(s);
 
@@ -214,7 +213,10 @@ fn build_sse_response(
             "finish_reason": null
         }]
     });
-    out.push_str(&format!("data: {}\n\n", serde_json::to_string(&delta).unwrap()));
+    out.push_str(&format!(
+        "data: {}\n\n",
+        serde_json::to_string(&delta).unwrap()
+    ));
 
     // Chunk 2: finish_reason = "stop".
     let finish = serde_json::json!({
@@ -224,7 +226,10 @@ fn build_sse_response(
             "finish_reason": "stop"
         }]
     });
-    out.push_str(&format!("data: {}\n\n", serde_json::to_string(&finish).unwrap()));
+    out.push_str(&format!(
+        "data: {}\n\n",
+        serde_json::to_string(&finish).unwrap()
+    ));
 
     // Chunk 3: usage with DeepSeek-specific cache fields.
     let usage = serde_json::json!({
@@ -241,7 +246,10 @@ fn build_sse_response(
             "prompt_cache_miss_tokens": miss_tok
         }
     });
-    out.push_str(&format!("data: {}\n\n", serde_json::to_string(&usage).unwrap()));
+    out.push_str(&format!(
+        "data: {}\n\n",
+        serde_json::to_string(&usage).unwrap()
+    ));
 
     // Done signal.
     out.push_str("data: [DONE]\n\n");
@@ -292,11 +300,8 @@ fn parse_sse_usage(body: &str) -> Option<SseUsage> {
 
 fn send_chat_completion(server_addr: &str, messages: &[Value]) -> Result<String, String> {
     // Parse host:port from URL.
-    let target = server_addr
-        .strip_prefix("http://")
-        .unwrap_or(server_addr);
-    let mut stream =
-        TcpStream::connect(target).map_err(|e| format!("connect: {}", e))?;
+    let target = server_addr.strip_prefix("http://").unwrap_or(server_addr);
+    let mut stream = TcpStream::connect(target).map_err(|e| format!("connect: {}", e))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .map_err(|e| format!("timeout: {}", e))?;
@@ -460,8 +465,8 @@ fn cache_hit_rate_with_mock_deepseek() {
         let sse_body = send_chat_completion(&server_addr, &wire_msgs)
             .unwrap_or_else(|e| panic!("turn {}: {}", i, e));
 
-        let usage = parse_sse_usage(&sse_body)
-            .unwrap_or_else(|| panic!("turn {}: no usage in SSE", i));
+        let usage =
+            parse_sse_usage(&sse_body).unwrap_or_else(|| panic!("turn {}: no usage in SSE", i));
 
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let hit = usage.prompt_cache_hit_tokens.unwrap_or(0);
@@ -577,8 +582,8 @@ fn cache_hit_rate_with_tools() {
         let sse_body = send_chat_completion(&server_addr, &wire_msgs)
             .unwrap_or_else(|e| panic!("turn {}: {}", i, e));
 
-        let usage = parse_sse_usage(&sse_body)
-            .unwrap_or_else(|| panic!("turn {}: no usage in SSE", i));
+        let usage =
+            parse_sse_usage(&sse_body).unwrap_or_else(|| panic!("turn {}: no usage in SSE", i));
 
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let hit = usage.prompt_cache_hit_tokens.unwrap_or(0);
@@ -627,19 +632,31 @@ fn cache_hit_rate_with_tools() {
         if s.hit_chars[i] != s.req_chars[i - 1] {
             println!(
                 "  PREFIX BROKEN at req {}: cached {} chars but the full prior request was {} chars",
-                i, s.hit_chars[i], s.req_chars[i - 1]
+                i,
+                s.hit_chars[i],
+                s.req_chars[i - 1]
             );
             broken += 1;
         }
     }
     if broken > 0 {
-        println!("  WARNING: {} turns had prefix breaks (tool messages may add variability)", broken);
+        println!(
+            "  WARNING: {} turns had prefix breaks (tool messages may add variability)",
+            broken
+        );
     } else {
-        println!("  ✓ Prefix byte-stable across all {} turns", s.req_chars.len());
+        println!(
+            "  ✓ Prefix byte-stable across all {} turns",
+            s.req_chars.len()
+        );
     }
     drop(s);
 
-    assert!(peak >= 80, "expected peak hit rate >= 80% with tools, got {}%", peak);
+    assert!(
+        peak >= 80,
+        "expected peak hit rate >= 80% with tools, got {}%",
+        peak
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -655,7 +672,10 @@ fn cache_hit_rate_long_conversation() {
 
     const TURNS: usize = 20;
 
-    println!("\n========== Long Conversation Cache Hit Curve ({} turns) ==========", TURNS);
+    println!(
+        "\n========== Long Conversation Cache Hit Curve ({} turns) ==========",
+        TURNS
+    );
 
     for i in 0..TURNS {
         let user_msg = format!(
@@ -665,19 +685,13 @@ fn cache_hit_rate_long_conversation() {
         );
         let assistant = format!("Acknowledged turn {}.", i);
 
-        let wire_msgs = next_turn_wire_messages(
-            &mut history,
-            &user_msg,
-            &assistant,
-            i,
-            false,
-        );
+        let wire_msgs = next_turn_wire_messages(&mut history, &user_msg, &assistant, i, false);
 
         let sse_body = send_chat_completion(&server_addr, &wire_msgs)
             .unwrap_or_else(|e| panic!("turn {}: {}", i, e));
 
-        let usage = parse_sse_usage(&sse_body)
-            .unwrap_or_else(|| panic!("turn {}: no usage in SSE", i));
+        let usage =
+            parse_sse_usage(&sse_body).unwrap_or_else(|| panic!("turn {}: no usage in SSE", i));
 
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let hit = usage.prompt_cache_hit_tokens.unwrap_or(0);
@@ -702,15 +716,13 @@ fn cache_hit_rate_long_conversation() {
         }
 
         if i > 0 && i == TURNS - 1 {
-            println!(
-                "Final turn {}: hit rate = {}%",
-                i, rate
-            );
+            println!("Final turn {}: hit rate = {}%", i, rate);
             assert!(
                 rate >= 90,
                 "expected final turn hit rate >= 90% after {} turns, got {}% \
                  (prefix may not be growing monotonically)",
-                TURNS, rate
+                TURNS,
+                rate
             );
         }
     }

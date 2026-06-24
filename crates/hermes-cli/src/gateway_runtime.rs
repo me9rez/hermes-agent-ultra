@@ -45,9 +45,9 @@ use crate::gateway_process::{
     try_stop_gateway_service, uninstall_gateway_service,
 };
 use crate::oneshot::start_gateway_keepawake_guard;
+use crate::paths::CliStateRoot;
 use crate::state_paths::hermes_state_root;
 use crate::webhook_delivery::run_cron_webhook_delivery_loop;
-use crate::paths::CliStateRoot;
 
 /// Handle `hermes gateway [action]`.
 #[allow(clippy::too_many_arguments)]
@@ -285,10 +285,7 @@ pub async fn run_gateway(
             let _p8 = _metrics.phase("handler_wiring");
             let agent_tools_for_cron = Arc::new(bridge_tool_registry(&tool_registry));
             let config_arc = Arc::new(config.clone());
-            crate::moa_wiring::wire_mixture_of_agents_backend(
-                &tool_registry,
-                config_arc.clone(),
-            );
+            crate::moa_wiring::wire_mixture_of_agents_backend(&tool_registry, config_arc.clone());
             let gateway_agent_cache: GatewayAgentCache =
                 Arc::new(tokio::sync::Mutex::new(HashMap::new()));
             let handler_deps = gateway_handlers::GatewayHandlerDeps {

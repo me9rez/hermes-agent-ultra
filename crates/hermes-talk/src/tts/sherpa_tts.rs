@@ -8,7 +8,7 @@ use sherpa_onnx::{
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info};
 
-use crate::config::SherpaTtsConfig;
+use crate::config::{SherpaKokoroTtsConfig, SherpaTtsRuntime, SherpaZipvoiceTtsConfig};
 use crate::error::{DemoError, Result};
 use crate::tts::{TtsEngine, bailian::TtsAudio};
 
@@ -32,7 +32,7 @@ pub struct SherpaTts {
 }
 
 impl SherpaTts {
-    pub async fn connect(cfg: &SherpaTtsConfig) -> Result<(Self, mpsc::Receiver<TtsAudio>)> {
+    pub async fn connect(cfg: &SherpaTtsRuntime) -> Result<(Self, mpsc::Receiver<TtsAudio>)> {
         let (audio_tx, audio_rx) = mpsc::channel(128);
         let (cmd_tx, cmd_rx) = mpsc::channel::<TtsCommand>(32);
         let cfg = cfg.clone();
@@ -126,19 +126,20 @@ fn run_driver_loop(
 }
 
 fn run_kokoro_driver(
-    cfg: SherpaTtsConfig,
+    cfg: SherpaTtsRuntime,
     cmd_rx: mpsc::Receiver<TtsCommand>,
     audio_tx: mpsc::Sender<TtsAudio>,
 ) -> Result<()> {
+    let kokoro_cfg = cfg.kokoro.clone();
     let kokoro = OfflineTtsKokoroModelConfig {
-        model: Some(cfg.model.clone()),
-        voices: Some(cfg.voices.clone()),
-        tokens: Some(cfg.tokens.clone()),
-        data_dir: Some(cfg.data_dir.clone()),
-        dict_dir: Some(cfg.dict_dir.clone()),
-        lexicon: Some(cfg.lexicon.clone()),
-        length_scale: cfg.length_scale,
-        lang: cfg.lang.clone(),
+        model: Some(kokoro_cfg.model.clone()),
+        voices: Some(kokoro_cfg.voices.clone()),
+        tokens: Some(kokoro_cfg.tokens.clone()),
+        data_dir: Some(kokoro_cfg.data_dir.clone()),
+        dict_dir: Some(kokoro_cfg.dict_dir.clone()),
+        lexicon: Some(kokoro_cfg.lexicon.clone()),
+        length_scale: kokoro_cfg.length_scale,
+        lang: kokoro_cfg.lang.clone(),
     };
 
     let tts_config = OfflineTtsConfig {
@@ -154,39 +155,39 @@ fn run_kokoro_driver(
 
     let tts = OfflineTts::create(&tts_config).ok_or_else(|| {
         DemoError::Config(format!(
-            "failed to create Kokoro TTS (check tts.sherpa model paths): model={}",
-            cfg.model
+            "failed to create Kokoro TTS (check tts.sherpa.kokoro paths): model={}",
+            kokoro_cfg.model
         ))
     })?;
 
     info!(
-        kind = "kokoro",
-        model = %cfg.model,
+        engine = "kokoro",
+        model = %kokoro_cfg.model,
         provider = %cfg.provider,
         sample_rate = tts.sample_rate(),
         speakers = tts.num_speakers(),
-        sid = cfg.sid,
+        sid = kokoro_cfg.sid,
         "sherpa Kokoro TTS ready"
     );
 
-    let cfg = cfg.clone();
     run_driver_loop(cmd_rx, audio_tx, &tts, move |tts, text, audio_tx| {
-        synthesize_kokoro_turn(tts, &cfg, text, audio_tx)
+        synthesize_kokoro_turn(tts, &kokoro_cfg, text, audio_tx)
     })
 }
 
 fn run_zipvoice_driver(
-    cfg: SherpaTtsConfig,
+    cfg: SherpaTtsRuntime,
     cmd_rx: mpsc::Receiver<TtsCommand>,
     audio_tx: mpsc::Sender<TtsAudio>,
 ) -> Result<()> {
+    let zip_cfg = cfg.zipvoice.clone();
     let zipvoice = OfflineTtsZipvoiceModelConfig {
-        tokens: Some(cfg.tokens.clone()),
-        encoder: Some(cfg.encoder.clone()),
-        decoder: Some(cfg.decoder.clone()),
-        vocoder: Some(cfg.vocoder.clone()),
-        data_dir: Some(cfg.data_dir.clone()),
-        lexicon: Some(cfg.lexicon.clone()),
+        tokens: Some(zip_cfg.tokens.clone()),
+        encoder: Some(zip_cfg.encoder.clone()),
+        decoder: Some(zip_cfg.decoder.clone()),
+        vocoder: Some(zip_cfg.vocoder.clone()),
+        data_dir: Some(zip_cfg.data_dir.clone()),
+        lexicon: Some(zip_cfg.lexicon.clone()),
         ..Default::default()
     };
 
@@ -203,44 +204,43 @@ fn run_zipvoice_driver(
 
     let tts = OfflineTts::create(&tts_config).ok_or_else(|| {
         DemoError::Config(format!(
-            "failed to create ZipVoice TTS (check tts.sherpa paths): encoder={}",
-            cfg.encoder
+            "failed to create ZipVoice TTS (check tts.sherpa.zipvoice paths): encoder={}",
+            zip_cfg.encoder
         ))
     })?;
 
-    let wave = Wave::read(&cfg.reference_audio).ok_or_else(|| {
+    let wave = Wave::read(&zip_cfg.reference_audio).ok_or_else(|| {
         DemoError::Config(format!(
             "failed to read ZipVoice reference_audio: {}",
-            cfg.reference_audio
+            zip_cfg.reference_audio
         ))
     })?;
     let reference = ZipvoiceReference {
         samples: wave.samples().to_vec(),
         sample_rate: wave.sample_rate(),
-        text: cfg.reference_text.clone(),
+        text: zip_cfg.reference_text.clone(),
     };
 
     info!(
-        kind = "zipvoice",
-        encoder = %cfg.encoder,
-        vocoder = %cfg.vocoder,
+        engine = "zipvoice",
+        encoder = %zip_cfg.encoder,
+        vocoder = %zip_cfg.vocoder,
         provider = %cfg.provider,
         sample_rate = tts.sample_rate(),
-        reference_audio = %cfg.reference_audio,
+        reference_audio = %zip_cfg.reference_audio,
         reference_samples = reference.samples.len(),
-        num_steps = cfg.num_steps,
+        num_steps = zip_cfg.num_steps,
         "sherpa ZipVoice TTS ready"
     );
 
-    let cfg = cfg.clone();
     run_driver_loop(cmd_rx, audio_tx, &tts, move |tts, text, audio_tx| {
-        synthesize_zipvoice_turn(tts, &cfg, &reference, text, audio_tx)
+        synthesize_zipvoice_turn(tts, &zip_cfg, &reference, text, audio_tx)
     })
 }
 
 fn synthesize_kokoro_turn(
     tts: &OfflineTts,
-    cfg: &SherpaTtsConfig,
+    cfg: &SherpaKokoroTtsConfig,
     text: &str,
     audio_tx: &mpsc::Sender<TtsAudio>,
 ) -> Result<()> {
@@ -259,7 +259,7 @@ fn synthesize_kokoro_turn(
 
 fn synthesize_zipvoice_turn(
     tts: &OfflineTts,
-    cfg: &SherpaTtsConfig,
+    cfg: &SherpaZipvoiceTtsConfig,
     reference: &ZipvoiceReference,
     text: &str,
     audio_tx: &mpsc::Sender<TtsAudio>,

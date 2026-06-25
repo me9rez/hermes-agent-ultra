@@ -27,7 +27,7 @@ const SUBDIRS_COMMON: &[&str] = &[
 ];
 
 #[cfg(feature = "sherpa-asr-tts")]
-const SUBDIRS_SHERPA_ASR_TTS: &[&str] = &["models/sensevoice", "models/kokoro"];
+const SUBDIRS_SHERPA_ASR_TTS: &[&str] = &["models/sensevoice", "models/kokoro", "models/zipvoice"];
 
 fn talk_subdirs() -> Vec<&'static str> {
     #[cfg(feature = "sherpa-asr-tts")]

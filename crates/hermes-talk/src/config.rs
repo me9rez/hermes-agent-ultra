@@ -148,15 +148,18 @@ pub struct TtsConfig {
     /// Language hints for synthesis quality (e.g. ["zh","en","ja","yue","ko"])
     #[serde(default)]
     pub language_hints: Option<Vec<String>>,
+    /// When `backend = "sherpa"`: active TTS engine `kokoro` | `zipvoice` (overrides `[tts.sherpa].engine`).
+    #[serde(default)]
+    pub engine: Option<String>,
     /// Configuration for local Rockchip TTS backend
     #[serde(default)]
     pub local: Option<RockchipTtsConfig>,
     /// Deprecated alias for local config
     #[serde(default)]
     pub rockchip: Option<RockchipTtsConfig>,
-    /// Configuration for sherpa-onnx TTS (Kokoro or ZipVoice)
+    /// Configuration for sherpa-onnx TTS (Kokoro + ZipVoice profiles).
     #[serde(default)]
-    pub sherpa: Option<SherpaTtsConfig>,
+    pub sherpa: Option<SherpaTtsSection>,
 }
 
 impl Default for TtsConfig {
@@ -168,6 +171,7 @@ impl Default for TtsConfig {
             sample_rate: default_24k(),
             format: default_pcm(),
             language_hints: None,
+            engine: None,
             local: None,
             rockchip: None,
             sherpa: None,
@@ -176,8 +180,10 @@ impl Default for TtsConfig {
 }
 
 impl TtsConfig {
-    pub fn effective_sherpa(&self) -> SherpaTtsConfig {
-        self.sherpa.clone().unwrap_or_default()
+    pub fn effective_sherpa(&self) -> SherpaTtsRuntime {
+        let mut section = self.sherpa.clone().unwrap_or_default();
+        section.normalize();
+        section.resolve(self.engine.as_deref())
     }
 }
 
@@ -242,13 +248,9 @@ impl Default for SherpaAsrConfig {
     }
 }
 
-/// sherpa-onnx offline TTS: Kokoro or ZipVoice (see sherpa-onnx TTS docs).
-#[derive(Debug, Clone, Deserialize)]
-pub struct SherpaTtsConfig {
-    /// `kokoro` (default) or `zipvoice`
-    #[serde(default = "default_sherpa_tts_kind")]
-    pub kind: String,
-    // --- Kokoro ---
+/// Kokoro offline TTS profile (https://k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/kokoro.html)
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SherpaKokoroTtsConfig {
     #[serde(default = "default_kokoro_model")]
     pub model: String,
     #[serde(default = "default_kokoro_voices")]
@@ -265,63 +267,176 @@ pub struct SherpaTtsConfig {
     pub length_scale: f32,
     #[serde(default)]
     pub lang: Option<String>,
-    /// Kokoro speaker id (0..num_speakers-1)
     #[serde(default)]
     pub sid: i32,
     #[serde(default = "default_kokoro_speed")]
     pub speed: f32,
-    // --- ZipVoice (zero-shot voice cloning) ---
+}
+
+/// ZipVoice zero-shot TTS profile (https://k2-fsa.github.io/sherpa/onnx/tts/zipvoice.html)
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SherpaZipvoiceTtsConfig {
     #[serde(default = "default_zipvoice_encoder")]
     pub encoder: String,
     #[serde(default = "default_zipvoice_decoder")]
     pub decoder: String,
     #[serde(default = "default_zipvoice_vocoder")]
     pub vocoder: String,
+    #[serde(default = "default_zipvoice_tokens")]
+    pub tokens: String,
+    #[serde(default = "default_zipvoice_data_dir")]
+    pub data_dir: String,
+    #[serde(default = "default_zipvoice_lexicon")]
+    pub lexicon: String,
     #[serde(default = "default_zipvoice_reference_audio")]
     pub reference_audio: String,
     #[serde(default = "default_zipvoice_reference_text")]
     pub reference_text: String,
     #[serde(default = "default_zipvoice_num_steps")]
     pub num_steps: i32,
+    #[serde(default = "default_kokoro_speed")]
+    pub speed: f32,
+}
+
+/// Legacy ZipVoice fields at `[tts.sherpa]` top level (pre-nested config).
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LegacyFlatZipvoiceFields {
+    encoder: Option<String>,
+    decoder: Option<String>,
+    vocoder: Option<String>,
+    reference_audio: Option<String>,
+    reference_text: Option<String>,
+    num_steps: Option<i32>,
+}
+
+/// `[tts.sherpa]` — engine selection plus Kokoro / ZipVoice model paths.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SherpaTtsSection {
+    /// Active engine: `kokoro` (default) or `zipvoice`. Alias: `kind`.
+    #[serde(default = "default_sherpa_tts_engine", alias = "kind")]
+    pub engine: String,
+    /// Kokoro paths; also accepts legacy flat keys under `[tts.sherpa]`.
+    #[serde(flatten)]
+    pub kokoro: SherpaKokoroTtsConfig,
+    #[serde(default)]
+    pub zipvoice: SherpaZipvoiceTtsConfig,
+    #[serde(flatten, default)]
+    legacy_zip: LegacyFlatZipvoiceFields,
     #[serde(default = "default_sherpa_threads")]
     pub num_threads: i32,
     #[serde(default = "default_sherpa_provider")]
     pub provider: String,
 }
 
-impl SherpaTtsConfig {
-    pub fn is_zipvoice(&self) -> bool {
-        self.kind.eq_ignore_ascii_case("zipvoice")
-    }
-
-    pub fn is_kokoro(&self) -> bool {
-        !self.is_zipvoice()
-    }
-}
-
-impl Default for SherpaTtsConfig {
+impl Default for SherpaTtsSection {
     fn default() -> Self {
         Self {
-            kind: default_sherpa_tts_kind(),
-            model: default_kokoro_model(),
-            voices: default_kokoro_voices(),
-            tokens: default_kokoro_tokens(),
-            data_dir: default_kokoro_data_dir(),
-            dict_dir: default_kokoro_dict_dir(),
-            lexicon: default_kokoro_lexicon(),
-            length_scale: default_kokoro_length_scale(),
-            lang: None,
-            sid: 0,
-            speed: default_kokoro_speed(),
-            encoder: default_zipvoice_encoder(),
-            decoder: default_zipvoice_decoder(),
-            vocoder: default_zipvoice_vocoder(),
-            reference_audio: default_zipvoice_reference_audio(),
-            reference_text: default_zipvoice_reference_text(),
-            num_steps: default_zipvoice_num_steps(),
+            engine: default_sherpa_tts_engine(),
+            kokoro: SherpaKokoroTtsConfig::default(),
+            zipvoice: SherpaZipvoiceTtsConfig::default(),
+            legacy_zip: LegacyFlatZipvoiceFields::default(),
             num_threads: default_sherpa_threads(),
             provider: default_sherpa_provider(),
         }
+    }
+}
+
+impl SherpaTtsSection {
+    /// Merge legacy flat ZipVoice keys and fill empty nested defaults.
+    pub fn normalize(&mut self) {
+        if self.zipvoice.encoder.is_empty() {
+            if let Some(v) = self.legacy_zip.encoder.take() {
+                self.zipvoice.encoder = v;
+            }
+        }
+        if self.zipvoice.decoder.is_empty() {
+            if let Some(v) = self.legacy_zip.decoder.take() {
+                self.zipvoice.decoder = v;
+            }
+        }
+        if self.zipvoice.vocoder.is_empty() {
+            if let Some(v) = self.legacy_zip.vocoder.take() {
+                self.zipvoice.vocoder = v;
+            }
+        }
+        if self.zipvoice.reference_audio.is_empty() {
+            if let Some(v) = self.legacy_zip.reference_audio.take() {
+                self.zipvoice.reference_audio = v;
+            }
+        }
+        if self.zipvoice.reference_text.is_empty() {
+            if let Some(v) = self.legacy_zip.reference_text.take() {
+                self.zipvoice.reference_text = v;
+            }
+        }
+        if self.zipvoice.num_steps <= 0 {
+            if let Some(v) = self.legacy_zip.num_steps {
+                self.zipvoice.num_steps = v;
+            }
+        }
+        if self.engine.eq_ignore_ascii_case("zipvoice") {
+            if self.zipvoice.tokens.is_empty() && !self.kokoro.tokens.is_empty() {
+                self.zipvoice.tokens = std::mem::take(&mut self.kokoro.tokens);
+            }
+            if self.zipvoice.data_dir.is_empty() && !self.kokoro.data_dir.is_empty() {
+                self.zipvoice.data_dir = std::mem::take(&mut self.kokoro.data_dir);
+            }
+            if self.zipvoice.lexicon.is_empty() && !self.kokoro.lexicon.is_empty() {
+                self.zipvoice.lexicon = std::mem::take(&mut self.kokoro.lexicon);
+            }
+        }
+    }
+
+    pub fn resolve(&self, tts_engine: Option<&str>) -> SherpaTtsRuntime {
+        let engine_name = tts_engine
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(self.engine.as_str())
+            .trim()
+            .to_ascii_lowercase();
+        let engine = if engine_name == "zipvoice" {
+            SherpaTtsEngineKind::Zipvoice
+        } else {
+            SherpaTtsEngineKind::Kokoro
+        };
+        SherpaTtsRuntime {
+            engine,
+            kokoro: self.kokoro.clone(),
+            zipvoice: self.zipvoice.clone(),
+            num_threads: self.num_threads,
+            provider: self.provider.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SherpaTtsEngineKind {
+    Kokoro,
+    Zipvoice,
+}
+
+/// Resolved sherpa TTS settings passed to the runtime driver.
+#[derive(Debug, Clone)]
+pub struct SherpaTtsRuntime {
+    pub engine: SherpaTtsEngineKind,
+    pub kokoro: SherpaKokoroTtsConfig,
+    pub zipvoice: SherpaZipvoiceTtsConfig,
+    pub num_threads: i32,
+    pub provider: String,
+}
+
+impl Default for SherpaTtsRuntime {
+    fn default() -> Self {
+        SherpaTtsSection::default().resolve(None)
+    }
+}
+
+impl SherpaTtsRuntime {
+    pub fn is_zipvoice(&self) -> bool {
+        self.engine == SherpaTtsEngineKind::Zipvoice
+    }
+
+    pub fn is_kokoro(&self) -> bool {
+        self.engine == SherpaTtsEngineKind::Kokoro
     }
 }
 
@@ -735,7 +850,7 @@ fn default_kokoro_length_scale() -> f32 {
 fn default_kokoro_speed() -> f32 {
     1.0
 }
-fn default_sherpa_tts_kind() -> String {
+fn default_sherpa_tts_engine() -> String {
     "kokoro".to_string()
 }
 fn default_zipvoice_encoder() -> String {
@@ -746,6 +861,15 @@ fn default_zipvoice_decoder() -> String {
 }
 fn default_zipvoice_vocoder() -> String {
     "models/zipvoice/vocos_24khz.onnx".to_string()
+}
+fn default_zipvoice_tokens() -> String {
+    "models/zipvoice/tokens.txt".to_string()
+}
+fn default_zipvoice_data_dir() -> String {
+    "models/zipvoice/espeak-ng-data".to_string()
+}
+fn default_zipvoice_lexicon() -> String {
+    "models/zipvoice/lexicon.txt".to_string()
 }
 fn default_zipvoice_reference_audio() -> String {
     "models/zipvoice/test_wavs/leijun-1.wav".to_string()
@@ -1158,6 +1282,9 @@ impl Config {
         merge_dashscope_defaults(&mut cfg);
         cfg.apply_sherpa_runtime();
         cfg.normalize_sherpa_providers_to_cpu();
+        if let Some(sherpa) = &mut cfg.tts.sherpa {
+            sherpa.normalize();
+        }
         cfg.wake.normalize();
         cfg.wake.validate()?;
         validate_talk_backends(&cfg)?;
@@ -1247,23 +1374,26 @@ impl Config {
             sherpa.tokens = join_if_relative(base, &sherpa.tokens);
         }
         if let Some(ref mut sherpa) = self.tts.sherpa {
-            if sherpa.is_kokoro() {
-                sherpa.model = join_if_relative(base, &sherpa.model);
-                sherpa.voices = join_if_relative(base, &sherpa.voices);
-                sherpa.dict_dir = join_if_relative(base, &sherpa.dict_dir);
-            }
-            sherpa.tokens = join_if_relative(base, &sherpa.tokens);
-            sherpa.data_dir = join_if_relative(base, &sherpa.data_dir);
-            sherpa.lexicon = sherpa
+            sherpa.kokoro.model = join_if_relative(base, &sherpa.kokoro.model);
+            sherpa.kokoro.voices = join_if_relative(base, &sherpa.kokoro.voices);
+            sherpa.kokoro.tokens = join_if_relative(base, &sherpa.kokoro.tokens);
+            sherpa.kokoro.data_dir = join_if_relative(base, &sherpa.kokoro.data_dir);
+            sherpa.kokoro.dict_dir = join_if_relative(base, &sherpa.kokoro.dict_dir);
+            sherpa.kokoro.lexicon = sherpa
+                .kokoro
                 .lexicon
                 .split(',')
                 .map(|p| join_if_relative(base, p.trim()))
                 .collect::<Vec<_>>()
                 .join(",");
-            sherpa.encoder = join_if_relative(base, &sherpa.encoder);
-            sherpa.decoder = join_if_relative(base, &sherpa.decoder);
-            sherpa.vocoder = join_if_relative(base, &sherpa.vocoder);
-            sherpa.reference_audio = join_if_relative(base, &sherpa.reference_audio);
+            sherpa.zipvoice.encoder = join_if_relative(base, &sherpa.zipvoice.encoder);
+            sherpa.zipvoice.decoder = join_if_relative(base, &sherpa.zipvoice.decoder);
+            sherpa.zipvoice.vocoder = join_if_relative(base, &sherpa.zipvoice.vocoder);
+            sherpa.zipvoice.tokens = join_if_relative(base, &sherpa.zipvoice.tokens);
+            sherpa.zipvoice.data_dir = join_if_relative(base, &sherpa.zipvoice.data_dir);
+            sherpa.zipvoice.lexicon = join_if_relative(base, &sherpa.zipvoice.lexicon);
+            sherpa.zipvoice.reference_audio =
+                join_if_relative(base, &sherpa.zipvoice.reference_audio);
         }
         self.wake.model_dir = join_if_relative(base, &self.wake.model_dir);
         self.wake.encoder = join_if_relative(base, &self.wake.encoder);
@@ -1415,39 +1545,48 @@ fn validate_sherpa_tts(cfg: &Config) -> Result<()> {
         if !uses_sherpa_tts(&cfg.tts.backend) {
             return Ok(());
         }
-        let Some(tts) = &cfg.tts.sherpa else {
+        let Some(_tts) = &cfg.tts.sherpa else {
             return Ok(());
         };
-        let kind = tts.kind.trim().to_ascii_lowercase();
-        if kind != "kokoro" && kind != "zipvoice" {
+        let engine = cfg
+            .tts
+            .engine
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(_tts.engine.as_str())
+            .trim()
+            .to_ascii_lowercase();
+        if engine != "kokoro" && engine != "zipvoice" {
             return Err(DemoError::Config(format!(
-                "tts.sherpa.kind must be 'kokoro' or 'zipvoice', got '{kind}'"
+                "tts engine must be 'kokoro' or 'zipvoice', got '{engine}'"
             )));
         }
-        if tts.is_zipvoice() {
+        let runtime = cfg.tts.effective_sherpa();
+        if runtime.is_zipvoice() {
+            let z = &runtime.zipvoice;
             for (name, path) in [
-                ("encoder", tts.encoder.as_str()),
-                ("decoder", tts.decoder.as_str()),
-                ("vocoder", tts.vocoder.as_str()),
-                ("tokens", tts.tokens.as_str()),
-                ("data_dir", tts.data_dir.as_str()),
-                ("lexicon", tts.lexicon.as_str()),
-                ("reference_audio", tts.reference_audio.as_str()),
+                ("zipvoice.encoder", z.encoder.as_str()),
+                ("zipvoice.decoder", z.decoder.as_str()),
+                ("zipvoice.vocoder", z.vocoder.as_str()),
+                ("zipvoice.tokens", z.tokens.as_str()),
+                ("zipvoice.data_dir", z.data_dir.as_str()),
+                ("zipvoice.lexicon", z.lexicon.as_str()),
+                ("zipvoice.reference_audio", z.reference_audio.as_str()),
             ] {
                 if path.trim().is_empty() {
                     return Err(DemoError::Config(format!(
-                        "tts.sherpa.{name} is required when kind = zipvoice"
+                        "tts.sherpa.{name} is required when engine = zipvoice"
                     )));
                 }
             }
-            if tts.reference_text.trim().is_empty() {
+            if z.reference_text.trim().is_empty() {
                 return Err(DemoError::Config(
-                    "tts.sherpa.reference_text is required when kind = zipvoice (must match reference_audio transcript)".into(),
+                    "tts.sherpa.zipvoice.reference_text is required (must match reference_audio transcript)".into(),
                 ));
             }
-            if tts.num_steps <= 0 {
+            if z.num_steps <= 0 {
                 return Err(DemoError::Config(
-                    "tts.sherpa.num_steps must be > 0 for zipvoice".into(),
+                    "tts.sherpa.zipvoice.num_steps must be > 0".into(),
                 ));
             }
         }
@@ -1633,8 +1772,38 @@ model = "m"
         let asr = cfg.asr.effective_sherpa();
         assert!(asr.model.contains("sensevoice"));
         let tts = cfg.tts.effective_sherpa();
-        assert!(tts.model.contains("kokoro"));
+        assert!(tts.kokoro.model.contains("kokoro"));
         assert!(tts.is_kokoro());
+    }
+
+    #[test]
+    fn tts_engine_selects_zipvoice_profile() {
+        let raw = r#"
+[tts]
+backend = "sherpa"
+engine = "zipvoice"
+[tts.sherpa.kokoro]
+model = "models/kokoro/model.onnx"
+[tts.sherpa.zipvoice]
+encoder = "models/zipvoice/encoder.int8.onnx"
+decoder = "models/zipvoice/decoder.int8.onnx"
+vocoder = "models/zipvoice/vocos_24khz.onnx"
+tokens = "models/zipvoice/tokens.txt"
+data_dir = "models/zipvoice/espeak-ng-data"
+lexicon = "models/zipvoice/lexicon.txt"
+reference_audio = "models/zipvoice/test_wavs/leijun-1.wav"
+reference_text = "ref text"
+num_steps = 4
+[llm]
+base_url = "http://127.0.0.1/v1"
+api_key = "k"
+model = "m"
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        let tts = cfg.tts.effective_sherpa();
+        assert!(tts.is_zipvoice());
+        assert_eq!(tts.zipvoice.num_steps, 4);
+        assert!(validate_sherpa_tts(&cfg).is_ok());
     }
 
     #[test]
@@ -1667,12 +1836,12 @@ model = "m"
         let cfg: Config = toml::from_str(raw).unwrap();
         let tts = cfg.tts.effective_sherpa();
         assert!(tts.is_zipvoice());
-        assert_eq!(tts.num_steps, 4);
+        assert_eq!(tts.zipvoice.num_steps, 4);
         assert!(validate_sherpa_tts(&cfg).is_ok());
     }
 
     #[test]
-    fn rejects_invalid_sherpa_tts_kind() {
+    fn rejects_invalid_sherpa_tts_engine() {
         let raw = r#"
 [tts]
 backend = "sherpa"

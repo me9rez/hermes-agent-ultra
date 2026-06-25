@@ -21,10 +21,15 @@ provider = "cpu"
 
 [tts]
 backend = "sherpa"
+engine = "kokoro"
 sample_rate = 24000
 format = "pcm"
 
 [tts.sherpa]
+num_threads = 2
+provider = "cpu"
+
+[tts.sherpa.kokoro]
 model = "models/kokoro/model.onnx"
 voices = "models/kokoro/voices.bin"
 tokens = "models/kokoro/tokens.txt"
@@ -34,8 +39,18 @@ lexicon = "models/kokoro/lexicon-us-en.txt,models/kokoro/lexicon-zh.txt"
 length_scale = 1.0
 sid = 0
 speed = 1.0
-num_threads = 2
-provider = "cpu"
+
+[tts.sherpa.zipvoice]
+encoder = "models/zipvoice/encoder.int8.onnx"
+decoder = "models/zipvoice/decoder.int8.onnx"
+vocoder = "models/zipvoice/vocos_24khz.onnx"
+tokens = "models/zipvoice/tokens.txt"
+data_dir = "models/zipvoice/espeak-ng-data"
+lexicon = "models/zipvoice/lexicon.txt"
+reference_audio = "models/zipvoice/test_wavs/leijun-1.wav"
+reference_text = "那还是三十六年前, 一九八七年. 我呢考上了武汉大学的计算机系."
+num_steps = 4
+speed = 1.0
 
 [dashscope]
 api_key = "sk-your-dashscope-key"

@@ -37,16 +37,15 @@ provider = "cpu"
 # ============================================================
 [tts]
 backend = "sherpa"
+engine = "kokoro"
 sample_rate = 24000
 format = "pcm"
-# model = "cosyvoice-v3-flash"          # 云端 TTS 模型
-# voice = "longanyang"                  # 云端 TTS 音色
-# language_hints = ["zh", "en"]
 
 [tts.sherpa]
-# kind = "kokoro"   # default multi-speaker Kokoro
-# ZipVoice zero-shot cloning: kind = "zipvoice" + reference_audio/text (see config.example.zipvoice.toml)
-kind = "kokoro"
+num_threads = 2
+provider = "cpu"
+
+[tts.sherpa.kokoro]
 model = "models/kokoro/model.onnx"
 voices = "models/kokoro/voices.bin"
 tokens = "models/kokoro/tokens.txt"
@@ -54,11 +53,21 @@ data_dir = "models/kokoro/espeak-ng-data"
 dict_dir = "models/kokoro/dict"
 lexicon = "models/kokoro/lexicon-us-en.txt,models/kokoro/lexicon-zh.txt"
 length_scale = 1.0
-# lang = "zh"
 sid = 0
 speed = 1.0
-num_threads = 2
-provider = "cpu"
+
+# Switch TTS voice engine: set [tts].engine = "zipvoice" (or [tts.sherpa].engine)
+[tts.sherpa.zipvoice]
+encoder = "models/zipvoice/encoder.int8.onnx"
+decoder = "models/zipvoice/decoder.int8.onnx"
+vocoder = "models/zipvoice/vocos_24khz.onnx"
+tokens = "models/zipvoice/tokens.txt"
+data_dir = "models/zipvoice/espeak-ng-data"
+lexicon = "models/zipvoice/lexicon.txt"
+reference_audio = "models/zipvoice/test_wavs/leijun-1.wav"
+reference_text = "那还是三十六年前, 一九八七年. 我呢考上了武汉大学的计算机系."
+num_steps = 4
+speed = 1.0
 
 # ============================================================
 # 云端 DashScope（backend = bailian/cloud/dashscope 时必填）

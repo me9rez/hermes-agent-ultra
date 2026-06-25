@@ -18,8 +18,9 @@ impl WakePhase {
         !matches!(self, WakePhase::Dormant)
     }
 
+    /// Dialog (flush ASR, trigger LLM, barge-in) allowed in every phase except dormant.
     pub fn allows_dialog(&self) -> bool {
-        matches!(self, WakePhase::Active)
+        !matches!(self, WakePhase::Dormant)
     }
 
     pub fn check_timeout(&self, now: Instant) -> bool {
@@ -29,5 +30,29 @@ impl WakePhase {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn allows_dialog_except_dormant() {
+        assert!(!WakePhase::Dormant.allows_dialog());
+        assert!(WakePhase::Active.allows_dialog());
+        assert!(
+            WakePhase::AwakeGrace {
+                deadline: Instant::now() + Duration::from_secs(5)
+            }
+            .allows_dialog()
+        );
+        assert!(
+            WakePhase::IdleAfterTurn {
+                deadline: Instant::now() + Duration::from_secs(30)
+            }
+            .allows_dialog()
+        );
     }
 }

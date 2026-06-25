@@ -6,10 +6,12 @@
 # 切换云端：改 [asr]/[tts] backend = "bailian" 并填写 [dashscope]。
 # 切换 Rockchip：改 backend = "local" 并启用 [asr.local] / [tts.local]。
 #
-# GPU 加速（可选）：
-#   1. 下载运行时: scripts/talk/fetch_sherpa_runtime.sh cuda  (Windows: .ps1)
-#   2. 编译: cargo build -p hermes-cli --features talk-cuda --bin hermes-agent-ultra
-#   3. 配置: [sherpa] provider = "cuda"  (或 directml / coreml)
+# GPU 加速（按平台打包，无需额外 Cargo feature）：
+#   make release-talk          # 自动 SHERPA_ONNX_PACK=auto（Win/Linux→CUDA，macOS→CoreML）
+#   make fetch-talk-sherpa-runtime
+#   config: [sherpa] provider = "cuda" | "directml" | "coreml"（依平台 cfg 校验）
+# 开发调试默认 SHERPA_ONNX_PACK=cpu；override 示例:
+#   SHERPA_ONNX_PACK=directml SHERPA_ONNX_LIB_DIR=/path/to/lib cargo build -p hermes-cli --features talk
 # ============================================================
 
 # sherpa-onnx 全局 execution provider（cpu | cuda | directml | coreml）

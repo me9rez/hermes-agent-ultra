@@ -2,7 +2,7 @@
 name = "sherpa-onnx"
 version = "1.13.3"
 edition = "2021"
-description = "Safe Rust wrapper for sherpa-onnx speech recognition toolkit (Hermes fork: GPU EP features)"
+description = "Safe Rust wrapper for sherpa-onnx (Hermes fork: platform pack via SHERPA_ONNX_PACK)"
 license = "Apache-2.0"
 repository = "https://github.com/k2-fsa/sherpa-onnx"
 documentation = "https://docs.rs/sherpa-onnx"
@@ -15,9 +15,6 @@ include = ["src/**", "Cargo.toml", "README.md", "LICENSE*"]
 default = ["static"]
 static = ["sherpa-onnx-sys/static"]
 shared = ["sherpa-onnx-sys/shared"]
-cuda = ["shared", "sherpa-onnx-sys/cuda"]
-directml = ["shared", "sherpa-onnx-sys/directml"]
-coreml = ["sherpa-onnx-sys/coreml"]
 
 [dependencies]
 sherpa-onnx-sys = { path = "../sherpa-onnx-sys", version = "1.13.3", default-features = false }

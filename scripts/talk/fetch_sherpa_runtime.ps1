@@ -1,7 +1,7 @@
-# Download sherpa-onnx native runtime for hermes-talk GPU execution providers.
+# Download sherpa-onnx native runtime for hermes-talk.
 param(
-    [ValidateSet("cpu", "cuda", "directml", "coreml")]
-    [string]$Ep = "cpu"
+    [ValidateSet("cpu", "cuda", "directml", "macos", "auto")]
+    [string]$Ep = "auto"
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +9,10 @@ $Root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $Version = "1.13.3"
 $Base = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$Version"
 $Cache = if ($env:SHERPA_ONNX_CACHE) { $env:SHERPA_ONNX_CACHE } else { Join-Path $Root ".cross-cache\sherpa-onnx" }
+
+if ($Ep -eq "auto") {
+    $Ep = "cuda"
+}
 
 function Get-ArchiveName {
     param([string]$Provider)
@@ -19,14 +23,15 @@ function Get-ArchiveName {
         "cuda" {
             return "sherpa-onnx-v$Version-cuda-12.x-cudnn-9.x-win-x64-cuda.tar.bz2"
         }
-        "coreml" {
-            throw "CoreML requires macOS"
+        "macos" {
+            throw "macos pack requires Darwin; run on macOS"
         }
         "directml" {
             throw @"
 DirectML has no official sherpa-onnx prebuilt archive.
 Build sherpa-onnx with -DSHERPA_ONNX_ENABLE_DIRECTML=ON, then:
   `$env:SHERPA_ONNX_LIB_DIR = 'C:\path\to\lib'
+  `$env:SHERPA_ONNX_PACK = 'directml'
 "@
         }
     }
@@ -38,8 +43,9 @@ $Stem = $Archive -replace '\.tar\.bz2$',''
 $LibDir = Join-Path (Join-Path $Dest $Stem) "lib"
 
 if (Test-Path $LibDir) {
-    Write-Host "sherpa-onnx $Ep runtime already at $LibDir"
+    Write-Host "sherpa-onnx pack=$Ep runtime already at $LibDir"
     Write-Host "`$env:SHERPA_ONNX_LIB_DIR = '$LibDir'"
+    Write-Host "`$env:SHERPA_ONNX_PACK = '$Ep'"
     exit 0
 }
 
@@ -55,5 +61,6 @@ if (-not (Test-Path $LibDir)) {
     throw "expected lib/ under $(Join-Path $Dest $Stem)"
 }
 
-Write-Host "sherpa-onnx $Ep runtime ready at $LibDir"
+Write-Host "sherpa-onnx pack=$Ep runtime ready at $LibDir"
 Write-Host "`$env:SHERPA_ONNX_LIB_DIR = '$LibDir'"
+Write-Host "`$env:SHERPA_ONNX_PACK = '$Ep'"

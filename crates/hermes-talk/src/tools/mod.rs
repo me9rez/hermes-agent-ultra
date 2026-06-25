@@ -130,7 +130,7 @@ pub async fn execute_tool(
     info!(%name, arguments, "tool: executing");
 
     match name {
-        "execute" => {
+        "execute" | "execute_command" => {
             let args: serde_json::Value = serde_json::from_str(arguments)
                 .map_err(|e| DemoError::Tool(format!("execute: invalid arguments JSON: {e}")))?;
             let command = args["command"]

@@ -43,14 +43,13 @@ DEBUG_BIN   := $(TARGET)/debug/$(BIN)$(EXE_EXT)
 # hermes talk (optional voice dialog)
 TALK_FEATURES     := talk
 TALK_FEATURES_RK  := talk-rockchip
-TALK_FEATURES_CUDA := talk-cuda
-TALK_FEATURES_DML  := talk-directml
-TALK_FEATURES_COREML := talk-coreml
 TALK_PKG          := -p $(BIN_CRATE) --features $(TALK_FEATURES) --bin $(BIN)
 TALK_PKG_RK       := -p $(BIN_CRATE) --features $(TALK_FEATURES_RK) --bin $(BIN)
-TALK_PKG_CUDA     := -p $(BIN_CRATE) --features $(TALK_FEATURES_CUDA) --bin $(BIN)
-TALK_PKG_DML      := -p $(BIN_CRATE) --features $(TALK_FEATURES_DML) --bin $(BIN)
-TALK_PKG_COREML   := -p $(BIN_CRATE) --features $(TALK_FEATURES_COREML) --bin $(BIN)
+# Platform sherpa runtime pack for release/package (see SHERPA_ONNX_PACK in sherpa-onnx-sys/build.rs)
+TALK_SHERPA_PACK_windows := auto
+TALK_SHERPA_PACK_linux   := auto
+TALK_SHERPA_PACK_macos   := auto
+TALK_SHERPA_PACK         := $(TALK_SHERPA_PACK_$(HOST_OS))
 TALK_CRATE        := crates/hermes-talk
 TALK_RKAUDIO      := $(TALK_CRATE)/rkaudio
 TALK_RUN          = $(CARGO) run $(TALK_PKG) -- talk
@@ -230,25 +229,41 @@ clean:
 build-talk:
 	$(CARGO) build $(TALK_PKG)
 
-release-talk: ensure-talk-models
-	$(CARGO) build --release $(TALK_PKG)
-	@echo "Built $(RELEASE_BIN) (features: $(TALK_FEATURES))"
+# Dev build: CPU static sherpa (SHERPA_ONNX_PACK defaults to cpu).
+release-talk: release-talk-$(HOST_OS)
 
-fetch-talk-sherpa-cuda:
-	bash $(TALK_SCRIPTS)/fetch_sherpa_runtime.sh cuda
+release-talk-unknown:
+	@echo "Cannot detect host OS; use release-talk-windows, release-talk-linux, or release-talk-macos" >&2
+	@exit 1
 
-fetch-talk-sherpa-coreml:
-	bash $(TALK_SCRIPTS)/fetch_sherpa_runtime.sh coreml
+release-talk-windows: ensure-talk-models fetch-talk-sherpa-runtime
+	SHERPA_ONNX_PACK=$(TALK_SHERPA_PACK_windows) $(CARGO) build --release $(TALK_PKG)
+	@echo "Built $(RELEASE_BIN) (talk + SHERPA_ONNX_PACK=$(TALK_SHERPA_PACK_windows))"
 
-release-talk-cuda: ensure-talk-models fetch-talk-sherpa-cuda
-	@test -n "$$SHERPA_ONNX_LIB_DIR" || (echo "Set SHERPA_ONNX_LIB_DIR from fetch-talk-sherpa-cuda output" >&2; exit 1)
-	$(CARGO) build --release $(TALK_PKG_CUDA)
-	@echo "Built $(RELEASE_BIN) (features: $(TALK_FEATURES_CUDA))"
+release-talk-linux: ensure-talk-models fetch-talk-sherpa-runtime
+	SHERPA_ONNX_PACK=$(TALK_SHERPA_PACK_linux) $(CARGO) build --release $(TALK_PKG)
+	@echo "Built $(RELEASE_BIN) (talk + SHERPA_ONNX_PACK=$(TALK_SHERPA_PACK_linux))"
 
-release-talk-coreml: ensure-talk-models fetch-talk-sherpa-coreml
-	@test -n "$$SHERPA_ONNX_LIB_DIR" || (echo "Set SHERPA_ONNX_LIB_DIR from fetch-talk-sherpa-coreml output" >&2; exit 1)
-	$(CARGO) build --release $(TALK_PKG_COREML)
-	@echo "Built $(RELEASE_BIN) (features: $(TALK_FEATURES_COREML))"
+release-talk-macos: ensure-talk-models fetch-talk-sherpa-runtime
+	SHERPA_ONNX_PACK=$(TALK_SHERPA_PACK_macos) $(CARGO) build --release $(TALK_PKG)
+	@echo "Built $(RELEASE_BIN) (talk + SHERPA_ONNX_PACK=$(TALK_SHERPA_PACK_macos))"
+
+fetch-talk-sherpa-runtime: fetch-talk-sherpa-runtime-$(HOST_OS)
+
+fetch-talk-sherpa-runtime-unknown:
+	@echo "Cannot detect host OS; use fetch-talk-sherpa-runtime-windows or fetch-talk-sherpa-runtime-unix" >&2
+	@exit 1
+
+fetch-talk-sherpa-runtime-windows:
+ifeq ($(HOST_OS),windows)
+	powershell -NoProfile -ExecutionPolicy Bypass -File $(TALK_SCRIPTS)/fetch_sherpa_runtime.ps1 auto
+else
+	@echo "fetch-talk-sherpa-runtime-windows requires Windows" >&2
+	@exit 1
+endif
+
+fetch-talk-sherpa-runtime-linux fetch-talk-sherpa-runtime-macos fetch-talk-sherpa-runtime-unix:
+	bash $(TALK_SCRIPTS)/fetch_sherpa_runtime.sh auto
 
 ensure-talk-models: ensure-talk-models-$(HOST_OS)
 

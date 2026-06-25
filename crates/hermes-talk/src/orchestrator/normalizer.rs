@@ -136,6 +136,364 @@ pub fn normalize_quotes(text: &str) -> String {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// ZipVoice-style TTS preprocessing
+// Ref: https://github.com/k2-fsa/ZipVoice/blob/master/zipvoice/tokenizer/normalizer.py
+// Ref: https://github.com/k2-fsa/ZipVoice/blob/master/zipvoice/tokenizer/tokenizer.py
+// ---------------------------------------------------------------------------
+
+/// Map Chinese / variant punctuation to forms TTS engines read reliably.
+pub fn map_punctuations(text: &str) -> String {
+    let mut text = text.to_string();
+    let pairs = [
+        ('，', ','),
+        ('。', '.'),
+        ('！', '!'),
+        ('？', '?'),
+        ('；', ';'),
+        ('：', ':'),
+        ('、', ','),
+        ('‘', '\''),
+        ('’', '\''),
+        ('“', '"'),
+        ('”', '"'),
+    ];
+    for (from, to) in pairs {
+        text = text.replace(from, &to.to_string());
+    }
+    text = text.replace("⋯", "…");
+    text = text.replace("···", "…");
+    text = text.replace("・・・", "…");
+    text = text.replace("...", "…");
+    text
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SegmentLang {
+    Zh,
+    En,
+    Other,
+}
+
+fn is_chinese_char(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fa5}').contains(&c)
+}
+
+fn classify_char(c: char) -> SegmentLang {
+    if is_chinese_char(c) {
+        SegmentLang::Zh
+    } else if c.is_ascii_alphabetic() {
+        SegmentLang::En
+    } else {
+        SegmentLang::Other
+    }
+}
+
+/// Split mixed zh/en text (ZipVoice `get_segment` semantics, without <> pinyin tags).
+fn segment_by_language(text: &str) -> Vec<(String, SegmentLang)> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let types: Vec<SegmentLang> = chars.iter().copied().map(classify_char).collect();
+
+    let mut segments = Vec::new();
+    let mut temp = String::new();
+    let mut temp_lang = types[0];
+
+    for (i, ch) in chars.iter().enumerate() {
+        let lang = types[i];
+        if i == 0 {
+            temp.push(*ch);
+            continue;
+        }
+        if temp_lang == SegmentLang::Other {
+            temp.push(*ch);
+            temp_lang = lang;
+        } else if lang == temp_lang || lang == SegmentLang::Other {
+            temp.push(*ch);
+        } else {
+            segments.push((std::mem::take(&mut temp), temp_lang));
+            temp.push(*ch);
+            temp_lang = lang;
+        }
+    }
+    if !temp.is_empty() {
+        segments.push((temp, temp_lang));
+    }
+    segments
+}
+
+fn digit_to_chinese(d: u8) -> char {
+    DIGITS[d as usize]
+}
+
+fn normalize_chinese_segment(text: &str) -> String {
+    use regex::Regex;
+    static PERCENT_RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"(\d+(?:\.\d+)?)\s*%").unwrap());
+    static DECIMAL_RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\d+\.\d+").unwrap());
+
+    let mut out = text.to_string();
+    out = PERCENT_RE
+        .replace_all(&out, |caps: &regex::Captures| {
+            let num = caps.get(1).unwrap().as_str();
+            if let Ok(n) = num.parse::<u64>() {
+                format!("百分之{}", number_to_chinese(n))
+            } else if let Some((int_part, frac)) = num.split_once('.') {
+                let int_cn = int_part
+                    .parse::<u64>()
+                    .map(number_to_chinese)
+                    .unwrap_or_else(|_| int_part.to_string());
+                let frac_cn: String = frac
+                    .chars()
+                    .filter(|c| c.is_ascii_digit())
+                    .map(|c| digit_to_chinese(c as u8 - b'0'))
+                    .collect();
+                format!("百分之{}点{}", int_cn, frac_cn)
+            } else {
+                caps.get(0).unwrap().as_str().to_string()
+            }
+        })
+        .into_owned();
+
+    out = DECIMAL_RE
+        .replace_all(&out, |caps: &regex::Captures| {
+            let num = caps.get(0).unwrap().as_str();
+            let Some((int_part, frac)) = num.split_once('.') else {
+                return num.to_string();
+            };
+            let int_cn = int_part
+                .parse::<u64>()
+                .map(number_to_chinese)
+                .unwrap_or_else(|_| int_part.to_string());
+            let frac_cn: String = frac
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .map(|c| digit_to_chinese(c as u8 - b'0'))
+                .collect();
+            format!("{}点{}", int_cn, frac_cn)
+        })
+        .into_owned();
+
+    normalize_chinese_numbers(&out)
+}
+
+fn english_ones(n: u64) -> &'static str {
+    match n {
+        0 => "zero",
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        4 => "four",
+        5 => "five",
+        6 => "six",
+        7 => "seven",
+        8 => "eight",
+        9 => "nine",
+        10 => "ten",
+        11 => "eleven",
+        12 => "twelve",
+        13 => "thirteen",
+        14 => "fourteen",
+        15 => "fifteen",
+        16 => "sixteen",
+        17 => "seventeen",
+        18 => "eighteen",
+        19 => "nineteen",
+        _ => "",
+    }
+}
+
+fn english_tens(n: u64) -> &'static str {
+    match n {
+        2 => "twenty",
+        3 => "thirty",
+        4 => "forty",
+        5 => "fifty",
+        6 => "sixty",
+        7 => "seventy",
+        8 => "eighty",
+        9 => "ninety",
+        _ => "",
+    }
+}
+
+fn english_number_to_words(n: i64) -> String {
+    if n < 0 {
+        return format!("minus {}", english_number_to_words(-n));
+    }
+    let n = n as u64;
+    if n < 20 {
+        return english_ones(n).to_string();
+    }
+    if n < 100 {
+        let tens = n / 10;
+        let ones = n % 10;
+        if ones == 0 {
+            return english_tens(tens).to_string();
+        }
+        return format!("{} {}", english_tens(tens), english_ones(ones));
+    }
+    if n < 1000 {
+        let hundreds = n / 100;
+        let rest = n % 100;
+        if rest == 0 {
+            return format!("{} hundred", english_ones(hundreds));
+        }
+        return format!(
+            "{} hundred {}",
+            english_ones(hundreds),
+            english_number_to_words(rest as i64)
+        );
+    }
+    if n < 1_000_000 {
+        let thousands = n / 1000;
+        let rest = n % 1000;
+        if rest == 0 {
+            return format!("{} thousand", english_number_to_words(thousands as i64));
+        }
+        return format!(
+            "{} thousand {}",
+            english_number_to_words(thousands as i64),
+            english_number_to_words(rest as i64)
+        );
+    }
+    n.to_string()
+}
+
+fn english_ordinal(n: u64) -> String {
+    let word = english_number_to_words(n as i64);
+    if word.ends_with('y') && !word.ends_with("ey") {
+        return format!("{}th", word.trim_end_matches('y'));
+    }
+    match word.as_str() {
+        "one" => "first".to_string(),
+        "two" => "second".to_string(),
+        "three" => "third".to_string(),
+        "five" => "fifth".to_string(),
+        "eight" => "eighth".to_string(),
+        "nine" => "ninth".to_string(),
+        "twelve" => "twelfth".to_string(),
+        _ if word.ends_with('e') => format!("{}nth", word),
+        _ => format!("{}th", word),
+    }
+}
+
+fn expand_english_abbreviations(text: &str) -> String {
+    const ABBREVS: [(&str, &str); 19] = [
+        ("mrs", "misess"),
+        ("mr", "mister"),
+        ("dr", "doctor"),
+        ("st", "saint"),
+        ("co", "company"),
+        ("jr", "junior"),
+        ("maj", "major"),
+        ("gen", "general"),
+        ("drs", "doctors"),
+        ("rev", "reverend"),
+        ("lt", "lieutenant"),
+        ("hon", "honorable"),
+        ("sgt", "sergeant"),
+        ("capt", "captain"),
+        ("esq", "esquire"),
+        ("ltd", "limited"),
+        ("col", "colonel"),
+        ("ft", "fort"),
+        ("etc", "et cetera"),
+    ];
+    let mut out = text.to_string();
+    for (abbr, expansion) in ABBREVS {
+        let re = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(abbr))).unwrap();
+        out = re.replace_all(&out, expansion).into_owned();
+    }
+    out
+}
+
+fn normalize_english_segment(text: &str) -> String {
+    use regex::Regex;
+    static COMMA_NUM: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\b(\d{1,3}(?:,\d{3})+)\b").unwrap());
+    static ORDINAL: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\b(\d+)(st|nd|rd|th)\b").unwrap());
+    static DECIMAL: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\b(\d+)\.(\d+)\b").unwrap());
+    static PERCENT: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\b(\d+(?:\.\d+)?)%\b").unwrap());
+    static PLAIN: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\b(\d+)\b").unwrap());
+
+    let mut out = expand_english_abbreviations(text);
+    out = COMMA_NUM
+        .replace_all(&out, |caps: &regex::Captures| {
+            let raw = caps.get(1).unwrap().as_str().replace(',', "");
+            raw.parse::<u64>()
+                .map(|n| english_number_to_words(n as i64))
+                .unwrap_or_else(|_| caps.get(0).unwrap().as_str().to_string())
+        })
+        .into_owned();
+    out = ORDINAL
+        .replace_all(&out, |caps: &regex::Captures| {
+            let n: u64 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
+            english_ordinal(n)
+        })
+        .into_owned();
+    out = PERCENT
+        .replace_all(&out, |caps: &regex::Captures| {
+            let num = caps.get(1).unwrap().as_str();
+            if let Ok(n) = num.parse::<u64>() {
+                format!("{} percent", english_number_to_words(n as i64))
+            } else {
+                format!("{} percent", num)
+            }
+        })
+        .into_owned();
+    out = DECIMAL
+        .replace_all(&out, |caps: &regex::Captures| {
+            let int_part: u64 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
+            let frac = caps.get(2).unwrap().as_str();
+            let frac_words: Vec<&str> = frac
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .map(|c| english_ones((c as u8 - b'0') as u64))
+                .collect();
+            format!(
+                "{} point {}",
+                english_number_to_words(int_part as i64),
+                frac_words.join(" ")
+            )
+        })
+        .into_owned();
+    out = PLAIN
+        .replace_all(&out, |caps: &regex::Captures| {
+            let n: u64 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
+            english_number_to_words(n as i64)
+        })
+        .into_owned();
+    out
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Full TTS text preprocessor (ZipVoice EmiliaTokenizer text path, without phoneme G2P).
+pub fn preprocess_tts_text(text: &str) -> String {
+    let mapped = map_punctuations(text);
+    let segments = segment_by_language(&mapped);
+    let mut out = String::with_capacity(mapped.len() + 16);
+    for (seg, lang) in segments {
+        let normalized = match lang {
+            SegmentLang::Zh => normalize_chinese_segment(&seg),
+            SegmentLang::En => normalize_english_segment(&seg),
+            SegmentLang::Other => seg,
+        };
+        out.push_str(&normalized);
+    }
+    collapse_whitespace(&normalize_quotes(&out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +576,33 @@ mod tests {
         assert_eq!(normalize_chinese_numbers("你好世界"), "你好世界");
         assert_eq!(normalize_chinese_numbers(""), "");
         assert_eq!(normalize_chinese_numbers("abc"), "abc");
+    }
+
+    #[test]
+    fn test_map_punctuations() {
+        assert_eq!(map_punctuations("你好，世界。"), "你好,世界.");
+        assert_eq!(map_punctuations("真的吗？"), "真的吗?");
+    }
+
+    #[test]
+    fn test_preprocess_chinese_numbers_and_percent() {
+        let out = preprocess_tts_text("温度25度，湿度50%");
+        assert!(out.contains("二十五"));
+        assert!(out.contains("百分之五十"));
+    }
+
+    #[test]
+    fn test_preprocess_mixed_zipvoice_example() {
+        let out = preprocess_tts_text("我们是5年小米人,是吗? Yes I think so!");
+        assert!(out.contains("五年"));
+        assert!(out.contains("Yes I think so"));
+    }
+
+    #[test]
+    fn test_preprocess_english_abbrev_and_number() {
+        let out = preprocess_tts_text("mr king, 5 years");
+        assert!(out.contains("mister"));
+        assert!(out.contains("five"));
     }
 
     #[test]

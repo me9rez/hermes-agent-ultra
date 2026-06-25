@@ -2,6 +2,7 @@
 
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig};
@@ -26,7 +27,13 @@ struct DriverState {
     buffer: Vec<i16>,
     paused: bool,
     gated: bool,
+    last_partial_decode: Instant,
+    last_partial_text: String,
+    min_partial_samples: usize,
 }
+
+/// How often to emit interim partial transcripts while the user is still speaking.
+const PARTIAL_DECODE_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct SherpaAsr {
     cmd_tx: SyncSender<AsrCommand>,
@@ -65,6 +72,9 @@ impl SherpaAsr {
             buffer: Vec::new(),
             paused: start_paused,
             gated: false,
+            last_partial_decode: Instant::now(),
+            last_partial_text: String::new(),
+            min_partial_samples: sample_rate as usize / 4, // ~250ms @ 16kHz
         };
 
         let thread = thread::spawn(move || {
@@ -132,6 +142,7 @@ fn run_asr_loop(
         match cmd {
             AsrCommand::SendAudio(pcm) if !state.paused && !state.gated => {
                 append_pcm_i16(&mut state.buffer, &pcm);
+                maybe_emit_partial(state, &event_tx);
             }
             AsrCommand::SendAudio(_) => {}
             AsrCommand::SetPaused(on) => state.paused = on,
@@ -139,27 +150,20 @@ fn run_asr_loop(
                 state.gated = on;
                 if on {
                     state.buffer.clear();
+                    state.last_partial_text.clear();
                 }
             }
-            AsrCommand::ResetBuffer => state.buffer.clear(),
+            AsrCommand::ResetBuffer => {
+                state.buffer.clear();
+                state.last_partial_text.clear();
+            }
             AsrCommand::FinishUtterance => {
+                state.last_partial_text.clear();
                 if state.buffer.is_empty() {
                     continue;
                 }
-                let samples: Vec<f32> = state
-                    .buffer
-                    .iter()
-                    .map(|&s| s as f32 / i16::MAX as f32)
-                    .collect();
+                let text = decode_buffer(state).unwrap_or_default();
                 state.buffer.clear();
-
-                let stream = state.recognizer.create_stream();
-                stream.accept_waveform(state.sample_rate as i32, &samples);
-                state.recognizer.decode(&stream);
-                let text = stream
-                    .get_result()
-                    .map(|r| r.text.trim().to_string())
-                    .unwrap_or_default();
 
                 if text.is_empty() {
                     warn!("sherpa asr: empty decode result");
@@ -172,6 +176,41 @@ fn run_asr_loop(
         }
     }
     Ok(())
+}
+
+fn maybe_emit_partial(state: &mut DriverState, event_tx: &async_mpsc::Sender<AsrEvent>) {
+    if state.buffer.len() < state.min_partial_samples {
+        return;
+    }
+    let now = Instant::now();
+    if now.duration_since(state.last_partial_decode) < PARTIAL_DECODE_INTERVAL {
+        return;
+    }
+    state.last_partial_decode = now;
+    let Some(text) = decode_buffer(state) else {
+        return;
+    };
+    if text.is_empty() || text == state.last_partial_text {
+        return;
+    }
+    info!(text = %text, samples = state.buffer.len(), "sherpa asr partial");
+    state.last_partial_text = text.clone();
+    let _ = event_tx.blocking_send(AsrEvent::Partial { text });
+}
+
+fn decode_buffer(state: &DriverState) -> Option<String> {
+    if state.buffer.is_empty() {
+        return None;
+    }
+    let samples: Vec<f32> = state
+        .buffer
+        .iter()
+        .map(|&s| s as f32 / i16::MAX as f32)
+        .collect();
+    let stream = state.recognizer.create_stream();
+    stream.accept_waveform(state.sample_rate as i32, &samples);
+    state.recognizer.decode(&stream);
+    stream.get_result().map(|r| r.text.trim().to_string())
 }
 
 fn append_pcm_i16(buf: &mut Vec<i16>, pcm: &[u8]) {

@@ -46,9 +46,8 @@ pub fn ensure_talk_home() -> Result<()> {
     }
 
     let example_path = home.join("config.toml.example");
-    fs::write(&example_path, CONFIG_EXAMPLE).map_err(|e| {
-        DemoError::Config(format!("write {}: {e}", example_path.display()))
-    })?;
+    fs::write(&example_path, CONFIG_EXAMPLE)
+        .map_err(|e| DemoError::Config(format!("write {}: {e}", example_path.display())))?;
     tracing::debug!(path = %example_path.display(), "refreshed talk config example");
     Ok(())
 }
@@ -174,7 +173,9 @@ pub fn init_talk_home() -> Result<()> {
             "  Full template refreshed at {}",
             talk_home.join("config.toml.example").display()
         );
-        println!("  Merge missing sections (e.g. [orchestrator]) from that file, or delete config.toml and re-run init.");
+        println!(
+            "  Merge missing sections (e.g. [orchestrator]) from that file, or delete config.toml and re-run init."
+        );
     }
     print_post_init_notes(&hermes_home, &talk_home);
     Ok(())

@@ -1312,13 +1312,44 @@ fn validate_sherpa_providers(cfg: &Config) -> Result<()> {
 
     for provider in providers {
         validate_provider(provider)?;
-        if provider != "cpu" {
-            if let Some(hint) = provider_hint(provider) {
-                tracing::debug!(provider, hint, "sherpa non-cpu provider configured");
-            }
+        if provider == "cpu" {
+            continue;
+        }
+        if !provider_linked_at_build(provider) {
+            tracing::warn!(
+                provider,
+                pack = std::env::var("SHERPA_ONNX_PACK").unwrap_or_else(|_| "cpu".into()),
+                "sherpa provider configured but this binary may not link the matching runtime; \
+                 rebuild with `make release-talk` or set SHERPA_ONNX_PACK"
+            );
+        }
+        if let Some(hint) = provider_hint(provider) {
+            tracing::debug!(provider, hint, "sherpa non-cpu provider");
         }
     }
     Ok(())
+}
+
+/// Whether the current binary was built with native libs for this provider.
+fn provider_linked_at_build(provider: &str) -> bool {
+    use crate::sherpa::platform_supports;
+
+    match provider {
+        "cpu" => true,
+        #[cfg(sherpa_pack_cuda)]
+        "cuda" => true,
+        #[cfg(not(sherpa_pack_cuda))]
+        "cuda" => false,
+        #[cfg(sherpa_pack_coreml)]
+        "coreml" => true,
+        #[cfg(not(sherpa_pack_coreml))]
+        "coreml" => false,
+        #[cfg(sherpa_pack_directml)]
+        "directml" => true,
+        #[cfg(not(sherpa_pack_directml))]
+        "directml" => false,
+        _ => platform_supports(provider),
+    }
 }
 
 fn join_if_relative(base: &Path, path: &str) -> String {

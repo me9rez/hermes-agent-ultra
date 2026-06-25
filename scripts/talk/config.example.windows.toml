@@ -1,7 +1,8 @@
 # ============================================================
-# hermes-talk 桌面版配置（sherpa-onnx SenseVoice + Kokoro）
+# hermes-talk Windows / 桌面版（sherpa-onnx SenseVoice + Kokoro / ZipVoice）
 # 用于 make package-talk-* / release-talk；`hermes talk init` 亦使用此模板。
 #
+# 切换 TTS 引擎：改 [tts].engine = "kokoro" | "zipvoice"
 # 切换云端 ASR/TTS：改 [asr]/[tts] backend = "bailian" 并填写 [dashscope]。
 #
 # sherpa-onnx 使用 CPU 执行提供者（所有平台）：
@@ -56,7 +57,6 @@ length_scale = 1.0
 sid = 0
 speed = 1.0
 
-# Switch TTS voice engine: set [tts].engine = "zipvoice" (or [tts.sherpa].engine)
 [tts.sherpa.zipvoice]
 encoder = "models/zipvoice/encoder.int8.onnx"
 decoder = "models/zipvoice/decoder.int8.onnx"
@@ -135,6 +135,7 @@ lexicon = "models/kws-zh-en/en.phone"
 boost_score = 2.0
 trigger_threshold = 0.35
 num_threads = 2
+provider = "cpu"
 
 # ============================================================
 # 会话编排
@@ -176,6 +177,7 @@ threshold = 0.5
 min_silence_duration = 0.55
 min_speech_duration = 0.25
 max_speech_duration = 15.0
+provider = "cpu"
 
 # ============================================================
 # 音频降噪（DPDFNet，需 models/denoise/dpdfnet_baseline.onnx）
@@ -184,6 +186,7 @@ max_speech_duration = 15.0
 enabled = true
 variant = "dpdfnet_baseline"
 model_dir = "models/denoise"
+provider = "cpu"
 
 # ============================================================
 # 回声消除（Speex AEC）
@@ -203,3 +206,4 @@ enabled = false
 threshold = 0.6
 model_dir = "models/speaker"
 voiceprint_path = "voiceprint.bin"
+provider = "cpu"

@@ -1858,10 +1858,16 @@ model = "m"
 
     #[test]
     fn config_example_template_parses() {
-        let raw = include_str!("../../../scripts/talk/config.example.desktop.toml");
-        let cfg: Config = toml::from_str(raw).unwrap();
+        let raw = include_str!("../../../scripts/talk/config.example.windows.toml");
+        let mut cfg: Config = toml::from_str(raw).unwrap();
+        cfg.apply_sherpa_runtime();
+        cfg.normalize_sherpa_providers_to_cpu();
         assert_eq!(cfg.asr.backend, "sherpa");
         assert_eq!(cfg.tts.backend, "sherpa");
+        assert_eq!(cfg.sherpa.provider, "cpu");
+        assert_eq!(cfg.asr.sherpa.as_ref().unwrap().provider, "cpu");
+        assert_eq!(cfg.tts.sherpa.as_ref().unwrap().provider, "cpu");
+        assert_eq!(cfg.wake.provider, "cpu");
         assert!(cfg.wake.enabled);
         assert_eq!(cfg.orchestrator.endpoint_silence_ms, 800);
     }
@@ -1897,19 +1903,6 @@ model = "m"
 "#,
         )
         .unwrap();
-        cfg.apply_sherpa_runtime();
-        cfg.normalize_sherpa_providers_to_cpu();
-        assert_eq!(cfg.sherpa.provider, "cpu");
-        assert_eq!(cfg.asr.sherpa.as_ref().unwrap().provider, "cpu");
-        assert_eq!(cfg.tts.sherpa.as_ref().unwrap().provider, "cpu");
-        assert_eq!(cfg.wake.provider, "cpu");
-    }
-
-    #[cfg(all(target_os = "windows", feature = "sherpa-asr-tts"))]
-    #[test]
-    fn windows_config_example_template_parses() {
-        let raw = include_str!("../../../scripts/talk/config.example.desktop.windows.toml");
-        let mut cfg: Config = toml::from_str(raw).unwrap();
         cfg.apply_sherpa_runtime();
         cfg.normalize_sherpa_providers_to_cpu();
         assert_eq!(cfg.sherpa.provider, "cpu");

@@ -64,8 +64,8 @@ foreach ($sub in @("sensevoice", "kokoro", "zipvoice", "kws-zh-en", "vad", "deno
     Copy-Models $sub
 }
 
-Copy-Item (Join-Path $Root "scripts\talk\config.example.desktop.windows.toml") (Join-Path $Out "config.example.toml") -Force
-Copy-Item (Join-Path $Root "scripts\talk\config.example.desktop.yaml") (Join-Path $Out "config.example.yaml") -Force
+Copy-Item (Join-Path $Root "scripts\talk\config.example.windows.toml") (Join-Path $Out "config.example.toml") -Force
+Copy-Item (Join-Path $Root "scripts\talk\config.example.windows.yaml") (Join-Path $Out "config.example.yaml") -Force
 Copy-Item (Join-Path $Root "scripts\talk\start_desktop.ps1") (Join-Path $Out "start.ps1") -Force
 
 Write-Host "Bundled: $Out"

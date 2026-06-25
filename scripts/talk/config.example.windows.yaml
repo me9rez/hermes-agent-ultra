@@ -1,4 +1,4 @@
-# Hermes Agent Ultra — 桌面 talk 包默认 gateway 配置
+# Hermes Agent Ultra — Windows / 桌面 talk 包默认 gateway 配置
 # start.sh / start.ps1 首次运行会复制为 $HERMES_HOME/config.yaml
 
 model: custom:auto

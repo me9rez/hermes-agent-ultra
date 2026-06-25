@@ -5,12 +5,8 @@ use std::path::Path;
 
 use crate::error::{DemoError, Result};
 
-#[cfg(all(feature = "sherpa-asr-tts", target_os = "windows"))]
-const CONFIG_EXAMPLE: &str =
-    include_str!("../../../scripts/talk/config.example.desktop.windows.toml");
-
-#[cfg(all(feature = "sherpa-asr-tts", not(target_os = "windows")))]
-const CONFIG_EXAMPLE: &str = include_str!("../../../scripts/talk/config.example.desktop.toml");
+#[cfg(feature = "sherpa-asr-tts")]
+const CONFIG_EXAMPLE: &str = include_str!("../../../scripts/talk/config.example.windows.toml");
 
 #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
 const CONFIG_EXAMPLE: &str = include_str!("../../../scripts/talk/config.example.rockchip.toml");

@@ -81,8 +81,8 @@ for sub in sensevoice kokoro zipvoice kws-zh-en vad denoise speaker; do
   copy_models "${sub}"
 done
 
-cp "${ROOT}/scripts/talk/config.example.desktop.toml" "${OUT}/config.example.toml"
-cp "${ROOT}/scripts/talk/config.example.desktop.yaml" "${OUT}/config.example.yaml"
+cp "${ROOT}/scripts/talk/config.example.windows.toml" "${OUT}/config.example.toml"
+cp "${ROOT}/scripts/talk/config.example.windows.yaml" "${OUT}/config.example.yaml"
 
 if [[ "${PLATFORM}" == "windows" ]]; then
   cp "${ROOT}/scripts/talk/start_desktop.ps1" "${OUT}/start.ps1"

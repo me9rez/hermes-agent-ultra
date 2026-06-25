@@ -1870,6 +1870,22 @@ model = "m"
         assert_eq!(cfg.wake.provider, "cpu");
         assert!(cfg.wake.enabled);
         assert_eq!(cfg.orchestrator.endpoint_silence_ms, 800);
+        assert!(cfg.orchestrator.barge_in_requires_wake);
+    }
+
+    #[test]
+    fn orchestrator_barge_in_requires_wake_defaults_true_when_omitted() {
+        let raw = r#"
+[orchestrator]
+endpoint_silence_ms = 800
+barge_in_enabled = true
+[llm]
+base_url = "http://127.0.0.1/v1"
+api_key = "k"
+model = "m"
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(cfg.orchestrator.barge_in_requires_wake);
     }
 
     #[test]

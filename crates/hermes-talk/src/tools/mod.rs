@@ -48,7 +48,7 @@ const HERMES_TOOL: &str = r#"{
     },
     "spoken": {
       "type": "string",
-      "description": "给用户的自然口语播报文本，简述你即将帮用户处理什么任务。例如'帮你查一下今天的天气''我看看北京到上海的航班'。必须口语化、自然，不要模板化开头。"
+      "description": "用准确精炼的口语，向用户复述这一次他要你做的具体任务（复述用户诉求本身，不是说你正在帮他查或已提交）。禁止敷衍套话，如「帮你查一下」「我看看」「已提交处理」「稍等我来办」等。"
     }
   },
   "required": ["text", "spoken"]
@@ -90,7 +90,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             r#type: "function".to_string(),
             function: FunctionDef {
                 name: "call_hermes".to_string(),
-                description: "将复杂问题交给 hermes 异步处理（联网搜索、复杂推理、多步操作、定时任务等）。调用后仅收到入队确认，不代表任务完成——hermes 处理完后会主动推送真实结果，你届时再向用户播报。调用后你只能说'已帮你提交请求等待处理'，严禁说'已完成''已设置'等表示任务已结束的话。仅当execute无法满足需求时使用。".to_string(),
+                description: "将复杂问题交给 hermes 异步处理（联网搜索、复杂推理、多步操作、定时任务等）。调用后仅收到入队确认，不代表任务完成——hermes 处理完后会主动推送真实结果，你届时再向用户播报。调用时 spoken 须用准确精炼的口语复述用户本次具体诉求，禁止「帮你查一下」「已提交处理」等敷衍套话。仅当execute无法满足需求时使用。".to_string(),
                 parameters: serde_json::from_str(HERMES_TOOL).unwrap(),
             },
         },

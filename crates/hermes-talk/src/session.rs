@@ -155,7 +155,7 @@ impl Session {
         }
         // Inject hermes guidance: call_hermes is async, hermes will reply later.
         {
-            let hermes_hint = "[工具提示] call_hermes 是把请求发给 hermes（后台智能助手）异步处理，hermes 可能几秒或更久才会回复。调用后你收到的 tool result 只有入队确认，不代表任务完成。调用时 spoken 参数要填写给用户的自然口语播报，简述你正在帮用户处理什么（如'帮你查一下天气''我看看这个怎么弄'），不要用模板化开头。之后你应告诉用户'已帮你提交给 hermes 处理，稍后 hermes 会回复你'。严禁说'已经设置好了''已经完成了'等话。";
+            let hermes_hint = "[工具提示] call_hermes 是把请求发给 hermes（后台智能助手）异步处理，hermes 可能几秒或更久才会回复。调用后你收到的 tool result 只有入队确认，不代表任务完成。调用时 spoken 必须用准确精炼的口语向用户复述这一次的具体诉求，禁止敷衍套话（如「帮你查一下」「我看看」「已提交处理」「稍等我来办」）。hermes 完成后会主动推送结果，你届时再用口语向用户播报真实结果。严禁在结果未返回前说「已经设置好了」「已经完成了」等话。";
             if !self.cfg.llm.system_prompt.contains(hermes_hint) {
                 self.cfg.llm.system_prompt =
                     format!("{hermes_hint}\n{}", self.cfg.llm.system_prompt);

@@ -155,7 +155,7 @@ impl Session {
         }
         // Inject hermes guidance: call_hermes is async, hermes will reply later.
         {
-            let hermes_hint = "[工具提示] call_hermes 是把请求发给 hermes（后台智能助手）异步处理，hermes 可能几秒或更久才会回复。调用后你收到的 tool result 只有入队确认，不代表任务完成。调用时 spoken 必须用准确精炼的口语向用户复述这一次的具体诉求，禁止敷衍套话（如「帮你查一下」「我看看」「已提交处理」「稍等我来办」）。hermes 完成后会主动推送结果，你届时再用口语向用户播报真实结果。严禁在结果未返回前说「已经设置好了」「已经完成了」等话。";
+            let hermes_hint = "[工具提示] call_hermes 是把请求发给 hermes（后台智能助手）异步处理，hermes 可能几秒或更久才会回复。调用后你收到的 tool result 只有入队确认，不代表任务完成。调用时 spoken 必须用准确精炼的口语向用户复述这一次的具体诉求，禁止敷衍套话（如「帮你查一下」「我看看」「已提交处理」「稍等我来办」）；spoken 播完后无需再说确认语。hermes 完成后会主动推送结果，你届时再用口语向用户播报真实结果。严禁在结果未返回前说「已经设置好了」「已经完成了」等话。";
             if !self.cfg.llm.system_prompt.contains(hermes_hint) {
                 self.cfg.llm.system_prompt =
                     format!("{hermes_hint}\n{}", self.cfg.llm.system_prompt);
@@ -2463,6 +2463,7 @@ async fn start_reply_turn(
                 suppressed_chars = buf.len(),
                 "llm returned tool_calls"
             );
+            let mut tool_results: Vec<String> = Vec::with_capacity(tool_calls.len());
             for tc in &tool_calls {
                 info!(tool = %tc.function.name, args = %tc.function.arguments, "tool: calling");
                 eprintln!(
@@ -2485,6 +2486,7 @@ async fn start_reply_turn(
                 if tc.function.name == "shutup" {
                     should_go_dormant = true;
                 }
+                tool_results.push(result.clone());
                 msgs_local.push(ChatMessage {
                     role: "tool".to_string(),
                     content: result,
@@ -2494,6 +2496,17 @@ async fn start_reply_turn(
             }
             if should_go_dormant {
                 break;
+            }
+            if tools::should_skip_call_hermes_confirmation(
+                tool_calls.iter().map(|tc| tc.function.name.as_str()),
+                &tool_results,
+            ) {
+                info!("call_hermes enqueued: skipping round-1 confirmation TTS");
+                playback_wait.wait_drain(Duration::from_secs(30)).await;
+                let _ = done_tx
+                    .send((assistant_buf, epoch_at_start, should_go_dormant))
+                    .await;
+                return;
             }
         }
 

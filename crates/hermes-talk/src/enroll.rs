@@ -3,8 +3,9 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 
+use crate::audio::pick_input_device;
 use crate::config::Config;
 use crate::error::{DemoError, Result};
 use crate::speaker::enroll_voiceprint;
@@ -24,16 +25,7 @@ pub fn run_enroll(cfg: &Config, duration_secs: u64) -> Result<()> {
     println!();
 
     let host = cpal::default_host();
-    let device = if cfg.audio.input_device.is_empty() {
-        host.default_input_device()
-            .ok_or_else(|| DemoError::Audio("no input device found".into()))?
-    } else {
-        let name = &cfg.audio.input_device;
-        host.input_devices()
-            .map_err(|e| DemoError::Audio(format!("list input devices: {e}")))?
-            .find(|d| d.name().map(|n| n == *name).unwrap_or(false))
-            .ok_or_else(|| DemoError::Audio(format!("input device not found: {name}")))?
-    };
+    let device = pick_input_device(&host, &cfg.audio)?;
 
     let config = device
         .default_input_config()

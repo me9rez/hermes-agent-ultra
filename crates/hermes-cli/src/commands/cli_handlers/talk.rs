@@ -1,9 +1,9 @@
 //! Voice dialog CLI handler (`hermes talk`).
 
-#[cfg(feature = "talk")]
+#[cfg(any(feature = "talk", feature = "talk-rockchip"))]
 use hermes_talk::Config;
 
-#[cfg(feature = "talk")]
+#[cfg(any(feature = "talk", feature = "talk-rockchip"))]
 use hermes_talk::{Session, TalkPushBridge};
 
 pub async fn handle_cli_talk(
@@ -69,7 +69,7 @@ pub async fn handle_cli_talk(
     }
 }
 
-#[cfg(feature = "talk")]
+#[cfg(any(feature = "talk", feature = "talk-rockchip"))]
 async fn run_talk_session(cfg: Config) -> Result<(), hermes_talk::DemoError> {
     use tokio::sync::mpsc;
 
@@ -95,7 +95,7 @@ async fn run_talk_session(cfg: Config) -> Result<(), hermes_talk::DemoError> {
     }
 }
 
-#[cfg(not(feature = "talk"))]
+#[cfg(not(any(feature = "talk", feature = "talk-rockchip")))]
 async fn run_talk_session(_cfg: Config) -> Result<(), hermes_talk::DemoError> {
     Err(hermes_talk::DemoError::Config(
         "talk feature not enabled".to_string(),
@@ -103,5 +103,8 @@ async fn run_talk_session(_cfg: Config) -> Result<(), hermes_talk::DemoError> {
 }
 
 fn map_talk_error(e: hermes_talk::DemoError) -> hermes_core::AgentError {
-    hermes_core::AgentError::Config(e.to_string())
+    match e {
+        hermes_talk::DemoError::Audio(msg) => hermes_core::AgentError::Io(msg),
+        other => hermes_core::AgentError::Config(other.to_string()),
+    }
 }

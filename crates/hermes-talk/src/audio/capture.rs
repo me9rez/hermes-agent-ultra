@@ -3,10 +3,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use cpal::SampleFormat;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use tracing::info;
 
 use crate::audio::pcm::f32_to_i16_le;
+use crate::audio::pick_input_device;
 use crate::config::AudioConfig;
 use crate::error::{DemoError, Result};
 
@@ -167,19 +168,6 @@ impl AudioCapture {
     pub fn try_recv_chunk(&self) -> Option<AudioChunk> {
         self.rx.try_recv().ok()
     }
-}
-
-fn pick_input_device(host: &cpal::Host, cfg: &AudioConfig) -> Result<cpal::Device> {
-    if cfg.input_device.is_empty() {
-        return host
-            .default_input_device()
-            .ok_or_else(|| DemoError::Audio("no default input device".into()));
-    }
-    let name = &cfg.input_device;
-    host.input_devices()
-        .map_err(|e| DemoError::Audio(e.to_string()))?
-        .find(|d| d.name().map(|n| n == *name).unwrap_or(false))
-        .ok_or_else(|| DemoError::Audio(format!("input device not found: {name}")))
 }
 
 fn interleaved_to_mono(data: &[f32], channels: usize) -> Vec<f32> {

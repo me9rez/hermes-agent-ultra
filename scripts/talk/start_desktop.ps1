@@ -67,7 +67,7 @@ try {
     & $Bin talk run @args
     $code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }
     if ($code -ne 0) {
-        Write-Error "hermes talk exited with code $code (missing DLL? re-run make package-talk-windows)"
+        Write-Error "hermes talk exited with code $code (check microphone/speakers with: .\bin\hermes-agent-ultra.exe talk list-devices)"
         exit $code
     }
 } finally {

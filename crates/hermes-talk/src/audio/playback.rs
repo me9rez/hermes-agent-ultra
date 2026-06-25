@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use cpal::SampleFormat;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use tracing::info;
 
+use crate::audio::pick_output_device;
 use crate::config::AudioConfig;
 use crate::error::{DemoError, Result};
 
@@ -188,19 +189,6 @@ impl AudioPlayback {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
-}
-
-fn pick_output_device(host: &cpal::Host, cfg: &AudioConfig) -> Result<cpal::Device> {
-    if cfg.output_device.is_empty() {
-        return host
-            .default_output_device()
-            .ok_or_else(|| DemoError::Audio("no default output device".into()));
-    }
-    let name = &cfg.output_device;
-    host.output_devices()
-        .map_err(|e| DemoError::Audio(e.to_string()))?
-        .find(|d| d.name().map(|n| n == *name).unwrap_or(false))
-        .ok_or_else(|| DemoError::Audio(format!("output device not found: {name}")))
 }
 
 /// Resample from `source_rate` buffer to `device_rate` output using linear interpolation.

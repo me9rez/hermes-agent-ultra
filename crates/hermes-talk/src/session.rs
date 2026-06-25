@@ -609,7 +609,13 @@ impl Session {
                             }
 
                             if user_speech_activity(&mut vad, None, orch.min_final_chars, &wake_phase, orch.grace_min_final_chars) {
-                                if promote_wake_on_speech(&mut wake_phase) {
+                                if promote_wake_on_speech_with_asr(
+                                    &mut wake_phase,
+                                    asr.clone(),
+                                    wake_enabled,
+                                )
+                                .await
+                                {
                                     partial_stable_since = None;
                                     last_partial.clear();
                                 }
@@ -641,46 +647,51 @@ impl Session {
                             continue;
                         }
 
-                        if !wake_enabled || !orch.barge_in_requires_wake {
-                            if try_barge_in(
-                                "vad",
-                                &orch,
-                                &mut state,
-                                &mut vad,
-                                &playback,
-                                &play_gen,
-                                &mut llm_cancel,
-                                            &mut active_turn,
-                                            &mut partial_stable_since,
-                                            &mut last_partial,
-                                            &current_latency,
-                                            &turn_epoch,
-                                            tts.clone(),
-                                            None,
-                                            &mut last_barge_in_at,
-                                            &speaker_verifier,
-                                            &recent_audio,
-                                            &mut speaker_gate,
-                                            &mut speaker_verify_buffer,
-                                            speaker_verify_gate,
-                                            asr.clone(),
-                                            &mut wake_phase,
-                                            wake_enabled,
-                                        )
-                                        .await
-                                        {
-                                input_gated = false;
-                                continue;
-                            }
-                            let now = Instant::now();
-                            if last_barge_in_suppress_warn
-                                .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
-                            {
-                                warn!(
-                                    phrases = ?wake_cfg.effective_phrases(),
-                                    "wake word required to barge-in"
-                                );
-                                last_barge_in_suppress_warn = Some(now);
+                        if orch.barge_in_enabled
+                            && is_output_busy(state, &playback, &active_turn)
+                        {
+                            if !wake_enabled || !orch.barge_in_requires_wake {
+                                if try_barge_in(
+                                    "vad",
+                                    &orch,
+                                    &mut state,
+                                    &mut vad,
+                                    &playback,
+                                    &play_gen,
+                                    &mut llm_cancel,
+                                    &mut active_turn,
+                                    &mut partial_stable_since,
+                                    &mut last_partial,
+                                    &current_latency,
+                                    &turn_epoch,
+                                    tts.clone(),
+                                    None,
+                                    &mut last_barge_in_at,
+                                    &speaker_verifier,
+                                    &recent_audio,
+                                    &mut speaker_gate,
+                                    &mut speaker_verify_buffer,
+                                    speaker_verify_gate,
+                                    asr.clone(),
+                                    &mut wake_phase,
+                                    wake_enabled,
+                                )
+                                .await
+                                {
+                                    input_gated = false;
+                                    continue;
+                                }
+                            } else {
+                                let now = Instant::now();
+                                if last_barge_in_suppress_warn
+                                    .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
+                                {
+                                    warn!(
+                                        phrases = ?wake_cfg.effective_phrases(),
+                                        "wake word required to barge-in"
+                                    );
+                                    last_barge_in_suppress_warn = Some(now);
+                                }
                             }
                         }
 
@@ -859,48 +870,52 @@ impl Session {
                                     if !wake_phase.allows_dialog() {
                                         continue;
                                     }
-                                    if !wake_enabled || !orch.barge_in_requires_wake {
-                                        if try_barge_in(
-                                            "asr-partial",
-                                            &orch,
-                                            &mut state,
-                                            &mut vad,
-                                            &playback,
-                                            &play_gen,
-                                            &mut llm_cancel,
-                                            &mut active_turn,
-                                            &mut partial_stable_since,
-                                            &mut last_partial,
-                                            &current_latency,
-                                            &turn_epoch,
-                                            tts.clone(),
-                                            Some(text.as_str()),
-                                            &mut last_barge_in_at,
-                                            &speaker_verifier,
-                                            &recent_audio,
-                                            &mut speaker_gate,
-                                            &mut speaker_verify_buffer,
-                                            speaker_verify_gate,
-                                            asr.clone(),
-                                            &mut wake_phase,
-                                            wake_enabled,
-                                        )
-                                        .await
-                                        {
-                                            input_gated = false;
-                                            last_partial = text;
-                                            continue;
-                                        }
-                                    } else {
-                                        let now = Instant::now();
-                                        if last_barge_in_suppress_warn
-                                            .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
-                                        {
-                                            warn!(
-                                                phrases = ?wake_cfg.effective_phrases(),
-                                                "wake word required to barge-in"
-                                            );
-                                            last_barge_in_suppress_warn = Some(now);
+                                    if orch.barge_in_enabled
+                                        && is_output_busy(state, &playback, &active_turn)
+                                    {
+                                        if !wake_enabled || !orch.barge_in_requires_wake {
+                                            if try_barge_in(
+                                                "asr-partial",
+                                                &orch,
+                                                &mut state,
+                                                &mut vad,
+                                                &playback,
+                                                &play_gen,
+                                                &mut llm_cancel,
+                                                &mut active_turn,
+                                                &mut partial_stable_since,
+                                                &mut last_partial,
+                                                &current_latency,
+                                                &turn_epoch,
+                                                tts.clone(),
+                                                Some(text.as_str()),
+                                                &mut last_barge_in_at,
+                                                &speaker_verifier,
+                                                &recent_audio,
+                                                &mut speaker_gate,
+                                                &mut speaker_verify_buffer,
+                                                speaker_verify_gate,
+                                                asr.clone(),
+                                                &mut wake_phase,
+                                                wake_enabled,
+                                            )
+                                            .await
+                                            {
+                                                input_gated = false;
+                                                last_partial = text;
+                                                continue;
+                                            }
+                                        } else {
+                                            let now = Instant::now();
+                                            if last_barge_in_suppress_warn
+                                                .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
+                                            {
+                                                warn!(
+                                                    phrases = ?wake_cfg.effective_phrases(),
+                                                    "wake word required to barge-in"
+                                                );
+                                                last_barge_in_suppress_warn = Some(now);
+                                            }
                                         }
                                     }
                                     if orch.speculative_llm
@@ -1068,54 +1083,58 @@ impl Session {
                                         asr_final_at = Some(Instant::now());
                                         continue;
                                     }
-                                    if !wake_enabled || !orch.barge_in_requires_wake {
-                                        if try_barge_in(
-                                            "asr-final",
-                                            &orch,
-                                            &mut state,
-                                            &mut vad,
-                                            &playback,
-                                            &play_gen,
-                                            &mut llm_cancel,
-                                            &mut active_turn,
-                                            &mut partial_stable_since,
-                                            &mut last_partial,
-                                            &current_latency,
-                                            &turn_epoch,
-                                            tts.clone(),
-                                            Some(text.as_str()),
-                                            &mut last_barge_in_at,
-                                            &speaker_verifier,
-                                            &recent_audio,
-                                            &mut speaker_gate,
-                                            &mut speaker_verify_buffer,
-                                            speaker_verify_gate,
-                                            asr.clone(),
-                                            &mut wake_phase,
-                                            wake_enabled,
-                                        )
-                                        .await
-                                        {
-                                            input_gated = false;
-                                            // Accumulate rather than replace — user may still be speaking
-                                            let sep = if last_final.as_deref().is_some_and(|s| !s.ends_with(['\n', ' '])) { " " } else { "" };
-                                            last_final = Some(match last_final.take() {
-                                                Some(prev) => format!("{prev}{sep}{text}"),
-                                                None => text,
-                                            });
-                                            asr_final_at = Some(Instant::now());
-                                            continue;
-                                        }
-                                    } else {
-                                        let now = Instant::now();
-                                        if last_barge_in_suppress_warn
-                                            .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
-                                        {
-                                            warn!(
-                                                phrases = ?wake_cfg.effective_phrases(),
-                                                "wake word required to barge-in"
-                                            );
-                                            last_barge_in_suppress_warn = Some(now);
+                                    if orch.barge_in_enabled
+                                        && is_output_busy(state, &playback, &active_turn)
+                                    {
+                                        if !wake_enabled || !orch.barge_in_requires_wake {
+                                            if try_barge_in(
+                                                "asr-final",
+                                                &orch,
+                                                &mut state,
+                                                &mut vad,
+                                                &playback,
+                                                &play_gen,
+                                                &mut llm_cancel,
+                                                &mut active_turn,
+                                                &mut partial_stable_since,
+                                                &mut last_partial,
+                                                &current_latency,
+                                                &turn_epoch,
+                                                tts.clone(),
+                                                Some(text.as_str()),
+                                                &mut last_barge_in_at,
+                                                &speaker_verifier,
+                                                &recent_audio,
+                                                &mut speaker_gate,
+                                                &mut speaker_verify_buffer,
+                                                speaker_verify_gate,
+                                                asr.clone(),
+                                                &mut wake_phase,
+                                                wake_enabled,
+                                            )
+                                            .await
+                                            {
+                                                input_gated = false;
+                                                // Accumulate rather than replace — user may still be speaking
+                                                let sep = if last_final.as_deref().is_some_and(|s| !s.ends_with(['\n', ' '])) { " " } else { "" };
+                                                last_final = Some(match last_final.take() {
+                                                    Some(prev) => format!("{prev}{sep}{text}"),
+                                                    None => text,
+                                                });
+                                                asr_final_at = Some(Instant::now());
+                                                continue;
+                                            }
+                                        } else {
+                                            let now = Instant::now();
+                                            if last_barge_in_suppress_warn
+                                                .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
+                                            {
+                                                warn!(
+                                                    phrases = ?wake_cfg.effective_phrases(),
+                                                    "wake word required to barge-in"
+                                                );
+                                                last_barge_in_suppress_warn = Some(now);
+                                            }
                                         }
                                     }
                                     asr_final_at = Some(Instant::now());
@@ -1286,10 +1305,12 @@ impl Session {
                                     wake_phase = WakePhase::Dormant;
                                     info!("shutup requested -> dormant; say wake word to resume");
                                 } else if wake_enabled {
-                                    let _ = asr.set_gate(true).await;
                                     wake_phase = WakePhase::IdleAfterTurn {
                                         deadline: Instant::now() + idle_after_turn,
                                     };
+                                    if !open_asr_for_user_speech(asr.clone(), wake_enabled).await {
+                                        warn!("IdleAfterTurn: failed to reopen ASR for follow-up speech");
+                                    }
                                     info!(
                                         idle_sec = wake_cfg.idle_after_turn_sec,
                                         "back to listening; idle timeout started"

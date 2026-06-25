@@ -18,8 +18,8 @@ use crate::kws::WakeDetectorHandle;
 use crate::kws::start_wake_detector;
 use crate::llm::{AccumulatedToolCall, ChatMessage, LlmClient, OpenAiCompatClient, ToolCall};
 use crate::orchestrator::{
-    SessionState, WakePhase, flush_remainder, matches_sleep_keyword, normalize_tts_text,
-    take_early_chunk, take_sentence, texts_compatible,
+    IncrementalThinkStripper, SessionState, WakePhase, flush_remainder, matches_sleep_keyword,
+    normalize_tts_text, take_early_chunk, take_sentence, texts_compatible,
 };
 use crate::speaker::SpeakerVerifier;
 use crate::tools;
@@ -2309,6 +2309,8 @@ async fn start_reply_turn(
             let mut first_token = true;
             let mut sent_early = false;
             let mut buf = String::new();
+            let mut tts_buf = String::new();
+            let mut think_strip = IncrementalThinkStripper::new();
             let mut tool_call_map: HashMap<u32, AccumulatedToolCall> = HashMap::new();
 
             while let Some(item) = stream.next().await {
@@ -2358,8 +2360,12 @@ async fn start_reply_turn(
                     assistant_buf.push_str(token);
 
                     if assistant_content_tts_allowed(round, tools_enabled, &buf) {
+                        let speakable = think_strip.push(token);
+                        if !speakable.is_empty() {
+                            tts_buf.push_str(&speakable);
+                        }
                         if !sent_early && round == 0 {
-                            if let Some(chunk) = take_early_chunk(&mut buf, tts_first_chunk) {
+                            if let Some(chunk) = take_early_chunk(&mut tts_buf, tts_first_chunk) {
                                 info!(
                                     ms = trigger_at.elapsed().as_millis(),
                                     %chunk,
@@ -2372,7 +2378,7 @@ async fn start_reply_turn(
                             }
                         }
 
-                        while let Some(sentence) = take_sentence(&mut buf, sentence_min) {
+                        while let Some(sentence) = take_sentence(&mut tts_buf, sentence_min) {
                             info!(%sentence, "tts sentence");
                             if let Err(e) = tts.append_text(&normalize_tts_text(&sentence)).await {
                                 warn!(error = %e, "tts append");
@@ -2403,8 +2409,22 @@ async fn start_reply_turn(
                         chars = speakable_buf.chars().count(),
                         "tools enabled but no tool_calls parsed; suppressing assistant TTS"
                     );
+                } else if assistant_content_tts_allowed(round, tools_enabled, &buf) {
+                    let tail = think_strip.flush();
+                    if !tail.is_empty() {
+                        tts_buf.push_str(&tail);
+                    }
+                    if let Some(rest) = flush_remainder(&mut tts_buf) {
+                        let _ = tts.append_text(&normalize_tts_text(&rest)).await;
+                    }
                 } else if let Some(rest) = flush_remainder(&mut speakable_buf) {
-                    let _ = tts.append_text(&normalize_tts_text(&rest)).await;
+                    let mut stripper = IncrementalThinkStripper::new();
+                    let cleaned = stripper.push(&rest);
+                    let tail = stripper.flush();
+                    let spoken = format!("{cleaned}{tail}");
+                    if !spoken.trim().is_empty() {
+                        let _ = tts.append_text(&normalize_tts_text(&spoken)).await;
+                    }
                 }
                 if let Err(e) = tts.finish_turn().await {
                     warn!(error = %e, "tts finish");
@@ -2610,7 +2630,8 @@ async fn handle_hermes_result(
             }
         };
 
-        let mut buf = String::new();
+        let mut tts_buf = String::new();
+        let mut think_strip = IncrementalThinkStripper::new();
         let mut sent_early = false;
         use futures_util::StreamExt;
         while let Some(item) = stream.next().await {
@@ -2618,22 +2639,32 @@ async fn handle_hermes_result(
                 break;
             }
             let Ok(stream_item) = item else { continue };
+            if let Some(ref reasoning) = stream_item.reasoning_content {
+                eprint!("{}", reasoning);
+            }
             if let Some(ref token) = stream_item.content {
-                buf.push_str(token);
-                assistant_buf.push_str(token);
+                let speakable = think_strip.push(token);
+                assistant_buf.push_str(&speakable);
+                if !speakable.is_empty() {
+                    tts_buf.push_str(&speakable);
+                }
                 if !sent_early {
-                    if let Some(chunk) = take_early_chunk(&mut buf, tts_first_chunk) {
+                    if let Some(chunk) = take_early_chunk(&mut tts_buf, tts_first_chunk) {
                         let _ = tts.append_text(&normalize_tts_text(&chunk)).await;
                         sent_early = true;
                     }
                 }
-                while let Some(sentence) = take_sentence(&mut buf, sentence_min) {
+                while let Some(sentence) = take_sentence(&mut tts_buf, sentence_min) {
                     let _ = tts.append_text(&normalize_tts_text(&sentence)).await;
                 }
             }
         }
 
-        if let Some(rest) = flush_remainder(&mut buf) {
+        let tail = think_strip.flush();
+        if !tail.is_empty() {
+            tts_buf.push_str(&tail);
+        }
+        if let Some(rest) = flush_remainder(&mut tts_buf) {
             let _ = tts.append_text(&normalize_tts_text(&rest)).await;
         }
         if let Err(e) = tts.finish_turn().await {

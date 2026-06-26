@@ -84,6 +84,7 @@ mod tests {
                 dcf_one_liner: "test".into(),
             },
             content: crate::research::report::ReportContent::default(),
+            raw_dims: serde_json::Value::Null,
         }
     }
 

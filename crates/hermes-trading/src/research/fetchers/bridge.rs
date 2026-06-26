@@ -121,6 +121,12 @@ fn apply_financials(snap: &mut FundamentalsSnapshot, data: &Value) {
             mark(snap, "revenue_history");
         }
     }
+    if let Some(arr) = data.get("net_profit_history").and_then(|v| v.as_array()) {
+        snap.net_profit_history = arr.iter().filter_map(|v| v.as_f64()).collect();
+        if !snap.net_profit_history.is_empty() {
+            mark(snap, "net_profit_history");
+        }
+    }
     if data
         .get("fcf_positive")
         .and_then(|v| v.as_bool())

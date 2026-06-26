@@ -2104,17 +2104,22 @@ async fn turn_post_tool(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
                 );
                 let num_tool_msgs = results.len();
                 for result in &results {
+                    let content = hermes_tools::slim_analyze_stock_tool_content(
+                        &tool_calls,
+                        std::slice::from_ref(result),
+                    )
+                    .unwrap_or_else(|| result.content.clone());
                     tc.replay.record(
                         "tool_result",
                         serde_json::json!({
                             "turn": tc.total_turns,
                             "tool_call_id": result.tool_call_id,
                             "is_error": result.is_error,
-                            "content_preview": result.content.chars().take(240).collect::<String>(),
+                            "content_preview": content.chars().take(240).collect::<String>(),
                         }),
                     );
                     tc.ctx
-                        .add_message(Message::tool_result(&result.tool_call_id, &result.content));
+                        .add_message(Message::tool_result(&result.tool_call_id, &content));
                 }
                 agent
                     .pending_steer
@@ -2140,7 +2145,14 @@ async fn turn_post_tool(agent: &AgentLoop, tc: &mut TurnContext) -> TurnState {
         && !results.iter().any(|r| r.is_error);
 
     let num_tool_msgs = results.len();
-    for result in results {
+    for mut result in results {
+        if tc.equity_slash_mode != hermes_tools::EquitySlashMode::None {
+            if let Some(slim) =
+                hermes_tools::slim_analyze_stock_tool_content(&tool_calls, &[result.clone()])
+            {
+                result.content = slim;
+            }
+        }
         tc.replay.record(
             "tool_result",
             serde_json::json!({

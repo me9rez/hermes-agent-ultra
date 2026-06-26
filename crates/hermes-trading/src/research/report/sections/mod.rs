@@ -1,6 +1,8 @@
 //! HTML section renderers for institutional report.
 
 mod appendix;
+mod core;
+mod dcf_block;
 mod dimensions;
 mod external;
 mod flows;
@@ -11,7 +13,9 @@ mod sector;
 mod util;
 
 pub use appendix::render_appendix;
-pub use dimensions::render_dimensions_section;
+pub use core::render_core_section;
+pub use dcf_block::render_dcf_section;
+pub use dimensions::{render_dimensions_section, render_dimensions_section_with_raw_limit};
 pub use external::render_external_section;
 pub use flows::render_flows_section;
 pub use fundamentals::render_fundamentals_section;

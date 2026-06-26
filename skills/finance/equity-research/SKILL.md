@@ -23,9 +23,9 @@ commands:
 
       Workflow:
       1. resolve_a_share_symbol if needed
-      2. analyze_stock(symbol, depth=medium, use_providers=true) — MUST run before any web_search
-      3. If data_confidence.score < 0.5 OR missing_dims is non-empty: web_search / web_extract (2–4 targeted queries for macro/industry/policy/sentiment/FCF gaps). Do NOT repeat analyze_stock.
-      4. System auto-delivers chat brief + HTML attachment after gap-fill; no format=html needed
+      2. analyze_stock(symbol, depth=medium, use_providers=true) — system auto-delivers brief + HTML; do NOT web_search unless user asks
+      3. Optional: user explicitly requests macro/policy refresh → web_search then merge_external_only
+      4. Do not write long analysis in chat; one tool call is enough
 metadata:
   hermes:
     tags: [Finance, Equity, Research, DCF, Valuation, A-Share]

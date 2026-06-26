@@ -14,6 +14,32 @@ pub fn render_dim_bar(score: u8, max: u8) -> String {
     )
 }
 
+#[must_use]
+pub fn score_tier_class(score: u8) -> &'static str {
+    if score >= 7 {
+        "high"
+    } else if score <= 4 {
+        "low"
+    } else {
+        "mid"
+    }
+}
+
+#[must_use]
+pub fn render_weight_stars(weight: u8) -> String {
+    let filled = weight.min(5);
+    let empty = 5usize.saturating_sub(filled as usize);
+    format!("{}{}", "★".repeat(filled as usize), "☆".repeat(empty))
+}
+
+/// Full-width bar for DEEP SCAN cards.
+#[must_use]
+pub fn render_deep_scan_bar(score: u8, max: u8) -> String {
+    let pct = (f64::from(score) / f64::from(max) * 100.0).clamp(0.0, 100.0);
+    let tier = score_tier_class(score);
+    format!(r#"<div class="dim-bar"><div class="fill {tier}" style="width:{pct:.0}%"></div></div>"#)
+}
+
 /// Company PE vs industry PE relative bar.
 #[must_use]
 pub fn render_pe_relative_bar(company_pe: f64, industry_pe: f64) -> String {
@@ -74,6 +100,19 @@ pub fn verdict_label_zh(verdict: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_scan_bar_uses_tier_class() {
+        let s = render_deep_scan_bar(8, 10);
+        assert!(s.contains("fill high"));
+        assert!(s.contains("width:80%"));
+    }
+
+    #[test]
+    fn weight_stars_five_of_five() {
+        assert_eq!(render_weight_stars(5), "★★★★★");
+        assert_eq!(render_weight_stars(3), "★★★☆☆");
+    }
 
     #[test]
     fn dim_bar_width_reflects_score() {

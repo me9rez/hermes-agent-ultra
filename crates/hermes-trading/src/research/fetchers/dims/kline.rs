@@ -37,20 +37,21 @@ impl DimFetcher for KlineFetcher {
             );
         }
         match compute_kline_stats(&ctx.symbol).await {
-            Ok((stats, source)) => DimResult::ok(
+            Ok((pack, source)) => DimResult::ok(
                 dim_keys::KLINE,
                 &ctx.symbol,
                 json!({
-                    "stage": stats.stage,
-                    "ma_align": stats.ma_align,
-                    "ma5": stats.ma5,
-                    "ma20": stats.ma20,
-                    "ma60": stats.ma60,
-                    "rsi14": stats.rsi14,
-                    "kline_stats": { "max_drawdown": stats.max_drawdown },
+                    "stage": pack.stats.stage,
+                    "ma_align": pack.stats.ma_align,
+                    "ma5": pack.stats.ma5,
+                    "ma20": pack.stats.ma20,
+                    "ma60": pack.stats.ma60,
+                    "rsi14": pack.stats.rsi14,
+                    "kline_stats": { "max_drawdown": pack.stats.max_drawdown },
+                    "recent_candles": super::kline_util::recent_candles_json(&pack.recent_candles),
                 }),
                 source,
-                if stats.stage.is_empty() {
+                if pack.stats.stage.is_empty() {
                     DimQuality::Partial
                 } else {
                     DimQuality::Full

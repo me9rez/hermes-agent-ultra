@@ -71,7 +71,7 @@ where
 pub use basic_info::{
     BasicInfoSupplement, apply_supplement, fetch_basic_info_supplement, map_individual_info,
 };
-pub use candles::fetch_a_share_closes;
+pub use candles::{CHART_CANDLE_COUNT, OhlcBar, fetch_a_share_closes, fetch_a_share_ohlc_bars};
 pub use capital_flow::fetch_capital_flow_dim_akshare;
 pub use events::fetch_events_dim_akshare;
 pub use financials::fetch_financials_dim_akshare;

@@ -177,6 +177,9 @@ impl EastmoneyFinancialsProvider {
             if let Some(rev) = row.revenue {
                 snap.revenue_history.push(rev / 1e8);
             }
+            if let Some(np) = row.net_profit {
+                snap.net_profit_history.push(np / 1e8);
+            }
         }
         if !snap.roe_history.is_empty() {
             snap.provenance
@@ -185,6 +188,10 @@ impl EastmoneyFinancialsProvider {
         if !snap.revenue_history.is_empty() {
             snap.provenance
                 .insert("revenue_history".into(), ProvenanceSource::Provider);
+        }
+        if !snap.net_profit_history.is_empty() {
+            snap.provenance
+                .insert("net_profit_history".into(), ProvenanceSource::Provider);
         }
 
         let latest = parsed.data.first();

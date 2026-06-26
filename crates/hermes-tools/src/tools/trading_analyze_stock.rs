@@ -144,10 +144,9 @@ impl ToolHandler for AnalyzeStockHandler {
         }
 
         if format == "markdown" {
-            let json_body = serde_json::to_string_pretty(&result)
-                .map_err(|e| ToolError::ExecutionFailed(format!("Serialization error: {e}")))?;
+            let json_body = slim_agent_json_suffix(&result)?;
             let body = format!(
-                "{}\n\n<!-- full JSON below; do not replace the markdown tables above -->\n{}",
+                "{}\n\n<!-- slim agent JSON below; full data lives in slash cache -->\n{}",
                 result.summary_markdown, json_body
             );
             return Ok(maybe_prefix_report_paths(
@@ -156,10 +155,9 @@ impl ToolHandler for AnalyzeStockHandler {
             ));
         }
 
-        let json_body = serde_json::to_string_pretty(&result)
-            .map_err(|e| ToolError::ExecutionFailed(format!("Serialization error: {e}")))?;
+        let json_body = slim_agent_json_suffix(&result)?;
         let body = format!(
-            "{}\n\n<!-- full JSON below; do not replace the markdown tables above -->\n{}",
+            "{}\n\n<!-- slim agent JSON below; full data lives in slash cache -->\n{}",
             result.summary_markdown, json_body
         );
         Ok(maybe_prefix_report_paths(
@@ -211,7 +209,7 @@ impl ToolHandler for AnalyzeStockHandler {
             json!({
                 "type": "string",
                 "enum": ["json", "markdown", "html", "synthesis"],
-                "description": "json (default, medium): summary_markdown + full JSON; markdown: tables only; lite defaults to quick-scan markdown; html: institutional one-page report; synthesis: slim JSON with synthesis + core metrics"
+                "description": "json (default, medium): summary_markdown + slim synthesis JSON; markdown: tables + slim JSON; lite defaults to quick-scan markdown; html: institutional one-page report; synthesis: slim JSON with synthesis + core metrics"
             }),
         );
         props.insert(
@@ -244,7 +242,11 @@ impl ToolHandler for AnalyzeStockHandler {
                     "macro_bullets": { "type": "array", "items": { "type": "string" } },
                     "policy_bullets": { "type": "array", "items": { "type": "string" } },
                     "sentiment_bullets": { "type": "array", "items": { "type": "string" } },
-                    "sources": { "type": "array", "items": { "type": "string" } }
+                    "sources": { "type": "array", "items": { "type": "string" } },
+                    "rate_cycle": { "type": "string" },
+                    "fx_trend": { "type": "string" },
+                    "geo_risk": { "type": "string" },
+                    "commodity": { "type": "string" }
                 }
             }),
         );
@@ -287,6 +289,17 @@ fn maybe_prefix_report_paths(paths: Option<&ReportPaths>, body: &str) -> String 
         "Report saved:\n- HTML: {}\n- analysis.json: {}\n\n{body}",
         paths.html, paths.analysis_json
     )
+}
+
+fn slim_agent_json_suffix(
+    result: &hermes_trading::research::analyze::AnalyzeStockResult,
+) -> Result<String, ToolError> {
+    let slim = build_synthesis_format_output(result);
+    serde_json::to_string_pretty(&json!({
+        "_orchestration": "Brief+HTML auto-delivered on /analyze-stock slash. Do not paste tables; web_search only if user explicitly asks.",
+        "data": slim,
+    }))
+    .map_err(|e| ToolError::ExecutionFailed(format!("Serialization error: {e}")))
 }
 
 fn parse_external_context(
@@ -348,8 +361,8 @@ mod tests {
             .await
             .expect("markdown medium");
         assert!(
-            raw.contains("<!-- full JSON"),
-            "medium format=markdown must retain JSON suffix for slash delivery"
+            raw.contains("<!-- slim agent JSON"),
+            "medium format=markdown must retain slim JSON suffix"
         );
     }
 

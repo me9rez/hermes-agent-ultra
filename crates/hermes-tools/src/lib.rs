@@ -64,8 +64,8 @@ pub use equity_research_seed::try_resolve_a_share_from_user_message;
 pub use equity_slash_delivery::{
     EquitySlashDeliveryOutcome, EquitySlashMode, EquitySlashSession, EquitySlashStallAction,
     detect_equity_slash_mode, handle_slash_text_stall, needs_web_fill,
-    slash_turn_start_system_hint, slash_web_fill_system_hint, try_equity_slash_delivery,
-    wants_md_only_attachment,
+    slash_turn_start_system_hint, slash_web_fill_system_hint, slim_analyze_stock_tool_content,
+    try_equity_slash_delivery, wants_md_only_attachment,
 };
 pub use kanban::{KANBAN_TASK_ENV, kanban_block_reason, kanban_task_from_env};
 pub use kanban_failure::{

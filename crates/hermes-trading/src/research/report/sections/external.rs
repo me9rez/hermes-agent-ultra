@@ -9,7 +9,7 @@ pub fn render_external_section(block: &ExternalBlock) -> String {
     match block.coverage {
         ExternalCoverage::NotRetrieved => {
             out.push_str(
-                r#"<p class="muted-note">本次未检索政策与舆情；下方「外部与定性」维度评分为框架占位。slash 流程可触发 web_search 补数。</p>"#,
+                r#"<p class="muted-note">本次报告未单独检索政策、宏观与舆情；如需可追问「补充政策与行业影响」。</p>"#,
             );
         }
         ExternalCoverage::HttpPartial => {

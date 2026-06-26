@@ -62,6 +62,17 @@ pub(super) fn reg(
     emoji: &str,
     env_deps: Vec<String>,
 ) {
+    reg_with_max(ctx, toolset, handler, emoji, env_deps, None);
+}
+
+pub(super) fn reg_with_max(
+    ctx: &RegistryContext<'_>,
+    toolset: &str,
+    handler: Arc<dyn ToolHandler>,
+    emoji: &str,
+    env_deps: Vec<String>,
+    max_result_size_chars: Option<usize>,
+) {
     let schema = handler.schema();
     let name = schema.name.clone();
     let desc = schema.description.clone();
@@ -75,7 +86,7 @@ pub(super) fn reg(
         true,
         desc,
         emoji,
-        None,
+        max_result_size_chars,
     );
 }
 

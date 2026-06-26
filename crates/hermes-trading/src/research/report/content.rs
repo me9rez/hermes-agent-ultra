@@ -78,6 +78,15 @@ pub struct ExternalContextOverlay {
     pub policy_bullets: Vec<String>,
     pub sentiment_bullets: Vec<String>,
     pub sources: Vec<String>,
+    /// Optional structured macro KPIs for DEEP SCAN 四宫格.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_cycle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fx_trend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geo_risk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commodity: Option<String>,
 }
 
 /// Build deterministic content from collected dims + models.
@@ -132,6 +141,44 @@ pub fn merge_external_overlay(content: &mut ReportContent, overlay: &ExternalCon
         .cloned()
         .collect();
     content.external.coverage = ExternalCoverage::WebFilled;
+}
+
+/// Patch `3_macro` dim data from web overlay (四宫格 KPI).
+pub fn merge_macro_dim_from_overlay(raw_dims: &mut Value, overlay: &ExternalContextOverlay) {
+    let rate = overlay
+        .rate_cycle
+        .clone()
+        .or_else(|| overlay.macro_bullets.first().cloned());
+    let fx = overlay
+        .fx_trend
+        .clone()
+        .or_else(|| overlay.macro_bullets.get(1).cloned());
+    let geo = overlay
+        .geo_risk
+        .clone()
+        .or_else(|| overlay.macro_bullets.get(2).cloned());
+    let commodity = overlay
+        .commodity
+        .clone()
+        .or_else(|| overlay.macro_bullets.get(3).cloned());
+    if rate.is_none() && fx.is_none() && geo.is_none() && commodity.is_none() {
+        return;
+    }
+    let data = serde_json::json!({
+        "rate_cycle": rate.unwrap_or_else(|| "中性（货币政策）".into()),
+        "fx_trend": fx.unwrap_or_else(|| "中性（人民币走势）".into()),
+        "geo_risk": geo.unwrap_or_else(|| "中性（地缘风险）".into()),
+        "commodity": commodity.unwrap_or_else(|| "中性（大宗周期）".into()),
+    });
+    let Some(obj) = raw_dims.as_object_mut() else {
+        return;
+    };
+    let entry = obj
+        .entry("3_macro")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(entry_obj) = entry.as_object_mut() {
+        entry_obj.insert("data".into(), data);
+    }
 }
 
 /// Whether slash should block delivery waiting for web gap-fill (low confidence only).
@@ -404,6 +451,24 @@ mod tests {
         );
         assert_eq!(content.external.coverage, ExternalCoverage::WebFilled);
         assert_eq!(content.external.policy_bullets.len(), 1);
+    }
+
+    #[test]
+    fn merge_macro_dim_from_overlay_sets_quad() {
+        let mut raw = json!({});
+        merge_macro_dim_from_overlay(
+            &mut raw,
+            &ExternalContextOverlay {
+                rate_cycle: Some("宽松".into()),
+                fx_trend: Some("偏弱".into()),
+                geo_risk: Some("可控".into()),
+                commodity: Some("底部".into()),
+                ..Default::default()
+            },
+        );
+        let data = raw["3_macro"]["data"].as_object().unwrap();
+        assert_eq!(data["rate_cycle"], "宽松");
+        assert_eq!(data["commodity"], "底部");
     }
 
     #[test]

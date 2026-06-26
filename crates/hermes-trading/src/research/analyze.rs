@@ -40,6 +40,9 @@ pub struct AnalyzeStockResult {
     /// Content-first blocks for HTML / brief (fundamentals / sector / external).
     #[serde(default)]
     pub content: crate::research::report::ReportContent,
+    /// Raw dimension payloads for DEEP SCAN charts (`{dim_key: {data: ...}}`).
+    #[serde(default)]
+    pub raw_dims: Value,
 }
 
 /// Run analysis pipeline on a fundamentals snapshot.
@@ -183,6 +186,7 @@ pub fn analyze_stock(
         summary_markdown,
         synthesis,
         content,
+        raw_dims: dims,
     }
 }
 
@@ -192,6 +196,7 @@ pub fn apply_external_context(
     overlay: &crate::research::report::ExternalContextOverlay,
 ) {
     crate::research::report::merge_external_overlay(&mut result.content, overlay);
+    crate::research::report::merge_macro_dim_from_overlay(&mut result.raw_dims, overlay);
 }
 
 /// Build snapshot from quote + optional JSON fundamentals.

@@ -11,6 +11,8 @@ pub mod financials {
     pub const NET_MARGIN_PCT: &str = "销售净利率(%)";
     pub const GROSS_MARGIN: &str = "销售毛利率";
     pub const REVENUE: &str = "营业总收入";
+    pub const NET_PROFIT_PARENT: &str = "归属于母公司所有者的净利润";
+    pub const NET_PROFIT: &str = "净利润";
     pub const DEBT_RATIO_PCT: &str = "资产负债率(%)";
     pub const CURRENT_RATIO: &str = "流动比率";
     pub const FCF: &str = "企业自由现金流量";

@@ -5,6 +5,7 @@ use hermes_trading::research::analyze::AnalyzeStockResult;
 use hermes_trading::research::report::{
     render_chat_brief_markdown, render_institutional_html, write_equity_report,
 };
+use hermes_trading::research::synthesis::build_synthesis_format_output;
 
 use crate::analyze_stock_cache;
 
@@ -44,7 +45,6 @@ pub struct EquitySlashSession {
 
 const WEB_FILL_MIN_SEARCHES: u32 = 1;
 const WEB_FILL_FORCE_DELIVER_BATCHES: u32 = 4;
-const WEB_FILL_MAX_TEXT_STALLS: u32 = 3;
 /// LLM replied with text before calling `analyze_stock` (common when session has history).
 const SLASH_SKIP_TOOLS_MAX_STALLS: u32 = 2;
 
@@ -85,7 +85,8 @@ pub fn slash_turn_start_system_hint(mode: EquitySlashMode) -> Option<String> {
         EquitySlashMode::AnalyzeStock => Some(
             "Slash /analyze-stock active: call analyze_stock(symbol, depth=medium, use_providers=true) \
              in this turn before writing assistant text. Do not reuse prior-turn analysis from history. \
-             Brief + HTML attachment are delivered automatically after the tool succeeds."
+             Brief + HTML attachment are delivered automatically after the tool succeeds — do NOT call web_search \
+             or write a long analysis; one analyze_stock call is enough."
                 .into(),
         ),
         EquitySlashMode::QuickScan => Some(
@@ -150,17 +151,8 @@ pub fn web_fill_system_hint(result: &AnalyzeStockResult) -> String {
 
 /// Hint for the model when analyze is done but web fill is still pending.
 #[must_use]
-pub fn slash_web_fill_system_hint(session: &EquitySlashSession) -> Option<String> {
-    if !session.analyze_done {
-        return None;
-    }
-    let symbol = session.symbol.as_deref()?;
-    let depth = session.depth.as_deref()?;
-    let parsed = analyze_stock_cache::get(symbol, depth)?;
-    if !needs_web_fill(&parsed) || web_fill_satisfied(session, &parsed) {
-        return None;
-    }
-    Some(web_fill_system_hint(&parsed))
+pub fn slash_web_fill_system_hint(_session: &EquitySlashSession) -> Option<String> {
+    None
 }
 
 /// Block premature text-only turn end while slash delivery is still pending.
@@ -189,28 +181,8 @@ pub fn handle_slash_text_stall(
         return None;
     }
 
-    session.text_stall_turns += 1;
-    if session.text_stall_turns >= WEB_FILL_MAX_TEXT_STALLS {
-        tracing::warn!(
-            symbol = %symbol,
-            stall_turns = session.text_stall_turns,
-            web_done = session.web_searches_done,
-            "equity slash: text-only stall limit — force delivering report"
-        );
-        return Some(EquitySlashStallAction::ForceDeliver(
-            force_deliver_analyze_stock(user_message, session, &parsed),
-        ));
-    }
-
-    tracing::info!(
-        symbol = %symbol,
-        stall_turns = session.text_stall_turns,
-        "equity slash: LLM text-only while web pending — continuing agent"
-    );
-    Some(EquitySlashStallAction::ContinueAgent(format!(
-        "{}\n\n【强制】不要仅用文字回复。下一回合必须调用 web_search 或 web_extract；禁止输出「开始补数」类空话。",
-        web_fill_system_hint(&parsed)
-    )))
+    // Slash now auto-delivers after analyze_stock; optional web fill is user-initiated.
+    None
 }
 
 fn handle_slash_skip_tools_stall(
@@ -320,16 +292,54 @@ fn extract_bare_a_share_code(message: &str) -> Option<String> {
     None
 }
 
+/// Replace bloated analyze_stock tool JSON before feeding the LLM (slash continuation only).
+#[must_use]
+pub fn slim_analyze_stock_tool_content(
+    tool_calls: &[ToolCall],
+    results: &[ToolResult],
+) -> Option<String> {
+    let (tc, res) = tool_calls
+        .iter()
+        .zip(results.iter())
+        .find(|(tc, r)| tc.function.name == "analyze_stock" && !r.is_error)?;
+    if res.content.contains("\"external_merged\"") {
+        return Some(
+            "analyze_stock: external_context merged into cache; slash will re-deliver brief+HTML."
+                .into(),
+        );
+    }
+    let (symbol, depth) = parse_symbol_depth(&tc.function.arguments)?;
+    let parsed = analyze_stock_cache::get(&symbol, &depth)?;
+    let slim = build_synthesis_format_output(&parsed);
+    serde_json::to_string_pretty(&serde_json::json!({
+        "_orchestration": "Slash auto-delivers brief+HTML. Do not paste tables or run web_search unless the user explicitly asks.",
+        "symbol": slim.symbol,
+        "depth": slim.depth,
+        "data_confidence": slim.data_confidence,
+        "missing_dims": slim.missing_dims,
+        "fundamental_score": slim.fundamental_score,
+        "panel_consensus": slim.panel_consensus,
+        "synthesis": slim.synthesis,
+    }))
+    .ok()
+}
+
 /// Update slash session from the latest tool batch.
 pub fn update_slash_session_from_batch(
     session: &mut EquitySlashSession,
     mode: EquitySlashMode,
+    user_message: &str,
     tool_calls: &[ToolCall],
     results: &[ToolResult],
 ) {
     if mode == EquitySlashMode::None {
         return;
     }
+    let default_depth = match mode {
+        EquitySlashMode::QuickScan => "lite",
+        EquitySlashMode::AnalyzeStock => "medium",
+        EquitySlashMode::None => "medium",
+    };
     for (tc, res) in tool_calls.iter().zip(results.iter()) {
         if res.is_error {
             continue;
@@ -340,6 +350,10 @@ pub fn update_slash_session_from_batch(
                     session.analyze_done = true;
                     session.symbol = Some(sym);
                     session.depth = Some(depth);
+                } else if let Some(sym) = slash_symbol_from_user_message(user_message) {
+                    session.analyze_done = true;
+                    session.symbol = Some(sym);
+                    session.depth = Some(default_depth.into());
                 }
             }
             "web_search" | "web_extract" if session.analyze_done => {
@@ -363,7 +377,7 @@ pub fn try_equity_slash_delivery(
         return EquitySlashDeliveryOutcome::Pending;
     }
 
-    update_slash_session_from_batch(session, mode, tool_calls, results);
+    update_slash_session_from_batch(session, mode, user_message, tool_calls, results);
 
     if let Some((tc, result)) = find_analyze_stock_error(tool_calls, results) {
         let preview = result.content.chars().take(400).collect::<String>();
@@ -410,23 +424,26 @@ pub fn try_equity_slash_delivery(
             deliver_quick_scan(&parsed)
         }
         EquitySlashMode::AnalyzeStock => {
-            if needs_web_fill(&parsed) && !web_fill_satisfied(session, &parsed) {
-                session.pending_web_batches += 1;
-                tracing::info!(
-                    symbol = %symbol,
-                    missing = parsed.missing_dims.len(),
-                    web_done = session.web_searches_done,
-                    pending_batches = session.pending_web_batches,
-                    "equity slash: waiting for web_search gap-fill before delivery"
-                );
-                return EquitySlashDeliveryOutcome::Pending;
-            }
+            let low_confidence = needs_web_fill(&parsed);
             let Some(parsed) = analyze_stock_cache::take(symbol, depth) else {
                 return EquitySlashDeliveryOutcome::Failed(format!(
                     "内部分析结果不可用（{symbol}），请重试 /analyze-stock。"
                 ));
             };
-            deliver_analyze_stock(user_message, &parsed)
+            let mut outcome = deliver_analyze_stock(user_message, &parsed);
+            if low_confidence {
+                let note = "\n\n⚠️ 数据置信度偏低，宏观/政策/舆情未 web 补数；如需补全请另说「补宏观舆情」。";
+                outcome = match outcome {
+                    EquitySlashDeliveryOutcome::Deliver(t) => {
+                        EquitySlashDeliveryOutcome::Deliver(format!("{t}{note}"))
+                    }
+                    EquitySlashDeliveryOutcome::Partial(t) => {
+                        EquitySlashDeliveryOutcome::Partial(format!("{t}{note}"))
+                    }
+                    other => other,
+                };
+            }
+            outcome
         }
         EquitySlashMode::None => EquitySlashDeliveryOutcome::Pending,
     }
@@ -487,12 +504,24 @@ fn deliver_analyze_stock(
     user_message: &str,
     parsed: &AnalyzeStockResult,
 ) -> EquitySlashDeliveryOutcome {
+    let started = std::time::Instant::now();
     let brief = render_chat_brief_markdown(parsed);
     if wants_md_only_attachment(user_message) {
         return EquitySlashDeliveryOutcome::Deliver(brief);
     }
 
-    let html = render_institutional_html(parsed, None);
+    let html = std::thread::scope(|scope| {
+        scope
+            .spawn(|| render_institutional_html(parsed, None))
+            .join()
+            .unwrap_or_else(|_| String::new())
+    });
+    tracing::info!(
+        symbol = %parsed.symbol,
+        html_bytes = html.len(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "equity slash: institutional HTML rendered"
+    );
     match write_equity_report(parsed, &html, None) {
         Ok(paths) => {
             let html_path = paths.html.to_string_lossy();
@@ -627,6 +656,7 @@ mod tests {
                 },
                 ..Default::default()
             },
+            raw_dims: serde_json::json!({}),
         }
     }
 
@@ -643,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn text_stall_when_low_confidence() {
+    fn text_stall_inactive_after_analyze_even_if_low_confidence() {
         let _guard = test_guard();
         let mut session = fresh_session();
         session.analyze_done = true;
@@ -658,7 +688,7 @@ mod tests {
                 "[MODE: analyze-stock] Analyze: 600522",
                 &mut session,
             )
-            .is_some()
+            .is_none()
         );
     }
 
@@ -796,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_stock_pends_when_low_confidence() {
+    fn analyze_stock_delivers_even_when_low_confidence() {
         let _guard = test_guard();
         let mut session = fresh_session();
         let mut sample = sample_with_gaps("600522.SH");
@@ -813,7 +843,12 @@ mod tests {
             &[ok("truncated")],
             &mut session,
         );
-        assert_eq!(out, EquitySlashDeliveryOutcome::Pending);
+        let text = match out {
+            EquitySlashDeliveryOutcome::Deliver(text) => text,
+            other => panic!("expected immediate Deliver, got {other:?}"),
+        };
+        assert!(text.contains("MEDIA:"));
+        assert!(text.contains("置信度偏低"));
     }
 
     #[test]
@@ -911,16 +946,6 @@ mod tests {
             &[ok(&ToolRegistry::tool_result(
                 "intentionally truncated for LLM context",
             ))],
-            &mut session,
-        );
-        assert_eq!(out, EquitySlashDeliveryOutcome::Pending);
-
-        let web = tc("web_search", r#"{"query":"600522 中天科技 行业 政策"}"#);
-        let out = try_equity_slash_delivery(
-            EquitySlashMode::AnalyzeStock,
-            msg,
-            std::slice::from_ref(&web),
-            &[ok("live web snippets")],
             &mut session,
         );
         let text = match out {

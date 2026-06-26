@@ -52,6 +52,7 @@ pub(crate) fn clear_for_tests() {
 mod tests {
     use super::*;
     use hermes_trading::research::synthesis::SynthesisReport;
+    use serde_json::json;
 
     fn minimal_result(symbol: &str, depth: &str) -> AnalyzeStockResult {
         AnalyzeStockResult {
@@ -88,6 +89,7 @@ mod tests {
                 dcf_one_liner: "dcf".into(),
             },
             content: hermes_trading::research::report::ReportContent::default(),
+            raw_dims: json!({}),
         }
     }
 

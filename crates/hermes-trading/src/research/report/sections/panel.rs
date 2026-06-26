@@ -7,7 +7,7 @@ use crate::research::scoring::PanelResult;
 const PANEL_TOP_N: usize = 20;
 
 #[must_use]
-pub fn render_panel_section(panel: &PanelResult) -> String {
+pub fn render_panel_section(panel: &PanelResult, include_full_table: bool) -> String {
     let vd = &panel.vote_distribution;
     let mut sorted = panel.investors.clone();
     sorted.sort_by(|a, b| {
@@ -44,7 +44,7 @@ pub fn render_panel_section(panel: &PanelResult) -> String {
         out.push_str(&panel_row(vote));
     }
     out.push_str("</table>");
-    if panel.investors.len() > PANEL_TOP_N {
+    if include_full_table && panel.investors.len() > PANEL_TOP_N {
         out.push_str(r#"<details class="panel-details"><summary>展开全部评委</summary><table><tr><th>评委</th><th>结论</th><th>分数</th></tr>"#);
         for vote in &sorted {
             out.push_str(&panel_row(vote));

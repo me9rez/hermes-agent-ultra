@@ -82,6 +82,7 @@ fn snap_to_json(snap: &crate::research::types::FundamentalsSnapshot, symbol: &st
         "ebitda_yi": snap.ebitda_yi,
         "roe_history": snap.roe_history,
         "revenue_history": snap.revenue_history,
+        "net_profit_history": snap.net_profit_history,
         "financial_health": {
             "debt_ratio": snap.debt_ratio,
             "current_ratio": snap.current_ratio,
@@ -105,6 +106,8 @@ fn map_financials_json(
     let roe_history = metric_series(abstract_rows, labels::financials::ROE)
         .or_else(|| metric_series(indicator_rows, labels::financials::ROE_PCT));
     let revenue_history = metric_series(abstract_rows, labels::financials::REVENUE);
+    let net_profit_history = metric_series(abstract_rows, labels::financials::NET_PROFIT_PARENT)
+        .or_else(|| metric_series(abstract_rows, labels::financials::NET_PROFIT));
     let debt_ratio = metric_latest(indicator_rows, labels::financials::DEBT_RATIO_PCT);
     let debt_history = metric_series(indicator_rows, labels::financials::DEBT_RATIO_PCT);
 
@@ -117,6 +120,7 @@ fn map_financials_json(
         "fcf_positive": fcf_yi.is_some_and(|v| v > 0.0),
         "roe_history": roe_history,
         "revenue_history": revenue_history.map(|v| v.into_iter().map(|x| x / 1e8).collect::<Vec<_>>()),
+        "net_profit_history": net_profit_history.map(|v| v.into_iter().map(|x| x / 1e8).collect::<Vec<_>>()),
         "debt_ratio_history": debt_history,
         "financial_health": {
             "debt_ratio": debt_ratio,
@@ -237,7 +241,7 @@ fn merge_financials_missing(primary: &Value, supplement: &Value) -> Value {
     {
         out["fcf_positive"] = json!(v);
     }
-    for key in ["roe_history", "revenue_history"] {
+    for key in ["roe_history", "revenue_history", "net_profit_history"] {
         if out
             .get(key)
             .and_then(|v| v.as_array())

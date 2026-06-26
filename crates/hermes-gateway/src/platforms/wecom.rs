@@ -28,6 +28,7 @@ use hermes_core::traits::{ParseMode, PlatformAdapter};
 
 use crate::adapter::{AdapterProxyConfig, BasePlatformAdapter, redact_identifier};
 use crate::gateway::IncomingMessage;
+use crate::platforms::helpers::split_message_by_chars;
 use crate::ssrf::is_safe_url;
 
 const DEFAULT_WS_URL: &str = "wss://openws.work.weixin.qq.com";
@@ -1699,7 +1700,27 @@ impl WeComAdapter {
         content: &str,
         reply_to: Option<&str>,
     ) -> Result<(), GatewayError> {
-        let trimmed = content.chars().take(MAX_MESSAGE_LENGTH).collect::<String>();
+        let chunks = split_message_by_chars(content, MAX_MESSAGE_LENGTH);
+        for (i, chunk) in chunks.iter().enumerate() {
+            if chunk.trim().is_empty() {
+                continue;
+            }
+            let chunk_reply = if i == 0 { reply_to } else { None };
+            Self::send_markdown_chunk_inner(inner, chat_id, chunk, chunk_reply).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_markdown_chunk_inner(
+        inner: &WeComInner,
+        chat_id: &str,
+        content: &str,
+        reply_to: Option<&str>,
+    ) -> Result<(), GatewayError> {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
         let reply_req_id = Self::reply_req_id_for_message(inner, reply_to).await;
         let path = if reply_req_id.is_some() {
             "respond"

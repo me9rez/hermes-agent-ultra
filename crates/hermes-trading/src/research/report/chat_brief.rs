@@ -7,7 +7,9 @@ use crate::research::types::DataConfidence;
 use super::labels::{DIM_ORDER, dimension_display_name};
 use super::markdown::score_badge;
 use crate::research::report::ReportIdentity;
-use crate::research::report_filter::scrub_dim_label;
+use crate::research::report_filter::{
+    deep_scan_dim_label, deep_scan_stub_footnote, show_dim_in_deep_scan,
+};
 
 /// Chat summary for `/analyze-stock`: fits WeCom ~4000 chars; full panel lives in HTML attachment.
 #[must_use]
@@ -109,30 +111,42 @@ fn render_chat_brief_parts(
             }
         }
         _ => {
-            out.push_str("- 本次未检索；详见 HTML 附件「政策 / 宏观 / 舆情」章节。\n");
+            out.push_str("- 本次未单独检索政策/宏观/舆情；可追问「补充政策与行业影响」。\n");
         }
     }
     out.push('\n');
 
     out.push_str("### 19 维评分概览\n\n");
     out.push_str("| 维度 | 评分 | 说明 |\n| --- | --- | --- |\n");
+    let coverage = content.external.coverage;
+    let mut stub_count = 0usize;
     for key in DIM_ORDER {
         let Some(d) = scored.dimensions.get(*key) else {
             continue;
         };
+        if !show_dim_in_deep_scan(key, d, coverage) {
+            continue;
+        }
+        if crate::research::report_filter::is_web_only_dim(key)
+            && crate::research::report_filter::is_placeholder_web_dim(key, d)
+            && coverage != crate::research::report::content::ExternalCoverage::WebFilled
+        {
+            stub_count += 1;
+        }
         let name = if d.display_name.is_empty() {
             dimension_display_name(key)
         } else {
             d.display_name.clone()
         };
         let badge = score_badge(d.score);
+        let label = deep_scan_dim_label(key, d, &content.external);
         out.push_str(&format!(
-            "| {name} | {}/{}{} | {} |\n",
-            d.score,
-            10,
-            badge,
-            scrub_dim_label(&d.label)
+            "| {name} | {}/{}{} | {label} |\n",
+            d.score, 10, badge,
         ));
+    }
+    if let Some(note) = deep_scan_stub_footnote(stub_count) {
+        out.push_str(&format!("\n> {note}\n"));
     }
 
     let vd = &panel.vote_distribution;
@@ -210,6 +224,7 @@ mod tests {
                 dcf_one_liner: "🔴 明显高估 · 安全边际 -46.1%".into(),
             },
             content: crate::research::report::ReportContent::default(),
+            raw_dims: serde_json::Value::Null,
         }
     }
 

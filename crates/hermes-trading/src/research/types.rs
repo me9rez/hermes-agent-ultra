@@ -94,6 +94,8 @@ pub struct FundamentalsSnapshot {
     pub roe_history: Vec<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revenue_history: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub net_profit_history: Vec<f64>,
 
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provenance: BTreeMap<String, ProvenanceSource>,
@@ -277,6 +279,9 @@ impl FundamentalsSnapshot {
         }
         if !part.revenue_history.is_empty() {
             self.revenue_history.clone_from(&part.revenue_history);
+        }
+        if !part.net_profit_history.is_empty() {
+            self.net_profit_history.clone_from(&part.net_profit_history);
         }
         if !part.matched_youzi.is_empty() {
             self.matched_youzi.clone_from(&part.matched_youzi);

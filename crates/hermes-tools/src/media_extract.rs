@@ -12,7 +12,7 @@ static MEDIA_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
             `[^`\n]+` |
             "[^"\n]+" |
             '[^'\n]+' |
-            (?:[A-Za-z]:[/\\]|~/|/)[^\s`"',;:)}\]]+\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|flac|epub|pdf|zip|rar|7z|docx?|xlsx?|pptx?|txt|md|csv|apk|ipa)
+            (?:[A-Za-z]:[/\\]|~/|/)[^\s`"',;:)}\]]+\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|flac|epub|pdf|zip|rar|7z|docx?|xlsx?|pptx?|txt|md|html|csv|apk|ipa)
         )
         [`"']?
         "#,
@@ -93,6 +93,16 @@ mod tests {
         let (media, cleaned) = extract_media("Here\nMEDIA:/workspace/AGENTS.md\nDone");
         assert_eq!(media.len(), 1);
         assert!(media[0].0.ends_with("AGENTS.md") || media[0].0.contains("AGENTS.md"));
+        assert!(!cleaned.contains("MEDIA:"));
+    }
+
+    #[test]
+    fn extracts_html_report_path() {
+        let (media, cleaned) = extract_media(
+            "摘要\nMEDIA:C:/reports/600519_SH_2026-06-25/full-report-standalone.html",
+        );
+        assert_eq!(media.len(), 1);
+        assert!(media[0].0.contains("full-report-standalone.html"));
         assert!(!cleaned.contains("MEDIA:"));
     }
 

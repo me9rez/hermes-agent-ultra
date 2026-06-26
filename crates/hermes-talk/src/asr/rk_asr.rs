@@ -13,7 +13,7 @@ use crate::config::RockchipAsrConfig;
 use crate::error::{DemoError, Result};
 
 // Keep in sync with stream_turn::ROCKCHIP_FINISH_UTTERANCE_TIMEOUT_MS.
-const FINISH_UTTERANCE_TIMEOUT_MS: u64 = 800;
+const FINISH_UTTERANCE_TIMEOUT_MS: u64 = 2500;
 
 unsafe extern "C" fn _dummy_output_cb(
     _name: *const std::ffi::c_char,

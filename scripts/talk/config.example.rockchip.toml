@@ -103,7 +103,8 @@ min_silence_ms = 450
 # endpoint_silence_ms = 500–600  # shorter VAD endpoint wait
 # speculative_llm = true          # start LLM on stable partial (300ms default)
 endpoint_silence_ms = 800
-early_endpoint_silence_ms = 400
+# 0 = disable early flush on complete sentence (。！？); helps multi-clause utterances
+early_endpoint_silence_ms = 0
 trigger_on_asr_final = true
 cold_start_sec = 1
 min_final_chars = 2
@@ -120,7 +121,8 @@ barge_in_sustain_frames = 4
 barge_in_cooldown_ms = 1000
 barge_in_requires_wake = true
 max_context_messages = 20
-offline_continuation_ms = 800
+# Extra silence when partial has no sentence end (e.g.「这次想了…聊点什么呢？」)
+offline_continuation_ms = 1200
 vad_mode = 3
 
 # ============================================================

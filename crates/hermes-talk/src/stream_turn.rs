@@ -426,7 +426,7 @@ pub const ROCKCHIP_ASR_FLUSH_WAIT_MS: u64 = 2500;
 pub const ROCKCHIP_ASR_FLUSH_WAIT_MS_COMPLETE: u64 = 600;
 
 /// RK driver internal deadline while waiting for SDK FINISH after LAST packet.
-pub const ROCKCHIP_FINISH_UTTERANCE_TIMEOUT_MS: u64 = 800;
+pub const ROCKCHIP_FINISH_UTTERANCE_TIMEOUT_MS: u64 = 2500;
 
 /// Pick session-layer wait after flush based on transcript completeness.
 pub fn rockchip_asr_flush_wait_ms(assembled: &str, min_final_chars: usize) -> u64 {
@@ -929,18 +929,29 @@ pub fn hermes_status_accepted(status: &str) -> bool {
 }
 
 /// VAD end-of-speech flush gate using streaming partial (utterance still open).
+///
+/// When the partial lacks sentence-ending punctuation, require extra trailing silence
+/// (`incomplete_extra_ms`, typically `offline_continuation_ms`) so mid-phrase pauses
+/// like「这次想了…聊点什么呢？」are not cut off.
 pub fn should_flush_asr_partial(
     input_gated: bool,
     trailing_silence_ms: u32,
     endpoint_silence_ms: u32,
+    incomplete_extra_ms: u32,
     partial: &str,
     min_final_chars: usize,
     utterance_open: bool,
 ) -> bool {
-    !input_gated
-        && utterance_open
-        && trailing_silence_ms >= endpoint_silence_ms
-        && partial.trim().chars().count() >= min_final_chars
+    let p = partial.trim();
+    if p.chars().count() < min_final_chars {
+        return false;
+    }
+    let required = if crate::orchestrator::utterance_likely_incomplete(p) {
+        endpoint_silence_ms.saturating_add(incomplete_extra_ms)
+    } else {
+        endpoint_silence_ms
+    };
+    !input_gated && utterance_open && trailing_silence_ms >= required
 }
 
 /// Early flush when partial is a stable complete sentence (shorter trailing silence).
@@ -1015,6 +1026,37 @@ mod tests {
             rockchip_asr_flush_wait_ms("帮我查一下明天的", 2),
             ROCKCHIP_ASR_FLUSH_WAIT_MS
         );
+    }
+
+    #[test]
+    fn partial_flush_waits_longer_when_incomplete() {
+        assert!(!should_flush_asr_partial(
+            false,
+            900,
+            800,
+            800,
+            "太好了，我们又连上了，这次想了",
+            2,
+            true,
+        ));
+        assert!(should_flush_asr_partial(
+            false,
+            1600,
+            800,
+            800,
+            "太好了，我们又连上了，这次想了",
+            2,
+            true,
+        ));
+        assert!(should_flush_asr_partial(
+            false,
+            800,
+            800,
+            800,
+            "太好了，我们又连上了。",
+            2,
+            true,
+        ));
     }
 
     #[test]

@@ -874,6 +874,7 @@ impl Session {
                         input_gated,
                         vad.trailing_silence_ms(),
                         orch.endpoint_silence_ms(),
+                        orch.offline_continuation_ms,
                         &last_partial,
                         orch.min_final_chars,
                         utterance_pipeline.is_open() || utterance_pipeline.is_sealed(),
@@ -3098,12 +3099,23 @@ async fn maybe_trigger(
     {
         return;
     }
-    let text = normalize_asr_transcript(&last_final.take().unwrap());
-    last_partial.clear();
+    let text = normalize_asr_transcript(last_final.as_ref().unwrap());
     let trimmed = text.trim();
     if trimmed.is_empty() {
+        last_final.take();
         return;
     }
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+    if crate::orchestrator::utterance_likely_incomplete(trimmed) {
+        info!(
+            trigger_text = %trimmed,
+            "maybe_trigger: skip incomplete utterance (no sentence end)"
+        );
+        *asr_final_at = None;
+        return;
+    }
+    let text = normalize_asr_transcript(&last_final.take().unwrap());
+    last_partial.clear();
 
     #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
     if matches_sleep_keyword(trimmed, sleep_phrases) {

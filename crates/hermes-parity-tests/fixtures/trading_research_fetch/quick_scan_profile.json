@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "fixture_group": "quick_scan_profile",
+  "lite_fetchers": [
+    "0_basic",
+    "1_financials",
+    "2_kline",
+    "10_valuation",
+    "11_governance",
+    "15_events",
+    "16_lhb",
+    "18_trap"
+  ],
+  "lite_investors": [
+    "buffett",
+    "duan",
+    "lynch",
+    "oneill",
+    "wood",
+    "marks",
+    "minervini",
+    "zhang_mz",
+    "zhao_lg",
+    "chen_xq"
+  ],
+  "lite_score_dims": [
+    "1_financials",
+    "2_kline",
+    "10_valuation",
+    "11_governance",
+    "15_events",
+    "16_lhb",
+    "18_trap"
+  ],
+  "medium_run_comps_lbo_three_stmt": true,
+  "lite_run_comps_lbo_three_stmt": false
+}

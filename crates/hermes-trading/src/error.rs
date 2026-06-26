@@ -25,4 +25,7 @@ pub enum TradingError {
 
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }

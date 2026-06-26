@@ -1,11 +1,13 @@
 use super::*;
 use crate::agent_config::is_stream_not_supported_error;
+use crate::agent_loop::finalizer_fns::summarize_background_review_result;
 use crate::governor::{GovernorRuntimeState, TurnGovernor};
 use crate::hooks::spill_hook_context_if_oversized;
 use crate::llm_caller::{
     collect_stream_llm_response, session_disable_streaming, use_streaming_llm_transport,
 };
 use crate::message_sanitization::budget_pressure_text;
+use crate::objective_guard::OBJECTIVE_DEEP_AUDIT_TAG;
 use crate::plugins::HookResult;
 use crate::replay::{ReplayState, RouteLearningStats, redact_json_value};
 use crate::route_learning::{

@@ -37,11 +37,19 @@ impl DimFetcher for CapitalFlowFetcher {
         }
         match fetch_capital_flow_dim_akshare(&ctx.symbol).await {
             Ok((data, source)) => {
-                let quality = if data
-                    .get("main_fund_5d_net_yi")
-                    .and_then(|v| v.as_f64())
-                    .is_some()
-                {
+                let paths = [
+                    data.get("main_fund_5d_net_yi").and_then(|v| v.as_f64()),
+                    data.get("northbound_holding_shares")
+                        .and_then(|v| v.as_f64()),
+                    data.get("holder_change_ratio").and_then(|v| v.as_f64()),
+                    data.get("margin_fin_balance").and_then(|v| v.as_f64()),
+                ]
+                .into_iter()
+                .filter(|v| v.is_some())
+                .count();
+                let quality = if paths >= 2 {
+                    DimQuality::Full
+                } else if paths >= 1 {
                     DimQuality::Partial
                 } else {
                     DimQuality::Missing

@@ -97,7 +97,10 @@ fn apply_financials(snap: &mut FundamentalsSnapshot, data: &Value) {
     set_f64(snap, "equity_yi", data, "equity_yi");
     set_f64(snap, "total_debt_yi", data, "total_debt_yi");
     set_f64(snap, "cash_yi", data, "cash_yi");
+    set_f64(snap, "eps", data, "eps");
+    set_f64(snap, "bvps", data, "bvps");
     set_f64(snap, "ebitda_yi", data, "ebitda_yi");
+    set_f64(snap, "shares_outstanding_yi", data, "shares_outstanding_yi");
     if let Some(h) = data.get("financial_health") {
         set_f64(snap, "debt_ratio", h, "debt_ratio");
         set_f64(snap, "current_ratio", h, "current_ratio");
@@ -153,6 +156,13 @@ fn apply_valuation(snap: &mut FundamentalsSnapshot, data: &Value) {
 }
 
 fn apply_lhb(snap: &mut FundamentalsSnapshot, data: &Value) {
+    if data
+        .get("lhb_count_30d")
+        .and_then(|v| v.as_u64())
+        .is_some_and(|n| n > 0)
+    {
+        mark(snap, "lhb_count_30d");
+    }
     if let Some(arr) = data.get("matched_youzi").and_then(|v| v.as_array()) {
         snap.matched_youzi = arr
             .iter()
@@ -207,6 +217,20 @@ fn apply_capital_flow(snap: &mut FundamentalsSnapshot, data: &Value) {
     {
         mark(snap, "main_fund_5d");
     }
+    if data
+        .get("holder_change_ratio")
+        .and_then(|v| v.as_f64())
+        .is_some()
+    {
+        mark(snap, "holder_change_ratio");
+    }
+    if data
+        .get("northbound_holding_shares")
+        .and_then(|v| v.as_f64())
+        .is_some()
+    {
+        mark(snap, "northbound_holding");
+    }
 }
 
 fn apply_events(snap: &mut FundamentalsSnapshot, data: &Value) {
@@ -216,6 +240,13 @@ fn apply_events(snap: &mut FundamentalsSnapshot, data: &Value) {
         .is_some_and(|n| n > 0)
     {
         mark(snap, "announcements");
+    }
+    if data
+        .get("news_count")
+        .and_then(|v| v.as_u64())
+        .is_some_and(|n| n > 0)
+    {
+        mark(snap, "news");
     }
 }
 
@@ -231,6 +262,7 @@ fn apply_industry(snap: &mut FundamentalsSnapshot, data: &Value) {
 mod tests {
     use super::*;
     use crate::research::fetchers::types::{CollectOutput, DimQuality, Market};
+    use crate::research::types::FundamentalsSnapshot;
 
     #[test]
     fn build_raw_dims_shape() {
@@ -255,5 +287,47 @@ mod tests {
                 .and_then(|v| v.get("data"))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn apply_events_marks_announcements_and_news() {
+        let mut snap = FundamentalsSnapshot::default();
+        apply_events(
+            &mut snap,
+            &serde_json::json!({
+                "announcement_count": 2,
+                "news_count": 3
+            }),
+        );
+        assert!(snap.provenance.contains_key("announcements"));
+        assert!(snap.provenance.contains_key("news"));
+    }
+
+    #[test]
+    fn apply_research_marks_reports() {
+        let mut snap = FundamentalsSnapshot::default();
+        apply_research(
+            &mut snap,
+            &serde_json::json!({
+                "research_count": 4,
+                "research_reports": [{"title": "买入"}]
+            }),
+        );
+        assert!(snap.provenance.contains_key("research_reports"));
+    }
+
+    #[test]
+    fn apply_lhb_marks_count_and_youzi() {
+        let mut snap = FundamentalsSnapshot::default();
+        apply_lhb(
+            &mut snap,
+            &serde_json::json!({
+                "lhb_count_30d": 2,
+                "matched_youzi": ["日涨幅偏离值达7%"]
+            }),
+        );
+        assert!(snap.provenance.contains_key("lhb_count_30d"));
+        assert!(snap.provenance.contains_key("matched_youzi"));
+        assert_eq!(snap.matched_youzi.len(), 1);
     }
 }

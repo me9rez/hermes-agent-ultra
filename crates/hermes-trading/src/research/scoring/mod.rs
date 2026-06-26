@@ -4,7 +4,8 @@ pub mod dims;
 
 use serde::{Deserialize, Serialize};
 
-use crate::research::personas::{PersonaVote, evaluate_all};
+use crate::research::personas::{PersonaVote, evaluate_filtered};
+use crate::research::profile::AnalysisProfile;
 use crate::research::types::FeatureVector;
 
 pub use dims::{DimScore, ScoreDimensionsResult, score_dimensions};
@@ -38,8 +39,12 @@ pub struct SignalDistribution {
 
 /// Generate investor panel from scored dimensions + features.
 #[must_use]
-pub fn generate_panel(scored: &ScoreDimensionsResult, features: &FeatureVector) -> PanelResult {
-    let votes = evaluate_all(features);
+pub fn generate_panel(
+    scored: &ScoreDimensionsResult,
+    features: &FeatureVector,
+    profile: &AnalysisProfile,
+) -> PanelResult {
+    let votes = evaluate_filtered(features, profile.lite_investor_ids());
     let mut vote_dist = VoteDistribution::default();
     let mut sig_dist = SignalDistribution::default();
     let mut score_sum = 0.0;
@@ -70,7 +75,7 @@ pub fn generate_panel(scored: &ScoreDimensionsResult, features: &FeatureVector) 
     }
 
     let panel_consensus = if score_count > 0.0 {
-        (score_sum / score_count * 10.0).round() / 10.0
+        (score_sum / score_count * 10.0_f64).round() / 10.0_f64
     } else {
         scored.fundamental_score
     };

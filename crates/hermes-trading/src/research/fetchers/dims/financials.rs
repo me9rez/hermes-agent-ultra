@@ -43,7 +43,7 @@ impl DimFetcher for FinancialsFetcher {
                 } else {
                     DimQuality::Missing
                 };
-                DimResult::ok(dim_keys::FINANCIALS, ticker, data, source, quality)
+                DimResult::ok(dim_keys::FINANCIALS, ticker, data, &source, quality)
             }
             Err(e) => DimResult::error(dim_keys::FINANCIALS, ticker, "akshare", e.to_string()),
         }

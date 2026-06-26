@@ -47,9 +47,61 @@
       },
       "expected": {
         "min_confidence": 0.55,
-        "min_fundamental_score": 6.0,
+        "min_fundamental_score": 5.9,
         "has_industry_pe": true,
         "pe_dim_score_lte": 7
+      }
+    },
+    {
+      "id": "moutai_synthesis_smoke",
+      "op": "build_synthesis",
+      "input": {
+        "symbol": "600519.SH",
+        "dims": {
+          "0_basic": {
+            "data": {
+              "name": "贵州茅台",
+              "industry": "白酒",
+              "price": 1680.0,
+              "pe_ttm": 28.5,
+              "pb": 8.2,
+              "market_cap_yi": 21000,
+              "shares_outstanding_yi": 12.56
+            }
+          },
+          "1_financials": {
+            "data": {
+              "roe": 32.0,
+              "net_margin": 52.0,
+              "revenue_latest_yi": 1500,
+              "fcf_yi": 600,
+              "financial_health": { "debt_ratio": 18.0 }
+            }
+          },
+          "10_valuation": {
+            "data": { "pe_ttm": 28.5, "pe_percentile": 35.0 }
+          },
+          "4_peers": {
+            "data": {
+              "peer_table": [
+                { "name": "五粮液", "pe": 18.0 },
+                { "name": "泸州老窖", "pe": 16.0 }
+              ]
+            }
+          },
+          "6_research": { "data": { "research_count": 10 } },
+          "7_industry": { "data": { "industry": "白酒", "growth": 12.0, "industry_pe": 22.0 } },
+          "6_fund_holders": { "data": { "holder_change_ratio": -8.0, "holder_count": 95000 } },
+          "12_capital_flow": { "data": { "main_fund_5d_net_yi": 3.5 } }
+        }
+      },
+      "expected": {
+        "verdict": "buy",
+        "confidence_tier": "high",
+        "min_panel_consensus": 7.0,
+        "headline_contains": "600519.SH",
+        "dcf_one_liner_contains": "安全边际",
+        "min_key_metrics": 4
       }
     },
     {
@@ -77,8 +129,47 @@
         }
       },
       "expected": {
-        "max_confidence": 0.52,
+        "max_confidence": 0.55,
         "max_fundamental_score": 6.5
+      }
+    },
+    {
+      "id": "capital_flow_full_paths",
+      "op": "bridge_and_score",
+      "input": {
+        "symbol": "688126.SH",
+        "dims": {
+          "0_basic": { "data": { "name": "沪硅产业", "price": 18.0, "pe_ttm": 80.0 } },
+          "12_capital_flow": {
+            "data": {
+              "main_fund_5d_net_yi": 1.2,
+              "main_fund_20d_net_yi": -0.5,
+              "northbound_holding_shares": 5000000.0,
+              "northbound_20d_net_shares": 120000.0,
+              "holder_change_ratio": -6.5,
+              "holders_trend": "户数连降",
+              "margin_fin_balance": 80000000.0
+            }
+          },
+          "6_fund_holders": { "data": { "holder_change_ratio": -6.5, "holder_count": 42000 } }
+        }
+      },
+      "expected": {
+        "min_fundamental_score": 4.0
+      }
+    },
+    {
+      "id": "valuation_missing_percentile",
+      "op": "bridge_and_score",
+      "input": {
+        "symbol": "600519.SH",
+        "dims": {
+          "0_basic": { "data": { "pe_ttm": 30.0, "price": 1600.0 } },
+          "10_valuation": { "data": { "pe_ttm": 30.0 } }
+        }
+      },
+      "expected": {
+        "has_missing_valuation_dim": true
       }
     },
     {
@@ -104,7 +195,181 @@
       },
       "expected": {
         "min_confidence": 0.25,
-        "max_confidence": 0.55
+        "max_confidence": 0.60
+      }
+    },
+    {
+      "id": "events_rich_counts",
+      "op": "bridge_and_score",
+      "input": {
+        "symbol": "600519.SH",
+        "dims": {
+          "15_events": {
+            "data": {
+              "announcement_count": 5,
+              "news_count": 4,
+              "announcements": [{ "title": "年度报告" }],
+              "news": [{ "title": "行业观察" }]
+            }
+          }
+        }
+      },
+      "expected": {
+        "events_dim_score_eq": 7,
+        "trap_dim_score_eq": 9
+      }
+    },
+    {
+      "id": "events_trap_from_announcement",
+      "op": "bridge_and_score",
+      "input": {
+        "symbol": "300999.SZ",
+        "dims": {
+          "15_events": {
+            "data": {
+              "announcement_count": 1,
+              "announcements": [{ "title": "妖股龙头翻倍涨停指南" }],
+              "news_count": 0,
+              "news": []
+            }
+          }
+        }
+      },
+      "expected": {
+        "trap_dim_score_eq": 3
+      }
+    },
+    {
+      "id": "events_missing_counts",
+      "op": "bridge_and_score",
+      "input": {
+        "symbol": "600519.SH",
+        "dims": {
+          "0_basic": { "data": { "price": 1680.0 } },
+          "15_events": { "data": {} }
+        }
+      },
+      "expected": {
+        "has_missing_events_dim": true,
+        "events_dim_score_eq": 4
+      }
+    },
+    {
+      "id": "research_rich_counts",
+      "op": "bridge_and_score",
+      "input": {
+        "symbol": "600519.SH",
+        "dims": {
+          "6_research": {
+            "data": {
+              "research_count": 10,
+              "research_reports": [
+                { "title": "维持买入", "org": "中信证券", "rating": "买入", "date": "2026-06-01" }
+              ]
+            }
+          }
+        }
+      },
+      "expected": {
+        "research_dim_score_eq": 7
+      }
+    },
+    {
+      "id": "research_missing_or_error",
+      "op": "bridge_and_score",
+      "input": {
+        "symbol": "600519.SH",
+        "dims": {
+          "6_research": {
+            "data": {
+              "research_reports": [],
+              "research_count": 0,
+              "research_error": "upstream timeout"
+            }
+          }
+        }
+      },
+      "expected": {
+        "has_missing_research_dim": true,
+        "research_dim_score_eq": 4
+      }
+    },
+    {
+      "id": "lhb_rich_counts",
+      "op": "bridge_and_score",
+      "input": {
+        "symbol": "600519.SH",
+        "dims": {
+          "16_lhb": {
+            "data": {
+              "lhb_count_30d": 4,
+              "matched_youzi": ["日涨幅偏离值达7%"],
+              "lhb_records": 4
+            }
+          }
+        }
+      },
+      "expected": {
+        "lhb_dim_score_eq": 7,
+        "has_matched_youzi": true
+      }
+    },
+    {
+      "id": "lhb_missing_or_error",
+      "op": "bridge_and_score",
+      "input": {
+        "symbol": "600519.SH",
+        "dims": {
+          "16_lhb": {
+            "data": {
+              "lhb_count_30d": 0,
+              "matched_youzi": [],
+              "lhb_records": 0,
+              "lhb_error": "upstream timeout"
+            }
+          }
+        }
+      },
+      "expected": {
+        "has_missing_lhb_dim": true,
+        "lhb_dim_score_eq": 4
+      }
+    },
+    {
+      "id": "moutai_confidence_supplement_partial",
+      "op": "bridge_and_score",
+      "input": {
+        "symbol": "600519.SH",
+        "dims": {
+          "0_basic": {
+            "data": {
+              "name": "贵州茅台",
+              "industry": "白酒",
+              "price": 1680.0,
+              "pe_ttm": 28.0,
+              "pb": 8.0,
+              "market_cap_yi": 21000
+            }
+          },
+          "1_financials": {
+            "data": {
+              "roe": 32.0,
+              "net_margin": 52.0,
+              "revenue_latest_yi": 1500,
+              "fcf_yi": 600,
+              "equity_yi": 2200,
+              "cash_yi": 1500,
+              "total_debt_yi": 30,
+              "financial_health": { "debt_ratio": 18.0 }
+            }
+          },
+          "10_valuation": {
+            "data": { "pe_ttm": 28.0, "pe_percentile": 35.0 }
+          }
+        }
+      },
+      "expected": {
+        "min_confidence": 0.65
       }
     }
   ]

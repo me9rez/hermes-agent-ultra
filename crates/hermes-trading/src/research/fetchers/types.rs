@@ -116,11 +116,20 @@ impl DimResult {
                 "ticker": self.ticker,
                 "data": self.data,
                 "source": self.source,
+                "quality": quality_tag(self.quality),
                 "fallback": self.fallback,
                 "error": self.error,
             }),
         )
     }
+}
+
+/// Summary row for `analyze_stock` JSON (`dim`, `quality`, `source`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DimSummaryEntry {
+    pub dim: String,
+    pub quality: String,
+    pub source: String,
 }
 
 /// Output of `collect_dims`.
@@ -151,6 +160,30 @@ impl CollectOutput {
             .map(|r| format!("{}={}/{}", r.dim_key, r.source, quality_tag(r.quality)))
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// Per-dimension summary for agent / `analyze_stock` JSON.
+    #[must_use]
+    pub fn dim_summary(&self) -> Vec<DimSummaryEntry> {
+        self.dims
+            .values()
+            .filter(|r| r.quality != DimQuality::Skipped)
+            .map(|r| DimSummaryEntry {
+                dim: r.dim_key.clone(),
+                quality: quality_tag(r.quality).to_string(),
+                source: r.source.clone(),
+            })
+            .collect()
+    }
+
+    /// Dim keys with `missing` or `error` quality.
+    #[must_use]
+    pub fn missing_dim_keys(&self) -> Vec<String> {
+        self.dims
+            .values()
+            .filter(|r| matches!(r.quality, DimQuality::Missing | DimQuality::Error))
+            .map(|r| r.dim_key.clone())
+            .collect()
     }
 }
 

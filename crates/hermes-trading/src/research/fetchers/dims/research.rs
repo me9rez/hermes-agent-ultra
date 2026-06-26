@@ -37,12 +37,13 @@ impl DimFetcher for ResearchFetcher {
                     .get("research_count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
+                let has_error = data.get("research_error").is_some();
                 DimResult::ok(
                     dim_keys::RESEARCH,
                     &ctx.symbol,
                     data,
                     "akshare",
-                    if count > 0 {
+                    if count > 0 && !has_error {
                         DimQuality::Partial
                     } else {
                         DimQuality::Missing

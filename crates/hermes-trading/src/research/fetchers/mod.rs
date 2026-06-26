@@ -9,10 +9,11 @@ pub mod context;
 pub mod dim_keys;
 pub mod dims;
 pub mod registry;
+pub mod schedule;
 pub mod r#trait;
 pub mod types;
 
 pub use bridge::apply_dims_to_snapshot;
-pub use collect::{CollectOptions, collect_dims, enrich_snapshot};
+pub use collect::{CollectOptions, EnrichSnapshotResult, collect_dims, enrich_snapshot};
 pub use registry::{EXEC_ORDER, build_registry, list_dim_keys};
-pub use types::{CollectOutput, DimQuality, DimResult, FetcherSpec, Market};
+pub use types::{CollectOutput, DimQuality, DimResult, DimSummaryEntry, FetcherSpec, Market};

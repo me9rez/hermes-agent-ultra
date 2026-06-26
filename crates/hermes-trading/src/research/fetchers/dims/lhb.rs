@@ -37,12 +37,13 @@ impl DimFetcher for LhbFetcher {
                     .get("lhb_count_30d")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
+                let has_error = data.get("lhb_error").is_some();
                 DimResult::ok(
                     dim_keys::LHB,
                     &ctx.symbol,
                     data,
                     source,
-                    if count > 0 {
+                    if count > 0 && !has_error {
                         DimQuality::Partial
                     } else {
                         DimQuality::Missing

@@ -60,7 +60,15 @@ impl DimFetcher for ValuationFetcher {
             );
         }
 
-        let (mut pe, mut pb, mut source) = if let Some((basic, src)) = ctx.prior_basic() {
+        let (mut pe, mut pb, mut source) = if let Some(basic) = ctx.cached_basic_data() {
+            (
+                Self::f64_from_basic(basic, "pe_ttm"),
+                Self::f64_from_basic(basic, "pb"),
+                ctx.prior_basic()
+                    .map(|(_, s)| s.to_string())
+                    .unwrap_or_else(|| "0_basic".into()),
+            )
+        } else if let Some((basic, src)) = ctx.prior_basic() {
             (
                 Self::f64_from_basic(basic, "pe_ttm"),
                 Self::f64_from_basic(basic, "pb"),
@@ -71,6 +79,7 @@ impl DimFetcher for ValuationFetcher {
         };
 
         if (pe.is_none() || pb.is_none())
+            && ctx.cached_basic_data().is_none()
             && let Ok(snap) = self.basic.fetch(ticker).await
         {
             pe = pe.or(snap.pe);

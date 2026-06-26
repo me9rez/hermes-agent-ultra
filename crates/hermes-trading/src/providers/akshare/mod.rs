@@ -116,4 +116,82 @@ mod tests {
         assert!(closes.last().copied().unwrap_or(0.0) > 0.0);
         assert!(source == "akshare" || source == "eastmoney_push2his");
     }
+
+    #[tokio::test]
+    #[ignore = "live akshare network"]
+    async fn live_events_dim_600519() {
+        let data = fetch_events_dim_akshare("600519.SH")
+            .await
+            .expect("events dim");
+        let ann = data
+            .get("announcement_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let news = data.get("news_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        eprintln!("live events 600519: {}", data);
+        if let Some(err) = data.get("announcement_error") {
+            eprintln!("announcement_error: {err}");
+        }
+        if let Some(err) = data.get("news_error") {
+            eprintln!("news_error: {err}");
+        }
+        assert!(
+            ann > 0 || news > 0,
+            "expected announcements or news; got {data}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "live akshare network"]
+    async fn live_research_dim_600519() {
+        let data = super::research::fetch_research_dim_akshare("600519.SH")
+            .await
+            .expect("research dim");
+        let count = data
+            .get("research_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        eprintln!("live research 600519: {}", data);
+        if let Some(err) = data.get("research_error") {
+            eprintln!("research_error: {err}");
+        }
+        assert!(count > 0, "expected broker reports for Moutai; got {data}");
+        let reports = data
+            .get("research_reports")
+            .and_then(|v| v.as_array())
+            .expect("research_reports array");
+        assert!(!reports.is_empty());
+        let first = &reports[0];
+        assert!(first.get("title").and_then(|v| v.as_str()).is_some());
+        assert!(first.get("org").and_then(|v| v.as_str()).is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "live akshare network"]
+    async fn live_lhb_dim_600519() {
+        let (data, source) = fetch_lhb_dim_akshare("600519.SH").await.expect("lhb dim");
+        eprintln!("live lhb 600519 ({source}): {}", data);
+        if let Some(err) = data.get("lhb_error") {
+            eprintln!("lhb_error: {err}");
+        }
+        assert!(
+            data.get("lhb_count_30d").is_some(),
+            "expected lhb_count_30d field; got {data}"
+        );
+        assert!(
+            data.get("matched_youzi")
+                .and_then(|v| v.as_array())
+                .is_some(),
+            "expected matched_youzi array; got {data}"
+        );
+        let count = data
+            .get("lhb_count_30d")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let youzi = data
+            .get("matched_youzi")
+            .and_then(|v| v.as_array())
+            .map_or(0, |a| a.len());
+        eprintln!("lhb_count_30d={count}, matched_youzi={youzi}");
+    }
 }

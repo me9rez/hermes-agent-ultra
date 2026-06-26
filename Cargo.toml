@@ -138,3 +138,6 @@ toml = "0.8"
 async-stream = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
 tokio-util = "0.7"
+
+# Equity research (A-share akshare-rs pin — see docs/sop/equity_research_data.md)
+akshare = "0.1.7"

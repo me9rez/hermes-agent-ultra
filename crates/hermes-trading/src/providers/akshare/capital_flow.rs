@@ -1,4 +1,4 @@
-//! Capital flow: HSGT + margin + akshare main flow.
+//! Capital flow: HSGT + margin + main flow + holder trend (UZI 9-path subset).
 
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -41,17 +41,41 @@ async fn fetch_akshare_inner(symbol: &str) -> Result<(Value, &'static str), Trad
         let sum_20: f64 = flows.iter().map(|p| p.main_net_inflow).sum();
         out["main_fund_5d_net_yi"] = json!(sum_5 / 1e8);
         out["main_fund_20d_net_yi"] = json!(sum_20 / 1e8);
+        let daily: Vec<Value> = flows
+            .iter()
+            .rev()
+            .take(5)
+            .map(|p| {
+                json!({
+                    "date": p.trade_date,
+                    "main_net_inflow": p.main_net_inflow,
+                })
+            })
+            .collect();
+        out["main_fund_flow_daily"] = json!(daily);
     }
 
     if let Ok(hsgt) = client()
         .stock_hsgt_individual_em(&code)
         .await
         .map_err(map_err)
-        && let Some(latest) = hsgt.last()
     {
-        out["northbound_holding_shares"] = json!(latest.holding_shares);
-        out["northbound_holding_ratio"] = json!(latest.holding_circulating_ratio);
-        out["northbound_trade_date"] = json!(latest.trade_date);
+        if let Some(latest) = hsgt.last() {
+            out["northbound_holding_shares"] = json!(latest.holding_shares);
+            out["northbound_holding_ratio"] = json!(latest.holding_circulating_ratio);
+            out["northbound_trade_date"] = json!(latest.trade_date);
+        }
+        if hsgt.len() >= 2 {
+            let window: Vec<f64> = hsgt
+                .iter()
+                .rev()
+                .take(20)
+                .map(|r| r.holding_shares)
+                .collect();
+            if let (Some(&newest), Some(&oldest)) = (window.first(), window.last()) {
+                out["northbound_20d_net_shares"] = json!(newest - oldest);
+            }
+        }
     }
 
     if let Some(margin) = fetch_margin_for_code(&code).await {
@@ -59,10 +83,58 @@ async fn fetch_akshare_inner(symbol: &str) -> Result<(Value, &'static str), Trad
         out["margin_loan_balance"] = json!(margin.1);
     }
 
+    if let Ok(gdhs) = client()
+        .stock_zh_a_gdhs_detail_em(&code)
+        .await
+        .map_err(map_err)
+    {
+        let history: Vec<Value> = gdhs
+            .iter()
+            .rev()
+            .take(8)
+            .map(|d| {
+                json!({
+                    "end_date": d.end_date,
+                    "holder_count": d.holder_count,
+                    "holder_change_ratio": d.holder_change_ratio,
+                })
+            })
+            .collect();
+        if !history.is_empty() {
+            out["holder_count_history"] = json!(history);
+            if let Some(latest) = gdhs.iter().max_by(|a, b| a.end_date.cmp(&b.end_date)) {
+                out["holder_change_ratio"] = json!(latest.holder_change_ratio);
+                let counts: Vec<(String, f64)> = gdhs
+                    .iter()
+                    .map(|d| (d.end_date.clone(), d.holder_count))
+                    .collect();
+                out["holders_trend"] = json!(holders_trend_label(&counts));
+            }
+        }
+    }
+
     if out.as_object().is_some_and(|o| !o.is_empty()) {
         Ok((out, "akshare"))
     } else {
         Err(TradingError::NoData)
+    }
+}
+
+fn holders_trend_label(rows: &[(String, f64)]) -> &'static str {
+    if rows.len() < 2 {
+        return "—";
+    }
+    let latest = rows.iter().max_by(|a, b| a.0.cmp(&b.0));
+    let oldest = rows.iter().min_by(|a, b| a.0.cmp(&b.0));
+    let (Some(l), Some(p)) = (latest, oldest) else {
+        return "—";
+    };
+    if l.1 < p.1 * 0.95 {
+        "户数连降"
+    } else if l.1 > p.1 * 1.05 {
+        "户数连升"
+    } else {
+        "基本持平"
     }
 }
 
@@ -76,4 +148,18 @@ async fn fetch_margin_for_code(code: &str) -> Option<(f64, f64)> {
     let rows = client().stock_margin_detail_szse(&today).await.ok()?;
     let row = rows.into_iter().find(|r| r.code == code)?;
     Some((row.fin_balance, row.loan_balance))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn holders_trend_detects_decline() {
+        let rows = vec![
+            ("2024-06-30".into(), 100_000.0),
+            ("2024-03-31".into(), 120_000.0),
+        ];
+        assert_eq!(holders_trend_label(&rows), "户数连降");
+    }
 }

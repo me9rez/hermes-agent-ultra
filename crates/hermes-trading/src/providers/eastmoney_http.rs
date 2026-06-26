@@ -5,6 +5,7 @@
 use reqwest::header::{CONTENT_ENCODING, REFERER};
 use reqwest::{Client, RequestBuilder};
 use serde::Deserialize;
+use serde_json::Value;
 use tracing::warn;
 
 use crate::error::TradingError;
@@ -215,25 +216,35 @@ struct Push2QuoteData {
     #[serde(rename = "f58")]
     name: Option<String>,
     #[serde(rename = "f43")]
-    price_raw: Option<i64>,
+    price_raw: Option<Value>,
     #[serde(rename = "f169")]
-    change_raw: Option<i64>,
+    change_raw: Option<Value>,
     #[serde(rename = "f170")]
-    change_pct_raw: Option<i64>,
+    change_pct_raw: Option<Value>,
     #[serde(rename = "f47")]
-    volume: Option<i64>,
+    volume: Option<Value>,
     #[serde(rename = "f116")]
-    market_cap_raw: Option<i64>,
+    market_cap_raw: Option<Value>,
     #[serde(rename = "f117")]
-    circulating_cap_raw: Option<i64>,
+    circulating_cap_raw: Option<Value>,
     #[serde(rename = "f162")]
-    pe_raw: Option<i64>,
+    pe_raw: Option<Value>,
     #[serde(rename = "f167")]
-    pb_raw: Option<i64>,
+    pb_raw: Option<Value>,
     #[serde(rename = "f184")]
-    total_shares_raw: Option<i64>,
+    total_shares_raw: Option<Value>,
     #[serde(rename = "f185")]
-    float_shares_raw: Option<i64>,
+    float_shares_raw: Option<Value>,
+}
+
+fn json_field_to_i64(value: Option<Value>) -> Option<i64> {
+    let Value::Number(num) = value? else {
+        return None;
+    };
+    if let Some(v) = num.as_i64() {
+        return Some(v);
+    }
+    num.as_f64().map(|v| v.round() as i64)
 }
 
 impl Push2QuoteData {
@@ -241,17 +252,17 @@ impl Push2QuoteData {
         Push2QuoteRaw {
             code: self.code,
             name: self.name,
-            price_raw: self.price_raw,
-            change_raw: self.change_raw,
-            change_pct_raw: self.change_pct_raw,
-            volume: self.volume,
-            market_cap_raw: self.market_cap_raw,
-            circulating_cap_raw: self.circulating_cap_raw,
-            pe_raw: self.pe_raw,
-            pb_raw: self.pb_raw,
+            price_raw: json_field_to_i64(self.price_raw),
+            change_raw: json_field_to_i64(self.change_raw),
+            change_pct_raw: json_field_to_i64(self.change_pct_raw),
+            volume: json_field_to_i64(self.volume),
+            market_cap_raw: json_field_to_i64(self.market_cap_raw),
+            circulating_cap_raw: json_field_to_i64(self.circulating_cap_raw),
+            pe_raw: json_field_to_i64(self.pe_raw),
+            pb_raw: json_field_to_i64(self.pb_raw),
             pe_alt_raw: None,
-            total_shares_raw: self.total_shares_raw,
-            float_shares_raw: self.float_shares_raw,
+            total_shares_raw: json_field_to_i64(self.total_shares_raw),
+            float_shares_raw: json_field_to_i64(self.float_shares_raw),
             source: "eastmoney",
         }
     }
@@ -657,6 +668,30 @@ mod tests {
         assert_eq!(raw.name.as_deref(), Some("贵州茅台"));
         assert_eq!(scaled_price(raw.price_raw), Some(1407.04));
         assert_eq!(market_cap_yi(raw.market_cap_raw), Some(21_000.0));
+    }
+
+    #[test]
+    fn push2_quote_data_tolerates_float_numeric_fields() {
+        let body = r#"{"data":{"f57":"600519","f58":"贵州茅台","f43":140704.0,"f116":2.1e12,"f117":2100000000000.0,"f184":1256197800.5,"f185":"bad","f47":12345.6}}"#;
+        let parsed: Push2QuoteResponse = serde_json::from_str(body).unwrap();
+        let raw = parsed.data.unwrap().into_raw();
+        assert_eq!(scaled_price(raw.price_raw), Some(1407.04));
+        assert_eq!(market_cap_yi(raw.market_cap_raw), Some(21_000.0));
+        assert_eq!(market_cap_yi(raw.circulating_cap_raw), Some(21_000.0));
+        assert_eq!(shares_yi(raw.total_shares_raw), Some(12.56197801));
+        assert_eq!(raw.float_shares_raw, None);
+        assert_eq!(raw.volume, Some(12_346));
+    }
+
+    #[test]
+    fn json_field_to_i64_handles_int_float_and_invalid() {
+        assert_eq!(json_field_to_i64(Some(Value::from(140704))), Some(140704));
+        assert_eq!(
+            json_field_to_i64(Some(Value::from(2100000000000.0))),
+            Some(2_100_000_000_000)
+        );
+        assert_eq!(json_field_to_i64(Some(Value::String("n/a".into()))), None);
+        assert_eq!(json_field_to_i64(None), None);
     }
 
     #[tokio::test]

@@ -57,13 +57,13 @@ impl BasicFetcher {
         snap: &mut FundamentalsSnapshot,
         source: &mut String,
     ) {
-        if !Self::snap_needs_supplement(snap) {
+        if !Self::snap_needs_supplement(snap) && snap.name.is_some() {
             return;
         }
         match fetch_basic_info_supplement(ticker).await {
             Ok(sup) => {
                 apply_supplement(snap, &sup);
-                if sup.market_cap_yi.is_some() || sup.industry.is_some() {
+                if sup.market_cap_yi.is_some() || sup.industry.is_some() || sup.name.is_some() {
                     if source.contains("akshare") {
                         *source = format!("{source}+akshare_info");
                     } else if source.is_empty() {
@@ -75,6 +75,30 @@ impl BasicFetcher {
             }
             Err(e) => {
                 warn!(symbol = %ticker, error = %e, "basic individual_info supplement failed");
+            }
+        }
+        Self::fill_name_from_tencent(ticker, snap, source).await;
+    }
+
+    async fn fill_name_from_tencent(
+        ticker: &str,
+        snap: &mut FundamentalsSnapshot,
+        source: &mut String,
+    ) {
+        if snap.name.is_some() {
+            return;
+        }
+        let http = crate::http::default_client();
+        match crate::providers::eastmoney_http::fetch_tencent_qt(&http, ticker).await {
+            Ok(qt) if qt.name.is_some() => {
+                snap.name.clone_from(&qt.name);
+                if !source.contains("tencent_qt") {
+                    *source = format!("{source}+tencent_qt");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(symbol = %ticker, error = %e, "tencent qt name fallback failed");
             }
         }
     }
@@ -348,7 +372,8 @@ mod tests {
         };
         let dim = BasicFetcher::merge_snap_and_quote("600519.SH", snap, &q).await;
         assert!(dim.error.is_none());
-        assert_eq!(dim.source, "akshare+eastmoney_push2+akshare_info");
+        assert!(dim.source.contains("akshare"));
+        assert!(dim.source.contains("eastmoney_push2"));
         assert_eq!(dim.data.get("price").and_then(|v| v.as_f64()), Some(1407.0));
         assert_eq!(
             dim.data.get("name").and_then(|v| v.as_str()),

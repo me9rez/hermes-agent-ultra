@@ -1,11 +1,13 @@
 //! Eastmoney financials provider (三表摘要 + 历史序列).
 
 use async_trait::async_trait;
+use reqwest::header::REFERER;
 use serde::Deserialize;
 use tracing::debug;
 
 use crate::error::TradingError;
 use crate::http::{default_client, send_with_retry};
+use crate::providers::akshare::em_prefix_symbol;
 use crate::providers::fundamentals::FundamentalsProvider;
 use crate::research::types::{FundamentalsSnapshot, ProvenanceSource};
 use crate::settlement::is_a_share;
@@ -17,6 +19,8 @@ const F10_DEBT_URL: &str =
     "https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/DebtAjax";
 const F10_CASHFLOW_URL: &str =
     "https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/CashFlowAjax";
+const F10_INDEX_REFERER: &str =
+    "https://emweb.securities.eastmoney.com/PC_HSF10/FinanceAnalysis/Index?type=web&code=";
 
 #[derive(Debug, Clone)]
 pub struct EastmoneyFinancialsProvider {
@@ -33,6 +37,12 @@ impl EastmoneyFinancialsProvider {
 
     fn yi_from_yuan(v: Option<f64>) -> Option<f64> {
         v.map(|n| n / 1e8)
+    }
+
+    fn f10_request(&self, url: &str, em_code: &str) -> reqwest::RequestBuilder {
+        self.client
+            .get(url)
+            .header(REFERER, format!("{F10_INDEX_REFERER}{em_code}"))
     }
 }
 
@@ -114,14 +124,15 @@ impl FundamentalsProvider for EastmoneyFinancialsProvider {
             .next()
             .unwrap_or(&canonical)
             .to_string();
+        let em_code = em_prefix_symbol(&canonical)?;
         let mut snap = FundamentalsSnapshot {
             symbol: canonical,
             ..Default::default()
         };
 
-        self.fill_main_targets(&code, &mut snap).await?;
-        self.fill_debt(&code, &mut snap).await?;
-        self.fill_cashflow(&code, &mut snap).await?;
+        self.fill_main_targets(&code, &em_code, &mut snap).await?;
+        self.fill_debt(&code, &em_code, &mut snap).await?;
+        self.fill_cashflow(&code, &em_code, &mut snap).await?;
 
         Ok(snap)
     }
@@ -131,12 +142,12 @@ impl EastmoneyFinancialsProvider {
     async fn fill_main_targets(
         &self,
         code: &str,
+        em_code: &str,
         snap: &mut FundamentalsSnapshot,
     ) -> Result<(), TradingError> {
         let url = format!("{F10_MAIN_URL}?companyType=4&reportDateType=0&code={code}");
         debug!(url = %url, "fetching financials main targets");
-        let client = self.client.clone();
-        let resp = send_with_retry(|| client.get(&url)).await?;
+        let resp = send_with_retry(|| self.f10_request(&url, em_code)).await?;
         if !resp.status().is_success() {
             return Ok(());
         }
@@ -220,12 +231,12 @@ impl EastmoneyFinancialsProvider {
     async fn fill_debt(
         &self,
         code: &str,
+        em_code: &str,
         snap: &mut FundamentalsSnapshot,
     ) -> Result<(), TradingError> {
         let url = format!("{F10_DEBT_URL}?companyType=4&reportDateType=0&code={code}");
         debug!(url = %url, "fetching balance sheet");
-        let client = self.client.clone();
-        let resp = send_with_retry(|| client.get(&url)).await?;
+        let resp = send_with_retry(|| self.f10_request(&url, em_code)).await?;
         if !resp.status().is_success() {
             return Ok(());
         }
@@ -264,12 +275,12 @@ impl EastmoneyFinancialsProvider {
     async fn fill_cashflow(
         &self,
         code: &str,
+        em_code: &str,
         snap: &mut FundamentalsSnapshot,
     ) -> Result<(), TradingError> {
         let url = format!("{F10_CASHFLOW_URL}?companyType=4&reportDateType=0&code={code}");
         debug!(url = %url, "fetching cash flow");
-        let client = self.client.clone();
-        let resp = send_with_retry(|| client.get(&url)).await?;
+        let resp = send_with_retry(|| self.f10_request(&url, em_code)).await?;
         if !resp.status().is_success() {
             return Ok(());
         }

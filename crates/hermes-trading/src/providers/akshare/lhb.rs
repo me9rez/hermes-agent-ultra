@@ -9,7 +9,7 @@ use crate::providers::eastmoney_lhb::fetch_lhb_dim;
 use crate::settlement::is_a_share;
 use crate::symbol::normalize_symbol;
 
-use super::{client, code6, map_err, try_or_fallback};
+use super::{client, code6, map_err};
 
 pub async fn fetch_lhb_dim_akshare(symbol: &str) -> Result<(Value, &'static str), TradingError> {
     let canonical = normalize_symbol(symbol);
@@ -18,12 +18,25 @@ pub async fn fetch_lhb_dim_akshare(symbol: &str) -> Result<(Value, &'static str)
             "LHB A-share only: {symbol}"
         )));
     }
-    try_or_fallback(fetch_akshare_lhb(&canonical), async {
-        let http = default_client();
-        let data = fetch_lhb_dim(&http, &canonical).await?;
-        Ok((data, "eastmoney_lhb"))
-    })
-    .await
+    match fetch_akshare_lhb(&canonical).await {
+        Ok(v) => Ok(v),
+        Err(primary_err) => {
+            tracing::warn!(error = %primary_err, "akshare lhb failed, using fallback");
+            let http = default_client();
+            match fetch_lhb_dim(&http, &canonical).await {
+                Ok(data) => Ok((data, "eastmoney_lhb")),
+                Err(fallback_err) => Ok((
+                    json!({
+                        "lhb_count_30d": 0,
+                        "matched_youzi": [],
+                        "lhb_records": 0,
+                        "lhb_error": format!("{primary_err}; fallback: {fallback_err}"),
+                    }),
+                    "akshare",
+                )),
+            }
+        }
+    }
 }
 
 async fn fetch_akshare_lhb(symbol: &str) -> Result<(Value, &'static str), TradingError> {
@@ -50,4 +63,33 @@ async fn fetch_akshare_lhb(symbol: &str) -> Result<(Value, &'static str), Tradin
         }),
         "akshare",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lhb_payload_shape_has_count_and_youzi() {
+        let data = json!({
+            "lhb_count_30d": 3,
+            "matched_youzi": ["日涨幅偏离值达7%"],
+            "lhb_records": 3
+        });
+        assert_eq!(data["lhb_count_30d"], 3);
+        assert!(data["matched_youzi"].is_array());
+    }
+
+    #[test]
+    fn lhb_error_keeps_zero_count_schema() {
+        let data = json!({
+            "lhb_count_30d": 0,
+            "matched_youzi": [],
+            "lhb_records": 0,
+            "lhb_error": "timeout"
+        });
+        assert!(data.get("lhb_error").is_some());
+        assert_eq!(data["lhb_count_30d"], 0);
+        assert!(data["matched_youzi"].as_array().unwrap().is_empty());
+    }
 }

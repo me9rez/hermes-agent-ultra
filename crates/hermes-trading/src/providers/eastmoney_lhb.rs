@@ -92,7 +92,11 @@ pub async fn fetch_lhb_dim(
     debug!(url = %url, "fetching lhb");
     let resp = send_with_retry(|| client.get(&url)).await?;
     if !resp.status().is_success() {
-        return Ok(serde_json::json!({ "lhb_count_30d": 0 }));
+        return Ok(serde_json::json!({
+            "lhb_count_30d": 0,
+            "matched_youzi": [],
+            "lhb_records": 0,
+        }));
     }
     let parsed: LhbResponse = resp.json().await?;
     let rows = parsed.result.map(|r| r.data).unwrap_or_default();

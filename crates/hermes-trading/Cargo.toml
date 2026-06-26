@@ -12,6 +12,7 @@ test-mock = ["dep:wiremock"]
 
 [dependencies]
 tokio = { workspace = true }
+futures = { workspace = true }
 reqwest = { workspace = true, features = ["json", "cookies", "gzip"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -21,7 +22,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 hermes-config = { workspace = true }
 wiremock = { version = "0.6", optional = true }
-akshare = "0.1.7"
+akshare = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt"] }

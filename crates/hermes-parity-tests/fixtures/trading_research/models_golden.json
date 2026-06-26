@@ -146,7 +146,52 @@
           "10_valuation": { "data": { "pe_percentile": 35 } }
         }
       },
-      "expected": { "panel_consensus": 3.1 }
+      "expected": { "panel_consensus": 78.6 }
+    },
+    {
+      "id": "panel_buffett_low_confidence",
+      "op": "persona_panel",
+      "input": {
+        "symbol": "600519.SH",
+        "price": 1680,
+        "pe": 28.5,
+        "roe_latest": 32,
+        "net_margin": 52,
+        "debt_ratio": 18
+      },
+      "expected": {
+        "buffett_signal": "bearish",
+        "buffett_score_lte": 40
+      }
+    },
+    {
+      "id": "panel_fisher_growth_smoke",
+      "op": "persona_panel",
+      "input": {
+        "symbol": "300750.SZ",
+        "price": 180,
+        "pe": 35,
+        "revenue_growth_latest": 22,
+        "roe_latest": 24,
+        "net_margin": 18
+      },
+      "expected": {
+        "investor_signal_eq": { "id": "fisher", "signal": "bullish" }
+      }
+    },
+    {
+      "id": "panel_soros_cycle_smoke",
+      "op": "persona_panel",
+      "input": {
+        "symbol": "600157.SH",
+        "price": 1.2,
+        "pe": -5,
+        "stage": "Stage 4 下跌",
+        "change_pct": -3.5
+      },
+      "expected": {
+        "investor_signal_eq": { "id": "soros", "signal": "bearish" }
+      }
     }
   ]
 }

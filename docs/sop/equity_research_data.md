@@ -66,10 +66,32 @@
 
 ```bash
 cargo build -p hermes-trading
-cargo test -p hermes-trading
+cargo test -p hermes-trading --lib research::fetchers
+cargo test -p hermes-parity-tests equity_research
 cargo clippy -p hermes-trading -- -D warnings
 cargo fmt -p hermes-trading
 ```
+
+CI 在 `.github/workflows/ci.yml` 的 **Equity research gate** step 跑上述命令子集（PR 必过）。
+
+## akshare-rs 版本 pin 与升级策略
+
+| 项 | 说明 |
+|----|------|
+| **Pin 位置** | 根 [`Cargo.toml`](../../Cargo.toml) `[workspace.dependencies] akshare = "0.1.7"`；`hermes-trading` 用 `{ workspace = true }` |
+| **升级流程** | 1) bump workspace 版本 → 2) `cargo build -p hermes-trading` → 3) `cargo test -p hermes-parity-tests equity_research` → 4) 本地 `--ignored live_` 冒烟 |
+| **阻断规则** | golden / parity 任一失败 **禁止合并**；不得 silent 改 `expected` 骗过测试 |
+| **Eastmoney fallback** | akshare 升级失败时仍依赖 `eastmoney_http`；主路 API 变更优先修 provider，再考虑 bump |
+
+## collect 并行 benchmark
+
+`CollectOptions.parallel`（默认 `true`）在同一 dependency layer 内用 `join_all` 并发拉维；`parallel: false` 为层内串行（benchmark 对照）。
+
+```bash
+cargo test -p hermes-trading benchmark_collect_parallel_vs_serial_600519_medium -- --ignored --nocapture
+```
+
+结果记录见 [`docs/insights/COLLECT_BENCHMARK_2026-06-25.md`](../insights/COLLECT_BENCHMARK_2026-06-25.md)。
 
 ## P2 未实现（刻意跳过）
 

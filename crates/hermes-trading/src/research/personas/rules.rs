@@ -50,13 +50,16 @@ fn debt_ratio_50(f: &FeatureVector) -> bool {
     d > 0.0 && d < 50.0
 }
 fn fcf_positive(f: &FeatureVector) -> bool {
-    f.fcf_positive.unwrap_or(false)
+    if let Some(b) = f.fcf_positive {
+        return b;
+    }
+    f.fcf_latest_yi.is_some_and(|v| v > 0.0)
 }
 fn moat_clear(f: &FeatureVector) -> bool {
     f.moat_total.unwrap_or(0.0) >= 24.0
 }
 fn pe_quantile_low(f: &FeatureVector) -> bool {
-    f.pe_quantile_5y.unwrap_or(100.0) < 50.0
+    f.pe_quantile_5y.is_some_and(|q| q < 50.0)
 }
 fn pe_under_15(f: &FeatureVector) -> bool {
     let pe = f.pe.unwrap_or(100.0);

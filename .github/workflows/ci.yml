@@ -39,6 +39,19 @@ jobs:
         run: cargo test --workspace
       - name: Parity fixture tests
         run: cargo test -p hermes-parity-tests
+      - name: Equity research gate
+        run: |
+          cargo build -p hermes-trading
+          cargo test -p hermes-trading --lib research::fetchers
+          cargo test -p hermes-trading research::gate
+          cargo test -p hermes-trading synthesis
+          cargo test -p hermes-trading institutional
+          cargo test -p hermes-trading report::disk
+          cargo test -p hermes-parity-tests equity_research
+          cargo test -p hermes-tools --lib skill_commands
+          cargo test -p hermes-tools --lib trading_analyze_stock
+          cargo test -p hermes-agent --lib equity_research_gate
+          cargo clippy -p hermes-trading -- -D warnings
       - name: CLI command/action parity contract
         run: cargo test -p hermes-parity-tests --test cli_command_contract
       - name: Upstream slash-command parity gate

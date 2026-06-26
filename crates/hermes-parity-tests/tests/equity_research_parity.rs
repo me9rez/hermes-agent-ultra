@@ -9,6 +9,7 @@ use hermes_trading::research::models::{
     CompsPeer, CompsTarget, ThreeStmtResult, build_comps_table, compute_dcf, compute_wacc,
     project_three_stmt, quick_lbo,
 };
+use hermes_trading::research::profile::AnalysisProfile;
 use hermes_trading::research::scoring::{generate_panel, score_dimensions};
 use hermes_trading::research::types::FeatureVector;
 
@@ -41,15 +42,18 @@ fn load_fixtures() -> FixtureFile {
 }
 
 fn features_from(v: &Value) -> FeatureVector {
-    let mut f: FeatureVector =
-        serde_json::from_value(v.clone()).unwrap_or_else(|_| FeatureVector {
-            symbol: v
-                .get("symbol")
-                .and_then(|s| s.as_str())
-                .unwrap_or("TEST")
-                .to_string(),
-            ..Default::default()
-        });
+    let mut core = v.clone();
+    if let Some(obj) = core.as_object_mut() {
+        obj.remove("raw_dims");
+    }
+    let mut f: FeatureVector = serde_json::from_value(core).unwrap_or_else(|_| FeatureVector {
+        symbol: v
+            .get("symbol")
+            .and_then(|s| s.as_str())
+            .unwrap_or("TEST")
+            .to_string(),
+        ..Default::default()
+    });
     if f.symbol.is_empty() {
         f.symbol = "TEST".into();
     }
@@ -80,6 +84,24 @@ fn features_from(v: &Value) -> FeatureVector {
     }
     if let Some(n) = v.get("pe_quantile_5y").and_then(|x| x.as_f64()) {
         f.pe_quantile_5y = Some(n);
+    }
+    if let Some(n) = v.get("roe_latest").and_then(|x| x.as_f64()) {
+        f.roe_latest = Some(n);
+    }
+    if let Some(n) = v.get("revenue_growth_latest").and_then(|x| x.as_f64()) {
+        f.revenue_growth_latest = Some(n);
+    }
+    if let Some(s) = v.get("stage").and_then(|x| x.as_str()) {
+        f.stage = Some(s.to_string());
+    }
+    if let Some(s) = v.get("ma_align").and_then(|x| x.as_str()) {
+        f.ma_align = Some(s.to_string());
+    }
+    if let Some(n) = v.get("change_pct").and_then(|x| x.as_f64()) {
+        f.change_pct = Some(n);
+    }
+    if let Some(n) = v.get("pe").and_then(|x| x.as_f64()) {
+        f.pe = Some(n);
     }
     f
 }
@@ -170,9 +192,10 @@ fn run_case(case: &FixtureCase) {
                 .get("raw_dims")
                 .cloned()
                 .unwrap_or(serde_json::json!({}));
-            let scored = score_dimensions(f.symbol.as_str(), &raw, &f);
-            let p1 = generate_panel(&scored, &f);
-            let p2 = generate_panel(&scored, &f);
+            let profile = AnalysisProfile::medium();
+            let scored = score_dimensions(f.symbol.as_str(), &raw, &f, &profile);
+            let p1 = generate_panel(&scored, &f, &profile);
+            let p2 = generate_panel(&scored, &f, &profile);
             assert_eq!(
                 p1.panel_consensus, p2.panel_consensus,
                 "{} panel not deterministic",
@@ -189,6 +212,61 @@ fn run_case(case: &FixtureCase) {
                     case.id,
                     p1.panel_consensus,
                     exp
+                );
+            }
+            if let Some(max) = case
+                .expected
+                .get("panel_consensus_lte")
+                .and_then(|v| v.as_f64())
+            {
+                assert!(
+                    p1.panel_consensus <= max,
+                    "{} panel {} > {max}",
+                    case.id,
+                    p1.panel_consensus
+                );
+            }
+            if let Some(signal) = case.expected.get("buffett_signal").and_then(|v| v.as_str()) {
+                let buffett = p1
+                    .investors
+                    .iter()
+                    .find(|v| v.id == "buffett")
+                    .expect("buffett vote");
+                assert_eq!(
+                    buffett.signal, signal,
+                    "{} buffett signal {} != {signal}",
+                    case.id, buffett.signal
+                );
+            }
+            if let Some(max) = case
+                .expected
+                .get("buffett_score_lte")
+                .and_then(|v| v.as_f64())
+            {
+                let buffett = p1
+                    .investors
+                    .iter()
+                    .find(|v| v.id == "buffett")
+                    .expect("buffett vote");
+                assert!(
+                    buffett.score <= max,
+                    "{} buffett score {} > {max}",
+                    case.id,
+                    buffett.score
+                );
+            }
+            if let Some(spec) = case.expected.get("investor_signal_eq") {
+                let id = spec["id"].as_str().expect("investor id");
+                let signal = spec["signal"].as_str().expect("signal");
+                let vote = p1
+                    .investors
+                    .iter()
+                    .find(|v| v.id == id)
+                    .unwrap_or_else(|| panic!("{} missing investor {id}", case.id));
+                assert_eq!(
+                    vote.signal, signal,
+                    "{} {id} signal {} != {signal}",
+                    case.id, vote.signal
                 );
             }
         }

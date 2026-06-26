@@ -4,4 +4,4 @@ pub mod evaluator;
 pub mod investors;
 pub mod rules;
 
-pub use evaluator::{PersonaVote, evaluate, evaluate_all};
+pub use evaluator::{PersonaVote, evaluate, evaluate_all, evaluate_filtered};

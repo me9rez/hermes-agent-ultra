@@ -6,7 +6,7 @@ use crate::research::types::DataConfidence;
 
 use super::labels::{DIM_ORDER, dimension_display_name};
 
-fn score_badge(score: u8) -> &'static str {
+pub(crate) fn score_badge(score: u8) -> &'static str {
     if score >= 7 {
         " 🟢"
     } else if score <= 4 {
@@ -100,6 +100,7 @@ pub fn render_summary_markdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::research::profile::AnalysisProfile;
     use crate::research::scoring::{generate_panel, score_dimensions};
     use crate::research::types::{DataConfidence, FundamentalsSnapshot};
     use serde_json::json;
@@ -118,9 +119,10 @@ mod tests {
             ..Default::default()
         };
         let features = snap.clone();
-        let scored = score_dimensions("300750.SZ", &raw, &features);
+        let profile = AnalysisProfile::medium();
+        let scored = score_dimensions("300750.SZ", &raw, &features, &profile);
         assert_eq!(scored.dimensions.len(), 19);
-        let panel = generate_panel(&scored, &features);
+        let panel = generate_panel(&scored, &features, &profile);
         assert_eq!(panel.investors.len(), 66);
         let md = render_summary_markdown(
             "300750.SZ",

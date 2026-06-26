@@ -72,6 +72,10 @@ pub fn evaluate(investor_id: &str, features: &FeatureVector) -> PersonaVote {
 
     for rule in rules {
         weight_total += u32::from(rule.weight);
+        if !rule_prerequisites_met(rule.rule_id, features) {
+            fail_list.push(missing_data_hit(rule));
+            continue;
+        }
         if safe_check(rule, features) {
             weight_pass += u32::from(rule.weight);
             pass_list.push(hit(rule, rule.pass_msg, features));
@@ -94,7 +98,7 @@ pub fn evaluate(investor_id: &str, features: &FeatureVector) -> PersonaVote {
         "neutral"
     };
 
-    let confidence = (50.0 + rules.len() as f64 * 8.0).min(100.0);
+    let confidence = vote_confidence(features, rules.len(), &pass_list, &fail_list);
     let cited = pass_list
         .first()
         .or(fail_list.first())
@@ -114,15 +118,63 @@ pub fn evaluate(investor_id: &str, features: &FeatureVector) -> PersonaVote {
     }
 }
 
-/// Evaluate all registered investors.
+/// Evaluate all registered investors, optionally filtered to a subset (lite quick-scan).
 #[must_use]
 pub fn evaluate_all(features: &FeatureVector) -> Vec<PersonaVote> {
-    INVESTORS.iter().map(|m| evaluate(m.id, features)).collect()
+    evaluate_filtered(features, None)
+}
+
+/// Evaluate investors matching `ids` when provided.
+#[must_use]
+pub fn evaluate_filtered(features: &FeatureVector, ids: Option<&[&str]>) -> Vec<PersonaVote> {
+    match ids {
+        Some(list) => list.iter().map(|id| evaluate(id, features)).collect(),
+        None => INVESTORS.iter().map(|m| evaluate(m.id, features)).collect(),
+    }
 }
 
 fn safe_check(rule: &Rule, features: &FeatureVector) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (rule.check)(features)))
         .unwrap_or(false)
+}
+
+/// Rules that need explicit fields must fail (not pass) when data is absent.
+fn rule_prerequisites_met(rule_id: &str, features: &FeatureVector) -> bool {
+    match rule_id {
+        "fcf_positive" | "fcf" => {
+            features.fcf_positive.is_some() || features.fcf_latest_yi.is_some()
+        }
+        "safety_margin_pe" | "margin_safety" => features.pe_quantile_5y.is_some(),
+        _ => true,
+    }
+}
+
+fn missing_data_hit(rule: &Rule) -> RuleHit {
+    RuleHit {
+        rule_id: rule.rule_id.to_string(),
+        name: rule.name.to_string(),
+        weight: rule.weight,
+        msg: "数据缺失，规则不通过".into(),
+    }
+}
+
+fn vote_confidence(
+    features: &FeatureVector,
+    rule_count: usize,
+    pass_list: &[RuleHit],
+    fail_list: &[RuleHit],
+) -> f64 {
+    let mut confidence = (50.0 + rule_count as f64 * 8.0).min(100.0);
+    if features.pe_quantile_5y.is_none() {
+        confidence = (confidence - 15.0).max(0.0);
+    }
+    if features.fcf_positive.is_none() && features.fcf_latest_yi.is_none() {
+        confidence = (confidence - 15.0).max(0.0);
+    }
+    if pass_list.is_empty() && fail_list.iter().any(|r| r.msg.contains("数据缺失")) {
+        confidence = (confidence - 10.0).max(0.0);
+    }
+    confidence
 }
 
 fn hit(rule: &Rule, template: &str, features: &FeatureVector) -> RuleHit {
@@ -210,5 +262,75 @@ mod tests {
         let v = evaluate("buffett", &f);
         assert_eq!(v.signal, "bullish");
         assert!(v.score >= 65.0);
+    }
+
+    #[test]
+    fn buffett_not_bullish_when_fcf_and_pe_quantile_missing() {
+        let f = FeatureVector {
+            market: Some("A".into()),
+            symbol: "600519.SH".into(),
+            price: Some(1680.0),
+            pe: Some(28.5),
+            roe_latest: Some(32.0),
+            net_margin: Some(52.0),
+            debt_ratio: Some(18.0),
+            ..Default::default()
+        };
+        let v = evaluate("buffett", &f);
+        assert_ne!(v.signal, "bullish");
+        assert!(v.score < 65.0);
+        assert!(
+            v.fail_rules
+                .iter()
+                .any(|r| r.msg.contains("数据缺失") || r.rule_id == "fcf_positive"),
+            "expected FCF rule failure, got {:?}",
+            v.fail_rules
+        );
+        assert!(
+            v.fail_rules.iter().any(|r| r.rule_id == "safety_margin_pe"),
+            "expected PE quantile rule failure"
+        );
+        assert!(v.confidence < 80.0);
+    }
+
+    #[test]
+    fn klarman_fails_margin_safety_without_pe_quantile() {
+        let f = FeatureVector {
+            market: Some("A".into()),
+            fcf_positive: Some(true),
+            debt_ratio: Some(30.0),
+            ..Default::default()
+        };
+        let v = evaluate("klarman", &f);
+        assert!(
+            v.fail_rules
+                .iter()
+                .any(|r| r.rule_id == "margin_safety" && r.msg.contains("数据缺失")),
+            "klarman margin_safety should fail closed on missing pe_quantile"
+        );
+    }
+
+    #[test]
+    fn fisher_growth_passes_with_revenue_growth() {
+        let f = FeatureVector {
+            market: Some("A".into()),
+            revenue_growth_latest: Some(20.0),
+            roe_latest: Some(22.0),
+            net_margin: Some(18.0),
+            ..Default::default()
+        };
+        let v = evaluate("fisher", &f);
+        assert!(v.score >= 65.0, "fisher score {}", v.score);
+    }
+
+    #[test]
+    fn soros_bearish_without_trend_data() {
+        let f = FeatureVector {
+            market: Some("A".into()),
+            price: Some(10.0),
+            ..Default::default()
+        };
+        let v = evaluate("soros", &f);
+        assert_ne!(v.signal, "bullish");
     }
 }

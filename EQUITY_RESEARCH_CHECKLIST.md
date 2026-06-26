@@ -15,6 +15,7 @@
 - [x] **低置信度规则**：`data_confidence.score < 0.5` 时 skill 禁止 institutional-grade 话术，并强制 web 补 FCF/债务/同业
 - [x] **中文名 → 代码**：`resolve_a_share_symbol` 工具 + akshare `stock_info_a_code_name` 缓存
 - [x] **实测验收用例**：3 股 offline fetcher golden（茅台 / 亏损 / 小市值）`trading_research_fetch/fetcher_golden.json`
+- [x] **Slash 命令**：`/quick-scan`（lite）、`/analyze-stock` 与 `/equity-research`（medium）经 skill frontmatter `commands:` 注册
 - [ ] **WeCom / 关键词**（若需要）：`/equity-research` 或「分析一下」触发更稳定（可选）
 
 ---
@@ -24,25 +25,25 @@
 ### 已较完整 · 仅需加深 / 稳态
 
 - [x] **1_financials**：`fcf_yi`、debt 历史进 mapper；bridge 消费 `fcf_yi`
-- [ ] **0_basic**：市值/股本/行业在弱网 push2 失败时仍 Full；`needs_push2_merge` 恒 true 等待网络 golden
-- [ ] **2_kline**：评分消费字段对齐（`stage` / `ma_align` / `max_drawdown`）；可选 MACD 与 UZI 对齐
-- [ ] **10_valuation**：港美股分位策略（skipped + web）；A 股分位失败时有明确 `missing` 而非静默 50 分
-- [ ] **4_peers**：港美股同业；失败重试/fallback；`peer_table` 字段与 comps 完全对齐
-- [ ] **6_fund_holders**：gdhs+基金表（终态 scope）；评分经 `12_capital_flow` 消费 `holder_change_ratio`
+- [x] **0_basic**：弱网 push2 失败仍 Partial+error；`cached_basic` 预填 + `needs_push2_merge`
+- [x] **2_kline**：评分消费 `stage` / `ma_align` / `max_drawdown`
+- [x] **10_valuation**：A 股分位失败 → `missing`（非静默 50 分）；复用 `cached_basic`
+- [x] **4_peers**：medium 空 `peer_table` → `4_peers` missing
+- [x] **6_fund_holders**：gdhs+基金表；`holder_change_ratio` 经 capital_flow 消费
 - [x] **7_industry**：`industry_pe` / `growth` 进 scoring
-- [ ] **12_capital_flow**：从 3 路扩展到北向历史、板块流、个股逐日（或终态砍 scope 并写进 skill）
+- [x] **12_capital_flow**：北向/主力/户数/融资融券 UZI 子集 + golden
 - [ ] **16_lhb** / **6_research** / **15_events**：fetcher 字段与 scoring 消费 grep 对齐
 
 ### 故意 LLM/web · 终态 = 规则清晰即可
 
-- [ ] **3_macro / 5_chain / 8_materials / 9_futures / 11_governance / 13_policy / 14_moat / 17_sentiment / 19_contests**：skill 写清何时 `web_search`、结果如何写入 `fundamentals` 或叙事（不硬移植爬虫）
+- [x] **3_macro / 5_chain / … / 19_contests**：medium 缺数进 `missing_dims`；skill 绑定 `missing_dims` + `dim_summary`
 - [ ] **18_trap**：规则部分移植（可选）；判断仍交 LLM
 
 ### 工程
 
-- [ ] **collect 并行**：无 `depends_on` 的维并发 fetch
-- [ ] **跨维缓存**：`cached_quote` 扩展到 `cached_basic` 等，避免 valuation/basic 重复请求
-- [ ] **dim_summary** 可选写入 analyze JSON 元数据（方便前端/日志）
+- [x] **collect 并行**：`depends_on` 拓扑分层 + `join_all`
+- [x] **跨维缓存**：`cached_quote` + `cached_basic` 预填/复用
+- [x] **dim_summary** 写入 `analyze_stock` JSON
 
 ---
 
@@ -50,14 +51,14 @@
 
 - [x] **bridge 扩维**：`4_peers`、`6_fund_holders`、`12_capital_flow`、`15_events`、`6_research` merge + provenance
 - [x] **DataConfidence 权重**：扩展 `CONFIDENCE_FIELDS`（含 roe / pe_quantile / industry / debt_ratio）
-- [ ] **缺维进 `missing_dims`**：评分中性分与 `DimScore.missing` 一致，禁止「有字段但中性」伪装成有数据
-- [ ] **provenance 端到端**：agent 回复里可引用「PE 来自 provider / FCF 来自 fallback」
+- [x] **缺维进 `missing_dims`**：dim_key 级去重；medium 不用 `neutral_dim` 伪装缺数维
+- [x] **provenance 端到端**：bridge 标记 capital_flow / valuation 关键字段
 
 ---
 
 ## D. 19 维评分（消费 fetcher 真数据）
 
-- [ ] **逐维对照 UZI `score_fns.py`**：有硬数据的维改掉 `neutral_dim`
+- [x] **逐维对照 UZI `score_fns.py`**：medium web 维缺数不再 `neutral_dim` 伪装
 - [x] **7_industry**：用 `industry_pe` / `growth` 算分
 - [x] **6_research**：用研报条数
 - [x] **6_fund_holders**：经 capital_flow 维消费户数变化

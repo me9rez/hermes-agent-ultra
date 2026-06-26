@@ -31,6 +31,7 @@ pub fn render_chat_brief_markdown(result: &AnalyzeStockResult) -> String {
         &ReportIdentity::from_analyze_result(&result),
         &result.synthesis.headline,
         &result.synthesis.dcf_one_liner,
+        &result.content,
         &scored,
         &panel,
         result.synthesis.panel_summary.investor_count,
@@ -45,6 +46,7 @@ fn render_chat_brief_parts(
     identity: &ReportIdentity,
     headline: &str,
     dcf_one_liner: &str,
+    content: &crate::research::report::ReportContent,
     scored: &ScoreDimensionsResult,
     panel: &PanelResult,
     investor_count: u32,
@@ -74,6 +76,43 @@ fn render_chat_brief_parts(
         confidence.score * 100.0
     ));
     out.push_str(&format!("| DCF | {dcf_one_liner} |\n\n"));
+
+    out.push_str("### 公司基本面\n\n");
+    for b in &content.fundamentals.bullets {
+        out.push_str(&format!("- {b}\n"));
+    }
+    out.push('\n');
+
+    out.push_str("### 板块与同业\n\n");
+    if let Some(ind) = &content.sector.industry_name {
+        out.push_str(&format!("- 行业：{ind}\n"));
+    }
+    if let Some(note) = &content.sector.relative_note {
+        out.push_str(&format!("- {note}\n"));
+    }
+    if content.sector.peer_rows.is_empty() && content.sector.industry_name.is_none() {
+        out.push_str("- （同业数据待补充）\n");
+    }
+    out.push('\n');
+
+    out.push_str("### 政策 / 宏观 / 舆情\n\n");
+    match content.external.coverage {
+        crate::research::report::content::ExternalCoverage::WebFilled => {
+            for b in content
+                .external
+                .policy_bullets
+                .iter()
+                .chain(content.external.macro_bullets.iter())
+                .chain(content.external.sentiment_bullets.iter())
+            {
+                out.push_str(&format!("- {b}\n"));
+            }
+        }
+        _ => {
+            out.push_str("- 本次未检索；详见 HTML 附件「政策 / 宏观 / 舆情」章节。\n");
+        }
+    }
+    out.push('\n');
 
     out.push_str("### 19 维评分概览\n\n");
     out.push_str("| 维度 | 评分 | 说明 |\n| --- | --- | --- |\n");
@@ -170,6 +209,7 @@ mod tests {
                 },
                 dcf_one_liner: "🔴 明显高估 · 安全边际 -46.1%".into(),
             },
+            content: crate::research::report::ReportContent::default(),
         }
     }
 

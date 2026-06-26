@@ -103,6 +103,8 @@ mod tests {
         let html = render_institutional_html(&result, Some("E2E live HTML smoke"));
         assert!(html.starts_with("<!DOCTYPE html>"));
         assert!(html.contains("600519.SH"));
+        assert!(html.contains("公司基本面"));
+        assert!(html.contains("板块与同业"));
         assert!(html.contains("19 维评分"));
         assert!(html.contains(&result.synthesis.headline));
         assert!(html.len() > 200);

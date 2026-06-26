@@ -406,7 +406,8 @@ pub async fn fetch_tencent_qt(client: &Client, symbol: &str) -> Result<TencentQt
             "Tencent quote HTTP {status}: {body}"
         )));
     }
-    let body = resp.text().await?;
+    let bytes = resp.bytes().await?;
+    let body = crate::text_encoding::decode_tencent_qt_body(&bytes);
     parse_tencent_body(&body)
 }
 
@@ -554,6 +555,18 @@ mod tests {
     fn tencent_code_mapping() {
         assert_eq!(to_tencent_code("600519.SH").unwrap(), "sh600519");
         assert_eq!(to_tencent_code("000001.SZ").unwrap(), "sz000001");
+    }
+
+    #[test]
+    fn parse_tencent_gbk_body() {
+        let inner = b"1~ST\xB3\xA4\xD4\xB0~600525~4.95~4.90~";
+        let mut body = Vec::from(b"v_sh600525=\"" as &[u8]);
+        body.extend_from_slice(inner);
+        body.extend_from_slice(b"\"");
+        let decoded = crate::text_encoding::decode_tencent_qt_body(&body);
+        let qt = parse_tencent_body(&decoded).unwrap();
+        assert_eq!(qt.name.as_deref(), Some("ST长园"));
+        assert_eq!(qt.price, Some(4.95));
     }
 
     #[test]

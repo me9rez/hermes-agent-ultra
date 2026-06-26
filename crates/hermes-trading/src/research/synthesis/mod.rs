@@ -252,6 +252,30 @@ fn build_key_metrics(
             value: format!("¥{price:.2}"),
         });
     }
+    if let Some(ind) = &identity.industry {
+        out.push(KeyMetric {
+            label: "行业".into(),
+            value: ind.clone(),
+        });
+    }
+    if let Some(cap) = identity.market_cap_yi {
+        out.push(KeyMetric {
+            label: "市值".into(),
+            value: format!("{cap:.0} 亿"),
+        });
+    }
+    if let Some(pe) = identity.pe {
+        out.push(KeyMetric {
+            label: "PE".into(),
+            value: format!("{pe:.1}"),
+        });
+    }
+    if let Some(pb) = identity.pb {
+        out.push(KeyMetric {
+            label: "PB".into(),
+            value: format!("{pb:.2}"),
+        });
+    }
     out.extend([
         KeyMetric {
             label: "基本面综合".into(),
@@ -422,13 +446,7 @@ mod tests {
         };
         let dcf = compute_dcf(&snap, None);
         let syn = build_synthesis_parts(
-            &ReportIdentity {
-                company_name: None,
-                symbol: "600157.SH".into(),
-                price: Some(1.2),
-                change_pct: None,
-                industry: None,
-            },
+            &ReportIdentity::from_snapshot(&snap),
             "medium",
             &ScoreDimensionsResult {
                 ticker: "600157.SH".into(),

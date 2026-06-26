@@ -87,6 +87,7 @@ mod tests {
                 },
                 dcf_one_liner: "dcf".into(),
             },
+            content: hermes_trading::research::report::ReportContent::default(),
         }
     }
 

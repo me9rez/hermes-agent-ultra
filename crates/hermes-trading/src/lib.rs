@@ -20,6 +20,7 @@ pub mod quote_provider;
 pub mod research;
 pub mod settlement;
 pub mod symbol;
+pub mod text_encoding;
 pub mod types;
 
 pub use backtest::{BacktestEngine, Period, RunCard, SignalKind, StrategyInfo, StrategyRegistry};

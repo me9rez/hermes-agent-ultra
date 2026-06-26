@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use crate::research::analyze::AnalyzeStockResult;
 use crate::research::types::FundamentalsSnapshot;
+use crate::text_encoding::is_usable_company_name;
 
 /// Display identity for brief / HTML hero (name, symbol, price).
 #[derive(Debug, Clone, PartialEq)]
@@ -13,6 +14,10 @@ pub struct ReportIdentity {
     pub price: Option<f64>,
     pub change_pct: Option<f64>,
     pub industry: Option<String>,
+    pub market_cap_yi: Option<f64>,
+    pub pe: Option<f64>,
+    pub pb: Option<f64>,
+    pub fundamental_score: Option<f64>,
 }
 
 impl ReportIdentity {
@@ -24,6 +29,10 @@ impl ReportIdentity {
             price: snap.price,
             change_pct: snap.change_pct,
             industry: snap.industry.clone(),
+            market_cap_yi: snap.market_cap_yi,
+            pe: snap.pe,
+            pb: snap.pb,
+            fundamental_score: None,
         }
     }
 
@@ -34,10 +43,36 @@ impl ReportIdentity {
             symbol: result.symbol.clone(),
             price: None,
             change_pct: None,
-            industry: None,
+            industry: result.content.sector.industry_name.clone(),
+            market_cap_yi: None,
+            pe: result.content.sector.company_pe,
+            pb: None,
+            fundamental_score: None,
         };
         id.enrich_from_dcf(&result.dcf);
         id.enrich_from_comps(&result.comps);
+        if id.industry.is_none() {
+            id.industry = result.content.sector.industry_name.clone();
+        }
+        if let Ok(scored) = serde_json::from_value::<crate::research::scoring::ScoreDimensionsResult>(
+            result.scores.clone(),
+        ) {
+            id.fundamental_score = Some(scored.fundamental_score);
+        }
+        for m in &result.content.fundamentals.metrics {
+            match m.label.as_str() {
+                "PB" if id.pb.is_none() => {
+                    id.pb = m.value.parse().ok();
+                }
+                "PE(TTM)" if id.pe.is_none() => {
+                    id.pe = m.value.parse().ok();
+                }
+                "总市值" if id.market_cap_yi.is_none() => {
+                    id.market_cap_yi = m.value.trim_end_matches(" 亿").parse().ok();
+                }
+                _ => {}
+            }
+        }
         id
     }
 
@@ -52,18 +87,22 @@ impl ReportIdentity {
             self.price = comps.get("current_price").and_then(|v| v.as_f64());
         }
         if let Some(target) = comps.get("target") {
-            if self.company_name.is_none() {
-                self.company_name = target
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-            }
             if self.price.is_none() {
                 self.price = target.get("price").and_then(|v| v.as_f64());
             }
+            if self.pe.is_none() {
+                self.pe = target.get("pe").and_then(|v| v.as_f64());
+            }
+            if self.pb.is_none() {
+                self.pb = target.get("pb").and_then(|v| v.as_f64());
+            }
         }
-        if self.company_name.is_none() {
-            self.company_name = peer_name_for_symbol(comps, &self.symbol);
+        if self
+            .company_name
+            .as_ref()
+            .is_none_or(|n| !is_usable_company_name(n))
+        {
+            self.company_name = resolve_company_name(comps, &self.symbol);
         }
     }
 
@@ -108,6 +147,19 @@ fn symbol_code6(symbol: &str) -> &str {
     symbol.split('.').next().unwrap_or(symbol)
 }
 
+fn resolve_company_name(comps: &Value, symbol: &str) -> Option<String> {
+    let from_target = comps
+        .get("target")
+        .and_then(|t| t.get("name"))
+        .and_then(|v| v.as_str())
+        .filter(|n| is_usable_company_name(n))
+        .map(str::to_string);
+    if from_target.is_some() {
+        return from_target;
+    }
+    peer_name_for_symbol(comps, symbol).filter(|n| is_usable_company_name(n))
+}
+
 fn peer_name_for_symbol(comps: &Value, symbol: &str) -> Option<String> {
     let code = symbol_code6(symbol);
     let peers = comps.get("peers")?.as_array()?;
@@ -137,6 +189,10 @@ mod tests {
             price: Some(14.01),
             change_pct: None,
             industry: None,
+            market_cap_yi: None,
+            pe: None,
+            pb: None,
+            fundamental_score: None,
         };
         assert!(id.title_prefix().contains("华海药业"));
         assert!(id.title_prefix().contains("14.01"));
@@ -156,6 +212,28 @@ mod tests {
     }
 
     #[test]
+    fn enrich_from_comps_prefers_peer_when_target_name_garbled() {
+        let mut id = ReportIdentity {
+            company_name: Some("ST\u{FFFD}\u{FFFD}\u{04B0}".into()),
+            symbol: "600525.SH".into(),
+            price: Some(4.95),
+            change_pct: None,
+            industry: None,
+            market_cap_yi: None,
+            pe: None,
+            pb: None,
+            fundamental_score: None,
+        };
+        let comps = json!({
+            "current_price": 4.95,
+            "target": { "name": "ST\u{FFFD}\u{FFFD}\u{04B0}", "price": 4.95 },
+            "peers": [{ "name": "ST长园", "ticker": "600525" }]
+        });
+        id.enrich_from_comps(&comps);
+        assert_eq!(id.company_name.as_deref(), Some("ST长园"));
+    }
+
+    #[test]
     fn enrich_from_comps_fills_missing_name() {
         let mut id = ReportIdentity {
             company_name: None,
@@ -163,6 +241,10 @@ mod tests {
             price: Some(14.01),
             change_pct: None,
             industry: None,
+            market_cap_yi: None,
+            pe: None,
+            pb: None,
+            fundamental_score: None,
         };
         let comps = json!({
             "current_price": 14.01,

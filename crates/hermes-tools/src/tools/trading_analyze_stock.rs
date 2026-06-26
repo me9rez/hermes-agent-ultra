@@ -61,6 +61,22 @@ impl ToolHandler for AnalyzeStockHandler {
             ));
         }
         let narrative = params.get("narrative").and_then(|v| v.as_str());
+        let merge_external_only = params
+            .get("merge_external_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if merge_external_only {
+            let overlay = parse_external_context(params.get("external_context"))?;
+            let mut cached = analyze_stock_cache::get(symbol, depth).ok_or_else(|| {
+                ToolError::ExecutionFailed(format!(
+                    "No cached analyze_stock result for {symbol} depth={depth}. Run analyze_stock first."
+                ))
+            })?;
+            hermes_trading::research::analyze::apply_external_context(&mut cached, &overlay);
+            analyze_stock_cache::store(symbol, depth, cached);
+            return Ok(json!({"ok": true, "external_merged": true, "symbol": symbol}).to_string());
+        }
 
         let router = QuoteRouter::new();
         let quote = router
@@ -212,13 +228,34 @@ impl ToolHandler for AnalyzeStockHandler {
                 "description": "When true (medium depth), write full-report-standalone.html + analysis.json under {HERMES_HOME}/reports/{symbol}_{date}/ and include report_paths in the response"
             }),
         );
+        props.insert(
+            "merge_external_only".into(),
+            json!({
+                "type": "boolean",
+                "description": "When true, merge external_context into cached analyze_stock result (after web_search). Does not re-run HTTP fetch."
+            }),
+        );
+        props.insert(
+            "external_context".into(),
+            json!({
+                "type": "object",
+                "description": "Structured policy/macro/sentiment bullets from web_search. Used with merge_external_only=true.",
+                "properties": {
+                    "macro_bullets": { "type": "array", "items": { "type": "string" } },
+                    "policy_bullets": { "type": "array", "items": { "type": "string" } },
+                    "sentiment_bullets": { "type": "array", "items": { "type": "string" } },
+                    "sources": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+        );
 
         tool_schema(
             "analyze_stock",
             "Listed-stock research: DCF, scoring, persona panel. depth=lite for /quick-scan (Top 10 judges, no web); depth=medium for /analyze-stock (66 judges). \
              Call **before** web_search for valuation requests. \
              Medium: paste full summary_markdown (19 dims + 66 judges). Lite: quick-scan markdown only. \
-             Use format=synthesis for structured verdict JSON; format=html + write_report=true to deliver a standalone report file.",
+             Use format=synthesis for structured verdict JSON; format=html + write_report=true to deliver a standalone report file. \
+             After web_search for policy/sentiment: analyze_stock(symbol, depth=medium, merge_external_only=true, external_context={...}).",
             JsonSchema::object(props, vec!["symbol".into()]),
         )
     }
@@ -250,6 +287,18 @@ fn maybe_prefix_report_paths(paths: Option<&ReportPaths>, body: &str) -> String 
         "Report saved:\n- HTML: {}\n- analysis.json: {}\n\n{body}",
         paths.html, paths.analysis_json
     )
+}
+
+fn parse_external_context(
+    value: Option<&Value>,
+) -> Result<hermes_trading::research::report::ExternalContextOverlay, ToolError> {
+    let Some(v) = value else {
+        return Err(ToolError::InvalidParams(
+            "merge_external_only requires external_context object.".into(),
+        ));
+    };
+    serde_json::from_value(v.clone())
+        .map_err(|e| ToolError::InvalidParams(format!("Invalid external_context: {e}")))
 }
 
 fn parse_peers(value: Option<&Value>) -> Option<Vec<CompsPeer>> {

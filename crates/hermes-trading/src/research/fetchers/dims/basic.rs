@@ -18,6 +18,7 @@ use crate::research::fetchers::context::FetchContext;
 use crate::research::fetchers::dim_keys;
 use crate::research::types::FundamentalsSnapshot;
 use crate::settlement::is_a_share;
+use crate::text_encoding::is_usable_company_name;
 
 pub struct BasicFetcher {
     basic: EastmoneyBasicProvider,
@@ -57,7 +58,12 @@ impl BasicFetcher {
         snap: &mut FundamentalsSnapshot,
         source: &mut String,
     ) {
-        if !Self::snap_needs_supplement(snap) && snap.name.is_some() {
+        if !Self::snap_needs_supplement(snap)
+            && snap
+                .name
+                .as_ref()
+                .is_some_and(|n| is_usable_company_name(n))
+        {
             return;
         }
         match fetch_basic_info_supplement(ticker).await {
@@ -85,12 +91,16 @@ impl BasicFetcher {
         snap: &mut FundamentalsSnapshot,
         source: &mut String,
     ) {
-        if snap.name.is_some() {
+        if snap
+            .name
+            .as_ref()
+            .is_some_and(|n| is_usable_company_name(n))
+        {
             return;
         }
         let http = crate::http::default_client();
         match crate::providers::eastmoney_http::fetch_tencent_qt(&http, ticker).await {
-            Ok(qt) if qt.name.is_some() => {
+            Ok(qt) if qt.name.as_ref().is_some_and(|n| is_usable_company_name(n)) => {
                 snap.name.clone_from(&qt.name);
                 if !source.contains("tencent_qt") {
                     *source = format!("{source}+tencent_qt");
@@ -104,7 +114,10 @@ impl BasicFetcher {
     }
 
     fn snap_has_core(snap: &FundamentalsSnapshot) -> bool {
-        snap.name.is_some() && snap.price.is_some()
+        snap.name
+            .as_ref()
+            .is_some_and(|n| is_usable_company_name(n))
+            && snap.price.is_some()
     }
 
     fn dim_from_snap(snap: &FundamentalsSnapshot, source: &str) -> DimResult {
@@ -248,7 +261,14 @@ impl BasicFetcher {
     }
 
     fn merge_snap_fields(snap: &mut FundamentalsSnapshot, q: &QuoteData) {
-        if snap.name.is_none() {
+        if snap
+            .name
+            .as_ref()
+            .is_none_or(|n| !is_usable_company_name(n))
+            && q.short_name
+                .as_ref()
+                .is_some_and(|n| is_usable_company_name(n))
+        {
             snap.name.clone_from(&q.short_name);
         }
         if snap.price.is_none() {

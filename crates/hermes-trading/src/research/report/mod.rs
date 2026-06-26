@@ -1,6 +1,7 @@
 //! Minimal HTML report (P0.5) + SVG stub (P2).
 
 pub mod chat_brief;
+pub mod content;
 pub mod dim_viz;
 pub mod disk;
 pub mod html;
@@ -9,9 +10,15 @@ pub mod institutional;
 pub mod labels;
 pub mod markdown;
 pub mod quick_scan;
+pub mod sections;
+pub mod styles;
 pub mod svg;
 
 pub use chat_brief::render_chat_brief_markdown;
+pub use content::{
+    ExternalContextOverlay, ReportContent, build_report_content, merge_external_overlay,
+    needs_external_web_fill,
+};
 pub use disk::{WrittenReportPaths, write_equity_report};
 pub use html::render_html_report;
 pub use identity::{ReportIdentity, infer_target_name_from_peers};

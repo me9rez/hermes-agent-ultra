@@ -122,10 +122,13 @@ pub fn wants_md_only_attachment(user_message: &str) -> bool {
     .any(|k| lower.contains(k))
 }
 
-/// Medium analysis always delivers after HTTP collect; gaps are scrubbed from user reports.
+/// Medium analysis: wait for web fill when external context not yet merged.
 #[must_use]
-pub fn needs_web_fill(_result: &AnalyzeStockResult) -> bool {
-    false
+pub fn needs_web_fill(result: &AnalyzeStockResult) -> bool {
+    hermes_trading::research::report::needs_external_web_fill(
+        &result.content,
+        result.data_confidence.score,
+    )
 }
 
 /// System hint when slash waits for web gap-fill after `analyze_stock`.
@@ -139,7 +142,8 @@ pub fn web_fill_system_hint(result: &AnalyzeStockResult) -> String {
     format!(
         "[equity slash] analyze_stock 完成（置信度 {:.0}%）。missing_dims=[{dims}]。\
          请按缺口调用 web_search 或 web_extract（2–4 条定向查询：宏观/行业/政策/舆情/FCF/同业等），\
-         不要重复 analyze_stock。补数完成后系统会自动投递简报与 HTML 附件。",
+         然后调用 analyze_stock(symbol, depth=medium, merge_external_only=true, external_context={{macro_bullets,policy_bullets,sentiment_bullets,sources}})。\
+         不要重复完整 analyze_stock。补数完成后系统会自动投递简报与 HTML 附件。",
         result.data_confidence.score * 100.0
     )
 }
@@ -432,6 +436,11 @@ fn web_fill_satisfied(session: &EquitySlashSession, result: &AnalyzeStockResult)
     if !needs_web_fill(result) {
         return true;
     }
+    if result.content.external.coverage
+        == hermes_trading::research::report::content::ExternalCoverage::WebFilled
+    {
+        return true;
+    }
     if session.web_searches_done >= WEB_FILL_MIN_SEARCHES {
         return true;
     }
@@ -573,6 +582,10 @@ mod tests {
         }
     }
 
+    use hermes_trading::research::report::content::{
+        ExternalBlock, ExternalCoverage, ReportContent,
+    };
+
     fn sample_result(symbol: &str) -> AnalyzeStockResult {
         AnalyzeStockResult {
             symbol: symbol.into(),
@@ -607,17 +620,50 @@ mod tests {
                 },
                 dcf_one_liner: "🔴 明显高估 · 安全边际 -46.1%".into(),
             },
+            content: ReportContent {
+                external: ExternalBlock {
+                    coverage: ExternalCoverage::WebFilled,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
         }
     }
 
-    fn sample_with_gaps(symbol: &str) -> AnalyzeStockResult {
+    fn sample_needs_web_fill(symbol: &str) -> AnalyzeStockResult {
         let mut r = sample_result(symbol);
+        r.content.external.coverage = ExternalCoverage::NotRetrieved;
+        r
+    }
+
+    fn sample_with_gaps(symbol: &str) -> AnalyzeStockResult {
+        let mut r = sample_needs_web_fill(symbol);
         r.missing_dims = vec!["3_macro".into(), "10_valuation".into()];
         r
     }
 
     #[test]
-    fn text_stall_inactive_when_web_fill_disabled() {
+    fn text_stall_when_low_confidence() {
+        let _guard = test_guard();
+        let mut session = fresh_session();
+        session.analyze_done = true;
+        session.symbol = Some("600522.SH".into());
+        session.depth = Some("medium".into());
+        let mut sample = sample_with_gaps("600522.SH");
+        sample.data_confidence.score = 0.40;
+        analyze_stock_cache::store("600522.SH", "medium", sample);
+        assert!(
+            handle_slash_text_stall(
+                EquitySlashMode::AnalyzeStock,
+                "[MODE: analyze-stock] Analyze: 600522",
+                &mut session,
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn text_stall_inactive_when_confidence_ok() {
         let _guard = test_guard();
         let mut session = fresh_session();
         session.analyze_done = true;
@@ -747,6 +793,27 @@ mod tests {
             other => panic!("expected immediate Deliver, got {other:?}"),
         };
         assert!(text.contains("MEDIA:"));
+    }
+
+    #[test]
+    fn analyze_stock_pends_when_low_confidence() {
+        let _guard = test_guard();
+        let mut session = fresh_session();
+        let mut sample = sample_with_gaps("600522.SH");
+        sample.data_confidence.score = 0.40;
+        analyze_stock_cache::store("600522.SH", "medium", sample);
+        let msg = "[MODE: analyze-stock / depth=medium] Analyze: 600522";
+        let out = try_equity_slash_delivery(
+            EquitySlashMode::AnalyzeStock,
+            msg,
+            &[tc(
+                "analyze_stock",
+                r#"{"symbol":"600522.SH","depth":"medium","use_providers":true}"#,
+            )],
+            &[ok("truncated")],
+            &mut session,
+        );
+        assert_eq!(out, EquitySlashDeliveryOutcome::Pending);
     }
 
     #[test]

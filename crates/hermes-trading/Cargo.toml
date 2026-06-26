@@ -23,6 +23,7 @@ async-trait = { workspace = true }
 hermes-config = { workspace = true }
 wiremock = { version = "0.6", optional = true }
 akshare = { workspace = true }
+encoding_rs = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt"] }

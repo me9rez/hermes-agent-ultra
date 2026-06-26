@@ -48,3 +48,47 @@ pub fn dimension_display_name(key: &str) -> String {
         _ => key.to_string(),
     }
 }
+
+/// Dimension groups for HTML section layout.
+#[must_use]
+pub fn dimension_group_title(group: &str) -> String {
+    match group {
+        "fundamentals" => "基本面".into(),
+        "market" => "市场与板块".into(),
+        "external" => "外部与定性".into(),
+        _ => group.into(),
+    }
+}
+
+#[must_use]
+pub fn dimensions_in_group(group: &str) -> &'static [&'static str] {
+    match group {
+        "fundamentals" => &[
+            "1_financials",
+            "10_valuation",
+            "6_research",
+            "6_fund_holders",
+        ],
+        "market" => &[
+            "2_kline",
+            "4_peers",
+            "7_industry",
+            "12_capital_flow",
+            "16_lhb",
+        ],
+        "external" => &[
+            "3_macro",
+            "5_chain",
+            "8_materials",
+            "9_futures",
+            "11_governance",
+            "13_policy",
+            "14_moat",
+            "15_events",
+            "17_sentiment",
+            "18_trap",
+            "19_contests",
+        ],
+        _ => &[],
+    }
+}

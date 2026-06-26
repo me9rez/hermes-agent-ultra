@@ -12,11 +12,12 @@ use crate::research::models::{
     quick_lbo,
 };
 use crate::research::profile::AnalysisProfile;
-use crate::research::report::{ReportIdentity, infer_target_name_from_peers};
+use crate::research::report::{ReportIdentity, build_report_content, infer_target_name_from_peers};
 use crate::research::report::{render_quick_scan_markdown, render_summary_markdown};
 use crate::research::scoring::{generate_panel, score_dimensions};
 use crate::research::synthesis::{SynthesisReport, build_synthesis_parts};
 use crate::research::types::{DataConfidence, FeatureVector, FundamentalsSnapshot};
+use crate::text_encoding::is_usable_company_name;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyzeStockResult {
@@ -36,6 +37,9 @@ pub struct AnalyzeStockResult {
     pub summary_markdown: String,
     /// Structured conclusion for HTML / agents (wave 2b).
     pub synthesis: SynthesisReport,
+    /// Content-first blocks for HTML / brief (fundamentals / sector / external).
+    #[serde(default)]
+    pub content: crate::research::report::ReportContent,
 }
 
 /// Run analysis pipeline on a fundamentals snapshot.
@@ -61,6 +65,7 @@ pub fn analyze_stock(
         let company_name = snap
             .name
             .clone()
+            .filter(|n| is_usable_company_name(n))
             .or_else(|| infer_target_name_from_peers(&effective_peers, &snap.symbol));
         let code = snap
             .symbol
@@ -149,6 +154,8 @@ pub fn analyze_stock(
 
     let mut identity = ReportIdentity::from_snapshot(snap);
     identity.enrich_from_comps(&comps);
+    identity.fundamental_score = Some(scored.fundamental_score);
+    let content = build_report_content(&dims, snap, &comps, &scored, &dcf);
     let synthesis = build_synthesis_parts(
         &identity,
         profile.depth_label(),
@@ -175,7 +182,16 @@ pub fn analyze_stock(
         used_fallback,
         summary_markdown,
         synthesis,
+        content,
     }
+}
+
+/// Apply web-search overlay to a cached analysis result.
+pub fn apply_external_context(
+    result: &mut AnalyzeStockResult,
+    overlay: &crate::research::report::ExternalContextOverlay,
+) {
+    crate::research::report::merge_external_overlay(&mut result.content, overlay);
 }
 
 /// Build snapshot from quote + optional JSON fundamentals.

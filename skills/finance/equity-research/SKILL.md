@@ -62,7 +62,7 @@ No gateway keyword routing — decide from **intent** (valuation vs spot price v
 1. If the request is **fundamental/valuation research**, call `skill_view(name="equity-research")` when unsure of the workflow.
 2. **`resolve_a_share_symbol`** when the user gives a Chinese name or bare 6-digit code.
 3. **`analyze_stock(symbol, depth=…, use_providers=true)`** — always **before** `web_search` for medium-depth research.
-4. **`web_search`** only **after** `analyze_stock` (medium), when `data_confidence.score < 0.5` OR `missing_dims` is non-empty. **Never before** analyze_stock; **never** on `/quick-scan`.
+4. **`web_search`** only **after** `analyze_stock` (medium), for **政策 / 宏观 / 舆情**（2–4 条定向查询）。Then **`analyze_stock(symbol, depth=medium, merge_external_only=true, external_context={macro_bullets, policy_bullets, sentiment_bullets, sources})`** — do **not** re-run full HTTP fetch. **Never before** analyze_stock; **never** on `/quick-scan`.
 5. If user typed **`/quick-scan`**, **`/analyze-stock`**, or **`/equity-research …`**, treat the skill as loaded and run the matching row above.
 
 ## When NOT to Use
@@ -88,9 +88,10 @@ No gateway keyword routing — decide from **intent** (valuation vs spot price v
    - **`depth=lite`** for `/quick-scan` only (Top 10 judges, quick-scan markdown)
    - Only pass manual `fundamentals` / `peers` when providers failed or user supplied research notes
 3. **`get_quote(symbol)`** — optional spot check; not a substitute for `analyze_stock` on research requests
-4. **`web_search`** — **after** `analyze_stock`, when `data_confidence.score < 0.5` OR `missing_dims` is non-empty (check `dim_summary` for `quality=missing|error`):
-   - supplement revenue, FCF, debt, ROE, peers, industry, policy headlines
-   - Chinese queries via bing_cn may return unrelated results ("贵州" tourism when searching for Moutai). Use English queries like `"Kweichow Moutai 600519 market cap"` for financial data.
+4. **`web_search`** — **after** `analyze_stock`, for policy/macro/sentiment (2–4 targeted queries). Then merge:
+   - `analyze_stock(symbol, depth=medium, merge_external_only=true, external_context={...})`
+   - `external_context` fields: `macro_bullets`, `policy_bullets`, `sentiment_bullets`, `sources[]` (URLs/titles from search)
+   - Also use web when `data_confidence.score < 0.5` for FCF/revenue gaps
 5. **LLM narrative** — after pasting **`summary_markdown`** from `analyze_stock` (full 19 dims + 66 judges; do not shorten to 9 rows), add conclusion citing:
    - `data_confidence.score`, `missing_dims`, and `dim_summary`
    - `used_fallback` (never hide proxy/Fallback paths)
@@ -124,6 +125,7 @@ If both fail (push2.eastmoney.com unreachable):
 - **`summary_markdown`** in tool JSON is the canonical chat table — paste verbatim before your narrative (default medium path)
 - `format=synthesis` for structured verdict only; `format=html` + `narrative` when user asks for 研报 / readable report
 - `write_report=true` (medium only) saves HTML + JSON to `{HERMES_HOME}/reports/` and returns paths
+- **`full-report-standalone.html` structure**: Hero（公司/现价/市值/PE/PB）→ 公司基本面 → 板块与同业 → 政策/宏观/舆情 → 资金与事件 → 19维评分 → 66评委 → DCF附录
 - `use_providers` defaults **true**; set `false` only for quote-only smoke tests
 
 ## Example

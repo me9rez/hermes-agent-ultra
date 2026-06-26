@@ -80,11 +80,14 @@ pub fn resolve_kokoro_sid(voice: Option<&str>, sid: i32) -> Result<i32> {
         )));
     }
     let key = raw.to_ascii_lowercase();
-    KOKORO_MULTI_LANG_V1_0.get(key.as_str()).copied().ok_or_else(|| {
-        DemoError::Config(format!(
+    KOKORO_MULTI_LANG_V1_0
+        .get(key.as_str())
+        .copied()
+        .ok_or_else(|| {
+            DemoError::Config(format!(
             "unknown Kokoro voice '{raw}' (see kokoro-multi-lang-v1_0 speaker list in sherpa docs)"
         ))
-    })
+        })
 }
 
 #[cfg(test)]

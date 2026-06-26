@@ -30,6 +30,10 @@ pub trait AsrEngine: Send + Sync {
     async fn set_gate(&self, on: bool) -> Result<()>;
     async fn reconnect(&self) -> Result<()>;
     async fn finish_utterance(&self) -> Result<()>;
+    /// Reset decoder state before a new VAD utterance (RK streaming ASR).
+    async fn begin_utterance(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

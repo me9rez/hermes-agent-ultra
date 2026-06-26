@@ -126,7 +126,8 @@ impl DefaultContextEngine {
             }
         }
 
-        let heuristic = self.heuristic_summary(removed_messages, removed_count, removed_tokens, keep_count);
+        let heuristic =
+            self.heuristic_summary(removed_messages, removed_count, removed_tokens, keep_count);
         if heuristic.trim().is_empty() {
             // Final fallback: deterministic marker so compaction always
             // frees context even when the summarizer is unreachable.
@@ -434,16 +435,12 @@ impl ContextEngine for DefaultContextEngine {
         let removed_tokens: u64 = fold_tokens;
 
         let summary = self
-            .maybe_generate_summary(
-                &fold,
-                fold.len(),
-                removed_tokens,
-                keep_count,
-            )
+            .maybe_generate_summary(&fold, fold.len(), removed_tokens, keep_count)
             .await;
 
         // Build result: pinned + kept (verbatim user turns) + summary + tail.
-        let mut result = Vec::with_capacity(pinned + kept.len() + 1 + (messages.len() - remove_end));
+        let mut result =
+            Vec::with_capacity(pinned + kept.len() + 1 + (messages.len() - remove_end));
         // Preserve pinned compression-summary messages verbatim.
         result.extend_from_slice(&messages[..pinned]);
         // Preserve small user turns and prior digests from the fold region.
@@ -617,8 +614,8 @@ const PINNABLE_USER_WINDOW_FRAC: f64 = 0.15;
 ///
 /// Ported from Reasonix `compact.go partitionFold`.
 fn partition_fold(region: &[Value], target_tokens: u64) -> (Vec<Value>, Vec<Value>) {
-    let max_tok = MAX_PINNABLE_USER_TOKENS
-        .min((target_tokens as f64 * PINNABLE_USER_WINDOW_FRAC) as u64);
+    let max_tok =
+        MAX_PINNABLE_USER_TOKENS.min((target_tokens as f64 * PINNABLE_USER_WINDOW_FRAC) as u64);
     let mut kept = Vec::new();
     let mut fold = Vec::new();
     for m in region {
@@ -913,22 +910,23 @@ mod tests {
         // fold assistant/tool messages into the summary.
         let messages = make_messages(80);
         let pinned = pinned_prefix_len(&messages, 200);
-        let keep_count = std::cmp::max(
-            std::cmp::max(2, (80.0 * 0.33) as usize),
-            pinned,
-        );
+        let keep_count = std::cmp::max(std::cmp::max(2, (80.0 * 0.33) as usize), pinned);
         let remove_end = 80 - keep_count + pinned;
         let (kept, fold) = partition_fold(&messages[pinned..remove_end], 200);
         // All kept messages should be user turns (small enough to pin).
         assert!(!kept.is_empty(), "some user turns should be kept verbatim");
-        assert!(kept.iter().all(|m| {
-            m.get("role").and_then(|r| r.as_str()) == Some("user")
-        }), "only user turns should be kept verbatim");
+        assert!(
+            kept.iter()
+                .all(|m| { m.get("role").and_then(|r| r.as_str()) == Some("user") }),
+            "only user turns should be kept verbatim"
+        );
         // All folded messages should be assistant turns.
         assert!(!fold.is_empty(), "some assistant messages should be folded");
-        assert!(fold.iter().all(|m| {
-            m.get("role").and_then(|r| r.as_str()) == Some("assistant")
-        }), "only assistant messages should be folded");
+        assert!(
+            fold.iter()
+                .all(|m| { m.get("role").and_then(|r| r.as_str()) == Some("assistant") }),
+            "only assistant messages should be folded"
+        );
     }
 
     #[tokio::test]

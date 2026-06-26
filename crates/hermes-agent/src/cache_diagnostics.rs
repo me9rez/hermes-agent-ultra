@@ -404,9 +404,9 @@ mod tests {
         let schemas = vec![sample_schema("t", "T")];
         let shape = capture_shape("system", &schemas, 0);
         let usage = UsageStats {
-            cache_read_tokens: 3500,   // prompt_cache_hit_tokens
-            cache_write_tokens: 0,     // DeepSeek: no write phase
-            input_tokens: 1500,        // prompt_cache_miss_tokens
+            cache_read_tokens: 3500, // prompt_cache_hit_tokens
+            cache_write_tokens: 0,   // DeepSeek: no write phase
+            input_tokens: 1500,      // prompt_cache_miss_tokens
             ..Default::default()
         };
         let diag = compare_shape(&shape, &shape, Some(&usage));

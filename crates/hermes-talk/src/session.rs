@@ -17,11 +17,23 @@ use crate::error::Result;
 use crate::kws::WakeDetectorHandle;
 use crate::kws::start_wake_detector;
 use crate::llm::{AccumulatedToolCall, ChatMessage, LlmClient, OpenAiCompatClient, ToolCall};
+#[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+use crate::orchestrator::StreamingThinkTtsGate;
+#[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+use crate::orchestrator::matches_sleep_keyword;
 use crate::orchestrator::{
-    SessionState, WakePhase, flush_remainder, matches_sleep_keyword, normalize_tts_text,
-    take_early_chunk, take_sentence, texts_compatible,
+    IncrementalThinkStripper, SessionState, WakePhase, extract_inline_thinking, flush_remainder,
+    normalize_asr_transcript, normalize_tts_text, strip_think_blocks, take_early_chunk,
+    take_sentence, texts_compatible,
+};
+#[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+use crate::orchestrator::{
+    UtterancePipeline, UtteranceTranscript, bump_longest_transcript,
+    resolve_utterance_text_with_best, spawn_ordered_asr_feeder, wait_utterance_fed,
 };
 use crate::speaker::SpeakerVerifier;
+#[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+use crate::stream_turn;
 use crate::tools;
 use crate::tools::hermes_queue::{HermesMessage, HermesQueue, HermesQueueSender, HermesWorkItem};
 use crate::tts::{TtsBackend, TtsEngine, create_tts};
@@ -71,6 +83,19 @@ enum SpeakerGate {
 struct ActiveTurn {
     user_text: String,
     speculative: bool,
+    /// `messages.len()` before this turn's hermes merge / user append.
+    context_checkpoint: usize,
+}
+
+fn rollback_turn_context(messages: &mut Vec<ChatMessage>, checkpoint: usize) {
+    if messages.len() > checkpoint {
+        messages.truncate(checkpoint);
+        info!(
+            checkpoint,
+            remaining = messages.len(),
+            "rolled back unspoken turn from context"
+        );
+    }
 }
 
 impl Session {
@@ -155,7 +180,7 @@ impl Session {
         }
         // Inject hermes guidance: call_hermes is async, hermes will reply later.
         {
-            let hermes_hint = "[工具提示] call_hermes 是把请求发给 hermes（后台智能助手）异步处理，hermes 可能几秒或更久才会回复。调用后你收到的 tool result 只有入队确认，不代表任务完成。调用时 spoken 参数要填写给用户的自然口语播报，简述你正在帮用户处理什么（如'帮你查一下天气''我看看这个怎么弄'），不要用模板化开头。之后你应告诉用户'已帮你提交给 hermes 处理，稍后 hermes 会回复你'。严禁说'已经设置好了''已经完成了'等话。";
+            let hermes_hint = "[工具提示] call_hermes 是把请求发给 hermes（后台智能助手）异步处理，hermes 可能几秒或更久才会回复。调用后你收到的 tool result 只有入队确认，不代表任务完成。调用时 spoken 须分两段：①准确精炼复述用户这一次的具体诉求；②用自然亲切的语气说明已交给 hermes、请用户稍候（如「我这就帮你安排」「好了已经交给后台了，你稍等一下」）。禁止空洞套话（如单独一句「帮你查一下」「我看看」）；spoken 播完后无需再说确认语。hermes 完成后会主动推送结果，你届时再用口语向用户播报真实结果。严禁在结果未返回前说「已经设置好了」「已经完成了」等话。";
             if !self.cfg.llm.system_prompt.contains(hermes_hint) {
                 self.cfg.llm.system_prompt =
                     format!("{hermes_hint}\n{}", self.cfg.llm.system_prompt);
@@ -200,12 +225,22 @@ impl Session {
         let (pcm_tx, mut pcm_rx) = mpsc::channel(64);
         let aec_ref_buf = aec::create_ref_buf(self.cfg.asr.sample_rate, 500);
         let aec_cfg = self.cfg.aec.clone();
+        let denoise_cfg = self.cfg.denoise.clone();
+        let capture_sample_rate = self.cfg.asr.sample_rate;
         let aec_ref_clone = aec_ref_buf.clone();
         std::thread::spawn(move || {
             let mut aec_engine = AecEngine::new(&aec_cfg, aec_ref_clone);
+            let mut denoiser = StreamingDenoiser::create(&denoise_cfg);
             loop {
                 if let Some(chunk) = capture.try_recv_chunk() {
-                    let cleaned = aec_engine.process(&chunk.samples_f32);
+                    // Pipeline order: AEC → denoise → (VAD/ASR in session loop)
+                    let after_aec = aec_engine.process(&chunk.samples_f32);
+                    let cleaned = if let Some(ref mut d) = denoiser {
+                        let out = d.process(&after_aec, capture_sample_rate);
+                        if out.is_empty() { after_aec } else { out }
+                    } else {
+                        after_aec
+                    };
                     let bytes = crate::audio::pcm::f32_to_i16_le(&cleaned);
                     let aec_chunk = crate::audio::capture::AudioChunk {
                         samples_f32: cleaned,
@@ -248,7 +283,8 @@ impl Session {
                             _ => break,
                         }
                     }
-                    continue;
+                    // Do not `continue` here: the current frame may be the first packet
+                    // of a barge-in ack after interrupt; enqueue_pcm_i16 drops stale gen.
                 }
                 // Feed reference to AEC (resample 24k->16k)
                 let f32_24k = crate::audio::pcm::i16_le_to_f32(&audio.pcm);
@@ -295,8 +331,21 @@ impl Session {
             ))
         };
 
-        let mut denoiser = StreamingDenoiser::create(&self.cfg.denoise);
-        let denoiser_enabled = denoiser.is_some();
+        let denoiser_enabled = self.cfg.denoise.enabled;
+        let aec_enabled = self.cfg.aec.enabled;
+
+        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+        let utterance_feeder = spawn_ordered_asr_feeder(asr.clone());
+        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+        let mut utterance_pipeline = UtterancePipeline::new(utterance_feeder.cmd_tx);
+        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+        let mut feed_done_rx = utterance_feeder.feed_done_rx;
+        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+        let mut feed_ack_rx = utterance_feeder.feed_ack_rx;
+        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+        let mut utterance_transcript = UtteranceTranscript::default();
+        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+        let mut sealed_utterance_id: Option<u64> = None;
 
         let speaker_verifier = SpeakerVerifier::create(&self.cfg.speaker);
         let speaker_enabled = speaker_verifier.is_some();
@@ -315,7 +364,6 @@ impl Session {
         let mut last_barge_in_at: Option<Instant> = None;
         let mut _last_wake_at: Option<Instant> = None;
         let asr_settle_ms: u64 = 300;
-        let asr_flush_wait_ms: u64 = 5000;
 
         // Speculative partial tracking
         let mut last_partial = String::new();
@@ -324,8 +372,10 @@ impl Session {
         let mut input_gated: bool = false;
         let mut utterance_active: bool = false;
         let mut pending_offline_flush: Option<Instant> = None;
+        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+        let mut asr_echo_cooldown_until: Option<Instant> = None;
 
-        let (done_tx, mut done_rx) = mpsc::channel::<(String, u64, bool)>(4);
+        let (done_tx, mut done_rx) = mpsc::channel::<stream_turn::TurnDone>(4);
 
         let (_hermes_queue, mut hermes_msg_rx, hermes_sender_for_spawn) =
             if self.cfg.llm.tools_enabled {
@@ -378,6 +428,8 @@ impl Session {
             speculative_llm = orch.speculative_llm,
             wake_enabled,
             denoise_enabled = denoiser_enabled,
+            aec_enabled,
+            audio_pipeline = "capture -> aec -> denoise -> vad",
             speaker_enabled,
             min_rms_barge_in = orch.min_rms_barge_in,
             barge_in_sustain = orch.barge_in_sustain_frames,
@@ -400,121 +452,117 @@ impl Session {
         let idle_after_turn = Duration::from_secs(wake_cfg.idle_after_turn_sec);
         let mut diag_tick: u32 = 0;
         let mut last_barge_in_suppress_warn: Option<Instant> = None;
-        let wake_ack_playing = Arc::new(AtomicBool::new(false));
-        let (wake_ack_done_tx, mut wake_ack_done_rx) = mpsc::channel::<()>(1);
 
         loop {
             tokio::select! {
-                    chunk = pcm_rx.recv() => {
-                        let Some(chunk) = chunk else { break };
-                        let raw_rms = rms_f32(&chunk.samples_f32);
+                chunk = pcm_rx.recv() => {
+                    let Some(chunk) = chunk else { break };
+                    let raw_rms = rms_f32(&chunk.samples_f32);
+                    let samples_f32 = chunk.samples_f32;
 
-                        let samples_f32 = if let Some(ref mut d) = denoiser {
-                            let denoised = d.process(&chunk.samples_f32, self.cfg.asr.sample_rate);
-                            if denoised.is_empty() {
-                                chunk.samples_f32.clone()
-                            } else {
-                                denoised
+                    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                    drain_feed_acks(
+                        &mut feed_ack_rx,
+                        &utterance_pipeline,
+                        &mut utterance_transcript,
+                    );
+
+                    if speaker_enabled {
+                        for &s in &samples_f32 {
+                            if recent_audio.len() >= recent_audio_max {
+                                recent_audio.pop_front();
                             }
-                        } else {
-                            chunk.samples_f32.clone()
-                        };
-
-                        if speaker_enabled {
-                            for &s in &samples_f32 {
-                                if recent_audio.len() >= recent_audio_max {
-                                    recent_audio.pop_front();
-                                }
-                                recent_audio.push_back(s);
-                            }
+                            recent_audio.push_back(s);
                         }
+                    }
 
-                        if let Some(ref det) = wake_detector {
-                            det.feed(&samples_f32);
-                        }
-                        vad.feed(&samples_f32);
+                    if let Some(ref det) = wake_detector {
+                        det.feed(&samples_f32);
+                    }
+                    vad.feed(&samples_f32);
 
-                        let speech_just_started = vad.speech_start();
-                        // Diagnostic: log audio level + VAD state during AwakeGrace every ~500ms
-                        if matches!(wake_phase, WakePhase::AwakeGrace { .. }) {
-                            diag_tick += 1;
-                            if diag_tick % 5 == 0 {
-                                let denoised_rms = rms_f32(&samples_f32);
-                                info!(
-                                    raw_rms = format!("{:.6}", raw_rms),
-                                    denoised_rms = format!("{:.6}", denoised_rms),
-                                    vad_rms = format!("{:.6}", vad.last_rms()),
-                                    vad_in_speech = vad.in_speech(),
-                                    vad_speech_start = speech_just_started,
-                                    speaker_gate = format!("{:?}", speaker_gate),
-                                    "grace diag"
-                                );
-                            }
+                    let speech_just_started = vad.speech_start();
+                    // Diagnostic: log audio level + VAD state during AwakeGrace every ~500ms
+                    if matches!(wake_phase, WakePhase::AwakeGrace { .. }) {
+                        diag_tick += 1;
+                        if diag_tick % 5 == 0 {
+                            let denoised_rms = rms_f32(&samples_f32);
+                            info!(
+                                raw_rms = format!("{:.6}", raw_rms),
+                                denoised_rms = format!("{:.6}", denoised_rms),
+                                vad_rms = format!("{:.6}", vad.last_rms()),
+                                vad_in_speech = vad.in_speech(),
+                                vad_speech_start = speech_just_started,
+                                speaker_gate = format!("{:?}", speaker_gate),
+                                "grace diag"
+                            );
                         }
-                        if speaker_verify_gate && speech_just_started && speaker_gate == SpeakerGate::Idle {
-                            speaker_gate = SpeakerGate::Verifying;
-                            speaker_verify_buffer.clear();
-                        }
+                    }
+                    if speaker_verify_gate && speech_just_started && speaker_gate == SpeakerGate::Idle {
+                        speaker_gate = SpeakerGate::Verifying;
+                        speaker_verify_buffer.clear();
+                    }
 
-                        if wake_enabled && wake_detector.as_ref().is_some_and(|d| d.try_recv_wake()) {
-                            _last_wake_at = Some(Instant::now());
-                            if matches!(wake_phase, WakePhase::Dormant) {
-                                info!("wake: waking from dormant — connecting ASR");
-                                let has_ack = !wake_cfg.ack_reply.trim().is_empty();
-                                let _ = asr.set_gate(true).await;
-                                let _ = asr.reconnect().await;
-                                utterance_active = false;
-                                input_gated = has_ack;
-                                if has_ack {
-                                    wake_ack_playing.store(true, Ordering::SeqCst);
-                                } else if !resume_asr_with_retry(asr.clone()).await {
-                                    warn!("wake: ASR resume failed; staying dormant");
-                                    continue;
+                    if wake_enabled && wake_detector.as_ref().is_some_and(|d| d.try_recv_wake()) {
+                        _last_wake_at = Some(Instant::now());
+                        if matches!(wake_phase, WakePhase::Dormant) {
+                            info!("wake: waking from dormant — connecting ASR");
+                            #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                            let asr_ok = stream_turn::resume_asr_with_retry(asr.clone()).await;
+                            #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                            let asr_ok = {
+                                if !resume_asr_with_retry(asr.clone()).await {
+                                    false
                                 } else {
                                     let _ = asr.set_gate(false).await;
+                                    asr.reconnect().await.is_ok()
                                 }
-                                let ack_extra = if has_ack {
-                                    Duration::from_secs(3)
-                                } else {
-                                    Duration::ZERO
-                                };
-                                wake_phase = WakePhase::AwakeGrace {
-                                    deadline: Instant::now() + grace_after_wake + ack_extra,
-                                };
-                                info!(
-                                    grace_sec = wake_cfg.grace_after_wake_sec,
-                                    ack = %wake_cfg.ack_reply,
-                                    has_ack,
-                                    "wake: accepted, now in AwakeGrace; speak within grace period"
-                                );
-                                if has_ack {
-                                    let ack = wake_cfg.ack_reply.clone();
-                                    let tts_ack = tts.clone();
-                                    let playback_ack = playback.clone();
-                                    let play_gen_ack = play_gen.clone();
-                                    let done_tx = wake_ack_done_tx.clone();
-                                    tokio::spawn(async move {
-                                        play_wake_ack(&ack, tts_ack, &playback_ack, &play_gen_ack)
-                                            .await;
-                                        let _ = done_tx.send(()).await;
-                                    });
-                                }
-                            } else if orch.barge_in_enabled
-                                && is_output_busy(state, &playback, &active_turn)
+                            };
+                            if !asr_ok {
+                                warn!("wake: ASR resume failed; staying dormant");
+                                continue;
+                            }
+                            #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
                             {
-                                if let Some(last) = last_barge_in_at {
-                                    if last.elapsed().as_millis() < orch.barge_in_cooldown_ms as u128 {
-                                        continue;
-                                    }
-                                }
-                                info!("wake-word barge-in (kws)");
-                                let (ack_reply, ack_playing_flag, ack_done_tx) = barge_in_ack_args(
-                                    wake_enabled,
-                                    &wake_cfg,
-                                    &wake_ack_playing,
-                                    &wake_ack_done_tx,
+                                utterance_active = false;
+                            }
+                            let ack_extra = if wake_cfg.ack_reply.trim().is_empty() {
+                                Duration::ZERO
+                            } else {
+                                Duration::from_secs(3)
+                            };
+                            wake_phase = WakePhase::AwakeGrace {
+                                deadline: Instant::now() + grace_after_wake + ack_extra,
+                            };
+                            info!(
+                                grace_sec = wake_cfg.grace_after_wake_sec,
+                                ack = %wake_cfg.ack_reply,
+                                "wake: accepted, now in AwakeGrace; speak within grace period"
+                            );
+                            if !wake_cfg.ack_reply.trim().is_empty() {
+                                spawn_wake_ack(
+                                    wake_cfg.ack_reply.clone(),
+                                    tts.clone(),
+                                    playback.clone(),
+                                    play_gen.clone(),
                                 );
-                                input_gated = do_barge_in(
+                            }
+                        } else if orch.barge_in_enabled
+                            && is_output_busy(state, &playback, &active_turn)
+                        {
+                            if let Some(last) = last_barge_in_at {
+                                if last.elapsed().as_millis() < orch.barge_in_cooldown_ms as u128 {
+                                    continue;
+                                }
+                            }
+                            if is_llm_turn_busy(state, &active_turn) {
+                                info!("wake-word barge-in (kws)");
+                                let ack_reply = barge_in_ack_reply(
+                                    wake_enabled,
+                                    &wake_cfg.ack_reply,
+                                    active_turn.is_some(),
+                                );
+                                do_barge_in(
                                     &turn_epoch,
                                     &playback,
                                     &play_gen,
@@ -525,6 +573,7 @@ impl Session {
                                     wake_enabled,
                                     &mut wake_phase,
                                     &mut state,
+                                    &mut messages,
                                     &mut active_turn,
                                     &current_latency,
                                     &mut last_partial,
@@ -534,288 +583,505 @@ impl Session {
                                     &mut speaker_verify_buffer,
                                     speaker_verify_gate,
                                     ack_reply,
-                                    ack_playing_flag,
-                                    ack_done_tx,
+                                    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                                    RockchipBargeInReset {
+                                        input_gated: &mut input_gated,
+                                        utterance_active: &mut utterance_active,
+                                        asr_echo_cooldown_until: &mut asr_echo_cooldown_until,
+                                        utterance_pipeline: &mut utterance_pipeline,
+                                        utterance_transcript: &mut utterance_transcript,
+                                        sealed_utterance_id: &mut sealed_utterance_id,
+                                        last_final: &mut last_final,
+                                        asr_rx: &mut asr_rx,
+                                    },
                                 )
                                 .await;
                             } else {
-                                match &mut wake_phase {
-                                    WakePhase::AwakeGrace { deadline } => {
-                                        *deadline = Instant::now() + grace_after_wake;
-                                        info!("wake kws during grace; extended grace window");
-                                    }
-                                    WakePhase::IdleAfterTurn { .. } => {
-                                        promote_wake_on_speech(&mut wake_phase);
-                                        if !speaker_verify_gate {
-                                            speaker_gate = SpeakerGate::Passed;
-                                        }
-                                        let _ =
-                                            open_asr_for_user_speech(asr.clone(), wake_enabled)
-                                                .await;
-                                    }
-                                    WakePhase::Active => {
-                                        debug!("wake kws while listening; ignored");
-                                    }
-                                    WakePhase::Dormant => {}
-                                }
-                            }
-                        }
-
-                        let ack_playing = wake_ack_playing.load(Ordering::SeqCst);
-
-                        if !ack_playing
-                            && wake_phase.allows_asr()
-                            && (speech_just_started || vad.in_speech())
-                            && matches!(wake_phase, WakePhase::IdleAfterTurn { .. })
-                        {
-                            info!("idle after turn -> active (speech start)");
-                            wake_phase = WakePhase::Active;
-                            if !speaker_verify_gate {
-                                speaker_gate = SpeakerGate::Passed;
-                            }
-                            let _ = open_asr_for_user_speech(asr.clone(), wake_enabled).await;
-                        }
-
-                        if !input_gated && !ack_playing && wake_phase.allows_asr() {
-                            let do_send = match speaker_gate {
-                                SpeakerGate::Idle => false,
-                                SpeakerGate::Verifying => {
-                                    speaker_verify_buffer.extend_from_slice(&samples_f32);
-                                    if speaker_verify_buffer.len() >= speaker_verify_max {
-                                        let buf = std::mem::take(&mut speaker_verify_buffer);
-                                        let passed = speaker_verifier.as_ref().map_or(true, |sv| {
-                                            sv.verify(&buf, self.cfg.asr.sample_rate)
-                                        });
-                                        if passed {
-                                            speaker_gate = SpeakerGate::Passed;
-                                            info!("speaker gate passed");
-                                            let i16_bytes = f32_slice_to_i16_bytes(&buf);
-                                            let _ = asr.send_audio(i16_bytes).await;
-                                            true
-                                        } else {
-                                            speaker_gate = SpeakerGate::Rejected;
-                                            vad.reset_barge_in_state();
-                                            info!("speaker gate rejected");
-                                            false
-                                        }
-                                    } else {
-                                        false
-                                    }
-                                }
-                                SpeakerGate::Passed => true,
-                                SpeakerGate::Rejected => false,
-                            };
-                            if do_send {
-                                let i16_bytes = f32_slice_to_i16_bytes(&samples_f32);
-                                let _ = asr.send_audio(i16_bytes).await;
-                            }
-                        }
-
-                        if !ack_playing {
-                            if wake_phase.allows_asr() && (speech_just_started || vad.in_speech()) {
-                                utterance_active = true;
-                                pending_offline_flush = None;
-                            }
-
-                            if user_speech_activity(&mut vad, None, orch.min_final_chars, &wake_phase, orch.grace_min_final_chars) {
-                                if promote_wake_on_speech_with_asr(
-                                    &mut wake_phase,
-                                    asr.clone(),
-                                    wake_enabled,
-                                )
-                                .await
-                                {
-                                    partial_stable_since = None;
-                                    last_partial.clear();
-                                }
-                            }
-                        }
-
-                        if wake_phase.check_timeout(Instant::now()) {
-                            enter_dormant(
-                                asr.clone(),
-                                &mut wake_phase,
-                                &mut state,
-                                &mut active_turn,
-                                &mut last_final,
-                                &mut asr_final_at,
-                                &mut partial_stable_since,
-                                &mut last_partial,
-                                &mut llm_cancel,
-                                &current_latency,
-                                &mut asr_rx,
-                                &mut speaker_gate,
-                                &mut speaker_verify_buffer,
-                                speaker_verify_gate,
-                            )
-                            .await;
-                            continue;
-                        }
-
-                        if !wake_phase.allows_dialog() {
-                            continue;
-                        }
-
-                        if orch.barge_in_enabled
-                            && is_output_busy(state, &playback, &active_turn)
-                        {
-                            if !wake_enabled || !orch.barge_in_requires_wake {
-                                let (ack_reply, ack_playing_flag, ack_done_tx) = barge_in_ack_args(
-                                    wake_enabled,
-                                    &wake_cfg,
-                                    &wake_ack_playing,
-                                    &wake_ack_done_tx,
-                                );
-                                if let Some(ack_playing) = try_barge_in(
-                                    "vad",
-                                    &orch,
-                                    &mut state,
-                                    &mut vad,
+                                info!("wake-word: interrupt playback for user speech");
+                                interrupt_playback_for_user_speech(
                                     &playback,
                                     &play_gen,
-                                    &mut llm_cancel,
-                                    &mut active_turn,
-                                    &mut partial_stable_since,
-                                    &mut last_partial,
-                                    &current_latency,
-                                    &turn_epoch,
                                     tts.clone(),
-                                    None,
-                                    &mut last_barge_in_at,
-                                    &speaker_verifier,
-                                    &recent_audio,
+                                    &mut vad,
+                                    asr.clone(),
+                                    wake_enabled,
+                                    &mut wake_phase,
+                                    &mut state,
+                                    &mut last_partial,
+                                    &mut partial_stable_since,
                                     &mut speaker_gate,
                                     &mut speaker_verify_buffer,
                                     speaker_verify_gate,
-                                    asr.clone(),
-                                    &mut wake_phase,
-                                    wake_enabled,
-                                    ack_reply,
-                                    ack_playing_flag,
-                                    ack_done_tx,
+                                    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                                    RockchipBargeInReset {
+                                        input_gated: &mut input_gated,
+                                        utterance_active: &mut utterance_active,
+                                        asr_echo_cooldown_until: &mut asr_echo_cooldown_until,
+                                        utterance_pipeline: &mut utterance_pipeline,
+                                        utterance_transcript: &mut utterance_transcript,
+                                        sealed_utterance_id: &mut sealed_utterance_id,
+                                        last_final: &mut last_final,
+                                        asr_rx: &mut asr_rx,
+                                    },
                                 )
-                                .await
-                                {
-                                    input_gated = ack_playing;
-                                    continue;
+                                .await;
+                            }
+                        } else {
+                            #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                            match &mut wake_phase {
+                                WakePhase::AwakeGrace { deadline } => {
+                                    *deadline = Instant::now() + grace_after_wake;
+                                    info!("wake kws during grace; extended grace window");
                                 }
-                            } else {
-                                let now = Instant::now();
-                                if last_barge_in_suppress_warn
-                                    .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
-                                {
-                                    warn!(
-                                        phrases = ?wake_cfg.effective_phrases(),
-                                        "wake word required to barge-in"
-                                    );
-                                    last_barge_in_suppress_warn = Some(now);
+                                WakePhase::IdleAfterTurn { .. } => {
+                                    promote_wake_on_speech(&mut wake_phase);
+                                    if !speaker_verify_gate {
+                                        speaker_gate = SpeakerGate::Passed;
+                                    }
+                                    let _ =
+                                        open_asr_for_user_speech(asr.clone(), wake_enabled)
+                                            .await;
                                 }
+                                WakePhase::Active => {
+                                    debug!("wake kws while listening; ignored");
+                                }
+                                WakePhase::Dormant => {}
                             }
                         }
+                    }
 
-                        let flush_now = if asr_offline {
-                            update_pending_offline_flush(
-                                utterance_active,
-                                input_gated,
-                                &vad,
-                                speech_just_started,
-                                orch.endpoint_silence_ms(),
-                                orch.offline_continuation_ms,
-                                &mut pending_offline_flush,
-                            )
-                        } else {
-                            ready_to_flush_asr(
-                                false,
-                                input_gated,
-                                &vad,
-                                orch.endpoint_silence_ms(),
-                                utterance_active,
-                                &last_final,
-                                orch.min_final_chars,
-                            )
+                    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                    if wake_phase.allows_asr()
+                        && (speech_just_started || vad.in_speech())
+                        && matches!(wake_phase, WakePhase::IdleAfterTurn { .. })
+                    {
+                        info!("idle after turn -> active (speech start)");
+                        wake_phase = WakePhase::Active;
+                        if !speaker_verify_gate {
+                            speaker_gate = SpeakerGate::Passed;
+                        }
+                        let _ = open_asr_for_user_speech(asr.clone(), wake_enabled).await;
+                    }
+
+                    if !input_gated && wake_phase.allows_asr() {
+                        let do_send = match speaker_gate {
+                            SpeakerGate::Idle => false,
+                            SpeakerGate::Verifying => {
+                                speaker_verify_buffer.extend_from_slice(&samples_f32);
+                                if speaker_verify_buffer.len() >= speaker_verify_max {
+                                    let buf = std::mem::take(&mut speaker_verify_buffer);
+                                    let passed = speaker_verifier.as_ref().map_or(true, |sv| {
+                                        sv.verify(&buf, self.cfg.asr.sample_rate)
+                                    });
+                                    if passed {
+                                        speaker_gate = SpeakerGate::Passed;
+                                        info!("speaker gate passed");
+                                        let i16_bytes = f32_slice_to_i16_bytes(&buf);
+                                        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                                        {
+                                            rockchip_open_utterance(
+                                                &asr,
+                                                &mut utterance_pipeline,
+                                                &mut utterance_transcript,
+                                                &mut sealed_utterance_id,
+                                                &mut last_final,
+                                                &mut last_partial,
+                                                &mut asr_rx,
+                                            )
+                                            .await;
+                                            utterance_pipeline.push_pcm(i16_bytes);
+                                        }
+                                        #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                                        {
+                                            let _ = asr.send_audio(i16_bytes).await;
+                                        }
+                                        true
+                                    } else {
+                                        speaker_gate = SpeakerGate::Rejected;
+                                        vad.reset_barge_in_state();
+                                        info!("speaker gate rejected");
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+                            SpeakerGate::Passed => true,
+                            SpeakerGate::Rejected => false,
                         };
+                        if do_send {
+                            let i16_bytes = f32_slice_to_i16_bytes(&samples_f32);
+                            #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                            {
+                                rockchip_open_utterance(
+                                    &asr,
+                                    &mut utterance_pipeline,
+                                    &mut utterance_transcript,
+                                    &mut sealed_utterance_id,
+                                    &mut last_final,
+                                    &mut last_partial,
+                                    &mut asr_rx,
+                                )
+                                .await;
+                                utterance_pipeline.push_pcm(i16_bytes);
+                            }
+                            #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                            {
+                                let _ = asr.send_audio(i16_bytes).await;
+                            }
+                        }
+                    }
 
-                        if flush_now {
-                            pending_offline_flush = None;
-                            input_gated = true;
-                            info!("end of speech: gating audio, flushing ASR");
+                    if wake_phase.allows_asr() && (speech_just_started || vad.in_speech()) {
+                        utterance_active = true;
+                        pending_offline_flush = None;
+                        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                        if speech_just_started {
+                            rockchip_open_utterance(
+                                &asr,
+                                &mut utterance_pipeline,
+                                &mut utterance_transcript,
+                                &mut sealed_utterance_id,
+                                &mut last_final,
+                                &mut last_partial,
+                                &mut asr_rx,
+                            )
+                            .await;
+                        }
+                    }
+
+                    if user_speech_activity(&mut vad, None, orch.min_final_chars, &wake_phase, orch.grace_min_final_chars) {
+                        if promote_wake_on_speech_with_asr(
+                            &mut wake_phase,
+                            asr.clone(),
+                            wake_enabled,
+                        )
+                        .await
+                        {
+                            partial_stable_since = None;
+                            last_partial.clear();
+                        }
+                    }
+
+                    if wake_phase.check_timeout(Instant::now()) {
+                        enter_dormant(
+                            asr.clone(),
+                            &mut wake_phase,
+                            &mut state,
+                            &mut active_turn,
+                            &mut last_final,
+                            &mut asr_final_at,
+                            &mut partial_stable_since,
+                            &mut last_partial,
+                            &mut llm_cancel,
+                            &current_latency,
+                            &mut asr_rx,
+                            &mut speaker_gate,
+                            &mut speaker_verify_buffer,
+                            speaker_verify_gate,
+                        )
+                        .await;
+                        continue;
+                    }
+
+                    if !wake_phase.allows_dialog() {
+                        continue;
+                    }
+
+                    if orch.barge_in_enabled
+                        && is_output_busy(state, &playback, &active_turn)
+                    {
+                        if !wake_enabled || !orch.barge_in_requires_wake {
+                            let ack_reply = barge_in_ack_reply(
+                                wake_enabled,
+                                &wake_cfg.ack_reply,
+                                active_turn.is_some(),
+                            );
+                            if try_barge_in(
+                                "vad",
+                                &orch,
+                                &mut state,
+                                &mut vad,
+                                &playback,
+                                &play_gen,
+                                &mut llm_cancel,
+                                &mut messages,
+                                &mut active_turn,
+                                &mut partial_stable_since,
+                                &mut last_partial,
+                                &current_latency,
+                                &turn_epoch,
+                                tts.clone(),
+                                None,
+                                &mut last_barge_in_at,
+                                &speaker_verifier,
+                                &recent_audio,
+                                &mut speaker_gate,
+                                &mut speaker_verify_buffer,
+                                speaker_verify_gate,
+                                asr.clone(),
+                                &mut wake_phase,
+                                wake_enabled,
+                                ack_reply,
+                                #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                                RockchipBargeInReset {
+                                    input_gated: &mut input_gated,
+                                    utterance_active: &mut utterance_active,
+                                    asr_echo_cooldown_until: &mut asr_echo_cooldown_until,
+                                    utterance_pipeline: &mut utterance_pipeline,
+                                    utterance_transcript: &mut utterance_transcript,
+                                    sealed_utterance_id: &mut sealed_utterance_id,
+                                    last_final: &mut last_final,
+                                    asr_rx: &mut asr_rx,
+                                },
+                            )
+                            .await
+                            {
+                                continue;
+                            }
+                        } else {
+                            let now = Instant::now();
+                            if last_barge_in_suppress_warn
+                                .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
+                            {
+                                warn!(
+                                    phrases = ?wake_cfg.effective_phrases(),
+                                    "wake word required to barge-in"
+                                );
+                                last_barge_in_suppress_warn = Some(now);
+                            }
+                        }
+                    }
+
+                    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                    let flush_now = stream_turn::should_flush_asr_partial(
+                        input_gated,
+                        vad.trailing_silence_ms(),
+                        orch.endpoint_silence_ms(),
+                        &last_partial,
+                        orch.min_final_chars,
+                        utterance_pipeline.is_open() || utterance_pipeline.is_sealed(),
+                    ) || stream_turn::should_flush_asr_partial_complete(
+                        input_gated,
+                        vad.trailing_silence_ms(),
+                        orch.early_endpoint_silence_ms(),
+                        &last_partial,
+                        orch.min_final_chars,
+                        utterance_pipeline.is_open() || utterance_pipeline.is_sealed(),
+                        partial_stable_since,
+                        orch.speculative_stable_ms,
+                    );
+                    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                    let flush_now = if asr_offline {
+                        update_pending_offline_flush(
+                            utterance_active,
+                            input_gated,
+                            &vad,
+                            speech_just_started,
+                            orch.endpoint_silence_ms(),
+                            orch.offline_continuation_ms,
+                            &mut pending_offline_flush,
+                        )
+                    } else {
+                        ready_to_flush_asr(
+                            false,
+                            input_gated,
+                            &vad,
+                            orch.endpoint_silence_ms(),
+                            utterance_active,
+                            &last_final,
+                            orch.min_final_chars,
+                        )
+                    };
+
+                    if flush_now {
+                        pending_offline_flush = None;
+                        input_gated = true;
+                        info!("end of speech: gating audio, flushing ASR");
+                        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                        {
+                            let utt_id = utterance_pipeline.utterance_id();
+                            if utterance_pipeline.is_open() {
+                                utterance_pipeline.seal();
+                                sealed_utterance_id = Some(utt_id);
+                            }
+                            if !wait_utterance_fed(
+                                &mut feed_done_rx,
+                                utt_id,
+                                500,
+                            )
+                            .await
+                            {
+                                warn!(
+                                    utterance_id = utt_id,
+                                    "utterance feed: timeout waiting for queue drain"
+                                );
+                            }
                             if let Err(e) = asr.finish_utterance().await {
                                 warn!(error = %e, "finish_utterance failed");
                             }
                             utterance_active = false;
-                            let flush_deadline =
-                                Instant::now() + Duration::from_millis(asr_flush_wait_ms);
-                            while Instant::now() < flush_deadline {
-                                match asr_rx.try_recv() {
-                                    Ok(AsrEvent::Final { text }) => {
-                                        info!(
-                                            final_text = %text,
-                                            last_final = ?last_final,
-                                            state = ?state,
-                                            wake_phase = ?wake_phase,
-                                            "asr final (post-flush)"
-                                        );
-                                        last_asr_event_at = Some(Instant::now());
-                                        let sep = if last_final.as_deref().is_some_and(|s| !s.ends_with(['\n', ' '])) { " " } else { "" };
-                                        last_final = Some(match last_final.take() {
-                                            Some(prev) => format!("{prev}{sep}{text}"),
-                                            None => text,
-                                        });
-                                        asr_final_at = Some(Instant::now());
-                                        partial_stable_since = None;
-                                        last_partial.clear();
-                                        break;
-                                    }
-                                    Ok(AsrEvent::Partial { text }) => {
-                                        debug!(partial = %text, "asr partial (post-flush)");
-                                        last_asr_event_at = Some(Instant::now());
-                                    }
-                                    Ok(_) => {}
-                                    Err(_) => {
-                                        tokio::task::yield_now().await;
-                                    }
+                            drain_feed_acks(
+                                &mut feed_ack_rx,
+                                &utterance_pipeline,
+                                &mut utterance_transcript,
+                            );
+                            let queued = utterance_transcript.best_transcript();
+                            let flush_wait_ms =
+                                stream_turn::rockchip_asr_flush_wait_ms(&queued, orch.min_final_chars);
+                            let final_text =
+                                wait_rockchip_asr_final(&mut asr_rx, flush_wait_ms).await;
+                            let asr_final_log = final_text.clone();
+                            let best_full = utterance_transcript.best_full();
+                            let peak_partial = last_partial.trim();
+                            let resolved = resolve_utterance_text_with_best(
+                                &queued,
+                                final_text.as_deref(),
+                                if best_full.is_empty() {
+                                    None
+                                } else {
+                                    Some(best_full)
+                                },
+                                if peak_partial.is_empty() {
+                                    None
+                                } else {
+                                    Some(peak_partial)
+                                },
+                            );
+                            if let Some(text) = resolved {
+                                let normalized = normalize_asr_transcript(&text);
+                                info!(
+                                    utterance_id = utt_id,
+                                    text = %normalized,
+                                    asr_final = ?asr_final_log,
+                                    "utterance complete: queue text concat"
+                                );
+                                last_final = Some(normalized);
+                                asr_final_at = Some(Instant::now());
+                                last_partial.clear();
+                                utterance_transcript.clear();
+                                if matches!(wake_phase, WakePhase::AwakeGrace { .. }) {
+                                    wake_phase = WakePhase::Active;
+                                }
+                                maybe_trigger(
+                                    &orch,
+                                    &mut state,
+                                    session_start,
+                                    cold_start,
+                                    &mut vad,
+                                    &mut last_final,
+                                    &mut asr_final_at,
+                                    &mut messages,
+                                    &llm,
+                                    tts.clone(),
+                                    &playback,
+                                    &play_gen,
+                                    &mut llm_cancel,
+                                    &mut active_turn,
+                                    &done_tx,
+                                    &current_latency,
+                                    &turn_epoch,
+                                    asr.clone(),
+                                    wake_enabled,
+                                    &sleep_phrases,
+                                    &self.cfg.llm,
+                                    hermes_sender_for_spawn.clone(),
+                                    &mut wake_phase,
+                                    &mut asr_rx,
+                                    &mut partial_stable_since,
+                                    &mut last_partial,
+                                    &mut speaker_gate,
+                                    &mut speaker_verify_buffer,
+                                    speaker_verify_gate,
+                                    &mut pending_hermes_msgs,
+                                )
+                                .await;
+                                if has_pending_utterance_trigger(
+                                    &last_final,
+                                    &asr_final_at,
+                                    &active_turn,
+                                ) {
+                                    info!(
+                                        user = last_final.as_deref().unwrap_or(""),
+                                        output_busy =
+                                            is_output_busy(state, &playback, &active_turn),
+                                        wake_phase = ?wake_phase,
+                                        "utterance ready: deferred LLM trigger (retry when playback idle)"
+                                    );
+                                }
+                                if active_turn.is_none() {
+                                    try_play_one_pending_hermes(
+                                        &mut pending_hermes_msgs,
+                                        false,
+                                        &mut messages,
+                                        &llm,
+                                        tts.clone(),
+                                        &playback,
+                                        &play_gen,
+                                        &turn_epoch,
+                                        &done_tx,
+                                        &mut state,
+                                        &mut active_turn,
+                                        &mut llm_cancel,
+                                        &orch,
+                                        &self.cfg.llm,
+                                    )
+                                    .await;
+                                }
+                                utterance_pipeline.clear_after_llm();
+                                utterance_transcript.clear();
+                                sealed_utterance_id = None;
+                            } else {
+                                warn!(
+                                    utterance_id = utt_id,
+                                    "utterance complete: no ASR final after queue flush"
+                                );
+                                last_final = None;
+                                sealed_utterance_id = None;
+                                utterance_pipeline.clear_after_llm();
+                                if active_turn.is_none() {
+                                    try_play_one_pending_hermes(
+                                        &mut pending_hermes_msgs,
+                                        false,
+                                        &mut messages,
+                                        &llm,
+                                        tts.clone(),
+                                        &playback,
+                                        &play_gen,
+                                        &turn_epoch,
+                                        &done_tx,
+                                        &mut state,
+                                        &mut active_turn,
+                                        &mut llm_cancel,
+                                        &orch,
+                                        &self.cfg.llm,
+                                    )
+                                    .await;
                                 }
                             }
-                            maybe_trigger(
-                                &orch,
-                                &mut state,
-                                session_start,
-                                cold_start,
-                                &mut vad,
-                                &mut last_final,
-                                &mut asr_final_at,
-                                &mut messages,
-                                &llm,
-                                tts.clone(),
-                                &playback,
-                                &play_gen,
-                                &mut llm_cancel,
-                                &mut active_turn,
-                                &done_tx,
-                                &current_latency,
-                                &turn_epoch,
-                                asr.clone(),
-                                wake_enabled,
-                                &sleep_phrases,
-                                &self.cfg.llm,
-                                hermes_sender_for_spawn.clone(),
-                                &mut wake_phase,
-                                &mut asr_rx,
-                                &mut partial_stable_since,
-                                &mut last_partial,
-                                &mut speaker_gate,
-                                &mut speaker_verify_buffer,
-                                speaker_verify_gate,
-                            )
-                            .await;
+                            drain_stale_asr_events(&mut asr_rx);
                             if state == SessionState::Listening && active_turn.is_none() {
                                 input_gated = false;
                             }
                             continue;
                         }
-
-                        if last_asr_event_at.map_or(true, |t| t.elapsed() >= Duration::from_millis(asr_settle_ms)) {
-                            maybe_trigger(
+                        #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                        {
+                        if let Err(e) = asr.finish_utterance().await {
+                            warn!(error = %e, "finish_utterance failed");
+                        }
+                        utterance_active = false;
+                        settle_asr_after_flush(
+                            &mut asr_rx,
+                            &mut last_final,
+                            &mut asr_final_at,
+                            &mut last_partial,
+                            &mut partial_stable_since,
+                            &mut last_asr_event_at,
+                            asr_settle_ms,
+                        )
+                        .await;
+                        maybe_trigger(
                             &orch,
                             &mut state,
                             session_start,
@@ -845,116 +1111,229 @@ impl Session {
                             &mut speaker_gate,
                             &mut speaker_verify_buffer,
                             speaker_verify_gate,
+                            &mut pending_hermes_msgs,
                         )
                         .await;
+                        if active_turn.is_none() {
+                            try_play_one_pending_hermes(
+                                &mut pending_hermes_msgs,
+                                false,
+                                &mut messages,
+                                &llm,
+                                tts.clone(),
+                                &playback,
+                                &play_gen,
+                                &turn_epoch,
+                                &done_tx,
+                                &mut state,
+                                &mut active_turn,
+                                &mut llm_cancel,
+                                &orch,
+                                &self.cfg.llm,
+                            )
+                            .await;
+                        }
+                        if state == SessionState::Listening && active_turn.is_none() {
+                            input_gated = false;
+                        }
+                        continue;
                         }
                     }
-                    ev = asr_rx.recv() => {
-                        if let Some(ev) = ev {
-                            match ev {
-                                AsrEvent::Partial { text } => {
-                                    if utterance_active && wake_phase.allows_asr() {
-                                        info!(
-                                            partial = %text,
-                                            state = ?state,
-                                            wake_phase = ?wake_phase,
-                                            "asr partial"
-                                        );
-                                    } else {
-                                        debug!(
-                                            partial = %text,
-                                            state = ?state,
-                                            wake_phase = ?wake_phase,
-                                            "asr partial"
-                                        );
+
+                    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                    let periodic_trigger_ok = has_pending_utterance_trigger(
+                        &last_final,
+                        &asr_final_at,
+                        &active_turn,
+                    );
+                    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                    let periodic_trigger_ok = true;
+
+                    if periodic_trigger_ok
+                        && last_asr_event_at
+                            .map_or(true, |t| t.elapsed() >= Duration::from_millis(asr_settle_ms))
+                    {
+                        maybe_trigger(
+                        &orch,
+                        &mut state,
+                        session_start,
+                        cold_start,
+                        &mut vad,
+                        &mut last_final,
+                        &mut asr_final_at,
+                        &mut messages,
+                        &llm,
+                        tts.clone(),
+                        &playback,
+                        &play_gen,
+                        &mut llm_cancel,
+                        &mut active_turn,
+                        &done_tx,
+                        &current_latency,
+                        &turn_epoch,
+                        asr.clone(),
+                        wake_enabled,
+                        &sleep_phrases,
+                        &self.cfg.llm,
+                        hermes_sender_for_spawn.clone(),
+                        &mut wake_phase,
+                        &mut asr_rx,
+                        &mut partial_stable_since,
+                        &mut last_partial,
+                        &mut speaker_gate,
+                        &mut speaker_verify_buffer,
+                        speaker_verify_gate,
+                        &mut pending_hermes_msgs,
+                    )
+                    .await;
+                    }
+                }
+                ev = asr_rx.recv() => {
+                    if let Some(ev) = ev {
+                        match ev {
+                            AsrEvent::Partial { text, full } => {
+                                #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                                if asr_echo_cooldown_until
+                                    .is_some_and(|t| Instant::now() < t)
+                                {
+                                    continue;
+                                }
+                                if utterance_active && wake_phase.allows_asr() {
+                                    info!(
+                                        partial = %text,
+                                        state = ?state,
+                                        wake_phase = ?wake_phase,
+                                        "asr partial"
+                                    );
+                                } else {
+                                    debug!(
+                                        partial = %text,
+                                        state = ?state,
+                                        wake_phase = ?wake_phase,
+                                        "asr partial"
+                                    );
+                                }
+                                last_asr_event_at = Some(Instant::now());
+                                #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                                {
+                                    if !utterance_pipeline.is_open() {
+                                        continue;
                                     }
-                                    last_asr_event_at = Some(Instant::now());
-                                    if speaker_verify_gate && vad.speech_start() && speaker_gate == SpeakerGate::Idle {
-                                        speaker_gate = SpeakerGate::Verifying;
-                                        speaker_verify_buffer.clear();
+                                    drain_feed_acks(
+                                        &mut feed_ack_rx,
+                                        &utterance_pipeline,
+                                        &mut utterance_transcript,
+                                    );
+                                    utterance_transcript.append_hypothesis(&text, full.as_deref());
+                                    let assembled = utterance_transcript.concat();
+                                    let prev_len = last_partial.chars().count();
+                                    bump_longest_transcript(
+                                        &mut last_partial,
+                                        &[&text, full.as_deref().unwrap_or(""), &assembled],
+                                    );
+                                    if last_partial.chars().count() != prev_len {
+                                        partial_stable_since = Some(Instant::now());
                                     }
-                                    if user_speech_activity(
-                                        &mut vad,
-                                        Some(&text),
-                                        orch.min_final_chars,
-                                        &wake_phase,
-                                        orch.grace_min_final_chars,
-                                    ) {
-                                        if promote_wake_on_speech_with_asr(
-                                            &mut wake_phase,
-                                            asr.clone(),
+                                }
+                                #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                                {
+                                    last_partial = text.clone();
+                                }
+                                if speaker_verify_gate && vad.speech_start() && speaker_gate == SpeakerGate::Idle {
+                                    speaker_gate = SpeakerGate::Verifying;
+                                    speaker_verify_buffer.clear();
+                                }
+                                if user_speech_activity(
+                                    &mut vad,
+                                    Some(&text),
+                                    orch.min_final_chars,
+                                    &wake_phase,
+                                    orch.grace_min_final_chars,
+                                ) {
+                                    if promote_wake_on_speech_with_asr(
+                                        &mut wake_phase,
+                                        asr.clone(),
+                                        wake_enabled,
+                                    )
+                                    .await
+                                    {
+                                        partial_stable_since = None;
+                                        last_partial.clear();
+                                    }
+                                }
+                                if !wake_phase.allows_dialog() {
+                                    continue;
+                                }
+                                if orch.barge_in_enabled
+                                    && is_output_busy(state, &playback, &active_turn)
+                                {
+                                    if !wake_enabled || !orch.barge_in_requires_wake {
+                                        let ack_reply = barge_in_ack_reply(
                                             wake_enabled,
+                                            &wake_cfg.ack_reply,
+                                            active_turn.is_some(),
+                                        );
+                                        if try_barge_in(
+                                            "asr-partial",
+                                            &orch,
+                                            &mut state,
+                                            &mut vad,
+                                            &playback,
+                                            &play_gen,
+                                            &mut llm_cancel,
+                                            &mut messages,
+                                            &mut active_turn,
+                                            &mut partial_stable_since,
+                                            &mut last_partial,
+                                            &current_latency,
+                                            &turn_epoch,
+                                            tts.clone(),
+                                            Some(text.as_str()),
+                                            &mut last_barge_in_at,
+                                            &speaker_verifier,
+                                            &recent_audio,
+                                            &mut speaker_gate,
+                                            &mut speaker_verify_buffer,
+                                            speaker_verify_gate,
+                                            asr.clone(),
+                                            &mut wake_phase,
+                                            wake_enabled,
+                                            ack_reply,
+                                            #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                                            RockchipBargeInReset {
+                                                input_gated: &mut input_gated,
+                                                utterance_active: &mut utterance_active,
+                                                asr_echo_cooldown_until: &mut asr_echo_cooldown_until,
+                                                utterance_pipeline: &mut utterance_pipeline,
+                                                utterance_transcript: &mut utterance_transcript,
+                                                sealed_utterance_id: &mut sealed_utterance_id,
+                                                last_final: &mut last_final,
+                                                asr_rx: &mut asr_rx,
+                                            },
                                         )
                                         .await
                                         {
-                                            partial_stable_since = None;
-                                            last_partial.clear();
+                                            last_partial = text;
+                                            continue;
+                                        }
+                                    } else {
+                                        let now = Instant::now();
+                                        if last_barge_in_suppress_warn
+                                            .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
+                                        {
+                                            warn!(
+                                                phrases = ?wake_cfg.effective_phrases(),
+                                                "wake word required to barge-in"
+                                            );
+                                            last_barge_in_suppress_warn = Some(now);
                                         }
                                     }
-                                    if !wake_phase.allows_dialog() {
-                                        continue;
-                                    }
-                                    if orch.barge_in_enabled
-                                        && is_output_busy(state, &playback, &active_turn)
-                                    {
-                                        if !wake_enabled || !orch.barge_in_requires_wake {
-                                            let (ack_reply, ack_playing_flag, ack_done_tx) =
-                                                barge_in_ack_args(
-                                                    wake_enabled,
-                                                    &wake_cfg,
-                                                    &wake_ack_playing,
-                                                    &wake_ack_done_tx,
-                                                );
-                                            if let Some(ack_playing) = try_barge_in(
-                                                "asr-partial",
-                                                &orch,
-                                                &mut state,
-                                                &mut vad,
-                                                &playback,
-                                                &play_gen,
-                                                &mut llm_cancel,
-                                                &mut active_turn,
-                                                &mut partial_stable_since,
-                                                &mut last_partial,
-                                                &current_latency,
-                                                &turn_epoch,
-                                                tts.clone(),
-                                                Some(text.as_str()),
-                                                &mut last_barge_in_at,
-                                                &speaker_verifier,
-                                                &recent_audio,
-                                                &mut speaker_gate,
-                                                &mut speaker_verify_buffer,
-                                                speaker_verify_gate,
-                                                asr.clone(),
-                                                &mut wake_phase,
-                                                wake_enabled,
-                                                ack_reply,
-                                                ack_playing_flag,
-                                                ack_done_tx,
-                                            )
-                                            .await
-                                            {
-                                                input_gated = ack_playing;
-                                                last_partial = text;
-                                                continue;
-                                            }
-                                        } else {
-                                            let now = Instant::now();
-                                            if last_barge_in_suppress_warn
-                                                .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
-                                            {
-                                                warn!(
-                                                    phrases = ?wake_cfg.effective_phrases(),
-                                                    "wake word required to barge-in"
-                                                );
-                                                last_barge_in_suppress_warn = Some(now);
-                                            }
-                                        }
-                                    }
-                                    if orch.speculative_llm
-                                        && state == SessionState::Listening
-                                        && wake_phase.allows_dialog()
+                                }
+                                if orch.speculative_llm
+                                    && state == SessionState::Listening
+                                    && wake_phase.allows_dialog()
+                                {
+                                    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
                                     {
                                         if text == last_partial {
                                             // unchanged
@@ -962,332 +1341,269 @@ impl Session {
                                             last_partial = text.clone();
                                             partial_stable_since = Some(Instant::now());
                                         }
-                                        if let Some(since) = partial_stable_since {
-                                            if since.elapsed() >= Duration::from_millis(orch.speculative_stable_ms as u64)
-                                                && text.trim().chars().count() >= orch.min_final_chars
-                                                && active_turn.is_none()
-                                            {
-                                                if matches_sleep_keyword(&text, &sleep_phrases) {
-                                                    apply_sleep_keyword(
-                                                        &text,
-                                                        wake_enabled,
-                                                        asr.clone(),
-                                                        tts.clone(),
-                                                        &playback,
-                                                        &play_gen,
-                                                        &turn_epoch,
-                                                        &mut llm_cancel,
-                                                        &mut wake_phase,
-                                                        &mut state,
-                                                        &mut active_turn,
-                                                        &mut last_final,
-                                                        &mut asr_final_at,
-                                                        &mut partial_stable_since,
-                                                        &mut last_partial,
-                                                        &current_latency,
-                                                        &mut asr_rx,
-                                                        &mut speaker_gate,
-                                                        &mut speaker_verify_buffer,
-                                                        speaker_verify_gate,
-                                                    )
-                                                    .await;
-                                                    continue;
-                                                }
-                                                info!(%text, "speculative llm start");
-                                                start_reply_turn(
-                                                    text,
-                                                    None,
-                                                    false,
-                                                    true,
-                                                    &orch,
-                                                    &mut state,
-                                                    &mut messages,
-                                                    &llm,
+                                    }
+                                    let spec_text = last_partial.as_str();
+                                    if let Some(since) = partial_stable_since {
+                                        if since.elapsed()
+                                            >= Duration::from_millis(orch.speculative_stable_ms as u64)
+                                            && spec_text.trim().chars().count() >= orch.min_final_chars
+                                            && active_turn.is_none()
+                                        {
+                                            #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                                            if matches_sleep_keyword(spec_text, &sleep_phrases) {
+                                                apply_sleep_keyword(
+                                                    &text,
+                                                    wake_enabled,
+                                                    asr.clone(),
                                                     tts.clone(),
                                                     &playback,
                                                     &play_gen,
-                                                    &mut llm_cancel,
-                                                    &mut active_turn,
-                                                    &done_tx,
-                                                    &current_latency,
                                                     &turn_epoch,
-                                                    asr.clone(),
-                                                    wake_enabled,
-                                                    &sleep_phrases,
-                                                    &self.cfg.llm,
-                                                    hermes_sender_for_spawn.clone(),
+                                                    &mut llm_cancel,
                                                     &mut wake_phase,
-                                                    &mut asr_rx,
+                                                    &mut state,
+                                                    &mut active_turn,
                                                     &mut last_final,
                                                     &mut asr_final_at,
                                                     &mut partial_stable_since,
                                                     &mut last_partial,
+                                                    &current_latency,
+                                                    &mut asr_rx,
                                                     &mut speaker_gate,
                                                     &mut speaker_verify_buffer,
                                                     speaker_verify_gate,
                                                 )
                                                 .await;
-                }
-            }
-                                    }
-                                }
-                                AsrEvent::Final { text } => {
-                                    info!(
-                                        final_text = %text,
-                                        last_final = %last_final.as_deref().unwrap_or("none"),
-                                        state = ?state,
-                                        wake_phase = ?wake_phase,
-                                        allows_dialog = wake_phase.allows_dialog(),
-                                        "asr final"
-                                    );
-                                    if matches_sleep_keyword(&text, &sleep_phrases) {
-                                        apply_sleep_keyword(
-                                            &text,
-                                            wake_enabled,
-                                            asr.clone(),
-                                            tts.clone(),
-                                            &playback,
-                                            &play_gen,
-                                            &turn_epoch,
-                                            &mut llm_cancel,
-                                            &mut wake_phase,
-                                            &mut state,
-                                            &mut active_turn,
-                                            &mut last_final,
-                                            &mut asr_final_at,
-                                            &mut partial_stable_since,
-                                            &mut last_partial,
-                                            &current_latency,
-                                            &mut asr_rx,
-                                            &mut speaker_gate,
-                                            &mut speaker_verify_buffer,
-                                            speaker_verify_gate,
-                                        )
-                                        .await;
-                                        continue;
-                                    }
-                                    if speaker_verify_gate && vad.speech_start() && speaker_gate == SpeakerGate::Idle {
-                                        speaker_gate = SpeakerGate::Verifying;
-                                        speaker_verify_buffer.clear();
-                                    }
-                                    if user_speech_activity(
-                                        &mut vad,
-                                        Some(&text),
-                                        orch.min_final_chars,
-                                        &wake_phase,
-                                        orch.grace_min_final_chars,
-                                    ) {
-                                        if promote_wake_on_speech_with_asr(
-                                            &mut wake_phase,
-                                            asr.clone(),
-                                            wake_enabled,
-                                        )
-                                        .await
-                                        {
-                                            partial_stable_since = None;
-                                            last_partial.clear();
-                                        }
-                                    }
-                                    if wake_phase.check_timeout(Instant::now()) {
-                                        enter_dormant(
-                                            asr.clone(),
-                                            &mut wake_phase,
-                                            &mut state,
-                                            &mut active_turn,
-                                            &mut last_final,
-                                            &mut asr_final_at,
-                                            &mut partial_stable_since,
-                                            &mut last_partial,
-                                            &mut llm_cancel,
-                                            &current_latency,
-                                            &mut asr_rx,
-                                            &mut speaker_gate,
-                                            &mut speaker_verify_buffer,
-                                            speaker_verify_gate,
-                                        )
-                                        .await;
-                                        continue;
-                                    }
-                                    if !wake_phase.allows_dialog() {
-                                        let sep = if last_final.as_deref().is_some_and(|s| !s.ends_with(['\n', ' '])) { " " } else { "" };
-                                        last_final = Some(match last_final.take() {
-                                            Some(prev) => format!("{prev}{sep}{text}"),
-                                            None => text,
-                                        });
-                                        asr_final_at = Some(Instant::now());
-                                        continue;
-                                    }
-                                    if orch.barge_in_enabled
-                                        && is_output_busy(state, &playback, &active_turn)
-                                    {
-                                        if !wake_enabled || !orch.barge_in_requires_wake {
-                                            let (ack_reply, ack_playing_flag, ack_done_tx) =
-                                                barge_in_ack_args(
-                                                    wake_enabled,
-                                                    &wake_cfg,
-                                                    &wake_ack_playing,
-                                                    &wake_ack_done_tx,
-                                                );
-                                            if let Some(ack_playing) = try_barge_in(
-                                                "asr-final",
+                                                continue;
+                                            }
+                                            info!(text = %spec_text, "speculative llm start");
+                                            let context_checkpoint = messages.len();
+                                            start_reply_turn(
+                                                spec_text.to_string(),
+                                                None,
+                                                false,
+                                                true,
+                                                context_checkpoint,
                                                 &orch,
                                                 &mut state,
-                                                &mut vad,
+                                                &mut messages,
+                                                &llm,
+                                                tts.clone(),
                                                 &playback,
                                                 &play_gen,
                                                 &mut llm_cancel,
                                                 &mut active_turn,
-                                                &mut partial_stable_since,
-                                                &mut last_partial,
+                                                &done_tx,
                                                 &current_latency,
                                                 &turn_epoch,
-                                                tts.clone(),
-                                                Some(text.as_str()),
-                                                &mut last_barge_in_at,
-                                                &speaker_verifier,
-                                                &recent_audio,
+                                                asr.clone(),
+                                                wake_enabled,
+                                                &sleep_phrases,
+                                                &self.cfg.llm,
+                                                hermes_sender_for_spawn.clone(),
+                                                &mut wake_phase,
+                                                &mut asr_rx,
+                                                &mut last_final,
+                                                &mut asr_final_at,
+                                                &mut partial_stable_since,
+                                                &mut last_partial,
                                                 &mut speaker_gate,
                                                 &mut speaker_verify_buffer,
                                                 speaker_verify_gate,
-                                                asr.clone(),
-                                                &mut wake_phase,
-                                                wake_enabled,
-                                                ack_reply,
-                                                ack_playing_flag,
-                                                ack_done_tx,
                                             )
-                                            .await
-                                            {
-                                                input_gated = ack_playing;
-                                                // Accumulate rather than replace — user may still be speaking
-                                                let sep = if last_final.as_deref().is_some_and(|s| !s.ends_with(['\n', ' '])) { " " } else { "" };
-                                                last_final = Some(match last_final.take() {
-                                                    Some(prev) => format!("{prev}{sep}{text}"),
-                                                    None => text,
-                                                });
-                                                asr_final_at = Some(Instant::now());
-                                                continue;
-                                            }
-                                        } else {
-                                            let now = Instant::now();
-                                            if last_barge_in_suppress_warn
-                                                .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
-                                            {
-                                                warn!(
-                                                    phrases = ?wake_cfg.effective_phrases(),
-                                                    "wake word required to barge-in"
-                                                );
-                                                last_barge_in_suppress_warn = Some(now);
-                                            }
+                                            .await;
                                         }
                                     }
+                                }
+                            }
+                            AsrEvent::Final { text } => {
+                                info!(
+                                    final_text = %text,
+                                    last_final = %last_final.as_deref().unwrap_or("none"),
+                                    state = ?state,
+                                    wake_phase = ?wake_phase,
+                                    allows_dialog = wake_phase.allows_dialog(),
+                                    "asr final"
+                                );
+                                #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                                {
+                                    debug!(
+                                        final_text = %text,
+                                        state = ?state,
+                                        sealed = ?sealed_utterance_id,
+                                        "asr final (rockchip): ignored; LLM only after queue+flush"
+                                    );
+                                    continue;
+                                }
+                                #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                                {
+                                if matches_sleep_keyword(&text, &sleep_phrases) {
+                                    apply_sleep_keyword(
+                                        &text,
+                                        wake_enabled,
+                                        asr.clone(),
+                                        tts.clone(),
+                                        &playback,
+                                        &play_gen,
+                                        &turn_epoch,
+                                        &mut llm_cancel,
+                                        &mut wake_phase,
+                                        &mut state,
+                                        &mut active_turn,
+                                        &mut last_final,
+                                        &mut asr_final_at,
+                                        &mut partial_stable_since,
+                                        &mut last_partial,
+                                        &current_latency,
+                                        &mut asr_rx,
+                                        &mut speaker_gate,
+                                        &mut speaker_verify_buffer,
+                                        speaker_verify_gate,
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                                if speaker_verify_gate && vad.speech_start() && speaker_gate == SpeakerGate::Idle {
+                                    speaker_gate = SpeakerGate::Verifying;
+                                    speaker_verify_buffer.clear();
+                                }
+                                if user_speech_activity(
+                                    &mut vad,
+                                    Some(&text),
+                                    orch.min_final_chars,
+                                    &wake_phase,
+                                    orch.grace_min_final_chars,
+                                ) {
+                                    if promote_wake_on_speech_with_asr(
+                                        &mut wake_phase,
+                                        asr.clone(),
+                                        wake_enabled,
+                                    )
+                                    .await
+                                    {
+                                        partial_stable_since = None;
+                                        last_partial.clear();
+                                    }
+                                }
+                                if wake_phase.check_timeout(Instant::now()) {
+                                    enter_dormant(
+                                        asr.clone(),
+                                        &mut wake_phase,
+                                        &mut state,
+                                        &mut active_turn,
+                                        &mut last_final,
+                                        &mut asr_final_at,
+                                        &mut partial_stable_since,
+                                        &mut last_partial,
+                                        &mut llm_cancel,
+                                        &current_latency,
+                                        &mut asr_rx,
+                                        &mut speaker_gate,
+                                        &mut speaker_verify_buffer,
+                                        speaker_verify_gate,
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                                if !wake_phase.allows_dialog() {
+                                    last_final = Some(normalize_asr_transcript(&text));
                                     asr_final_at = Some(Instant::now());
-                                    last_asr_event_at = Some(Instant::now());
-                                    partial_stable_since = None;
-                                    last_partial.clear();
-
-                                    if let Some(ref turn) = active_turn {
-                                        if turn.speculative && texts_compatible(&turn.user_text, &text) {
-                                            info!("speculative text matches final");
-                                            last_final = None;
-                                        } else if turn.speculative {
-                                            info!("speculative mismatch; restart with final");
-                                            if let Some(c) = llm_cancel.take() {
-                                                c.cancel();
-                                            }
-                                            if messages.last().map(|m| m.role.as_str()) == Some("user") {
-                                                messages.pop();
-                                            }
-                                            active_turn = None;
-                                            state = SessionState::Listening;
-                                            input_gated = false;
-                                            last_final = Some(text);
-                                            maybe_trigger(
-                                                &orch, &mut state, session_start, cold_start,
-                                                &mut vad, &mut last_final, &mut asr_final_at,
-                                                &mut messages, &llm, tts.clone(), &playback, &play_gen,
-                                                &mut llm_cancel, &mut active_turn, &done_tx,
-                                                &current_latency,
-                                                &turn_epoch,
-                                                asr.clone(),
-                                                wake_enabled,
-                                                &sleep_phrases,
-                                                &self.cfg.llm,
-                                                hermes_sender_for_spawn.clone(),
-                                                &mut wake_phase,
-                                                &mut asr_rx,
-                                                &mut partial_stable_since,
-                                                &mut last_partial,
-                                                &mut speaker_gate,
-                                                &mut speaker_verify_buffer,
-                                                speaker_verify_gate,
-                                            ).await;
-                                        } else if !wake_enabled || !orch.barge_in_requires_wake {
-                                            let prev_user_text = turn.user_text.clone();
-                                            info!(prev = %prev_user_text, final_text = %text, "restarting turn with complete final text");
-                                            if let Some(c) = llm_cancel.take() {
-                                                c.cancel();
-                                            }
-                                            if messages.last().map(|m| m.role.as_str()) == Some("user") {
-                                                messages.pop();
-                                            }
-                                            active_turn = None;
-                                            state = SessionState::Listening;
-                                            input_gated = false;
-                                            let sep = if last_final.as_deref().is_some_and(|s| !s.ends_with(['\n', ' '])) { " " } else { "" };
-                                            let combined = match last_final.take() {
-                                                Some(prev) => format!("{prev}{sep}{text}"),
-                                                None => {
-                                                    let sep2 = if !text.starts_with(['\n', ' ']) && !prev_user_text.ends_with(['\n', ' ']) { " " } else { "" };
-                                                    format!("{}{}{}", prev_user_text, sep2, text)
-                                                }
-                                            };
-                                            last_final = Some(combined);
-                                            maybe_trigger(
-                                                &orch, &mut state, session_start, cold_start,
-                                                &mut vad, &mut last_final, &mut asr_final_at,
-                                                &mut messages, &llm, tts.clone(), &playback, &play_gen,
-                                                &mut llm_cancel, &mut active_turn, &done_tx,
-                                                &current_latency,
-                                                &turn_epoch,
-                                                asr.clone(),
-                                                wake_enabled,
-                                                &sleep_phrases,
-                                                &self.cfg.llm,
-                                                hermes_sender_for_spawn.clone(),
-                                                &mut wake_phase,
-                                                &mut asr_rx,
-                                                &mut partial_stable_since,
-                                                &mut last_partial,
-                                                &mut speaker_gate,
-                                                &mut speaker_verify_buffer,
-                                                speaker_verify_gate,
-                                            ).await;
-                                        } else {
-                                            // Wake word required to interrupt — save text for next turn
-                                            let sep = if last_final.as_deref().is_some_and(|s| !s.ends_with(['\n', ' '])) { " " } else { "" };
-                                            last_final = Some(match last_final.take() {
-                                                Some(prev) => format!("{prev}{sep}{text}"),
-                                                None => text,
-                                            });
+                                    continue;
+                                }
+                                if orch.barge_in_enabled
+                                    && is_output_busy(state, &playback, &active_turn)
+                                {
+                                    if !wake_enabled || !orch.barge_in_requires_wake {
+                                        let ack_reply = barge_in_ack_reply(
+                                            wake_enabled,
+                                            &wake_cfg.ack_reply,
+                                            active_turn.is_some(),
+                                        );
+                                        if try_barge_in(
+                                            "asr-final",
+                                            &orch,
+                                            &mut state,
+                                            &mut vad,
+                                            &playback,
+                                            &play_gen,
+                                            &mut llm_cancel,
+                                            &mut messages,
+                                            &mut active_turn,
+                                            &mut partial_stable_since,
+                                            &mut last_partial,
+                                            &current_latency,
+                                            &turn_epoch,
+                                            tts.clone(),
+                                            Some(text.as_str()),
+                                            &mut last_barge_in_at,
+                                            &speaker_verifier,
+                                            &recent_audio,
+                                            &mut speaker_gate,
+                                            &mut speaker_verify_buffer,
+                                            speaker_verify_gate,
+                                            asr.clone(),
+                                            &mut wake_phase,
+                                            wake_enabled,
+                                            ack_reply,
+                                            #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                                            RockchipBargeInReset {
+                                                input_gated: &mut input_gated,
+                                                utterance_active: &mut utterance_active,
+                                                asr_echo_cooldown_until: &mut asr_echo_cooldown_until,
+                                                utterance_pipeline: &mut utterance_pipeline,
+                                                utterance_transcript: &mut utterance_transcript,
+                                                sealed_utterance_id: &mut sealed_utterance_id,
+                                                last_final: &mut last_final,
+                                                asr_rx: &mut asr_rx,
+                                            },
+                                        )
+                                        .await
+                                        {
+                                            // Accumulate rather than replace — user may still be speaking
+                                            last_final = Some(normalize_asr_transcript(&text));
+                                            asr_final_at = Some(Instant::now());
+                                            continue;
                                         }
                                     } else {
-                                        // Accumulate ASR text regardless of state.
-                                        // When Speaking/TTS playing, text is saved so the next
-                                        // Listening cycle picks up the full utterance.
-                                        let sep = if last_final.as_deref().is_some_and(|s| !s.ends_with(['\n', ' '])) { " " } else { "" };
-                                        last_final = Some(match last_final.take() {
-                                            Some(prev) => format!("{prev}{sep}{text}"),
-                                            None => text,
-                                        });
+                                        let now = Instant::now();
+                                        if last_barge_in_suppress_warn
+                                            .is_none_or(|t| now.duration_since(t).as_secs() >= 3)
+                                        {
+                                            warn!(
+                                                phrases = ?wake_cfg.effective_phrases(),
+                                                "wake word required to barge-in"
+                                            );
+                                            last_barge_in_suppress_warn = Some(now);
+                                        }
                                     }
-                                    if state == SessionState::Listening && active_turn.is_none() {
+                                }
+                                asr_final_at = Some(Instant::now());
+                                last_asr_event_at = Some(Instant::now());
+                                last_partial.clear();
+
+                                if let Some(ref turn) = active_turn {
+                                    if turn.speculative && texts_compatible(&turn.user_text, &text) {
+                                        info!("speculative text matches final");
+                                        last_final = None;
+                                    } else if turn.speculative {
+                                        info!("speculative mismatch; restart with final");
+                                        if let Some(c) = llm_cancel.take() {
+                                            c.cancel();
+                                        }
+                                        if messages.last().map(|m| m.role.as_str()) == Some("user") {
+                                            messages.pop();
+                                        }
+                                        active_turn = None;
+                                        state = SessionState::Listening;
+                                        input_gated = false;
+                                        last_final = Some(normalize_asr_transcript(&text));
                                         maybe_trigger(
                                             &orch, &mut state, session_start, cold_start,
                                             &mut vad, &mut last_final, &mut asr_final_at,
                                             &mut messages, &llm, tts.clone(), &playback, &play_gen,
                                             &mut llm_cancel, &mut active_turn, &done_tx,
-                                            &current_latency, &turn_epoch,
+                                            &current_latency,
+                                            &turn_epoch,
                                             asr.clone(),
                                             wake_enabled,
                                             &sleep_phrases,
@@ -1300,194 +1616,279 @@ impl Session {
                                             &mut speaker_gate,
                                             &mut speaker_verify_buffer,
                                             speaker_verify_gate,
+                                            &mut pending_hermes_msgs,
                                         ).await;
+                                    } else if !wake_enabled
+                                        || !orch.barge_in_requires_wake
+                                        || crate::orchestrator::utterance_likely_incomplete(&turn.user_text)
+                                    {
+                                        let prev_user_text = turn.user_text.clone();
+                                        let continuing =
+                                            crate::orchestrator::utterance_likely_incomplete(&prev_user_text);
+                                        info!(
+                                            prev = %prev_user_text,
+                                            final_text = %text,
+                                            continuing,
+                                            "restarting turn with complete final text"
+                                        );
+                                        if let Some(c) = llm_cancel.take() {
+                                            c.cancel();
+                                        }
+                                        turn_epoch.fetch_add(1, Ordering::SeqCst);
+                                        play_gen.fetch_add(1, Ordering::SeqCst);
+                                        if messages.last().map(|m| m.role.as_str()) == Some("user") {
+                                            messages.pop();
+                                        }
+                                        active_turn = None;
+                                        state = SessionState::Listening;
+                                        input_gated = false;
+                                        let combined = normalize_asr_transcript(&text);
+                                        info!(combined = %combined, "utterance text for retrigger");
+                                        last_final = Some(combined);
+                                        maybe_trigger(
+                                            &orch, &mut state, session_start, cold_start,
+                                            &mut vad, &mut last_final, &mut asr_final_at,
+                                            &mut messages, &llm, tts.clone(), &playback, &play_gen,
+                                            &mut llm_cancel, &mut active_turn, &done_tx,
+                                            &current_latency,
+                                            &turn_epoch,
+                                            asr.clone(),
+                                            wake_enabled,
+                                            &sleep_phrases,
+                                            &self.cfg.llm,
+                                            hermes_sender_for_spawn.clone(),
+                                            &mut wake_phase,
+                                            &mut asr_rx,
+                                            &mut partial_stable_since,
+                                            &mut last_partial,
+                                            &mut speaker_gate,
+                                            &mut speaker_verify_buffer,
+                                            speaker_verify_gate,
+                                            &mut pending_hermes_msgs,
+                                        ).await;
+                                    } else {
+                                        // Wake word required to interrupt — save text for next turn
+                                        last_final = Some(normalize_asr_transcript(&text));
                                     }
+                                } else {
+                                    // Accumulate ASR text regardless of state.
+                                    // When Speaking/TTS playing, text is saved so the next
+                                    // Listening cycle picks up the full utterance.
+                                    last_final = Some(normalize_asr_transcript(&text));
                                 }
-                                AsrEvent::TaskFailed { message } => {
-                        if wake_phase.allows_asr() && state == SessionState::Listening {
-                                        warn!(%message, "asr failed");
-                                    }
+                                if state == SessionState::Listening && active_turn.is_none() {
+                                    maybe_trigger(
+                                        &orch, &mut state, session_start, cold_start,
+                                        &mut vad, &mut last_final, &mut asr_final_at,
+                                        &mut messages, &llm, tts.clone(), &playback, &play_gen,
+                                        &mut llm_cancel, &mut active_turn, &done_tx,
+                                        &current_latency, &turn_epoch,
+                                        asr.clone(),
+                                        wake_enabled,
+                                        &sleep_phrases,
+                                        &self.cfg.llm,
+                                        hermes_sender_for_spawn.clone(),
+                                        &mut wake_phase,
+                                        &mut asr_rx,
+                                        &mut partial_stable_since,
+                                        &mut last_partial,
+                                        &mut speaker_gate,
+                                        &mut speaker_verify_buffer,
+                                        speaker_verify_gate,
+                                        &mut pending_hermes_msgs,
+                                    ).await;
                                 }
-                                _ => {}
+                                } // non-rockchip asr final
                             }
+                            AsrEvent::TaskFailed { message } => {
+                    if wake_phase.allows_asr() && state == SessionState::Listening {
+                                    warn!(%message, "asr failed");
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    done = done_rx.recv() => {
-                        if let Some((text, epoch, shutup_requested)) = done {
-                            if !text.trim().is_empty() {
+                }
+                done = done_rx.recv() => {
+                    if let Some(done) = done {
+                        let stream_turn::TurnDone {
+                            assistant_text,
+                            epoch,
+                            shutup,
+                            tts_spoken,
+                        } = done;
+                        let context_checkpoint =
+                            active_turn.as_ref().map(|t| t.context_checkpoint);
+                        if epoch == turn_epoch.load(Ordering::SeqCst) {
+                            if tts_spoken && !assistant_text.trim().is_empty() {
                                 messages.push(ChatMessage {
                                     role: "assistant".to_string(),
-                                    content: text,
+                                    content: assistant_text,
                                     tool_calls: None,
                                     tool_call_id: None,
                                 });
-                                if orch.max_context_messages > 0 && messages.len() > orch.max_context_messages {
+                                if orch.max_context_messages > 0
+                                    && messages.len() > orch.max_context_messages
+                                {
                                     let excess = messages.len() - orch.max_context_messages;
                                     messages.drain(..excess);
                                 }
-                            }
-                            if epoch == turn_epoch.load(Ordering::SeqCst) {
-                                state = SessionState::Listening;
-                                active_turn = None;
-                                last_final = None;
-                                asr_final_at = None;
-                                partial_stable_since = None;
-                                last_partial.clear();
-                                last_asr_event_at = None;
-                                input_gated = false;
-                                speaker_gate = SpeakerGate::Idle;
-                                if !speaker_verify_gate {
-                                    speaker_gate = SpeakerGate::Passed;
-                                }
-                                speaker_verify_buffer.clear();
-                                *current_latency.lock().unwrap() = None;
-                                if shutup_requested && wake_enabled {
-                                    let _ = asr.set_gate(true).await;
-                                    let _ = asr.pause().await;
-                                    // drain pending ASR events
-                                    while asr_rx.try_recv().is_ok() {}
-                                    wake_phase = WakePhase::Dormant;
-                                    info!("shutup requested -> dormant; say wake word to resume");
-                                } else if wake_enabled {
-                                    wake_phase = WakePhase::IdleAfterTurn {
-                                        deadline: Instant::now() + idle_after_turn,
-                                    };
-                                    if !open_asr_for_user_speech(asr.clone(), wake_enabled).await {
-                                        warn!("IdleAfterTurn: failed to reopen ASR for follow-up speech");
-                                    }
-                                    info!(
-                                        idle_sec = wake_cfg.idle_after_turn_sec,
-                                        "back to listening; idle timeout started"
-                                    );
-                                } else {
-                                    wake_phase = WakePhase::Active;
-                                    info!("back to listening");
-                                }
-                                // Process any pending hermes messages
-                                if let Some(msg) = pending_hermes_msgs.pop_front() {
-                                    info!(
-                                        request_id = %msg.request_id,
-                                        text = %msg.text,
-                                        "hermes: processing pending message"
-                                    );
-                                    let was_dormant = false; // deferred from a busy state → never dormant
-                                    handle_hermes_result(
-                                        was_dormant,
-                                        msg,
-                                        &mut messages,
-                                        &llm,
-                                        tts.clone(),
-                                        &playback,
-                                        &play_gen,
-                                        &turn_epoch,
-                                        &done_tx,
-                                        &mut state,
-                                        &mut active_turn,
-                                        &mut llm_cancel,
-                                        &orch,
-                                        &self.cfg.llm,
-                                    )
-                                    .await;
+                            } else if !tts_spoken {
+                                if let Some(cp) = context_checkpoint {
+                                    rollback_turn_context(&mut messages, cp);
                                 }
                             }
-                        }
-                    }
-                    msg = hermes_msg_rx.recv() => {
-                        if let Some(msg) = msg {
-                            info!(
-                                request_id = %msg.request_id,
-                                status = %msg.status,
-                                text = %msg.text,
-                                "hermes: message received"
-                            );
-                            if state == SessionState::Listening && active_turn.is_none() {
-                                let was_dormant = matches!(wake_phase, WakePhase::Dormant);
-                                handle_hermes_result(
-                                    was_dormant,
-                                    msg,
-                                    &mut messages,
-                                    &llm,
-                                    tts.clone(),
-                                    &playback,
-                                    &play_gen,
-                                    &turn_epoch,
-                                    &done_tx,
-                                    &mut state,
-                                    &mut active_turn,
-                                    &mut llm_cancel,
-                                    &orch,
-                                    &self.cfg.llm,
-                                )
-                                .await;
-                            } else {
-                                info!(request_id = %msg.request_id, text = %msg.text, "hermes: deferring message (busy)");
-                                pending_hermes_msgs.push_back(msg);
-                            }
-                        }
-                    }
-                    _ = wake_ack_done_rx.recv() => {
-                        wake_ack_playing.store(false, Ordering::SeqCst);
-                        if resume_asr_with_retry(asr.clone()).await {
-                            let _ = asr.set_gate(false).await;
-                            let _ = asr.reconnect().await;
-                            input_gated = false;
-                            utterance_active = false;
+                            state = SessionState::Listening;
+                            active_turn = None;
                             last_final = None;
                             asr_final_at = None;
                             partial_stable_since = None;
                             last_partial.clear();
-                            vad.reset_barge_in_state();
-                            pending_offline_flush = None;
-                            if matches!(wake_phase, WakePhase::Active) {
-                                wake_phase = WakePhase::AwakeGrace {
-                                    deadline: Instant::now() + grace_after_wake,
-                                };
+                            last_asr_event_at = None;
+                            input_gated = false;
+                            speaker_gate = SpeakerGate::Idle;
+                            #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                            {
+                                utterance_pipeline.clear_after_llm();
+                                utterance_transcript.clear();
+                                sealed_utterance_id = None;
+                                asr_echo_cooldown_until = Some(
+                                    Instant::now()
+                                        + Duration::from_millis(
+                                            stream_turn::ROCKCHIP_POST_TURN_ASR_COOLDOWN_MS,
+                                        ),
+                                );
+                                drain_stale_asr_events(&mut asr_rx);
                             }
-                            info!("wake ack done; ASR listening for user speech");
-                        } else {
-                            warn!("wake ack done but ASR resume failed; returning to dormant");
-                            enter_dormant(
-                                asr.clone(),
-                                &mut wake_phase,
+                            if !speaker_verify_gate {
+                                speaker_gate = SpeakerGate::Passed;
+                            }
+                            speaker_verify_buffer.clear();
+                            *current_latency.lock().unwrap() = None;
+                            if (shutup || wake_cfg.idle_after_turn_sec == 0) && wake_enabled {
+                                let _ = asr.set_gate(true).await;
+                                let _ = asr.pause().await;
+                                // drain pending ASR events
+                                while asr_rx.try_recv().is_ok() {}
+                                wake_phase = WakePhase::Dormant;
+                                if shutup {
+                                    info!("shutup requested -> dormant; say wake word to resume");
+                                } else {
+                                    info!(
+                                        "turn complete -> dormant (idle_after_turn_sec=0); say wake word to resume"
+                                    );
+                                }
+                            } else if wake_enabled {
+                                wake_phase = WakePhase::IdleAfterTurn {
+                                    deadline: Instant::now() + idle_after_turn,
+                                };
+                                #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                                stream_turn::reopen_asr_after_turn(asr.clone(), wake_enabled).await;
+                                #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                                if !open_asr_for_user_speech(asr.clone(), wake_enabled).await {
+                                    warn!(
+                                        "IdleAfterTurn: failed to reopen ASR for follow-up speech"
+                                    );
+                                }
+                                info!(
+                                    idle_sec = wake_cfg.idle_after_turn_sec,
+                                    "back to listening; idle timeout started"
+                                );
+                            } else {
+                                wake_phase = WakePhase::Active;
+                                info!("back to listening");
+                            }
+                            // Process any pending hermes messages
+                            try_play_one_pending_hermes(
+                                &mut pending_hermes_msgs,
+                                false,
+                                &mut messages,
+                                &llm,
+                                tts.clone(),
+                                &playback,
+                                &play_gen,
+                                &turn_epoch,
+                                &done_tx,
                                 &mut state,
                                 &mut active_turn,
-                                &mut last_final,
-                                &mut asr_final_at,
-                                &mut partial_stable_since,
-                                &mut last_partial,
                                 &mut llm_cancel,
-                                &current_latency,
-                                &mut asr_rx,
-                                &mut speaker_gate,
-                                &mut speaker_verify_buffer,
-                                speaker_verify_gate,
+                                &orch,
+                                &self.cfg.llm,
                             )
                             .await;
-                        }
-                    }
-                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                        if wake_phase.check_timeout(Instant::now()) {
-                            enter_dormant(
-                                asr.clone(),
-                                &mut wake_phase,
-                                &mut state,
-                                &mut active_turn,
-                                &mut last_final,
-                                &mut asr_final_at,
-                                &mut partial_stable_since,
-                                &mut last_partial,
-                                &mut llm_cancel,
-                                &current_latency,
-                                &mut asr_rx,
-                                &mut speaker_gate,
-                                &mut speaker_verify_buffer,
-                                speaker_verify_gate,
-                            )
-                            .await;
-                            continue;
                         }
                     }
                 }
+                msg = hermes_msg_rx.recv() => {
+                    if let Some(msg) = msg {
+                        info!(
+                            request_id = %msg.request_id,
+                            status = %msg.status,
+                            text = %msg.text,
+                            "hermes: message received"
+                        );
+                        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+                        let user_speaking = user_speech_in_progress_rockchip(
+                            utterance_active,
+                            &vad,
+                            &utterance_pipeline,
+                        );
+                        #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+                        let user_speaking = user_speech_in_progress(utterance_active, &vad);
+                        if should_defer_hermes(user_speaking, state, &active_turn) {
+                            info!(
+                                request_id = %msg.request_id,
+                                text = %msg.text,
+                                user_speaking,
+                                state = ?state,
+                                "hermes: deferring message"
+                            );
+                            pending_hermes_msgs.push_back(msg);
+                        } else {
+                            let was_dormant = matches!(wake_phase, WakePhase::Dormant);
+                            handle_hermes_result(
+                                was_dormant,
+                                msg,
+                                &mut messages,
+                                &llm,
+                                tts.clone(),
+                                &playback,
+                                &play_gen,
+                                &turn_epoch,
+                                &done_tx,
+                                &mut state,
+                                &mut active_turn,
+                                &mut llm_cancel,
+                                &orch,
+                                &self.cfg.llm,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if wake_phase.check_timeout(Instant::now()) {
+                        enter_dormant(
+                            asr.clone(),
+                            &mut wake_phase,
+                            &mut state,
+                            &mut active_turn,
+                            &mut last_final,
+                            &mut asr_final_at,
+                            &mut partial_stable_since,
+                            &mut last_partial,
+                            &mut llm_cancel,
+                            &current_latency,
+                            &mut asr_rx,
+                            &mut speaker_gate,
+                            &mut speaker_verify_buffer,
+                            speaker_verify_gate,
+                        )
+                        .await;
+                        continue;
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -1501,13 +1902,22 @@ fn user_speech_activity(
     wake_phase: &WakePhase,
     grace_min_chars: usize,
 ) -> bool {
-    if vad.speech_start() || vad.in_speech() {
-        return true;
-    }
     let in_grace = matches!(
         *wake_phase,
         WakePhase::AwakeGrace { .. } | WakePhase::IdleAfterTurn { .. }
     );
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+    {
+        if !in_grace && (vad.speech_start() || vad.in_speech()) {
+            return true;
+        }
+    }
+    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+    {
+        if vad.speech_start() || vad.in_speech() {
+            return true;
+        }
+    }
     let min = if in_grace { grace_min_chars } else { min_chars };
     text.is_some_and(|t| t.trim().chars().count() >= min)
 }
@@ -1550,7 +1960,11 @@ fn tool_calls_from_stream_map(map: &HashMap<u32, AccumulatedToolCall>) -> Vec<To
     indices
         .into_iter()
         .filter_map(|idx| {
-            map.get(&idx).map(|acc| ToolCall {
+            let acc = map.get(&idx)?;
+            if acc.name.trim().is_empty() {
+                return None;
+            }
+            Some(ToolCall {
                 id: if acc.id.is_empty() {
                     format!("call_{idx}")
                 } else {
@@ -1564,6 +1978,10 @@ fn tool_calls_from_stream_map(map: &HashMap<u32, AccumulatedToolCall>) -> Vec<To
             })
         })
         .collect()
+}
+
+fn has_actionable_tool_deltas(map: &HashMap<u32, AccumulatedToolCall>) -> bool {
+    map.values().any(|acc| !acc.name.trim().is_empty())
 }
 
 fn core_tool_call_to_talk(tc: hermes_core::ToolCall) -> ToolCall {
@@ -1581,12 +1999,256 @@ fn core_tool_call_to_talk(tc: hermes_core::ToolCall) -> ToolCall {
     }
 }
 
-/// Whether assistant `content` tokens may be streamed to TTS on this LLM round.
-fn assistant_content_tts_allowed(round: u32, tools_enabled: bool, buf: &str) -> bool {
-    if round == 0 && tools_enabled {
-        return false;
+async fn append_tts_text(tts: &Arc<dyn TtsEngine>, text: &str, tts_sent: &mut bool) {
+    let normalized = normalize_tts_text(text);
+    if normalized.trim().is_empty() {
+        return;
     }
-    hermes_core::speakable_tts_prefix_end(buf) == buf.len()
+    match tts.append_text(&normalized).await {
+        Ok(()) => *tts_sent = true,
+        Err(e) => warn!(error = %e, %normalized, "tts append failed"),
+    }
+}
+
+async fn drain_tts_buf(
+    tts: &Arc<dyn TtsEngine>,
+    tts_buf: &mut String,
+    tts_first_chunk: usize,
+    sentence_min: usize,
+    sent_early: &mut bool,
+    tts_sent: &mut bool,
+) {
+    if !*sent_early {
+        if let Some(chunk) = take_early_chunk(tts_buf, tts_first_chunk) {
+            info!(%chunk, "tts early chunk");
+            append_tts_text(tts, &chunk, tts_sent).await;
+            *sent_early = true;
+        }
+    }
+    while let Some(sentence) = take_sentence(tts_buf, sentence_min) {
+        info!(%sentence, "tts sentence");
+        append_tts_text(tts, &sentence, tts_sent).await;
+    }
+    if let Some(rest) = flush_remainder(tts_buf) {
+        append_tts_text(tts, &rest, tts_sent).await;
+    }
+}
+
+async fn speak_plain_assistant_reply(
+    tts: &Arc<dyn TtsEngine>,
+    plain: &str,
+    tts_first_chunk: usize,
+    sentence_min: usize,
+    tts_sent: &mut bool,
+) {
+    let plain = strip_think_blocks(plain);
+    if plain.trim().is_empty() {
+        return;
+    }
+    let mut stripper = IncrementalThinkStripper::new();
+    let cleaned = stripper.push(&plain);
+    let tail = stripper.flush();
+    let mut buf = format!("{cleaned}{tail}");
+    if buf.trim().is_empty() {
+        return;
+    }
+    info!(
+        chars = buf.chars().count(),
+        "tts speaking plain assistant reply"
+    );
+    let mut sent_early = false;
+    drain_tts_buf(
+        tts,
+        &mut buf,
+        tts_first_chunk,
+        sentence_min,
+        &mut sent_early,
+        tts_sent,
+    )
+    .await;
+}
+
+fn flush_llm_reasoning_log(round: u32, reasoning_buf: &mut String, emitted: &mut bool) {
+    if *emitted || reasoning_buf.trim().is_empty() {
+        reasoning_buf.clear();
+        return;
+    }
+    info!(
+        round,
+        chars = reasoning_buf.chars().count(),
+        reasoning = %reasoning_buf.trim(),
+        "llm reasoning"
+    );
+    *emitted = true;
+    reasoning_buf.clear();
+}
+
+fn flush_llm_content_log(round: u32, content: &str, emitted: &mut bool) {
+    if *emitted || content.trim().is_empty() {
+        return;
+    }
+    info!(
+        round,
+        chars = content.chars().count(),
+        content = %content.trim(),
+        "llm assistant content"
+    );
+    *emitted = true;
+}
+
+/// Split assistant `content` into reasoning (inline think blocks) and TTS/log speakable text.
+fn prepare_llm_speakable_text(
+    raw: &str,
+    reasoning_buf: &mut String,
+    reasoning_log_emitted: &mut bool,
+    round: u32,
+) -> String {
+    let inline = extract_inline_thinking(raw);
+    if !inline.trim().is_empty() {
+        if !reasoning_buf.trim().is_empty() {
+            reasoning_buf.push('\n');
+        }
+        reasoning_buf.push_str(inline.trim());
+        flush_llm_reasoning_log(round, reasoning_buf, reasoning_log_emitted);
+    }
+    strip_think_blocks(raw)
+}
+
+fn log_llm_tool_calls(round: u32, tool_calls: &[ToolCall]) {
+    for tc in tool_calls {
+        info!(
+            round,
+            tool = %tc.function.name,
+            args = %tc.function.arguments,
+            "llm tool_call"
+        );
+    }
+}
+
+fn resolve_asr_last_final(last_final: &mut Option<String>, last_partial: &str) {
+    if last_partial.trim().is_empty() {
+        return;
+    }
+    let normalized = normalize_asr_transcript(last_partial);
+    if last_final.as_deref() != Some(normalized.as_str()) {
+        if let Some(prev) = last_final.as_ref() {
+            info!(prev = %prev, resolved = %normalized, "asr: use latest partial");
+        }
+        *last_final = Some(normalized);
+    }
+}
+
+#[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+fn drain_stale_asr_events(asr_rx: &mut mpsc::Receiver<AsrEvent>) {
+    let mut dropped = 0usize;
+    while asr_rx.try_recv().is_ok() {
+        dropped += 1;
+    }
+    if dropped > 0 {
+        debug!(dropped, "asr: drained stale events between utterances");
+    }
+}
+
+#[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+fn drain_feed_acks(
+    feed_ack_rx: &mut mpsc::Receiver<(u64, u64)>,
+    utterance_pipeline: &UtterancePipeline,
+    utterance_transcript: &mut UtteranceTranscript,
+) {
+    while let Ok((id, seq)) = feed_ack_rx.try_recv() {
+        if id == utterance_pipeline.utterance_id() {
+            utterance_transcript.on_slice_fed(id, seq);
+        }
+    }
+}
+
+#[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+async fn rockchip_open_utterance(
+    asr: &Arc<dyn AsrEngine>,
+    pipeline: &mut UtterancePipeline,
+    transcript: &mut UtteranceTranscript,
+    sealed_utterance_id: &mut Option<u64>,
+    last_final: &mut Option<String>,
+    last_partial: &mut String,
+    asr_rx: &mut mpsc::Receiver<AsrEvent>,
+) {
+    if pipeline.is_open() {
+        return;
+    }
+    drain_stale_asr_events(asr_rx);
+    pipeline.begin();
+    transcript.reset(pipeline.utterance_id());
+    *sealed_utterance_id = None;
+    *last_final = None;
+    last_partial.clear();
+    if let Err(e) = asr.begin_utterance().await {
+        warn!(error = %e, "begin_utterance failed");
+    }
+}
+
+/// Block until RK streaming ASR emits Final after `finish_utterance`.
+async fn wait_rockchip_asr_final(
+    asr_rx: &mut mpsc::Receiver<AsrEvent>,
+    timeout_ms: u64,
+) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, asr_rx.recv()).await {
+            Ok(Some(AsrEvent::Final { text })) => return Some(text),
+            Ok(Some(AsrEvent::Partial { text, .. })) => {
+                debug!(partial = %text, "asr partial while waiting for final");
+            }
+            Ok(Some(AsrEvent::TaskFailed { message })) => {
+                warn!(%message, "asr failed while waiting for final");
+                return None;
+            }
+            Ok(Some(AsrEvent::TaskStarted)) | Ok(None) => return None,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+async fn settle_asr_after_flush(
+    asr_rx: &mut mpsc::Receiver<AsrEvent>,
+    last_final: &mut Option<String>,
+    asr_final_at: &mut Option<Instant>,
+    last_partial: &mut String,
+    partial_stable_since: &mut Option<Instant>,
+    last_asr_event_at: &mut Option<Instant>,
+    settle_ms: u64,
+) {
+    let deadline = Instant::now() + Duration::from_millis(settle_ms);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, asr_rx.recv()).await {
+            Ok(Some(AsrEvent::Final { text })) => {
+                info!(
+                    final_text = %text,
+                    last_final = ?last_final,
+                    "asr final (post-flush settle)"
+                );
+                *last_final = Some(normalize_asr_transcript(&text));
+                *asr_final_at = Some(Instant::now());
+                *last_asr_event_at = Some(Instant::now());
+                *partial_stable_since = None;
+                last_partial.clear();
+            }
+            Ok(Some(AsrEvent::Partial { text, .. })) => {
+                debug!(partial = %text, "asr partial (post-flush settle)");
+                *last_partial = text;
+                *last_asr_event_at = Some(Instant::now());
+            }
+            Ok(Some(AsrEvent::TaskFailed { .. })) | Ok(None) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    resolve_asr_last_final(last_final, last_partial);
 }
 
 fn ready_to_flush_asr(
@@ -1632,7 +2294,10 @@ async fn promote_wake_on_speech_with_asr(
     wake_enabled: bool,
 ) -> bool {
     if promote_wake_on_speech(wake) {
-        let _ = open_asr_for_user_speech(asr, wake_enabled).await;
+        #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+        {
+            let _ = open_asr_for_user_speech(asr, wake_enabled).await;
+        }
         true
     } else {
         false
@@ -1808,24 +2473,19 @@ async fn play_wake_ack(
     playback.wait_drain(Duration::from_secs(15)).await;
 }
 
-fn barge_in_ack_args<'a>(
-    wake_enabled: bool,
-    wake_cfg: &'a crate::config::WakeConfig,
-    wake_ack_playing: &'a Arc<AtomicBool>,
-    wake_ack_done_tx: &mpsc::Sender<()>,
-) -> (
-    Option<&'a str>,
-    Option<&'a Arc<AtomicBool>>,
-    Option<mpsc::Sender<()>>,
+fn spawn_wake_ack(
+    text: String,
+    tts: Arc<dyn TtsEngine>,
+    playback: Arc<AudioPlayback>,
+    play_gen: Arc<AtomicU64>,
 ) {
-    if !wake_enabled || wake_cfg.ack_reply.trim().is_empty() {
-        return (None, None, None);
-    }
-    (
-        Some(wake_cfg.ack_reply.as_str()),
-        Some(wake_ack_playing),
-        Some(wake_ack_done_tx.clone()),
-    )
+    tokio::spawn(async move {
+        play_wake_ack(&text, tts, &playback, &play_gen).await;
+    });
+}
+
+fn is_llm_turn_busy(state: SessionState, active_turn: &Option<ActiveTurn>) -> bool {
+    active_turn.is_some() || matches!(state, SessionState::Thinking | SessionState::Speaking)
 }
 
 fn is_output_busy(
@@ -1833,9 +2493,118 @@ fn is_output_busy(
     playback: &AudioPlayback,
     active_turn: &Option<ActiveTurn>,
 ) -> bool {
-    matches!(state, SessionState::Thinking | SessionState::Speaking)
-        || active_turn.is_some()
+    is_llm_turn_busy(state, active_turn)
         || playback.buffered_samples() > playback.sample_rate() as usize / 10
+}
+
+/// Rockchip: utterance flush produced text but LLM has not started yet.
+fn has_pending_utterance_trigger(
+    last_final: &Option<String>,
+    asr_final_at: &Option<Instant>,
+    active_turn: &Option<ActiveTurn>,
+) -> bool {
+    last_final.is_some() && asr_final_at.is_some() && active_turn.is_none()
+}
+
+fn barge_in_ack_reply<'a>(
+    wake_enabled: bool,
+    ack: &'a str,
+    llm_turn_busy: bool,
+) -> Option<&'a str> {
+    if wake_enabled && llm_turn_busy && !ack.trim().is_empty() {
+        Some(ack)
+    } else {
+        None
+    }
+}
+
+#[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+struct RockchipBargeInReset<'a> {
+    input_gated: &'a mut bool,
+    utterance_active: &'a mut bool,
+    asr_echo_cooldown_until: &'a mut Option<Instant>,
+    utterance_pipeline: &'a mut UtterancePipeline,
+    utterance_transcript: &'a mut UtteranceTranscript,
+    sealed_utterance_id: &'a mut Option<u64>,
+    last_final: &'a mut Option<String>,
+    asr_rx: &'a mut mpsc::Receiver<AsrEvent>,
+}
+
+#[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+fn rockchip_reset_after_barge_in(rk: RockchipBargeInReset<'_>, echo_cooldown: bool) {
+    *rk.input_gated = false;
+    *rk.utterance_active = false;
+    rk.utterance_pipeline.clear_after_llm();
+    rk.utterance_transcript.clear();
+    *rk.sealed_utterance_id = None;
+    *rk.last_final = None;
+    drain_stale_asr_events(rk.asr_rx);
+    *rk.asr_echo_cooldown_until = echo_cooldown.then(|| {
+        Instant::now() + Duration::from_millis(stream_turn::ROCKCHIP_POST_TURN_ASR_COOLDOWN_MS)
+    });
+}
+
+#[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+async fn rockchip_reopen_asr_after_barge_in(
+    asr: Arc<dyn AsrEngine>,
+    wake_enabled: bool,
+    echo_cooldown: bool,
+    rk: RockchipBargeInReset<'_>,
+) {
+    rockchip_reset_after_barge_in(rk, echo_cooldown);
+    if wake_enabled {
+        let _ = asr.set_gate(true).await;
+    }
+    if let Err(e) = asr.begin_utterance().await {
+        warn!(error = %e, "begin_utterance after barge-in failed");
+    }
+    info!(echo_cooldown, "rockchip ASR reopened for user speech");
+}
+
+/// Stop wake ack / leftover playback so mic+ASR can capture the user — no LLM cancel, no ack replay.
+#[allow(clippy::too_many_arguments)]
+async fn interrupt_playback_for_user_speech(
+    playback: &Arc<AudioPlayback>,
+    play_gen: &Arc<AtomicU64>,
+    tts: Arc<dyn TtsEngine>,
+    vad: &mut VadEngine,
+    asr: Arc<dyn AsrEngine>,
+    wake_enabled: bool,
+    wake_phase: &mut WakePhase,
+    state: &mut SessionState,
+    last_partial: &mut String,
+    partial_stable_since: &mut Option<Instant>,
+    speaker_gate: &mut SpeakerGate,
+    speaker_verify_buffer: &mut Vec<f32>,
+    speaker_verify_gate: bool,
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))] rk: RockchipBargeInReset<'_>,
+) {
+    playback.stop_clear();
+    play_gen.store(playback.current_generation(), Ordering::SeqCst);
+    if let Err(e) = tts.interrupt_turn().await {
+        warn!(error = %e, "tts interrupt on playback-only interrupt failed");
+    }
+    vad.reset_barge_in_state();
+    if matches!(wake_phase, WakePhase::AwakeGrace { .. }) {
+        *wake_phase = WakePhase::Active;
+    }
+    *state = SessionState::Listening;
+    last_partial.clear();
+    *partial_stable_since = None;
+    *speaker_gate = SpeakerGate::Idle;
+    if !speaker_verify_gate {
+        *speaker_gate = SpeakerGate::Passed;
+    }
+    speaker_verify_buffer.clear();
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+    {
+        rockchip_reopen_asr_after_barge_in(asr.clone(), wake_enabled, false, rk).await;
+    }
+    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+    {
+        let _ = open_asr_for_user_speech(asr, wake_enabled).await;
+    }
+    info!("playback interrupted; ready for user speech");
 }
 
 async fn do_barge_in(
@@ -1849,6 +2618,7 @@ async fn do_barge_in(
     wake_enabled: bool,
     wake_phase: &mut WakePhase,
     state: &mut SessionState,
+    messages: &mut Vec<ChatMessage>,
     active_turn: &mut Option<ActiveTurn>,
     current_latency: &Arc<std::sync::Mutex<Option<Arc<TurnLatency>>>>,
     last_partial: &mut String,
@@ -1858,16 +2628,31 @@ async fn do_barge_in(
     speaker_verify_buffer: &mut Vec<f32>,
     speaker_verify_gate: bool,
     ack_reply: Option<&str>,
-    wake_ack_playing: Option<&Arc<AtomicBool>>,
-    wake_ack_done_tx: Option<mpsc::Sender<()>>,
-) -> bool {
-    *last_barge_in_at = Some(Instant::now());
-    turn_epoch.fetch_add(1, Ordering::SeqCst);
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))] rk: RockchipBargeInReset<'_>,
+) {
+    // 1. Stop speaker output immediately — before any await or other work.
     playback.stop_clear();
     play_gen.store(playback.current_generation(), Ordering::SeqCst);
+
+    *last_barge_in_at = Some(Instant::now());
+
+    if let Some(turn) = active_turn.as_ref() {
+        rollback_turn_context(messages, turn.context_checkpoint);
+    }
+
+    // 2. Stop in-flight LLM stream.
     if let Some(c) = llm_cancel.take() {
         c.cancel();
     }
+
+    // 3. Stop TTS synthesis and discard buffered text.
+    if let Err(e) = tts.interrupt_turn().await {
+        warn!(error = %e, "tts interrupt on barge-in failed");
+    }
+
+    // 4. Drop stale PCM still in the TTS pump channel (playback stays stopped).
+    turn_epoch.fetch_add(1, Ordering::SeqCst);
+
     vad.reset_barge_in_state();
     *wake_phase = WakePhase::Active;
     *state = SessionState::Listening;
@@ -1881,35 +2666,27 @@ async fn do_barge_in(
     }
     speaker_verify_buffer.clear();
 
-    let has_ack = ack_reply.is_some_and(|s| !s.trim().is_empty());
-    if has_ack {
-        if let (Some(flag), Some(done_tx)) = (wake_ack_playing, wake_ack_done_tx) {
-            flag.store(true, Ordering::SeqCst);
-            let _ = asr.set_gate(true).await;
-            let ack = ack_reply.unwrap().trim().to_string();
-            info!(reply = %ack, "barge-in ack");
-            let tts_ack = tts.clone();
-            let playback_ack = playback.clone();
-            let play_gen_ack = play_gen.clone();
-            tokio::spawn(async move {
-                if let Err(e) = tts_ack.interrupt_turn().await {
-                    warn!(error = %e, "tts interrupt on barge-in failed");
-                }
-                play_wake_ack(&ack, tts_ack, &playback_ack, &play_gen_ack).await;
-                let _ = done_tx.send(()).await;
-            });
-            return true;
-        }
+    // 5. Ack TTS+playback on a background task; do not block ASR reopen.
+    if let Some(ack) = ack_reply.filter(|s| !s.trim().is_empty()) {
+        info!(reply = %ack.trim(), "barge-in ack (spawned)");
+        spawn_wake_ack(
+            ack.trim().to_string(),
+            tts.clone(),
+            playback.clone(),
+            play_gen.clone(),
+        );
     }
 
-    let tts_int = tts.clone();
-    tokio::spawn(async move {
-        if let Err(e) = tts_int.interrupt_turn().await {
-            warn!(error = %e, "tts interrupt on barge-in failed");
-        }
-    });
-    let _ = open_asr_for_user_speech(asr, wake_enabled).await;
-    false
+    // 6. Reopen mic/ASR immediately (echo cooldown only when barge-in ack will play).
+    let echo_cooldown = ack_reply.is_some();
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+    {
+        rockchip_reopen_asr_after_barge_in(asr.clone(), wake_enabled, echo_cooldown, rk).await;
+    }
+    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+    {
+        let _ = open_asr_for_user_speech(asr, wake_enabled).await;
+    }
 }
 
 fn asr_indicates_barge_in(text: &str, active_turn: &Option<ActiveTurn>, min_chars: usize) -> bool {
@@ -1932,6 +2709,7 @@ async fn try_barge_in(
     playback: &Arc<AudioPlayback>,
     play_gen: &Arc<AtomicU64>,
     llm_cancel: &mut Option<CancellationToken>,
+    messages: &mut Vec<ChatMessage>,
     active_turn: &mut Option<ActiveTurn>,
     partial_stable_since: &mut Option<Instant>,
     last_partial: &mut String,
@@ -1949,11 +2727,10 @@ async fn try_barge_in(
     wake_phase: &mut WakePhase,
     wake_enabled: bool,
     ack_reply: Option<&str>,
-    wake_ack_playing: Option<&Arc<AtomicBool>>,
-    wake_ack_done_tx: Option<mpsc::Sender<()>>,
-) -> Option<bool> {
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))] rk: RockchipBargeInReset<'_>,
+) -> bool {
     if !orch.barge_in_enabled || !is_output_busy(*state, playback, active_turn) {
-        return None;
+        return false;
     }
 
     let vad_hit = vad.speech_start()
@@ -1964,16 +2741,16 @@ async fn try_barge_in(
         .unwrap_or(false);
 
     if !vad_hit && !asr_hit {
-        return None;
+        return false;
     }
 
     if orch.min_rms_barge_in > 0.0 && vad.last_rms() < orch.min_rms_barge_in {
-        return None;
+        return false;
     }
 
     if let Some(last) = *last_barge_in_at {
         if last.elapsed().as_millis() < orch.barge_in_cooldown_ms as u128 {
-            return None;
+            return false;
         }
     }
 
@@ -1982,13 +2759,36 @@ async fn try_barge_in(
             let sample_rate = 16000u32;
             let audio: Vec<f32> = recent_audio.iter().copied().collect();
             if !audio.is_empty() && !sv.verify(&audio, sample_rate) {
-                return None;
+                return false;
             }
         }
     }
 
+    if !is_llm_turn_busy(*state, active_turn) {
+        info!(reason, vad_hit, asr_hit, "playback-only interrupt");
+        interrupt_playback_for_user_speech(
+            playback,
+            play_gen,
+            tts,
+            vad,
+            asr,
+            wake_enabled,
+            wake_phase,
+            state,
+            last_partial,
+            partial_stable_since,
+            speaker_gate,
+            speaker_verify_buffer,
+            speaker_verify_gate,
+            #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+            rk,
+        )
+        .await;
+        return true;
+    }
+
     info!(reason, vad_hit, asr_hit, "barge-in");
-    let ack_playing = do_barge_in(
+    do_barge_in(
         turn_epoch,
         playback,
         play_gen,
@@ -1999,6 +2799,7 @@ async fn try_barge_in(
         wake_enabled,
         wake_phase,
         state,
+        messages,
         active_turn,
         current_latency,
         last_partial,
@@ -2008,11 +2809,142 @@ async fn try_barge_in(
         speaker_verify_buffer,
         speaker_verify_gate,
         ack_reply,
-        wake_ack_playing,
-        wake_ack_done_tx,
+        #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+        rk,
     )
     .await;
-    Some(ack_playing)
+    true
+}
+
+fn hermes_message_accepted(status: &str) -> bool {
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+    {
+        stream_turn::hermes_status_accepted(status)
+    }
+    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+    {
+        status == "final" || status == "error" || status == "ok"
+    }
+}
+
+fn user_speech_in_progress(utterance_active: bool, vad: &VadEngine) -> bool {
+    utterance_active || vad.in_speech()
+}
+
+#[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+fn user_speech_in_progress_rockchip(
+    utterance_active: bool,
+    vad: &VadEngine,
+    utterance_pipeline: &UtterancePipeline,
+) -> bool {
+    user_speech_in_progress(utterance_active, vad) || utterance_pipeline.is_open()
+}
+
+fn should_defer_hermes(
+    user_speaking: bool,
+    state: SessionState,
+    active_turn: &Option<ActiveTurn>,
+) -> bool {
+    user_speaking || state != SessionState::Listening || active_turn.is_some()
+}
+
+fn append_hermes_to_messages(
+    messages: &mut Vec<ChatMessage>,
+    msg: &HermesMessage,
+    merged_with_user: bool,
+) -> bool {
+    if !hermes_message_accepted(&msg.status) {
+        return false;
+    }
+    messages.push(ChatMessage {
+        role: "tool".to_string(),
+        content: msg.text.clone(),
+        tool_calls: None,
+        tool_call_id: Some(msg.request_id.clone()),
+    });
+    let system_content = if merged_with_user {
+        format!(
+            "hermes 返回了查询结果（request_id={}），请用自然口语向用户播报这个结果；若用户刚才也说了话，请一并回应",
+            msg.request_id
+        )
+    } else {
+        format!(
+            "hermes 返回了查询结果（request_id={}），请用自然口语向用户播报这个结果",
+            msg.request_id
+        )
+    };
+    messages.push(ChatMessage {
+        role: "system".to_string(),
+        content: system_content,
+        tool_calls: None,
+        tool_call_id: None,
+    });
+    true
+}
+
+fn take_one_pending_hermes_for_turn(
+    pending: &mut VecDeque<HermesMessage>,
+    messages: &mut Vec<ChatMessage>,
+) -> bool {
+    while let Some(msg) = pending.pop_front() {
+        if append_hermes_to_messages(messages, &msg, true) {
+            return true;
+        }
+        warn!(
+            request_id = %msg.request_id,
+            status = %msg.status,
+            "hermes: skipping non-final pending message"
+        );
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn try_play_one_pending_hermes(
+    pending: &mut VecDeque<HermesMessage>,
+    was_dormant: bool,
+    messages: &mut Vec<ChatMessage>,
+    llm: &Arc<dyn LlmClient>,
+    tts: Arc<dyn TtsEngine>,
+    playback: &Arc<AudioPlayback>,
+    play_gen: &Arc<AtomicU64>,
+    turn_epoch: &Arc<AtomicU64>,
+    done_tx: &mpsc::Sender<stream_turn::TurnDone>,
+    state: &mut SessionState,
+    active_turn: &mut Option<ActiveTurn>,
+    llm_cancel: &mut Option<CancellationToken>,
+    orch: &OrchestratorConfig,
+    llm_cfg: &LlmConfig,
+) -> bool {
+    while let Some(msg) = pending.pop_front() {
+        if !hermes_message_accepted(&msg.status) {
+            warn!(
+                request_id = %msg.request_id,
+                status = %msg.status,
+                "hermes: skipping non-final pending message"
+            );
+            continue;
+        }
+        handle_hermes_result(
+            was_dormant,
+            msg,
+            messages,
+            llm,
+            tts,
+            playback,
+            play_gen,
+            turn_epoch,
+            done_tx,
+            state,
+            active_turn,
+            llm_cancel,
+            orch,
+            llm_cfg,
+        )
+        .await;
+        return true;
+    }
+    false
 }
 
 async fn maybe_trigger(
@@ -2030,7 +2962,7 @@ async fn maybe_trigger(
     play_gen: &Arc<AtomicU64>,
     llm_cancel: &mut Option<CancellationToken>,
     active_turn: &mut Option<ActiveTurn>,
-    done_tx: &mpsc::Sender<(String, u64, bool)>,
+    done_tx: &mpsc::Sender<stream_turn::TurnDone>,
     current_latency: &Arc<std::sync::Mutex<Option<Arc<TurnLatency>>>>,
     turn_epoch: &Arc<AtomicU64>,
     asr: Arc<dyn AsrEngine>,
@@ -2045,7 +2977,12 @@ async fn maybe_trigger(
     speaker_gate: &mut SpeakerGate,
     speaker_verify_buffer: &mut Vec<f32>,
     speaker_verify_gate: bool,
+    pending_hermes_msgs: &mut VecDeque<HermesMessage>,
 ) {
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+    if asr_final_at.is_none() {
+        return;
+    }
     if *state != SessionState::Listening || active_turn.is_some() {
         return;
     }
@@ -2053,13 +2990,30 @@ async fn maybe_trigger(
         return;
     }
     if is_output_busy(*state, playback, active_turn) {
+        if last_final.is_some() {
+            debug!(
+                wake_phase = ?wake_phase,
+                "maybe_trigger: output busy, utterance pending"
+            );
+        }
         return;
     }
     if session_start.elapsed() < cold_start {
         return;
     }
+    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+    resolve_asr_last_final(last_final, last_partial);
+    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
     let endpoint_silence = orch.endpoint_silence_ms();
-    if vad.trailing_silence_ms() < endpoint_silence {
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+    {
+        let _ = orch.endpoint_silence_ms();
+    }
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+    let utterance_flush_ready = true;
+    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
+    let utterance_flush_ready = vad.trailing_silence_ms() >= endpoint_silence;
+    if !utterance_flush_ready {
         return;
     }
     if last_final
@@ -2068,9 +3022,14 @@ async fn maybe_trigger(
     {
         return;
     }
-    let text = last_final.take().unwrap();
+    let text = normalize_asr_transcript(&last_final.take().unwrap());
+    last_partial.clear();
     let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
 
+    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
     if matches_sleep_keyword(trimmed, sleep_phrases) {
         apply_sleep_keyword(
             trimmed,
@@ -2105,12 +3064,19 @@ async fn maybe_trigger(
         "maybe_trigger: triggering LLM"
     );
 
+    let context_checkpoint = messages.len();
+    let merged = take_one_pending_hermes_for_turn(pending_hermes_msgs, messages);
+    if merged {
+        info!(user = %trimmed, "hermes: merged one message into user turn");
+    }
+
     let final_at = asr_final_at.take();
     start_reply_turn(
-        text,
+        text.clone(),
         final_at,
         true,
         false,
+        context_checkpoint,
         orch,
         state,
         messages,
@@ -2147,6 +3113,7 @@ async fn start_reply_turn(
     asr_final_at: Option<Instant>,
     log_asr_to_trigger: bool,
     speculative: bool,
+    context_checkpoint: usize,
     orch: &OrchestratorConfig,
     state: &mut SessionState,
     messages: &mut Vec<ChatMessage>,
@@ -2156,7 +3123,7 @@ async fn start_reply_turn(
     play_gen: &Arc<AtomicU64>,
     llm_cancel: &mut Option<CancellationToken>,
     active_turn: &mut Option<ActiveTurn>,
-    done_tx: &mpsc::Sender<(String, u64, bool)>,
+    done_tx: &mpsc::Sender<stream_turn::TurnDone>,
     current_latency: &Arc<std::sync::Mutex<Option<Arc<TurnLatency>>>>,
     turn_epoch: &Arc<AtomicU64>,
     asr: Arc<dyn AsrEngine>,
@@ -2184,6 +3151,7 @@ async fn start_reply_turn(
         return;
     }
 
+    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
     if matches_sleep_keyword(text.trim(), sleep_phrases) {
         apply_sleep_keyword(
             text.trim(),
@@ -2239,6 +3207,7 @@ async fn start_reply_turn(
     *active_turn = Some(ActiveTurn {
         user_text: text,
         speculative,
+        context_checkpoint,
     });
 
     *state = SessionState::Thinking;
@@ -2267,34 +3236,55 @@ async fn start_reply_turn(
     let llm_cfg = llm_cfg.clone();
     let hermes_sender = hermes_sender.clone();
 
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+    stream_turn::spawn_reply_turn(
+        cancel,
+        trigger_at,
+        speculative,
+        epoch_at_start,
+        msgs,
+        llm,
+        tts,
+        playback_wait,
+        done_tx,
+        sentence_min,
+        tts_first_chunk,
+        tools_enabled,
+        llm_cfg,
+        hermes_sender,
+    );
+
+    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
     tokio::spawn(async move {
         let mut msgs_local = msgs;
         let mut assistant_buf = String::new();
-        let mut with_tools = tools_enabled;
         let mut should_go_dormant = false;
-        // Round 0 may call tools (native or inline); round 1 speaks the result.
-        const MAX_LLM_ROUNDS: u32 = 2;
+        let mut turn_tts_spoken = false;
+        let max_rounds: u32 = if tools_enabled { 2 } else { 1 };
 
-        let tool_defs = if tools_enabled {
-            Some(tools::get_tool_definitions())
-        } else {
-            None
-        };
-
-        for round in 0..MAX_LLM_ROUNDS {
-            let tools = if with_tools && round == 0 {
-                tool_defs.as_deref()
+        for round in 0..max_rounds {
+            let tools = if tools_enabled && round == 0 {
+                Some(tools::get_tool_definitions())
             } else {
                 None
             };
-            with_tools = false;
 
             let stream_started = Instant::now();
-            let mut stream = match llm.stream_chat(&msgs_local, tools, cancel.clone()).await {
+            let mut stream = match llm
+                .stream_chat(&msgs_local, tools.as_deref(), cancel.clone())
+                .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(error = %e, "llm failed");
-                    let _ = done_tx.send((String::new(), epoch_at_start, false)).await;
+                    stream_turn::send_turn_done(
+                        &done_tx,
+                        String::new(),
+                        epoch_at_start,
+                        false,
+                        false,
+                    )
+                    .await;
                     return;
                 }
             };
@@ -2308,7 +3298,13 @@ async fn start_reply_turn(
 
             let mut first_token = true;
             let mut sent_early = false;
+            let mut tts_sent = false;
             let mut buf = String::new();
+            let mut tts_buf = String::new();
+            let mut reasoning_buf = String::new();
+            let mut reasoning_log_emitted = false;
+            let mut content_log_emitted = false;
+            let mut think_strip = StreamingThinkTtsGate::new(llm_cfg.thinking_enabled);
             let mut tool_call_map: HashMap<u32, AccumulatedToolCall> = HashMap::new();
 
             while let Some(item) = stream.next().await {
@@ -2327,6 +3323,7 @@ async fn start_reply_turn(
                 }
 
                 if let Some(ref reasoning) = stream_item.reasoning_content {
+                    reasoning_buf.push_str(reasoning);
                     eprint!("{}", reasoning);
                 }
 
@@ -2352,67 +3349,98 @@ async fn start_reply_turn(
                         entry.arguments.push_str(args);
                     }
                 }
+                if has_actionable_tool_deltas(&tool_call_map) {
+                    flush_llm_reasoning_log(round, &mut reasoning_buf, &mut reasoning_log_emitted);
+                }
 
                 if let Some(ref token) = stream_item.content {
+                    flush_llm_reasoning_log(round, &mut reasoning_buf, &mut reasoning_log_emitted);
                     buf.push_str(token);
                     assistant_buf.push_str(token);
 
-                    if assistant_content_tts_allowed(round, tools_enabled, &buf) {
-                        if !sent_early && round == 0 {
-                            if let Some(chunk) = take_early_chunk(&mut buf, tts_first_chunk) {
-                                info!(
-                                    ms = trigger_at.elapsed().as_millis(),
-                                    %chunk,
-                                    "tts early chunk"
-                                );
-                                if let Err(e) = tts.append_text(&normalize_tts_text(&chunk)).await {
-                                    warn!(error = %e, "tts early append");
-                                }
-                                sent_early = true;
-                            }
-                        }
-
-                        while let Some(sentence) = take_sentence(&mut buf, sentence_min) {
-                            info!(%sentence, "tts sentence");
-                            if let Err(e) = tts.append_text(&normalize_tts_text(&sentence)).await {
-                                warn!(error = %e, "tts append");
-                            }
-                        }
+                    let actionable = has_actionable_tool_deltas(&tool_call_map);
+                    let speakable = think_strip.push(token);
+                    if crate::orchestrator::append_speakable_stream_delta(
+                        &mut tts_buf,
+                        &speakable,
+                        actionable,
+                    ) {
+                        drain_tts_buf(
+                            &tts,
+                            &mut tts_buf,
+                            tts_first_chunk,
+                            sentence_min,
+                            &mut sent_early,
+                            &mut tts_sent,
+                        )
+                        .await;
                     }
                 }
             }
 
+            flush_llm_reasoning_log(round, &mut reasoning_buf, &mut reasoning_log_emitted);
+
             let mut tool_calls = tool_calls_from_stream_map(&tool_call_map);
-            let mut speakable_buf = buf.clone();
-
-            if tool_calls.is_empty() {
-                let (plain, inline) = hermes_core::separate_text_and_calls(&buf);
-                speakable_buf = plain;
-                if !inline.is_empty() {
-                    info!(
-                        count = inline.len(),
-                        "parsed inline tool_calls from assistant content"
-                    );
-                    tool_calls.extend(inline.into_iter().map(core_tool_call_to_talk));
-                }
+            let (plain, inline) = hermes_core::separate_text_and_calls(&buf);
+            let speakable_buf = prepare_llm_speakable_text(
+                &plain,
+                &mut reasoning_buf,
+                &mut reasoning_log_emitted,
+                round,
+            );
+            if tool_calls.is_empty() && !inline.is_empty() {
+                info!(
+                    count = inline.len(),
+                    "parsed inline tool_calls from assistant content"
+                );
+                tool_calls.extend(inline.into_iter().map(core_tool_call_to_talk));
             }
+            tool_calls.retain(|tc| !tc.function.name.trim().is_empty());
+            flush_llm_content_log(round, &speakable_buf, &mut content_log_emitted);
+            log_llm_tool_calls(round, &tool_calls);
 
             if tool_calls.is_empty() {
-                if tools_enabled && round == 0 {
+                let tail = think_strip.flush();
+                if crate::orchestrator::append_speakable_stream_delta(&mut tts_buf, &tail, false) {
+                    drain_tts_buf(
+                        &tts,
+                        &mut tts_buf,
+                        tts_first_chunk,
+                        sentence_min,
+                        &mut sent_early,
+                        &mut tts_sent,
+                    )
+                    .await;
+                }
+                if !tts_sent {
+                    speak_plain_assistant_reply(
+                        &tts,
+                        &speakable_buf,
+                        tts_first_chunk,
+                        sentence_min,
+                        &mut tts_sent,
+                    )
+                    .await;
+                }
+                if !tts_sent && !speakable_buf.trim().is_empty() {
                     warn!(
                         chars = speakable_buf.chars().count(),
-                        "tools enabled but no tool_calls parsed; suppressing assistant TTS"
+                        "assistant reply had text but nothing was sent to TTS"
                     );
-                } else if let Some(rest) = flush_remainder(&mut speakable_buf) {
-                    let _ = tts.append_text(&normalize_tts_text(&rest)).await;
                 }
                 if let Err(e) = tts.finish_turn().await {
                     warn!(error = %e, "tts finish");
                 }
                 playback_wait.wait_drain(Duration::from_secs(30)).await;
-                let _ = done_tx
-                    .send((assistant_buf, epoch_at_start, should_go_dormant))
-                    .await;
+                turn_tts_spoken |= tts_sent;
+                stream_turn::send_turn_done(
+                    &done_tx,
+                    assistant_buf,
+                    epoch_at_start,
+                    should_go_dormant,
+                    turn_tts_spoken,
+                )
+                .await;
                 return;
             }
 
@@ -2420,28 +3448,29 @@ async fn start_reply_turn(
             // Discard content buffer (tool call scaffolding / reasoning, not for TTS)
             buf.clear();
 
+            let shutup_turn = tools::tool_calls_include_shutup(
+                tool_calls.iter().map(|tc| tc.function.name.as_str()),
+            );
+
             let mut spoken_list: Vec<String> = Vec::new();
 
             for tc in &tool_calls {
-                let mut has_spoken = false;
-                if let Some(spoken) = tools::extract_spoken(&tc.function.arguments) {
+                if let Some(spoken) =
+                    tools::extract_tool_spoken(&tc.function.name, &tc.function.arguments)
+                {
                     spoken_list.push(spoken);
-                    has_spoken = true;
-                }
-                if !has_spoken && tc.function.name == "call_hermes" {
-                    if let Some(spoken) = tools::generate_hermes_spoken(&tc.function.arguments) {
-                        spoken_list.push(spoken);
-                    }
                 }
             }
 
             // TTS spoken notifications — finish current task so audio plays
             // during tool execution, not deferred until after the tool result.
-            if !spoken_list.is_empty() {
+            if !shutup_turn && !spoken_list.is_empty() {
                 for spoken in &spoken_list {
                     info!(%spoken, "tool: spoken notification");
                     if let Err(e) = tts.append_text(&normalize_tts_text(spoken)).await {
                         warn!(error = %e, "tts spoken append");
+                    } else {
+                        turn_tts_spoken = true;
                     }
                 }
                 if let Err(e) = tts.finish_turn().await {
@@ -2463,6 +3492,7 @@ async fn start_reply_turn(
                 suppressed_chars = buf.len(),
                 "llm returned tool_calls"
             );
+            let mut tool_results: Vec<String> = Vec::with_capacity(tool_calls.len());
             for tc in &tool_calls {
                 info!(tool = %tc.function.name, args = %tc.function.arguments, "tool: calling");
                 eprintln!(
@@ -2482,9 +3512,10 @@ async fn start_reply_turn(
                 };
                 info!(tool = %tc.function.name, result_len = result.len(), "tool: result");
                 eprintln!("═══ tool result: {} ═══\n{}", tc.function.name, result);
-                if tc.function.name == "shutup" {
+                if tools::is_shutup_tool(&tc.function.name) {
                     should_go_dormant = true;
                 }
+                tool_results.push(result.clone());
                 msgs_local.push(ChatMessage {
                     role: "tool".to_string(),
                     content: result,
@@ -2493,7 +3524,26 @@ async fn start_reply_turn(
                 });
             }
             if should_go_dormant {
-                break;
+                stream_turn::complete_shutup_turn(&tts, &playback_wait, &done_tx, epoch_at_start)
+                    .await;
+                return;
+            }
+            turn_tts_spoken |= tts_sent;
+            if tools::should_skip_call_hermes_confirmation(
+                tool_calls.iter().map(|tc| tc.function.name.as_str()),
+                &tool_results,
+            ) {
+                info!("call_hermes enqueued: skipping follow-up LLM round");
+                playback_wait.wait_drain(Duration::from_secs(30)).await;
+                stream_turn::send_turn_done(
+                    &done_tx,
+                    assistant_buf,
+                    epoch_at_start,
+                    should_go_dormant,
+                    turn_tts_spoken,
+                )
+                .await;
+                return;
             }
         }
 
@@ -2502,9 +3552,14 @@ async fn start_reply_turn(
             warn!(error = %e, "tts finish");
         }
         playback_wait.wait_drain(Duration::from_secs(30)).await;
-        let _ = done_tx
-            .send((assistant_buf, epoch_at_start, should_go_dormant))
-            .await;
+        stream_turn::send_turn_done(
+            &done_tx,
+            assistant_buf,
+            epoch_at_start,
+            should_go_dormant,
+            turn_tts_spoken,
+        )
+        .await;
     });
 
     *state = SessionState::Speaking;
@@ -2522,19 +3577,20 @@ async fn handle_hermes_result(
     playback: &Arc<AudioPlayback>,
     play_gen: &Arc<AtomicU64>,
     turn_epoch: &Arc<AtomicU64>,
-    done_tx: &mpsc::Sender<(String, u64, bool)>,
+    done_tx: &mpsc::Sender<stream_turn::TurnDone>,
     state: &mut SessionState,
     active_turn: &mut Option<ActiveTurn>,
     llm_cancel: &mut Option<CancellationToken>,
     orch: &OrchestratorConfig,
-    _llm_cfg: &LlmConfig,
+    llm_cfg: &LlmConfig,
 ) {
     eprintln!(
         "\n══════════ hermes 返回 ══════════\n{}\n══════════════════════════",
         msg.text
     );
 
-    if msg.status != "final" && msg.status != "error" && msg.status != "ok" {
+    let context_checkpoint = messages.len();
+    if !append_hermes_to_messages(messages, &msg, false) {
         info!(
             request_id = %msg.request_id,
             status = %msg.status,
@@ -2543,26 +3599,11 @@ async fn handle_hermes_result(
         return;
     }
 
-    messages.push(ChatMessage {
-        role: "tool".to_string(),
-        content: msg.text.clone(),
-        tool_calls: None,
-        tool_call_id: Some(msg.request_id.clone()),
-    });
-    messages.push(ChatMessage {
-        role: "system".to_string(),
-        content: format!(
-            "hermes 返回了查询结果（request_id={}），请用自然口语向用户播报这个结果",
-            msg.request_id
-        ),
-        tool_calls: None,
-        tool_call_id: None,
-    });
-
     *state = SessionState::Thinking;
     *active_turn = Some(ActiveTurn {
         user_text: String::new(),
         speculative: false,
+        context_checkpoint,
     });
 
     let g = playback.bump_generation();
@@ -2582,54 +3623,125 @@ async fn handle_hermes_result(
     let tts_first_chunk = orch.tts_first_chunk_chars;
     let epoch_at_start = turn_epoch.load(std::sync::atomic::Ordering::SeqCst);
     let go_dormant = was_dormant;
+    let llm_cfg = llm_cfg.clone();
 
+    #[cfg(all(feature = "rockchip", not(feature = "sherpa-asr-tts")))]
+    stream_turn::spawn_hermes_replay(
+        cancel,
+        epoch_at_start,
+        go_dormant,
+        msgs,
+        llm,
+        tts,
+        playback,
+        done_tx,
+        sentence_min,
+        tts_first_chunk,
+        llm_cfg.clone(),
+    );
+
+    #[cfg(not(all(feature = "rockchip", not(feature = "sherpa-asr-tts"))))]
     tokio::spawn(async move {
         let mut assistant_buf = String::new();
+        let mut buf = String::new();
+        let mut reasoning_buf = String::new();
+        let mut reasoning_log_emitted = false;
+        let mut content_log_emitted = false;
 
         let mut stream = match llm.stream_chat(&msgs, None, cancel.clone()).await {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, "hermes replay llm failed");
-                let _ = done_tx
-                    .send((String::new(), epoch_at_start, go_dormant))
-                    .await;
+                stream_turn::send_turn_done(
+                    &done_tx,
+                    String::new(),
+                    epoch_at_start,
+                    go_dormant,
+                    false,
+                )
+                .await;
                 return;
             }
         };
 
-        let mut buf = String::new();
+        let mut tts_buf = String::new();
+        let mut tts_gate = StreamingThinkTtsGate::new(llm_cfg.thinking_enabled);
         let mut sent_early = false;
+        let mut tts_sent = false;
         use futures_util::StreamExt;
         while let Some(item) = stream.next().await {
             if cancel.is_cancelled() {
                 break;
             }
             let Ok(stream_item) = item else { continue };
+            if let Some(ref reasoning) = stream_item.reasoning_content {
+                reasoning_buf.push_str(reasoning);
+                eprint!("{}", reasoning);
+            }
             if let Some(ref token) = stream_item.content {
+                flush_llm_reasoning_log(1, &mut reasoning_buf, &mut reasoning_log_emitted);
                 buf.push_str(token);
                 assistant_buf.push_str(token);
-                if !sent_early {
-                    if let Some(chunk) = take_early_chunk(&mut buf, tts_first_chunk) {
-                        let _ = tts.append_text(&normalize_tts_text(&chunk)).await;
-                        sent_early = true;
-                    }
-                }
-                while let Some(sentence) = take_sentence(&mut buf, sentence_min) {
-                    let _ = tts.append_text(&normalize_tts_text(&sentence)).await;
+
+                let speakable = tts_gate.push(token);
+                if crate::orchestrator::append_speakable_stream_delta(
+                    &mut tts_buf,
+                    &speakable,
+                    false,
+                ) {
+                    drain_tts_buf(
+                        &tts,
+                        &mut tts_buf,
+                        tts_first_chunk,
+                        sentence_min,
+                        &mut sent_early,
+                        &mut tts_sent,
+                    )
+                    .await;
                 }
             }
         }
 
-        if let Some(rest) = flush_remainder(&mut buf) {
-            let _ = tts.append_text(&normalize_tts_text(&rest)).await;
+        flush_llm_reasoning_log(1, &mut reasoning_buf, &mut reasoning_log_emitted);
+        let (plain, _inline) = hermes_core::separate_text_and_calls(&buf);
+        let speakable_buf =
+            prepare_llm_speakable_text(&plain, &mut reasoning_buf, &mut reasoning_log_emitted, 1);
+        flush_llm_content_log(1, &speakable_buf, &mut content_log_emitted);
+
+        let tail = tts_gate.flush();
+        if crate::orchestrator::append_speakable_stream_delta(&mut tts_buf, &tail, false) {
+            drain_tts_buf(
+                &tts,
+                &mut tts_buf,
+                tts_first_chunk,
+                sentence_min,
+                &mut sent_early,
+                &mut tts_sent,
+            )
+            .await;
+        }
+        if !tts_sent {
+            speak_plain_assistant_reply(
+                &tts,
+                &speakable_buf,
+                tts_first_chunk,
+                sentence_min,
+                &mut tts_sent,
+            )
+            .await;
         }
         if let Err(e) = tts.finish_turn().await {
             warn!(error = %e, "tts finish");
         }
         playback.wait_drain(Duration::from_secs(30)).await;
-        let _ = done_tx
-            .send((assistant_buf, epoch_at_start, go_dormant))
-            .await;
+        stream_turn::send_turn_done(
+            &done_tx,
+            assistant_buf,
+            epoch_at_start,
+            go_dormant,
+            tts_sent,
+        )
+        .await;
     });
 
     *state = SessionState::Speaking;
@@ -2651,4 +3763,71 @@ fn rms_f32(samples: &[f32]) -> f32 {
     }
     let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
     ((sum_sq / samples.len() as f64).sqrt()) as f32
+}
+
+#[cfg(test)]
+mod hermes_pending_tests {
+    use super::*;
+
+    fn sample_msg(id: &str, status: &str) -> HermesMessage {
+        HermesMessage {
+            request_id: id.to_string(),
+            text: format!("result-{id}"),
+            status: status.to_string(),
+        }
+    }
+
+    #[test]
+    fn take_one_empty_pending_no_op() {
+        let mut pending = VecDeque::new();
+        let mut messages = Vec::new();
+        assert!(!take_one_pending_hermes_for_turn(
+            &mut pending,
+            &mut messages
+        ));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn take_one_appends_single_accepted_message() {
+        let mut pending = VecDeque::from([sample_msg("r1", "final")]);
+        let mut messages = Vec::new();
+        assert!(take_one_pending_hermes_for_turn(
+            &mut pending,
+            &mut messages
+        ));
+        assert!(pending.is_empty());
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "tool");
+        assert_eq!(messages[0].content, "result-r1");
+        assert_eq!(messages[1].role, "system");
+        assert!(messages[1].content.contains("若用户刚才也说了话"));
+    }
+
+    #[test]
+    fn take_one_from_many_leaves_remainder() {
+        let mut pending = VecDeque::from([sample_msg("r1", "final"), sample_msg("r2", "final")]);
+        let mut messages = Vec::new();
+        assert!(take_one_pending_hermes_for_turn(
+            &mut pending,
+            &mut messages
+        ));
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].request_id, "r2");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tool_call_id.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn take_one_skips_non_final_at_front() {
+        let mut pending =
+            VecDeque::from([sample_msg("bad", "partial"), sample_msg("good", "final")]);
+        let mut messages = Vec::new();
+        assert!(take_one_pending_hermes_for_turn(
+            &mut pending,
+            &mut messages
+        ));
+        assert!(pending.is_empty());
+        assert_eq!(messages[0].tool_call_id.as_deref(), Some("good"));
+    }
 }

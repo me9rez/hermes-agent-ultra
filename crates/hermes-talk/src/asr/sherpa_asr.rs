@@ -257,7 +257,7 @@ fn maybe_emit_partial(
     }
     info!(text = %text, samples = state.samples.len(), "sherpa asr partial");
     state.last_partial_text = text.clone();
-    let _ = event_tx.blocking_send(AsrEvent::Partial { text });
+    let _ = event_tx.blocking_send(AsrEvent::Partial { text, full: None });
 }
 
 fn decode_buffer(

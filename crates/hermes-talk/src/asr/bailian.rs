@@ -389,7 +389,7 @@ fn parse_asr_event(msg: &Value) -> Option<AsrEvent> {
             if sentence_end {
                 Some(AsrEvent::Final { text })
             } else {
-                Some(AsrEvent::Partial { text })
+                Some(AsrEvent::Partial { text, full: None })
             }
         }
         _ => None,

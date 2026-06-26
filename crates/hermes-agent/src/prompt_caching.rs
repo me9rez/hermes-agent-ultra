@@ -160,8 +160,7 @@ fn prompt_cache_outcome(raw_usage: &serde_json::Value) -> Option<bool> {
         .max(get("cache_read_tokens"))
         .max(details_cached)
         .max(get("prompt_cache_hit_tokens")); // DeepSeek automatic prefix cache
-    let cache_write = get("cache_creation_input_tokens")
-        .max(get("cache_write_tokens"));
+    let cache_write = get("cache_creation_input_tokens").max(get("cache_write_tokens"));
     let prompt_side = get("prompt_tokens")
         .max(get("input_tokens"))
         .max(cache_read + cache_write)

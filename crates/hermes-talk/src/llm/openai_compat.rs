@@ -53,7 +53,8 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: Vec<ApiMessage<'a>>,
     stream: bool,
-    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     temperature: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [ToolDefinition]>,
@@ -74,11 +75,35 @@ struct ExtraBody {
     enable_thinking: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking_budget: Option<u32>,
-    reasoning_format: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     budget_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+}
+
+fn build_extra_body(cfg: &LlmConfig) -> Option<ExtraBody> {
+    let budget = cfg.effective_thinking_budget();
+    if cfg.thinking_enabled {
+        return Some(ExtraBody {
+            enable_thinking: true,
+            thinking_budget: budget,
+            reasoning_format: Some("deepseek".to_string()),
+            budget_tokens: budget,
+            reasoning_effort: cfg.reasoning_effort.clone(),
+        });
+    }
+    if cfg.reasoning_effort.is_some() {
+        return Some(ExtraBody {
+            enable_thinking: false,
+            thinking_budget: None,
+            reasoning_format: None,
+            budget_tokens: None,
+            reasoning_effort: cfg.reasoning_effort.clone(),
+        });
+    }
+    None
 }
 
 #[derive(Serialize)]
@@ -163,6 +188,7 @@ impl LlmClient for OpenAiCompatClient {
             "{}/chat/completions",
             self.cfg.base_url.trim_end_matches('/')
         );
+        let budget = self.cfg.effective_thinking_budget();
         let body = ChatRequest {
             model: &self.cfg.model,
             messages: api_messages,
@@ -170,25 +196,11 @@ impl LlmClient for OpenAiCompatClient {
             max_tokens: self.cfg.max_tokens,
             temperature: self.cfg.temperature,
             tools,
-            extra_body: if self.cfg.thinking_enabled {
-                Some(ExtraBody {
-                    enable_thinking: true,
-                    thinking_budget: self.cfg.thinking_budget,
-                    reasoning_format: "deepseek".to_string(),
-                    budget_tokens: self.cfg.thinking_budget,
-                    reasoning_effort: self.cfg.reasoning_effort.clone(),
-                })
-            } else {
-                None
-            },
+            extra_body: build_extra_body(&self.cfg),
             chat_template_kwargs: ChatTemplateKwargs {
                 enable_thinking: self.cfg.thinking_enabled,
             },
-            thinking_budget_tokens: if self.cfg.thinking_enabled {
-                self.cfg.thinking_budget
-            } else {
-                None
-            },
+            thinking_budget_tokens: budget,
         };
 
         let resp = self
@@ -322,5 +334,48 @@ fn api_message(m: &ChatMessage) -> ApiMessage<'_> {
             tool_calls: None,
             tool_call_id: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AipcTalkConfig, DEFAULT_THINKING_BUDGET, LlmConfig};
+
+    fn base_llm(thinking_enabled: bool) -> LlmConfig {
+        LlmConfig {
+            base_url: "http://127.0.0.1:11080/v1".to_string(),
+            api_key: String::new(),
+            model: "auto".to_string(),
+            system_prompt: String::new(),
+            max_tokens: None,
+            temperature: 0.7,
+            warmup_on_start: false,
+            thinking_enabled,
+            thinking_budget: None,
+            reasoning_effort: Some("low".to_string()),
+            user_id: "flowy".to_string(),
+            tools_enabled: false,
+            execute_allowlist: vec![],
+            aipc_talk: AipcTalkConfig::default(),
+        }
+    }
+
+    #[test]
+    fn build_extra_body_defaults_budget_when_enabled() {
+        let cfg = base_llm(true);
+        let body = build_extra_body(&cfg).expect("extra_body");
+        assert!(body.enable_thinking);
+        assert_eq!(body.thinking_budget, Some(DEFAULT_THINKING_BUDGET));
+        assert_eq!(body.reasoning_effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn build_extra_body_passes_reasoning_effort_when_disabled() {
+        let cfg = base_llm(false);
+        let body = build_extra_body(&cfg).expect("extra_body");
+        assert!(!body.enable_thinking);
+        assert_eq!(body.reasoning_effort.as_deref(), Some("low"));
+        assert!(body.thinking_budget.is_none());
     }
 }

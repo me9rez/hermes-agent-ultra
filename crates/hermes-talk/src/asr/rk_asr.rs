@@ -1,5 +1,6 @@
 use std::ffi::CString;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -10,6 +11,9 @@ use tracing::{debug, error, info, warn};
 use crate::asr::{AsrEngine, AsrEvent};
 use crate::config::RockchipAsrConfig;
 use crate::error::{DemoError, Result};
+
+// Keep in sync with stream_turn::ROCKCHIP_FINISH_UTTERANCE_TIMEOUT_MS.
+const FINISH_UTTERANCE_TIMEOUT_MS: u64 = 800;
 
 unsafe extern "C" fn _dummy_output_cb(
     _name: *const std::ffi::c_char,
@@ -131,6 +135,19 @@ mod ffi {
 struct CallbackContext {
     event_tx: mpsc::Sender<AsrEvent>,
     frame_done: Arc<AtomicBool>,
+    /// True while `finish_utterance` waits for the SDK flush FINISH.
+    sealing: Arc<AtomicBool>,
+    /// False between utterances — drop stale SDK callbacks (e.g. late partial after flush).
+    accepting: Arc<AtomicBool>,
+    last_emitted: Mutex<String>,
+}
+
+impl CallbackContext {
+    fn reset_utterance(&self) {
+        if let Ok(mut last) = self.last_emitted.lock() {
+            last.clear();
+        }
+    }
 }
 
 unsafe extern "C" fn asr_result_callback(
@@ -139,6 +156,11 @@ unsafe extern "C" fn asr_result_callback(
     userdata: *mut std::ffi::c_void,
 ) {
     let ctx = &*(userdata as *const CallbackContext);
+    let sealing = ctx.sealing.load(Ordering::SeqCst);
+    if !ctx.accepting.load(Ordering::SeqCst) && !sealing {
+        debug!("rkasr callback dropped (between utterances)");
+        return;
+    }
     let r = &*result;
     let state = r.state;
 
@@ -177,24 +199,71 @@ unsafe extern "C" fn asr_result_callback(
         "rkasr callback"
     );
 
-    let text = new_txt.or(full_txt);
-    let Some(text) = text else { return };
-    if text.is_empty() {
-        return;
+    if state == ffi::ASR_STATE_FIRST {
+        if let Ok(mut last) = ctx.last_emitted.lock() {
+            last.clear();
+        }
     }
 
-    let event = match state {
-        ffi::ASR_STATE_FINISH => {
-            info!(%text, "rkasr final result");
-            AsrEvent::Final { text }
+    let is_sdk_finish = state == ffi::ASR_STATE_FINISH;
+
+    let full_for_event = full_txt.filter(|t| !t.is_empty());
+    let new_for_emit = new_txt.filter(|t| !t.is_empty());
+
+    let emit_text = if is_sdk_finish && sealing {
+        if let Some(full) = full_for_event.clone() {
+            full
+        } else if let Some(new) = new_for_emit {
+            new
+        } else {
+            return;
         }
-        _ => {
-            info!(%text, "rkasr partial result");
-            AsrEvent::Partial { text }
+    } else if let Some(full) = full_for_event.clone() {
+        full
+    } else if let Some(new) = new_for_emit {
+        new
+    } else {
+        return;
+    };
+
+    if is_sdk_finish && !sealing {
+        debug!(
+            %emit_text,
+            "rkasr internal segment FINISH -> partial (not end of utterance)"
+        );
+    }
+
+    if let Ok(last) = ctx.last_emitted.lock() {
+        if *last == emit_text {
+            debug!(
+                state = state_name,
+                %emit_text,
+                "rkasr callback: skip duplicate text"
+            );
+            if state == ffi::ASR_STATE_FINISH {
+                ctx.frame_done.store(true, Ordering::SeqCst);
+            }
+            return;
+        }
+    }
+
+    let event = if is_sdk_finish && sealing {
+        info!(%emit_text, "rkasr final result (utterance flush)");
+        AsrEvent::Final {
+            text: emit_text.clone(),
+        }
+    } else {
+        info!(%emit_text, "rkasr partial result");
+        AsrEvent::Partial {
+            text: emit_text.clone(),
+            full: full_for_event,
         }
     };
+    if let Ok(mut last) = ctx.last_emitted.lock() {
+        *last = emit_text.clone();
+    }
     let _ = ctx.event_tx.try_send(event);
-    if state == ffi::ASR_STATE_FINISH {
+    if is_sdk_finish && sealing {
         ctx.frame_done.store(true, Ordering::SeqCst);
     }
 }
@@ -203,6 +272,7 @@ enum RkAsrCommand {
     Audio(Vec<u8>),
     Pause(oneshot::Sender<Result<()>>),
     Resume(oneshot::Sender<Result<()>>),
+    BeginUtterance(oneshot::Sender<Result<()>>),
     FinishUtterance(oneshot::Sender<Result<()>>),
 }
 
@@ -282,6 +352,16 @@ impl AsrEngine for RockchipAsr {
             .map_err(|e| DemoError::Asr(format!("finish_utterance: {e}")))?;
         rx.await
             .map_err(|e| DemoError::Asr(format!("finish_utterance response: {e}")))?
+    }
+    async fn begin_utterance(&self) -> Result<()> {
+        debug!("rkasr begin_utterance");
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(RkAsrCommand::BeginUtterance(tx))
+            .await
+            .map_err(|e| DemoError::Asr(format!("begin_utterance: {e}")))?;
+        rx.await
+            .map_err(|e| DemoError::Asr(format!("begin_utterance response: {e}")))?
     }
 }
 
@@ -368,9 +448,13 @@ async fn run_rkasr_driver(
         debug!("rkasr set auth_config ok");
     }
 
+    let accepting = Arc::new(AtomicBool::new(false));
     let callback_ctx = Box::new(CallbackContext {
         event_tx: event_tx.clone(),
         frame_done: frame_done.clone(),
+        sealing: Arc::new(AtomicBool::new(false)),
+        accepting,
+        last_emitted: Mutex::new(String::new()),
     });
 
     let init_param = Box::new(ffi::RockXAsrInitParam {
@@ -454,6 +538,12 @@ async fn run_rkasr_driver(
                     let _ = done.send(Ok(()));
                     continue;
                 }
+                Some(RkAsrCommand::BeginUtterance(done)) => {
+                    callback_ctx.reset_utterance();
+                    callback_ctx.accepting.store(true, Ordering::SeqCst);
+                    let _ = done.send(Ok(()));
+                    continue;
+                }
                 Some(RkAsrCommand::Audio(_)) => continue,
                 None => break,
             }
@@ -526,8 +616,18 @@ async fn run_rkasr_driver(
                         first.store(true, Ordering::SeqCst);
                         let _ = done.send(Ok(()));
                     }
+                    Some(RkAsrCommand::BeginUtterance(done)) => {
+                        info!("rkasr begin_utterance: reset decoder state");
+                        callback_ctx.sealing.store(false, Ordering::SeqCst);
+                        callback_ctx.frame_done.store(false, Ordering::SeqCst);
+                        callback_ctx.reset_utterance();
+                        callback_ctx.accepting.store(true, Ordering::SeqCst);
+                        first.store(true, Ordering::SeqCst);
+                        let _ = done.send(Ok(()));
+                    }
                     Some(RkAsrCommand::FinishUtterance(done)) => {
                         info!("rkasr finish_utterance: sending LAST to flush");
+                        callback_ctx.sealing.store(true, Ordering::SeqCst);
                         frame_done.store(false, Ordering::SeqCst);
                         let silence = vec![0i16; 1600];
                         let input = unsafe { ffi::RockXInputCreate(handle.0) };
@@ -543,15 +643,31 @@ async fn run_rkasr_driver(
                                 ffi::RockXProcessAsync(handle.0, input, std::ptr::null_mut());
                             }
                         }
-                        let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+                        let deadline = tokio::time::Instant::now()
+                            + Duration::from_millis(FINISH_UTTERANCE_TIMEOUT_MS);
                         while !frame_done.load(Ordering::SeqCst) {
                             if tokio::time::Instant::now() >= deadline {
                                 warn!("rkasr finish_utterance: flush timed out");
+                                if let Ok(last) = callback_ctx.last_emitted.lock() {
+                                    if !last.is_empty() {
+                                        info!(
+                                            text = %last,
+                                            "rkasr finish_utterance: synthetic final on timeout"
+                                        );
+                                        let _ = callback_ctx.event_tx.try_send(AsrEvent::Final {
+                                            text: last.clone(),
+                                        });
+                                    }
+                                }
+                                frame_done.store(true, Ordering::SeqCst);
                                 break;
                             }
                             tokio::time::sleep(Duration::from_millis(5)).await;
                         }
+                        callback_ctx.sealing.store(false, Ordering::SeqCst);
+                        callback_ctx.accepting.store(false, Ordering::SeqCst);
                         info!("rkasr finish_utterance: flush complete");
+                        callback_ctx.reset_utterance();
                         first.store(true, Ordering::SeqCst);
                         let _ = done.send(Ok(()));
                     }

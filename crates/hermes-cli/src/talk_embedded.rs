@@ -41,9 +41,11 @@ struct TalkEmbeddedGuard {
 pub async fn bootstrap_talk_embedded(
     talk_session_key: &str,
     push_bridge: TalkPushBridge,
+    talk_llm: &hermes_talk::config::LlmConfig,
 ) -> Result<TalkEmbeddedRuntime, AgentError> {
-    let config =
+    let mut config =
         load_config(None).map_err(|e| AgentError::Config(format!("load config.yaml: {e}")))?;
+    hermes_talk::apply_talk_reasoning_to_gateway(&mut config, talk_llm);
     let config_arc = Arc::new(config.clone());
     let state_root = hermes_state_root_from_home();
     let (work_tx, work_rx) = mpsc::channel::<HermesWorkItem>(64);

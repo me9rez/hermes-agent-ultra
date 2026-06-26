@@ -75,15 +75,17 @@ async fn run_talk_session(cfg: Config) -> Result<(), hermes_talk::DemoError> {
 
     let channel_mode = cfg.llm.tools_enabled && cfg.llm.aipc_talk.uses_channel();
     let session_key = cfg.llm.aipc_talk.session_key.clone();
+    let talk_llm = cfg.llm.clone();
 
     let mut session = Session::new(cfg);
 
     if channel_mode {
         let (msg_tx, msg_rx) = mpsc::channel(128);
         let push_bridge = TalkPushBridge::new(msg_tx.clone());
-        let embedded = crate::talk_embedded::bootstrap_talk_embedded(&session_key, push_bridge)
-            .await
-            .map_err(|e| hermes_talk::DemoError::Config(e.to_string()))?;
+        let embedded =
+            crate::talk_embedded::bootstrap_talk_embedded(&session_key, push_bridge, &talk_llm)
+                .await
+                .map_err(|e| hermes_talk::DemoError::Config(e.to_string()))?;
         let work_tx = embedded.work_tx.clone();
         let _embedded = embedded;
         session = session

@@ -9,6 +9,12 @@ use crate::error::{DemoError, Result};
 use crate::llm::{FunctionDef, ToolDefinition};
 use crate::tools::hermes_queue::{HermesPriority, HermesQueueSender, ListResult};
 
+/// Tool result prefix when `call_hermes` successfully enqueues (round-1 TTS skip signal).
+pub const CALL_HERMES_ENQUEUED_PREFIX: &str = "call_hermes 请求已入队";
+
+/// Fallback tail when LLM omits `spoken` but `text` is present.
+pub const HERMES_SPOKEN_WAIT_TAIL: &str = "已经交给 hermes 处理了，请稍候。";
+
 const SHUTUP_TOOL: &str = r#"{
   "type": "object",
   "properties": {},
@@ -48,7 +54,7 @@ const HERMES_TOOL: &str = r#"{
     },
     "spoken": {
       "type": "string",
-      "description": "给用户的自然口语播报文本，简述你即将帮用户处理什么任务。例如'帮你查一下今天的天气''我看看北京到上海的航班'。必须口语化、自然，不要模板化开头。"
+      "description": "给用户听的完整口语，分两段：①准确精炼地复述用户这一次的具体诉求；②接着用自然亲切的语气说明已交给 hermes 后台处理、请用户稍候（提供情绪价值，如「我这就帮你安排」「好了已经交给后台了，你稍等一下」）。禁止空洞敷衍、不说清诉求的套话（如单独一句「帮你查一下」「我看看」）；禁止在未出结果前声称「已经完成了」。"
     }
   },
   "required": ["text", "spoken"]
@@ -90,7 +96,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             r#type: "function".to_string(),
             function: FunctionDef {
                 name: "call_hermes".to_string(),
-                description: "将复杂问题交给 hermes 异步处理（联网搜索、复杂推理、多步操作、定时任务等）。调用后仅收到入队确认，不代表任务完成——hermes 处理完后会主动推送真实结果，你届时再向用户播报。调用后你只能说'已帮你提交请求等待处理'，严禁说'已完成''已设置'等表示任务已结束的话。仅当execute无法满足需求时使用。".to_string(),
+                description: "将复杂问题交给 hermes 异步处理（联网搜索、复杂推理、多步操作、定时任务等）。调用后仅收到入队确认，不代表任务完成——hermes 处理完后会主动推送真实结果，你届时再向用户播报。调用时 spoken 须分两段：先复述用户本次具体诉求，再亲切说明已交给 hermes、请稍候；这是入队前唯一需要对用户说的话，入队成功后无需再说确认语。仅当execute无法满足需求时使用。".to_string(),
                 parameters: serde_json::from_str(HERMES_TOOL).unwrap(),
             },
         },
@@ -162,7 +168,7 @@ pub async fn execute_tool(
             let request_id = sender
                 .add_request(text.to_string(), priority, model, provider)
                 .await?;
-            Ok(format!("call_hermes 请求已入队, ID: {request_id}"))
+            Ok(format!("{CALL_HERMES_ENQUEUED_PREFIX}, ID: {request_id}"))
         }
         "cancel_call_hermes" => {
             let args: serde_json::Value = serde_json::from_str(arguments).map_err(|e| {
@@ -194,9 +200,32 @@ pub async fn execute_tool(
             let result = sender.list_tasks(request_id).await?;
             Ok(format_list_result(&result))
         }
-        "shutup" => Ok("shutup: 系统已进入休眠模式。".to_string()),
+        "shutup" => Ok(String::new()),
         other => Err(DemoError::Tool(format!("unknown tool: {other}"))),
     }
+}
+
+pub fn is_shutup_tool(name: &str) -> bool {
+    name.trim() == "shutup"
+}
+
+pub fn tool_calls_include_shutup<'a>(names: impl IntoIterator<Item = &'a str>) -> bool {
+    names.into_iter().any(is_shutup_tool)
+}
+
+/// End the talk turn after successful `call_hermes` enqueue — no follow-up LLM round;
+/// user-facing text was already spoken via the tool's `spoken` field.
+pub fn should_skip_call_hermes_confirmation<'a>(
+    tool_names: impl IntoIterator<Item = &'a str>,
+    tool_results: &[String],
+) -> bool {
+    let names: Vec<&str> = tool_names.into_iter().collect();
+    if names.is_empty() || names.len() != tool_results.len() {
+        return false;
+    }
+    names.iter().zip(tool_results).all(|(name, result)| {
+        *name == "call_hermes" && result.starts_with(CALL_HERMES_ENQUEUED_PREFIX)
+    })
 }
 
 pub fn extract_spoken(arguments: &str) -> Option<String> {
@@ -206,6 +235,16 @@ pub fn extract_spoken(arguments: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+pub fn extract_tool_spoken(name: &str, arguments: &str) -> Option<String> {
+    if let Some(spoken) = extract_spoken(arguments) {
+        return Some(spoken);
+    }
+    if name == "call_hermes" {
+        return generate_hermes_spoken(arguments);
+    }
+    None
+}
+
 pub fn generate_hermes_spoken(arguments: &str) -> Option<String> {
     let text = serde_json::from_str::<serde_json::Value>(arguments)
         .ok()
@@ -213,11 +252,12 @@ pub fn generate_hermes_spoken(arguments: &str) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    if text.len() > 60 {
-        Some(format!("{}...", text.chars().take(60).collect::<String>()))
+    let summary = if text.chars().count() > 60 {
+        format!("{}...", text.chars().take(60).collect::<String>())
     } else {
-        Some(text)
-    }
+        text
+    };
+    Some(format!("{summary}，{HERMES_SPOKEN_WAIT_TAIL}"))
 }
 
 fn format_list_result(r: &ListResult) -> String {
@@ -252,4 +292,75 @@ fn format_list_result(r: &ListResult) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod skip_confirmation_tests {
+    use super::*;
+
+    #[test]
+    fn skip_when_only_successful_call_hermes() {
+        assert!(should_skip_call_hermes_confirmation(
+            ["call_hermes"],
+            &["call_hermes 请求已入队, ID: abc".to_string()],
+        ));
+    }
+
+    #[test]
+    fn skip_when_multiple_call_hermes_all_enqueued() {
+        assert!(should_skip_call_hermes_confirmation(
+            ["call_hermes", "call_hermes"],
+            &[
+                "call_hermes 请求已入队, ID: a".to_string(),
+                "call_hermes 请求已入队, ID: b".to_string(),
+            ],
+        ));
+    }
+
+    #[test]
+    fn no_skip_when_mixed_with_execute() {
+        assert!(!should_skip_call_hermes_confirmation(
+            ["call_hermes", "execute"],
+            &[
+                "call_hermes 请求已入队, ID: a".to_string(),
+                "ok output".to_string(),
+            ],
+        ));
+    }
+
+    #[test]
+    fn no_skip_when_call_hermes_failed() {
+        assert!(!should_skip_call_hermes_confirmation(
+            ["call_hermes"],
+            &["error: hermes queue full".to_string()],
+        ));
+    }
+
+    #[test]
+    fn generate_hermes_spoken_appends_wait_tail() {
+        let args = r#"{"text":"查明天北京天气"}"#;
+        let spoken = generate_hermes_spoken(args).unwrap();
+        assert!(spoken.contains("查明天北京天气"));
+        assert!(spoken.contains(HERMES_SPOKEN_WAIT_TAIL));
+    }
+
+    #[test]
+    fn shutup_tool_detected() {
+        assert!(is_shutup_tool("shutup"));
+        assert!(!is_shutup_tool("call_hermes"));
+        assert!(tool_calls_include_shutup(["shutup"]));
+        assert!(!tool_calls_include_shutup(["call_hermes", "execute"]));
+    }
+
+    #[test]
+    fn no_skip_for_cancel_or_list() {
+        assert!(!should_skip_call_hermes_confirmation(
+            ["cancel_call_hermes"],
+            &["已取消请求 x".to_string()],
+        ));
+        assert!(!should_skip_call_hermes_confirmation(
+            ["list_call_hermes"],
+            &["当前没有 waiting 或已完成的 hermes 任务。".to_string()],
+        ));
+    }
 }

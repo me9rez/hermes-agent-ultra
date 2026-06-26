@@ -532,8 +532,8 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default = "default_warmup_on_start")]
@@ -542,11 +542,11 @@ pub struct LlmConfig {
     pub thinking_enabled: bool,
     #[serde(default = "default_thinking_budget")]
     pub thinking_budget: Option<u32>,
-    #[serde(default = "default_reasoning_effort")]
+    #[serde(default)]
     pub reasoning_effort: Option<String>,
     #[serde(default = "default_user_id")]
     pub user_id: String,
-    #[serde(default = "default_tools_enabled")]
+    #[serde(default)]
     pub tools_enabled: bool,
     #[serde(default = "default_execute_allowlist")]
     pub execute_allowlist: Vec<String>,
@@ -554,24 +554,28 @@ pub struct LlmConfig {
     pub aipc_talk: AipcTalkConfig,
 }
 
-fn default_user_id() -> String {
-    "flowy".to_string()
-}
+pub const DEFAULT_THINKING_BUDGET: u32 = 256;
 
 fn default_thinking_enabled() -> bool {
     true
 }
 
 fn default_thinking_budget() -> Option<u32> {
-    Some(512)
+    Some(DEFAULT_THINKING_BUDGET)
 }
 
-fn default_reasoning_effort() -> Option<String> {
-    Some("low".to_string())
+fn default_user_id() -> String {
+    "flowy".to_string()
 }
 
-fn default_tools_enabled() -> bool {
-    true
+impl LlmConfig {
+    /// Thinking token budget sent to the LLM API when `thinking_enabled`.
+    pub fn effective_thinking_budget(&self) -> Option<u32> {
+        if !self.thinking_enabled {
+            return None;
+        }
+        Some(self.thinking_budget.unwrap_or(DEFAULT_THINKING_BUDGET))
+    }
 }
 
 fn default_execute_allowlist() -> Vec<String> {
@@ -595,6 +599,9 @@ pub struct OrchestratorConfig {
     pub min_silence_ms: u32,
     #[serde(default = "default_endpoint_silence")]
     pub endpoint_silence_ms: u32,
+    /// When partial is a stable complete sentence, flush after this much trailing silence (0 = disabled).
+    #[serde(default = "default_early_endpoint_silence")]
+    pub early_endpoint_silence_ms: u32,
     #[serde(default = "default_trigger_on_asr_final")]
     pub trigger_on_asr_final: bool,
     #[serde(default = "default_cold_start")]
@@ -648,6 +655,7 @@ impl Default for OrchestratorConfig {
         Self {
             min_silence_ms: default_min_silence(),
             endpoint_silence_ms: default_endpoint_silence(),
+            early_endpoint_silence_ms: default_early_endpoint_silence(),
             trigger_on_asr_final: default_trigger_on_asr_final(),
             cold_start_sec: default_cold_start(),
             min_final_chars: default_min_final(),
@@ -673,6 +681,10 @@ impl Default for OrchestratorConfig {
 impl OrchestratorConfig {
     pub fn endpoint_silence_ms(&self) -> u32 {
         self.endpoint_silence_ms
+    }
+
+    pub fn early_endpoint_silence_ms(&self) -> u32 {
+        self.early_endpoint_silence_ms
     }
 }
 
@@ -712,6 +724,8 @@ pub struct WakeConfig {
     pub trigger_threshold: f32,
     #[serde(default = "default_grace_after_wake")]
     pub grace_after_wake_sec: u64,
+    /// Seconds of follow-up listening after a turn completes before returning to dormant.
+    /// `0` = enter dormant immediately after each turn (wake word required again).
     #[serde(default = "default_idle_after_turn")]
     pub idle_after_turn_sec: u64,
     /// Exact-match phrases that skip LLM and enter dormant (e.g. 安静, mute).
@@ -816,11 +830,6 @@ impl WakeConfig {
         if self.grace_after_wake_sec == 0 {
             return Err(DemoError::Config(
                 "wake.grace_after_wake_sec must be >= 1".into(),
-            ));
-        }
-        if self.idle_after_turn_sec == 0 {
-            return Err(DemoError::Config(
-                "wake.idle_after_turn_sec must be >= 1".into(),
             ));
         }
         for (name, path) in [
@@ -989,6 +998,9 @@ fn default_min_silence() -> u32 {
 fn default_endpoint_silence() -> u32 {
     150
 }
+fn default_early_endpoint_silence() -> u32 {
+    400
+}
 fn default_trigger_on_asr_final() -> bool {
     true
 }
@@ -1032,9 +1044,6 @@ fn default_system_prompt() -> String {
 
 再次强调：你的每一次回复都必须严格遵守上述输出格式，只能是最干净的口语，只能使用逗号句号问号感叹号。"#
         .to_string()
-}
-fn default_max_tokens() -> u32 {
-    80
 }
 fn default_temperature() -> f32 {
     0.7
@@ -1277,7 +1286,7 @@ fn default_aec_filter_length() -> i32 {
     2048
 }
 fn default_aec_preprocess() -> bool {
-    false
+    true
 }
 fn default_aec_enabled() -> bool {
     true
@@ -1526,6 +1535,8 @@ fn merge_gateway_llm_defaults(cfg: &mut Config) {
             cfg.llm.model = model.clone();
         }
     }
+
+    crate::llm_reasoning::merge_gateway_reasoning_defaults(&mut cfg.llm);
 }
 
 /// Hydrate `[dashscope]` from env / gateway config so cloud ASR/TTS works on every platform.
@@ -1760,6 +1771,43 @@ fn resolve_auth_license_paths(auth_config: &str, base: &Path) -> String {
         }
     }
     value.to_string()
+}
+
+#[cfg(test)]
+mod llm_config_defaults_tests {
+    use super::LlmConfig;
+
+    #[test]
+    fn thinking_enabled_defaults_true() {
+        let llm: LlmConfig = toml::from_str(
+            r#"
+base_url = "http://127.0.0.1:11080/v1"
+api_key = ""
+model = "auto"
+"#,
+        )
+        .unwrap();
+        assert!(llm.thinking_enabled);
+        assert_eq!(llm.thinking_budget, Some(super::DEFAULT_THINKING_BUDGET));
+        assert_eq!(
+            llm.effective_thinking_budget(),
+            Some(super::DEFAULT_THINKING_BUDGET)
+        );
+    }
+
+    #[test]
+    fn effective_thinking_budget_none_when_disabled() {
+        let llm: LlmConfig = toml::from_str(
+            r#"
+base_url = "http://127.0.0.1:11080/v1"
+api_key = ""
+model = "auto"
+thinking_enabled = false
+"#,
+        )
+        .unwrap();
+        assert!(llm.effective_thinking_budget().is_none());
+    }
 }
 
 #[cfg(test)]

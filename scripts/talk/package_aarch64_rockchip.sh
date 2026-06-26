@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DIST="${DIST_DIR:-${ROOT}/target/dist}"
 BIN="${BIN_PATH:-${ROOT}/target/aarch64-unknown-linux-gnu/release/hermes-agent-ultra}"
 GCC="${ROOT}/.cross-cache/gcc-aarch64/aarch64-none-linux-gnu"
-OUT="${DIST}/hermes-talk-rk3588"
+OUT="${DIST}/${OUT_NAME:-hermes-talk-rk3588}"
 RKAUDIO="${ROOT}/crates/hermes-talk/rkaudio"
 MODELS_ROOT="${MODELS_ROOT:-${ROOT}/.models}"
 
@@ -25,7 +25,7 @@ RK_TTS_SDK_DIR="${RK_TTS_SDK_DIR:-/home/leeyang/Rockchip_RKTTS_SDK_Release}"
 RK_ASR_SDK_DIR="${RK_ASR_SDK_DIR:-/home/leeyang/ASR_SDK/ROCKASR2_RK3588/rockasr2_android_linux_rk3588_20260312}"
 
 if [[ ! -f "${BIN}" ]]; then
-  echo "missing ${BIN}; run: make release-talk-rockchip-arm64" >&2
+  echo "missing ${BIN}; run: make release-talk-rockchip-arm64 (or make debug-talk-rockchip-arm64 for dev)" >&2
   exit 1
 fi
 

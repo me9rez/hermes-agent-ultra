@@ -1,0 +1,28 @@
+name: build-variants
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/hermes-desktop-tauri/variants/**'
+      - 'apps/hermes-desktop-tauri/scripts/apply-variant.mjs'
+
+jobs:
+  matrix:
+    strategy:
+      matrix:
+        variant: [default]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Apply variant
+        working-directory: apps/hermes-desktop-tauri
+        run: node scripts/apply-variant.mjs ${{ matrix.variant }}
+      - name: Frontend check
+        working-directory: apps/hermes-desktop-tauri
+        run: npm ci && npm run build:check

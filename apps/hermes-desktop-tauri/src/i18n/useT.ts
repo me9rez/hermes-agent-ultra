@@ -3,7 +3,18 @@ import { useCallback } from 'react'
 import { useI18n } from '@/i18n'
 import { getTerraCatalog, resolveTerraString } from '@/i18n/terra-locales'
 
-export type TranslationDomain = 'app' | 'task' | 'vertical' | 'composer' | 'settings' | 'billing' | 'auth'
+export type TranslationDomain =
+  | 'app'
+  | 'task'
+  | 'vertical'
+  | 'composer'
+  | 'settings'
+  | 'billing'
+  | 'auth'
+  | 'mcp'
+  | 'schedules'
+  | 'onboarding'
+  | 'voice'
 
 export type DomainTranslator = (key: string, fallback?: string) => string
 

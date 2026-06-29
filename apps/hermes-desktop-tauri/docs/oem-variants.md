@@ -1,10 +1,21 @@
-# OEM Variants
+# OEM variants
 
-Build a branded Terra client from `variants/<id>/variant.json`.
+Terra desktop supports white-label builds via `variants/<id>/variant.json`.
+
+## Apply a variant
 
 ```bash
-node scripts/apply-variant.mjs default
+npm run variant:apply -- default
+npm run variant:apply -- <oem-id>
+```
+
+This updates `src/branding.ts`, copies icons, and emits `src-tauri/tauri.conf.<oem>.json`.
+
+## Build
+
+```bash
+npm run variant:apply -- <oem-id>
 npm run tauri:build
 ```
 
-Each variant may override branding, icons, and i18n merges. Output: `src-tauri/tauri.conf.<id>.json`.
+CI matrix: `.github/workflows/build-variants.yml`.

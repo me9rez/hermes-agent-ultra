@@ -1,9 +1,12 @@
 //! Vertical definitions and persona loading for Terra.
 
+pub mod cross_query;
 pub mod knowledge;
 pub mod loader;
 pub mod persona;
 pub mod trader;
+
+pub use cross_query::{CrossQueryRequest, CrossQueryResult, cross_vertical_query};
 
 pub use knowledge::*;
 pub use loader::{VerticalDefinition, VerticalLoadError, VerticalLoader};

@@ -2,7 +2,7 @@
   "name": "hermes-desktop-community",
   "private": true,
   "version": "0.16.0",
-  "description": "Hermes Desktop Community, a community-driven Tauri edition of Hermes Desktop",
+  "description": "Terra desktop — task-centric AI platform (Tauri v2)",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -18,6 +18,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "variant:apply": "node scripts/apply-variant.mjs",
+    "build:variant:default": "node scripts/apply-variant.mjs default && npm run tauri:build",
     "tauri:android:dev": "tauri android dev",
     "tauri:android:build": "tauri android build",
     "tauri:ios:dev": "tauri ios dev",

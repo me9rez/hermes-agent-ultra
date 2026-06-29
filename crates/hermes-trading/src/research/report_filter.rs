@@ -200,6 +200,84 @@ fn truncate_for_dim_label(s: &str) -> String {
     }
 }
 
+/// Web-only dimension keys active for the given analysis profile.
+#[must_use]
+pub fn web_dims_for_profile(
+    profile: &crate::research::profile::AnalysisProfile,
+) -> Vec<&'static str> {
+    WEB_ONLY_DIMS
+        .iter()
+        .copied()
+        .filter(|key| profile.should_run_fetcher(key))
+        .collect()
+}
+
+/// True when any profile-scoped web-only dim still lacks web overlay fill.
+#[must_use]
+pub fn has_unfilled_web_dims(
+    result: &AnalyzeStockResult,
+    profile: &crate::research::profile::AnalysisProfile,
+) -> bool {
+    if !profile.allow_web_supplement {
+        return false;
+    }
+    web_dims_for_profile(profile)
+        .into_iter()
+        .any(|key| web_dim_still_unfilled(result, key))
+}
+
+fn web_dim_still_unfilled(result: &AnalyzeStockResult, key: &str) -> bool {
+    use crate::research::fetchers::dim_keys;
+    use crate::research::scoring::ScoreDimensionsResult;
+
+    match key {
+        dim_keys::MACRO => {
+            result.content.external.macro_bullets.is_empty()
+                && !web_dim_has_fill(&result.raw_dims, key)
+        }
+        dim_keys::POLICY => result.content.external.policy_bullets.is_empty(),
+        dim_keys::SENTIMENT => result.content.external.sentiment_bullets.is_empty(),
+        dim_keys::CHAIN => {
+            result.content.external.chain_bullets.is_empty()
+                && !web_dim_has_fill(&result.raw_dims, key)
+        }
+        dim_keys::MATERIALS => {
+            result.content.external.materials_bullets.is_empty()
+                && !web_dim_has_fill(&result.raw_dims, key)
+        }
+        dim_keys::FUTURES => {
+            result.content.external.futures_bullets.is_empty()
+                && !web_dim_has_fill(&result.raw_dims, key)
+        }
+        dim_keys::GOVERNANCE => {
+            result.content.external.governance_bullets.is_empty()
+                && !web_dim_has_fill(&result.raw_dims, key)
+        }
+        dim_keys::MOAT => {
+            result.content.external.moat_bullets.is_empty()
+                && !web_dim_has_fill(&result.raw_dims, key)
+        }
+        dim_keys::CONTESTS => {
+            result.content.external.contests_bullets.is_empty()
+                && !web_dim_has_fill(&result.raw_dims, key)
+        }
+        dim_keys::TRAP => {
+            if web_dim_has_fill(&result.raw_dims, key) {
+                return false;
+            }
+            let Ok(scored) = serde_json::from_value::<ScoreDimensionsResult>(result.scores.clone())
+            else {
+                return true;
+            };
+            scored
+                .dimensions
+                .get(key)
+                .is_some_and(|dim| is_placeholder_web_dim(key, dim, Some(&result.raw_dims)))
+        }
+        _ => false,
+    }
+}
+
 fn is_internal_subfield_key(key: &str) -> bool {
     matches!(
         key,

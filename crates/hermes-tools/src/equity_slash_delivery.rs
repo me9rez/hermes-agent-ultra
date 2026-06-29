@@ -85,8 +85,7 @@ pub fn slash_turn_start_system_hint(mode: EquitySlashMode) -> Option<String> {
         EquitySlashMode::AnalyzeStock => Some(
             "Slash /analyze-stock active: call analyze_stock(symbol, depth=medium, use_providers=true) \
              in this turn before writing assistant text. Do not reuse prior-turn analysis from history. \
-             Brief + HTML attachment are delivered automatically after the tool succeeds — do NOT call web_search \
-             or write a long analysis; one analyze_stock call is enough."
+             Brief + HTML attachment are delivered automatically after the tool succeeds (includes automatic web_search gap-fill)."
                 .into(),
         ),
         EquitySlashMode::QuickScan => Some(
@@ -126,10 +125,7 @@ pub fn wants_md_only_attachment(user_message: &str) -> bool {
 /// Medium analysis: wait for web fill when external context not yet merged.
 #[must_use]
 pub fn needs_web_fill(result: &AnalyzeStockResult) -> bool {
-    hermes_trading::research::report::needs_external_web_fill(
-        &result.content,
-        result.data_confidence.score,
-    )
+    hermes_trading::research::report::needs_external_web_fill(result)
 }
 
 /// System hint when slash waits for web gap-fill after `analyze_stock`.
@@ -312,7 +308,7 @@ pub fn slim_analyze_stock_tool_content(
     let parsed = analyze_stock_cache::get(&symbol, &depth)?;
     let slim = build_synthesis_format_output(&parsed);
     serde_json::to_string_pretty(&serde_json::json!({
-        "_orchestration": "Slash auto-delivers brief+HTML. Do not paste tables or run web_search unless the user explicitly asks.",
+        "_orchestration": "Slash auto-delivers brief+HTML after analyze_stock (web dims filled automatically). Do not paste tables.",
         "symbol": slim.symbol,
         "depth": slim.depth,
         "data_confidence": slim.data_confidence,
@@ -403,7 +399,7 @@ pub fn try_equity_slash_delivery(
         }
     };
 
-    let Some(parsed) = analyze_stock_cache::get(symbol, depth) else {
+    if analyze_stock_cache::get(symbol, depth).is_none() {
         tracing::error!(
             symbol = %symbol,
             depth = %depth,
@@ -412,7 +408,7 @@ pub fn try_equity_slash_delivery(
         return EquitySlashDeliveryOutcome::Failed(format!(
             "内部分析结果不可用（{symbol}），请重试 /analyze-stock。"
         ));
-    };
+    }
 
     match mode {
         EquitySlashMode::QuickScan => {
@@ -424,26 +420,12 @@ pub fn try_equity_slash_delivery(
             deliver_quick_scan(&parsed)
         }
         EquitySlashMode::AnalyzeStock => {
-            let low_confidence = needs_web_fill(&parsed);
             let Some(parsed) = analyze_stock_cache::take(symbol, depth) else {
                 return EquitySlashDeliveryOutcome::Failed(format!(
                     "内部分析结果不可用（{symbol}），请重试 /analyze-stock。"
                 ));
             };
-            let mut outcome = deliver_analyze_stock(user_message, &parsed);
-            if low_confidence {
-                let note = "\n\n⚠️ 数据置信度偏低，宏观/政策/舆情未 web 补数；如需补全请另说「补宏观舆情」。";
-                outcome = match outcome {
-                    EquitySlashDeliveryOutcome::Deliver(t) => {
-                        EquitySlashDeliveryOutcome::Deliver(format!("{t}{note}"))
-                    }
-                    EquitySlashDeliveryOutcome::Partial(t) => {
-                        EquitySlashDeliveryOutcome::Partial(format!("{t}{note}"))
-                    }
-                    other => other,
-                };
-            }
-            outcome
+            deliver_analyze_stock(user_message, parsed)
         }
         EquitySlashMode::None => EquitySlashDeliveryOutcome::Pending,
     }
@@ -476,7 +458,7 @@ fn force_deliver_analyze_stock(
             "内部分析结果不可用（{symbol}），无法投递。"
         ));
     };
-    let mut outcome = deliver_analyze_stock(user_message, &parsed);
+    let mut outcome = deliver_analyze_stock(user_message, parsed);
     if session.web_searches_done == 0 {
         let note = "\n\n⚠️ web 补数未完成，以下为 HTTP 硬数据分析结果。";
         outcome = match outcome {
@@ -502,17 +484,20 @@ fn deliver_quick_scan(result: &AnalyzeStockResult) -> EquitySlashDeliveryOutcome
 
 fn deliver_analyze_stock(
     user_message: &str,
-    parsed: &AnalyzeStockResult,
+    mut parsed: AnalyzeStockResult,
 ) -> EquitySlashDeliveryOutcome {
+    #[cfg(all(feature = "web"))]
+    crate::equity_web_fill::ensure_web_dims_filled(&mut parsed);
+
     let started = std::time::Instant::now();
-    let brief = render_chat_brief_markdown(parsed);
+    let brief = render_chat_brief_markdown(&parsed);
     if wants_md_only_attachment(user_message) {
         return EquitySlashDeliveryOutcome::Deliver(brief);
     }
 
     let html = std::thread::scope(|scope| {
         scope
-            .spawn(|| render_institutional_html(parsed, None))
+            .spawn(|| render_institutional_html(&parsed, None))
             .join()
             .unwrap_or_else(|_| String::new())
     });
@@ -522,7 +507,7 @@ fn deliver_analyze_stock(
         elapsed_ms = started.elapsed().as_millis(),
         "equity slash: institutional HTML rendered"
     );
-    match write_equity_report(parsed, &html, None) {
+    match write_equity_report(&parsed, &html, None) {
         Ok(paths) => {
             let html_path = paths.html.to_string_lossy();
             EquitySlashDeliveryOutcome::Deliver(format!(
@@ -826,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_stock_delivers_even_when_low_confidence() {
+    fn analyze_stock_delivers_without_low_confidence_warning() {
         let _guard = test_guard();
         let mut session = fresh_session();
         let mut sample = sample_with_gaps("600522.SH");
@@ -848,7 +833,7 @@ mod tests {
             other => panic!("expected immediate Deliver, got {other:?}"),
         };
         assert!(text.contains("MEDIA:"));
-        assert!(text.contains("置信度偏低"));
+        assert!(!text.contains("置信度偏低"));
     }
 
     #[test]
@@ -925,7 +910,7 @@ mod tests {
         use hermes_core::ToolHandler;
         use serde_json::json;
 
-        const MAX_ELAPSED: Duration = Duration::from_secs(120);
+        const MAX_ELAPSED: Duration = Duration::from_secs(180);
 
         analyze_stock_cache::clear_for_tests();
         let started = Instant::now();
@@ -982,6 +967,10 @@ mod tests {
             "HTML missing 06 / VALUATION"
         );
         assert!(html.contains("600528"), "HTML missing symbol");
+        assert!(
+            !html.contains("待 web 补数"),
+            "HTML should not contain web stub cards after automatic web fill"
+        );
 
         assert!(
             started.elapsed() < MAX_ELAPSED,

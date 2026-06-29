@@ -16,6 +16,7 @@ pub mod sections;
 pub mod styles;
 pub mod svg;
 
+pub use crate::research::report_filter::{has_unfilled_web_dims, web_dims_for_profile};
 pub use chat_brief::render_chat_brief_markdown;
 pub use content::{
     ExternalContextOverlay, ReportContent, build_report_content, merge_external_overlay,

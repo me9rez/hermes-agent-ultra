@@ -341,7 +341,7 @@ fn quick_scan_profile_golden() {
 
     assert!(!lite.run_comps_lbo_three_stmt);
     assert!(medium.run_comps_lbo_three_stmt);
-    assert!(!lite.allow_web_supplement);
+    assert!(lite.allow_web_supplement);
     assert!(medium.allow_web_supplement);
 }
 

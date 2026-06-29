@@ -112,7 +112,10 @@ pub fn assert_comps_html_parity(html: &str, comps: &Value) -> Result<(), String>
 
     let verdict = escape_html(&ok.valuation_verdict);
     if !section.contains(&verdict) {
-        return Err(format!("valuation_verdict {:?} not in COMPS HTML", ok.valuation_verdict));
+        return Err(format!(
+            "valuation_verdict {:?} not in COMPS HTML",
+            ok.valuation_verdict
+        ));
     }
 
     for peer in &ok.peers {
@@ -129,10 +132,10 @@ pub fn assert_comps_html_parity(html: &str, comps: &Value) -> Result<(), String>
         }
     }
 
-    if let Some(name) = ok.target.name.as_deref().filter(|n| !n.is_empty()) {
-        if !section.contains(name) {
-            return Err(format!("target name {name} missing from COMPS table"));
-        }
+    if let Some(name) = ok.target.name.as_deref().filter(|n| !n.is_empty())
+        && !section.contains(name)
+    {
+        return Err(format!("target name {name} missing from COMPS table"));
     }
     if let Some(pe) = ok.target.pe {
         let pe_str = format!("{pe:.2}");
@@ -198,7 +201,11 @@ pub fn assert_web_merge_html(html: &str, overlay_snippets: &[&str]) -> Result<()
 }
 
 /// Filled web dim must not still show the generic stub suffix in its label line.
-pub fn assert_dim_label_not_stub(html: &str, filled_label: &str, stub_prefix: &str) -> Result<(), String> {
+pub fn assert_dim_label_not_stub(
+    html: &str,
+    filled_label: &str,
+    stub_prefix: &str,
+) -> Result<(), String> {
     if !html.contains(filled_label) {
         return Err(format!("filled label {filled_label:?} not in HTML"));
     }
@@ -211,7 +218,7 @@ pub fn assert_dim_label_not_stub(html: &str, filled_label: &str, stub_prefix: &s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::research::analyze::{apply_external_context, analyze_stock};
+    use crate::research::analyze::{analyze_stock, apply_external_context};
     use crate::research::fetchers::bridge::apply_dims_to_snapshot;
     use crate::research::fetchers::types::{CollectOutput, DimQuality, DimResult, Market};
     use crate::research::profile::AnalysisProfile;
@@ -267,7 +274,9 @@ mod tests {
 
     fn write_preview(name: &str, html: &str) -> std::path::PathBuf {
         use std::path::PathBuf;
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target").join(name);
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create target dir");
         }

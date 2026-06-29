@@ -93,13 +93,43 @@ impl ToolHandler for AnalyzeStockHandler {
         };
 
         let peers = parse_peers(peers_json);
-        let result = analyze_stock(
+        let mut result = analyze_stock(
             &snap,
             raw_dims.as_ref(),
             peers.as_deref(),
             &profile,
             collect.as_ref(),
         );
+
+        #[cfg(all(feature = "web"))]
+        {
+            if profile.allow_web_supplement {
+                let backend = crate::backends::web::search_backend_from_env_or_fallback();
+                let fill = crate::equity_web_fill::fill_web_dims_if_needed(
+                    backend.as_ref(),
+                    &mut result,
+                    &profile,
+                )
+                .await;
+                if fill.queries_run > 0 && !fill.filled {
+                    tracing::warn!(
+                        symbol = %symbol,
+                        depth = %depth,
+                        queries = fill.queries_run,
+                        "analyze_stock: web gap-fill ran but returned no snippets — check HERMES_WEB_SEARCH_BACKEND / network"
+                    );
+                } else if fill.queries_run > 0 {
+                    tracing::info!(
+                        symbol = %symbol,
+                        depth = %depth,
+                        queries = fill.queries_run,
+                        filled = fill.filled,
+                        "analyze_stock: automatic web gap-fill finished"
+                    );
+                }
+            }
+        }
+
         analyze_stock_cache::store(symbol, depth, result.clone());
 
         let mut saved_report_paths: Option<ReportPaths> = None;
@@ -296,7 +326,7 @@ fn slim_agent_json_suffix(
 ) -> Result<String, ToolError> {
     let slim = build_synthesis_format_output(result);
     serde_json::to_string_pretty(&json!({
-        "_orchestration": "Brief+HTML auto-delivered on /analyze-stock slash. Do not paste tables; web_search only if user explicitly asks.",
+        "_orchestration": "Brief+HTML auto-delivered on /analyze-stock slash; web dims filled automatically inside analyze_stock.",
         "data": slim,
     }))
     .map_err(|e| ToolError::ExecutionFailed(format!("Serialization error: {e}")))

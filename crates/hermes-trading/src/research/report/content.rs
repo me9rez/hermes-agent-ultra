@@ -112,6 +112,8 @@ pub struct ExternalContextOverlay {
     pub moat_bullets: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contests_bullets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trap_bullets: Vec<String>,
 }
 
 /// Build deterministic content from collected dims + models.
@@ -158,7 +160,8 @@ pub fn merge_external_overlay(content: &mut ReportContent, overlay: &ExternalCon
         || !overlay.futures_bullets.is_empty()
         || !overlay.governance_bullets.is_empty()
         || !overlay.moat_bullets.is_empty()
-        || !overlay.contests_bullets.is_empty();
+        || !overlay.contests_bullets.is_empty()
+        || !overlay.trap_bullets.is_empty();
     if !has_content {
         return;
     }
@@ -226,6 +229,7 @@ pub fn merge_web_dims_from_overlay(raw_dims: &mut Value, overlay: &ExternalConte
         ("9_futures", &overlay.futures_bullets),
         ("11_governance", &overlay.governance_bullets),
         ("14_moat", &overlay.moat_bullets),
+        ("18_trap", &overlay.trap_bullets),
         ("19_contests", &overlay.contests_bullets),
     ];
     let Some(obj) = raw_dims.as_object_mut() else {
@@ -323,13 +327,11 @@ pub fn refresh_web_dim_labels(result: &mut crate::research::analyze::AnalyzeStoc
     }
 }
 
-/// Whether slash should block delivery waiting for web gap-fill (low confidence only).
+/// Whether analysis still has unfilled web-only dimensions (any mode).
 #[must_use]
-pub fn needs_external_web_fill(content: &ReportContent, confidence: f64) -> bool {
-    if content.external.coverage == ExternalCoverage::WebFilled {
-        return false;
-    }
-    confidence < 0.55
+pub fn needs_external_web_fill(result: &crate::research::analyze::AnalyzeStockResult) -> bool {
+    let profile = crate::research::profile::AnalysisProfile::from_depth_str(&result.depth);
+    crate::research::report_filter::has_unfilled_web_dims(result, &profile)
 }
 
 fn build_fundamentals_block(
@@ -614,10 +616,66 @@ mod tests {
     }
 
     #[test]
-    fn needs_external_web_fill_when_low_confidence() {
-        let content = ReportContent::default();
-        assert!(needs_external_web_fill(&content, 0.40));
-        assert!(!needs_external_web_fill(&content, 0.75));
+    fn needs_external_web_fill_when_web_dims_stub() {
+        use crate::research::analyze::AnalyzeStockResult;
+        use crate::research::types::DataConfidence;
+
+        let result = AnalyzeStockResult {
+            symbol: "600519.SH".into(),
+            depth: "medium".into(),
+            dcf: serde_json::json!({}),
+            comps: serde_json::json!({}),
+            three_statement: serde_json::json!({}),
+            lbo: serde_json::json!({}),
+            scores: serde_json::json!({
+                "ticker": "600519.SH",
+                "fundamental_score": 60.0,
+                "dimensions": {
+                    "14_moat": { "score": 5, "weight": 3, "display_name": "", "label": "护城河", "missing": [], "reasons_pass": [], "reasons_fail": [] }
+                }
+            }),
+            personas: serde_json::json!({}),
+            data_confidence: DataConfidence {
+                score: 0.75,
+                present: vec![],
+                missing: vec![],
+            },
+            missing_dims: vec![],
+            dim_summary: vec![],
+            used_fallback: vec![],
+            summary_markdown: String::new(),
+            synthesis: crate::research::synthesis::SynthesisReport {
+                headline: String::new(),
+                verdict: String::new(),
+                confidence_tier: String::new(),
+                key_metrics: vec![],
+                risks: vec![],
+                missing_highlights: vec![],
+                panel_summary: crate::research::synthesis::PanelSummary {
+                    consensus: 0.0,
+                    vote_buy: 0,
+                    vote_avoid: 0,
+                    investor_count: 0,
+                },
+                dcf_one_liner: String::new(),
+            },
+            content: ReportContent::default(),
+            raw_dims: serde_json::json!({}),
+        };
+        assert!(needs_external_web_fill(&result));
+
+        let mut filled = result.clone();
+        filled.content.external.coverage = ExternalCoverage::WebFilled;
+        filled.content.external.macro_bullets = vec!["宏观平稳".into()];
+        filled.content.external.policy_bullets = vec!["政策稳定".into()];
+        filled.content.external.sentiment_bullets = vec!["舆情中性".into()];
+        filled.content.external.chain_bullets = vec!["产业链稳定".into()];
+        filled.content.external.materials_bullets = vec!["原材料平稳".into()];
+        filled.content.external.futures_bullets = vec!["期货中性".into()];
+        filled.content.external.governance_bullets = vec!["治理规范".into()];
+        filled.content.external.moat_bullets = vec!["品牌护城河".into()];
+        filled.content.external.contests_bullets = vec!["大赛热度一般".into()];
+        assert!(!needs_external_web_fill(&filled));
     }
 
     #[test]

@@ -65,7 +65,7 @@ impl AnalysisProfile {
             depth: AnalysisDepth::Lite,
             fetchers_enabled,
             run_comps_lbo_three_stmt: false,
-            allow_web_supplement: false,
+            allow_web_supplement: true,
         }
     }
 

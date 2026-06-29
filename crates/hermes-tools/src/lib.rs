@@ -22,6 +22,8 @@ pub mod dispatch;
 pub mod equity_research_seed;
 #[cfg(feature = "trading-research")]
 pub mod equity_slash_delivery;
+#[cfg(all(feature = "trading-research", feature = "web"))]
+pub mod equity_web_fill;
 pub mod kanban;
 pub mod kanban_failure;
 pub mod media_extract;

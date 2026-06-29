@@ -23,8 +23,8 @@ commands:
 
       Workflow:
       1. resolve_a_share_symbol if needed
-      2. analyze_stock(symbol, depth=medium, use_providers=true) — system auto-delivers brief + HTML; do NOT web_search unless user asks
-      3. Optional: user explicitly requests macro/policy refresh → web_search then merge_external_only
+      2. analyze_stock(symbol, depth=medium, use_providers=true) — system auto-delivers brief + HTML (web dims filled automatically)
+      3. Optional: user explicitly requests refresh → web_search then merge_external_only
       4. Do not write long analysis in chat; one tool call is enough
 metadata:
   hermes:
@@ -54,15 +54,15 @@ No gateway keyword routing — decide from **intent** (valuation vs spot price v
 
 | Mode | Tool | web_search | Output |
 |------|------|------------|--------|
-| `/quick-scan` | `analyze_stock(depth=lite)` | **禁止** | quick-scan markdown + ≤2句 one-liner |
-| `/analyze-stock` / `/equity-research` | `analyze_stock(depth=medium)` → gap-fill | **analyze 之后按需**（missing_dims / 低 confidence） | 短摘要 MD + HTML 附件（自动） |
-| 用户要 **研报 / HTML / 发报告** | 同 `/analyze-stock`（已自动附 HTML）；可加 `narrative=…` 写入 HTML | analyze 后按需 | institutional HTML 附件；`write_report` 由系统自动处理 |
-| 只要 **结构化结论 JSON** | `analyze_stock(format=synthesis)` | analyze 后按需 | `synthesis` + 核心指标，无 66 评委全表 |
+| `/quick-scan` | `analyze_stock(depth=lite)` | **自动**（治理 web 补数） | quick-scan markdown + ≤2句 one-liner |
+| `/analyze-stock` / `/equity-research` | `analyze_stock(depth=medium)` | **自动**（宏观/政策/舆情/产业链等） | 短摘要 MD + HTML 附件（自动） |
+| 用户要 **研报 / HTML / 发报告** | 同 `/analyze-stock`（已自动附 HTML）；可加 `narrative=…` 写入 HTML | 自动 | institutional HTML 附件；`write_report` 由系统自动处理 |
+| 只要 **结构化结论 JSON** | `analyze_stock(format=synthesis)` | 自动 | `synthesis` + 核心指标，无 66 评委全表 |
 
 1. If the request is **fundamental/valuation research**, call `skill_view(name="equity-research")` when unsure of the workflow.
 2. **`resolve_a_share_symbol`** when the user gives a Chinese name or bare 6-digit code.
 3. **`analyze_stock(symbol, depth=…, use_providers=true)`** — always **before** `web_search` for medium-depth research.
-4. **`web_search`** only **after** `analyze_stock` (medium), for **政策 / 宏观 / 舆情**（2–4 条定向查询）。Then **`analyze_stock(symbol, depth=medium, merge_external_only=true, external_context={macro_bullets, policy_bullets, sentiment_bullets, sources})`** — do **not** re-run full HTTP fetch. **Never before** analyze_stock; **never** on `/quick-scan`.
+4. **`web_search`** — handled **inside** `analyze_stock` for web-only dims (macro/policy/sentiment/chain/moat…). For manual refresh after delivery: `analyze_stock(symbol, depth=medium, merge_external_only=true, external_context={...})`.
 5. If user typed **`/quick-scan`**, **`/analyze-stock`**, or **`/equity-research …`**, treat the skill as loaded and run the matching row above.
 
 ## When NOT to Use
@@ -74,8 +74,8 @@ No gateway keyword routing — decide from **intent** (valuation vs spot price v
 
 ## Slash commands
 
-- **`/quick-scan 688126`** — lite: 8 core dims + Top 10 judges + trap; no web_search
-- **`/analyze-stock 沪硅产业`** — medium: HTTP 采集 + 按需 web 补数 + 66 judges + DCF + 自动 HTML
+- **`/quick-scan 688126`** — lite: 8 core dims + Top 10 judges + trap; governance web-filled automatically
+- **`/analyze-stock 沪硅产业`** — medium: HTTP 采集 + 自动 web 补数 + 66 judges + DCF + 自动 HTML
 - **`/equity-research 山西汾酒`** — same as `/analyze-stock` (medium)
 - **`/equity-research 600809.SH`** — same, with explicit symbol
 
@@ -88,10 +88,8 @@ No gateway keyword routing — decide from **intent** (valuation vs spot price v
    - **`depth=lite`** for `/quick-scan` only (Top 10 judges, quick-scan markdown)
    - Only pass manual `fundamentals` / `peers` when providers failed or user supplied research notes
 3. **`get_quote(symbol)`** — optional spot check; not a substitute for `analyze_stock` on research requests
-4. **`web_search`** — **after** `analyze_stock`, for policy/macro/sentiment (2–4 targeted queries). Then merge:
+4. **`web_search`** — normally **not needed** (auto inside `analyze_stock`). Manual refresh only when user asks to update macro/policy/sentiment after delivery:
    - `analyze_stock(symbol, depth=medium, merge_external_only=true, external_context={...})`
-   - `external_context` fields: `macro_bullets`, `policy_bullets`, `sentiment_bullets`, `sources[]` (URLs/titles from search)
-   - Also use web when `data_confidence.score < 0.5` for FCF/revenue gaps
 5. **LLM narrative** — after pasting **`summary_markdown`** from `analyze_stock` (full 19 dims + 66 judges; do not shorten to 9 rows), add conclusion citing:
    - `data_confidence.score`, `missing_dims`, and `dim_summary`
    - `used_fallback` (never hide proxy/Fallback paths)

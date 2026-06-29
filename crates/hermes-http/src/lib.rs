@@ -4,12 +4,14 @@
 //! - `HERMES_HTTP_MAX_BODY_BYTES` — max JSON body size for POST routes (default 2 MiB).
 //! Policy HTTP routes are intentionally omitted (Hermes Python does not expose them).
 
+mod billing;
 mod otel;
 mod push;
 mod security;
 mod task_ws;
 mod tasks;
 
+pub use billing::routes as billing_routes;
 pub use otel::init_otel_stub;
 pub use push::routes as push_routes;
 
@@ -553,6 +555,7 @@ pub fn router(state: HttpServerState) -> Router {
         .route("/api/ws", get(compat_or_multiplex_ws))
         .merge(tasks::task_routes())
         .merge(push_routes())
+        .merge(billing_routes())
         .with_state(state)
         .layer(middleware::from_fn(move |req, next| {
             let sec = sec_guard.clone();

@@ -71,3 +71,47 @@ async fn command_help_runs_through_gateway() {
         out
     );
 }
+
+#[tokio::test]
+async fn billing_tier_mapping_stub() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let cfg = hermes_config::GatewayConfig::default();
+    let state = hermes_http::HttpServerState::build(cfg).await.unwrap();
+    let app = hermes_http::router(state);
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/billing/tier-mapping")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["schema_version"], 1);
+    assert!(v["mappings"].as_array().unwrap().len() >= 3);
+}
+
+#[tokio::test]
+async fn billing_quota_stub() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let cfg = hermes_config::GatewayConfig::default();
+    let state = hermes_http::HttpServerState::build(cfg).await.unwrap();
+    let app = hermes_http::router(state);
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/billing/quota")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["tier"], "free");
+    assert_eq!(v["effective_provider_tier"], "economic");
+}

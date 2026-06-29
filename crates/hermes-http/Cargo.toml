@@ -25,6 +25,8 @@ ulid = { workspace = true }
 hermes-tasks = { workspace = true }
 hermes-verticals = { workspace = true }
 hermes-datasources = { workspace = true }
+hermes-accounts = { workspace = true }
+hermes-billing = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

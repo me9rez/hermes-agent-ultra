@@ -39,7 +39,7 @@ pub struct QuotaState {
     pub vertical_caps: HashMap<String, u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderTier {
     Smart,
@@ -62,6 +62,20 @@ pub struct ProviderPreferences {
     pub stt_engine: String,
     pub stt_raw_override: Option<String>,
     pub byok_overrides: Vec<ByokOverride>,
+}
+
+impl Default for ProviderPreferences {
+    fn default() -> Self {
+        Self {
+            llm_tier: ProviderTier::Economic,
+            llm_raw_override: None,
+            tts_voice_id: "warm".into(),
+            tts_raw_override: None,
+            stt_engine: "auto".into(),
+            stt_raw_override: None,
+            byok_overrides: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,4 +108,22 @@ pub struct StoredAccount {
     pub access_token_keychain_id: String,
     pub refresh_token_keychain_id: String,
     pub last_active_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_preferences_default_economic() {
+        let prefs = ProviderPreferences::default();
+        assert_eq!(prefs.llm_tier, ProviderTier::Economic);
+        assert_eq!(prefs.stt_engine, "auto");
+    }
+
+    #[test]
+    fn tier_serializes_snake_case() {
+        let json = serde_json::to_string(&Tier::Free).unwrap();
+        assert_eq!(json, "\"free\"");
+    }
 }

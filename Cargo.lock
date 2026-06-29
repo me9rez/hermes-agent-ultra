@@ -4025,7 +4025,9 @@ dependencies = [
  "axum",
  "chrono",
  "futures",
+ "hermes-accounts",
  "hermes-agent",
+ "hermes-billing",
  "hermes-config",
  "hermes-core",
  "hermes-datasources",
@@ -4376,6 +4378,7 @@ dependencies = [
 name = "hermes-verticals"
 version = "0.18.0"
 dependencies = [
+ "hermes-billing",
  "hermes-tasks",
  "serde",
  "serde_json",

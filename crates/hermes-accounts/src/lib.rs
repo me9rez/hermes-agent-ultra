@@ -8,7 +8,7 @@ pub mod phone_otp;
 pub mod store;
 pub mod types;
 
-pub use consent::{ConsentRecord, ConsentStore};
+pub use consent::ConsentStore;
 pub use email_auth::{EmailAuthError, EmailAuthFlow};
 pub use jwt::{JwtError, JwtTokens, refresh_if_needed};
 pub use oauth::{OauthError, OauthFlow};

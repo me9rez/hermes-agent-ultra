@@ -24,6 +24,17 @@ The Tauri shell probes `hermes-http` in this order:
 
 Default HTTP port: **8787** (override via `HERMES_HTTP_ADDR` when spawning).
 
+### Terra UI
+
+- Task home: `#/terra`
+- Settings (billing, watchlist, schedules): `#/terra/settings`
+
+### Verify
+
+```bash
+npm run verify:terra
+```
+
 ### WebSocket
 
 - Task event stream: `GET /api/tasks/{id}/stream`

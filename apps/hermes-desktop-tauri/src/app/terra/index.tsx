@@ -5,6 +5,7 @@ import { Link, Route, Routes } from 'react-router-dom'
 import TerraSettings from '@/app/terra/settings'
 
 import { ApprovalModal } from '@/components/approval/ApprovalModal'
+import { PrimaryOfflineBanner } from '@/components/devices/PrimaryOfflineBanner'
 import { VerticalPicker } from '@/components/home/VerticalPicker'
 import { VerticalSearch } from '@/components/home/VerticalSearch'
 import { TaskDetail } from '@/components/tasks/TaskDetail'
@@ -101,6 +102,7 @@ export default function TerraApp() {
 
   const shell = (
     <div className="terra-shell">
+      <PrimaryOfflineBanner />
       <header className="terra-shell__top">
         <Link to="/terra/settings">Settings</Link>
       </header>

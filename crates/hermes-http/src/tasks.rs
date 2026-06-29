@@ -10,8 +10,9 @@ use hermes_datasources::{
     UserCustomDataSource, UserCustomDataSourceConfig,
 };
 use hermes_tasks::{
-    ArtifactStore, DeviceId, ForkRequest, SignedUrlConfig, Task, TaskCancellationRegistry, TaskId,
-    TaskListQuery, TaskRuntime, UserId, VerticalId, generate_signed_url,
+    ArtifactStore, CheckpointState, DeviceId, ForkRequest, SignedUrlConfig, Task,
+    TaskCancellationRegistry, TaskId, TaskListQuery, TaskRuntime, UserId, VerticalId,
+    generate_signed_url, latest_checkpoint,
 };
 use hermes_verticals::VerticalLoader;
 use serde::Deserialize;
@@ -91,6 +92,15 @@ pub struct ForkTaskRequest {
     pub vertical: String,
     pub title: String,
     pub instruction: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CheckpointRequest {
+    pub last_event_id: String,
+    #[serde(default)]
+    pub agent_state: Value,
+    #[serde(default)]
+    pub working_memory: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -377,6 +387,65 @@ pub async fn fork_task(
     ))
 }
 
+pub async fn save_checkpoint(
+    State(state): State<HttpServerState>,
+    Path(id): Path<String>,
+    Json(req): Json<CheckpointRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let tasks = task_state(&state)?;
+    let task_id: TaskId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let last_event_id: hermes_tasks::EventId = req
+        .last_event_id
+        .parse()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let checkpoint = CheckpointState {
+        last_event_id,
+        agent_state_json: req.agent_state,
+        working_memory: req.working_memory,
+    };
+    let event = tasks
+        .runtime
+        .checkpoint(task_id, &checkpoint)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "event": event })))
+}
+
+pub async fn get_checkpoint(
+    State(state): State<HttpServerState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    let tasks = task_state(&state)?;
+    let task_id: TaskId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let checkpoint = latest_checkpoint(tasks.runtime.events(), task_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "checkpoint": checkpoint })))
+}
+
+pub async fn resume_task(
+    State(state): State<HttpServerState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    let tasks = task_state(&state)?;
+    let task_id: TaskId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let context = tasks
+        .runtime
+        .resume_context(task_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    crate::task_agent::spawn_task_agent_run(
+        state.clone(),
+        context.task.clone(),
+        "Resume from checkpoint".to_string(),
+        None,
+        tasks.cancellation.clone(),
+    );
+    Ok(Json(json!({
+        "task": context.task,
+        "checkpoint": context.checkpoint,
+        "resumed": true
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct VerticalListParams {
     pub category: Option<String>,
@@ -586,6 +655,11 @@ pub fn task_routes() -> axum::Router<HttpServerState> {
         .route("/api/tasks/{id}/cancel", post(cancel_task))
         .route("/api/tasks/{id}/approve", post(approve_task))
         .route("/api/tasks/{id}/fork", post(fork_task))
+        .route(
+            "/api/tasks/{id}/checkpoint",
+            get(get_checkpoint).post(save_checkpoint),
+        )
+        .route("/api/tasks/{id}/resume", post(resume_task))
         .route("/api/verticals", get(list_verticals))
         .route("/api/verticals/{id}", get(get_vertical))
         .route(

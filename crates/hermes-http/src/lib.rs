@@ -4,7 +4,10 @@
 //! - `HERMES_HTTP_MAX_BODY_BYTES` — max JSON body size for POST routes (default 2 MiB).
 //! Policy HTTP routes are intentionally omitted (Hermes Python does not expose them).
 
+mod push;
 mod security;
+mod task_ws;
+mod tasks;
 
 pub use security::PolicyGuardConfig;
 pub use security::parse_allowed_ips;
@@ -18,13 +21,13 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use axum::extract::ws::{Message as WsMessage, WebSocket};
-use axum::extract::{Path, State, WebSocketUpgrade};
+use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
 use futures::StreamExt;
@@ -141,6 +144,7 @@ impl PlatformAdapter for HttpPlatformAdapter {
 pub struct HttpServerState {
     pub config: Arc<GatewayConfig>,
     pub tool_registry: Arc<ToolRegistry>,
+    pub tasks: Option<Arc<tasks::TaskApiState>>,
     gateway: Arc<Gateway>,
     outbound: ChatOutboundBuffer,
 }
@@ -170,6 +174,7 @@ impl HttpServerState {
         gateway.register_adapter(HTTP_PLATFORM, adapter).await;
 
         let tool_registry = Arc::new(ToolRegistry::new());
+        let task_api = tasks::TaskApiState::new().ok().map(Arc::new);
         let agent_tools = Arc::new(bridge_tool_registry(&tool_registry));
         let agent_tools_handler = agent_tools.clone();
         let config_arc = Arc::new(config.clone());
@@ -355,8 +360,9 @@ impl HttpServerState {
             .map_err(|e| AgentError::Io(e.to_string()))?;
 
         Ok(Self {
-            config: Arc::new(config),
+            config: config_arc,
             tool_registry,
+            tasks: task_api,
             gateway,
             outbound,
         })
@@ -508,6 +514,41 @@ pub fn router(state: HttpServerState) -> Router {
         .route("/v1/sessions/{session_id}/messages", post(send_message))
         .route("/v1/commands", post(exec_command))
         .route("/v1/ws/{session_id}", get(ws_upgrade))
+        // Compatibility routes for Python Hermes API (desktop app)
+        .route("/api/status", get(compat_api_status))
+        .route("/api/sessions", get(compat_api_sessions))
+        .route(
+            "/api/config",
+            get(compat_api_config).put(compat_api_config_put),
+        )
+        .route("/api/config/defaults", get(compat_api_config_defaults))
+        .route("/api/config/schema", get(compat_api_config_schema))
+        .route("/api/model/info", get(compat_api_model_info))
+        .route("/api/model/options", get(compat_api_model_options))
+        .route("/api/model/auxiliary", get(compat_api_model_auxiliary))
+        .route(
+            "/api/model/recommended-default",
+            get(compat_api_model_recommended),
+        )
+        .route("/api/model/set", post(compat_api_model_set))
+        .route("/api/skills", get(compat_api_skills))
+        .route("/api/skills/toggle", put(compat_api_skills_toggle))
+        .route("/api/toolsets", get(compat_api_toolsets))
+        .route("/api/env", get(compat_api_env))
+        .route("/api/profiles", get(compat_api_profiles))
+        .route("/api/profiles/active", get(compat_api_profiles_active))
+        .route("/api/profiles/sessions", get(compat_api_sessions))
+        .route("/api/logs", get(compat_api_logs))
+        .route(
+            "/api/messaging/platforms",
+            get(compat_api_messaging_platforms),
+        )
+        .route("/api/cron/jobs", get(compat_api_cron_jobs))
+        .route("/api/analytics/usage", get(compat_api_analytics))
+        .route("/api/providers/oauth", get(compat_api_oauth_providers))
+        .route("/api/ws", get(compat_or_multiplex_ws))
+        .merge(tasks::task_routes())
+        .merge(push::push_routes())
         .with_state(state)
         .layer(middleware::from_fn(move |req, next| {
             let sec = sec_guard.clone();
@@ -1140,6 +1181,248 @@ fn resolve_model(default_model: &str, provider: Option<&str>, model: Option<&str
         }
         (None, Some(m)) => m.to_string(),
         (None, None) => default_model.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compatibility API handlers — Python Hermes API stubs for desktop app
+// ---------------------------------------------------------------------------
+
+async fn compat_api_status() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "version": "0.17.0",
+        "status": "running",
+        "model": "hermes-agent-ultra",
+        "uptime": 0
+    }))
+}
+
+async fn compat_api_sessions(
+    Query(_params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "sessions": [],
+        "offset": 0,
+        "total": 0
+    }))
+}
+
+async fn compat_api_config() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "model": "openai:gpt-4o",
+        "personality": null,
+        "max_turns": 50,
+        "streaming": { "enabled": true },
+        "model_context_length": 128000,
+        "agent": { "service_tier": "default" }
+    }))
+}
+
+async fn compat_api_config_put(Json(_body): Json<serde_json::Value>) -> impl IntoResponse {
+    Json(serde_json::json!({ "ok": true }))
+}
+
+async fn compat_api_config_defaults() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "model": "openai:gpt-4o",
+        "personality": null,
+        "max_turns": 50
+    }))
+}
+
+async fn compat_api_config_schema() -> impl IntoResponse {
+    Json(serde_json::json!({ "fields": [] }))
+}
+
+async fn compat_api_model_info() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "current": { "provider": "openai", "model": "gpt-4o" },
+        "available": []
+    }))
+}
+
+async fn compat_api_model_options() -> impl IntoResponse {
+    Json(serde_json::json!({ "providers": [] }))
+}
+
+async fn compat_api_model_auxiliary() -> impl IntoResponse {
+    Json(serde_json::json!({ "assignments": {} }))
+}
+
+async fn compat_api_model_recommended(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "provider": params.get("provider").map_or("openai", |s| s.as_str()),
+        "model": "gpt-4o",
+        "free_tier": null
+    }))
+}
+
+async fn compat_api_model_set(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "ok": true,
+        "provider": body.get("provider").and_then(|v| v.as_str()).unwrap_or("openai"),
+        "model": body.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o")
+    }))
+}
+
+async fn compat_api_skills() -> impl IntoResponse {
+    Json(serde_json::json!([]))
+}
+
+async fn compat_api_skills_toggle(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "ok": true,
+        "name": body.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+        "enabled": body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false)
+    }))
+}
+
+async fn compat_api_toolsets() -> impl IntoResponse {
+    Json(serde_json::json!([]))
+}
+
+async fn compat_api_env() -> impl IntoResponse {
+    Json(serde_json::json!({}))
+}
+
+async fn compat_api_profiles() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "profiles": [{"name": "default", "active": true}]
+    }))
+}
+
+async fn compat_api_profiles_active() -> impl IntoResponse {
+    Json(serde_json::json!({ "profile": "default", "active": true }))
+}
+
+async fn compat_api_logs() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "lines": [],
+        "components": []
+    }))
+}
+
+async fn compat_api_messaging_platforms() -> impl IntoResponse {
+    Json(serde_json::json!([]))
+}
+
+async fn compat_api_cron_jobs() -> impl IntoResponse {
+    Json(serde_json::json!([]))
+}
+
+async fn compat_api_analytics() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "daily": [],
+        "totals": { "requests": 0, "tokens": 0, "cost": 0 }
+    }))
+}
+
+async fn compat_api_oauth_providers() -> impl IntoResponse {
+    Json(serde_json::json!({ "providers": [] }))
+}
+
+async fn compat_or_multiplex_ws(
+    ws: WebSocketUpgrade,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(state): State<HttpServerState>,
+    headers: HeaderMap,
+) -> Response {
+    if params.get("mode").map(String::as_str) == Some("tasks") {
+        return task_ws::multiplex_ws_upgrade(ws, State(state)).await;
+    }
+    compat_ws_upgrade(ws, Query(params), State(state), headers).await
+}
+
+async fn compat_ws_upgrade(
+    ws: WebSocketUpgrade,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(state): State<HttpServerState>,
+    headers: HeaderMap,
+) -> Response {
+    let session_key = session_key_from_headers(&headers).unwrap_or_else(|| {
+        params
+            .get("token")
+            .cloned()
+            .unwrap_or_else(|| "http".to_string())
+    });
+    let sid = session_key.clone();
+    ws.on_upgrade(move |socket| handle_ws_compat(socket, state, sid))
+}
+
+async fn handle_ws_compat(mut socket: WebSocket, state: HttpServerState, session_key: String) {
+    // Accept connection silently — client will send JSON-RPC requests.
+    // Do NOT send an initial message (Desktop JSON-RPC client doesn't expect one).
+
+    while let Some(msg) = socket.next().await {
+        match msg {
+            Ok(WsMessage::Text(text)) => {
+                // Try to parse as JSON-RPC request first
+                let frame: Result<serde_json::Value, _> = serde_json::from_str(&text);
+                match frame {
+                    Ok(ref f) if f.get("id").is_some() => {
+                        // JSON-RPC request — echo back a stub result
+                        let id = f.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                        let method = f.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                        let response = serde_json::json!({
+                            "id": id,
+                            "result": {
+                                "ok": true,
+                                "method": method
+                            }
+                        });
+                        let _ = socket
+                            .send(WsMessage::Text(response.to_string().into()))
+                            .await;
+                    }
+                    Ok(ref f) if f.get("method").and_then(|m| m.as_str()) == Some("event") => {
+                        // Incoming event — ignore for now
+                    }
+                    _ => {
+                        // Plain text — treat as chat message for /v1/sessions compatibility
+                        let request = SendMessageRequest {
+                            text: text.to_string(),
+                            model: None,
+                            provider: None,
+                            personality: None,
+                            user_id: None,
+                        };
+                        let sid = session_key.clone();
+                        match send_message(
+                            Path(sid),
+                            State(state.clone()),
+                            HeaderMap::new(),
+                            Json(request),
+                        )
+                        .await
+                        {
+                            Ok(resp) => {
+                                let _ = socket
+                                    .send(WsMessage::Text(
+                                        serde_json::json!(resp.0).to_string().into(),
+                                    ))
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = socket
+                                    .send(WsMessage::Text(
+                                        serde_json::json!({"error": e.to_string()})
+                                            .to_string()
+                                            .into(),
+                                    ))
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(WsMessage::Ping(data)) => {
+                let _ = socket.send(WsMessage::Pong(data)).await;
+            }
+            Ok(WsMessage::Close(_)) | Err(_) => break,
+            _ => {}
+        }
     }
 }
 

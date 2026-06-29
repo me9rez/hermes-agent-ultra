@@ -30,6 +30,13 @@ members = [
     "crates/hermes-market-watch",
     "crates/hermes-copilot-lite",
     "crates/hermes-talk",
+    "crates/hermes-tasks",
+    "crates/hermes-verticals",
+    "crates/hermes-datasources",
+    "crates/hermes-accounts",
+    "crates/hermes-billing",
+    "crates/hermes-browser-driver",
+    "apps/hermes-desktop-tauri/src-tauri",
 ]
 
 [workspace.package]
@@ -69,6 +76,12 @@ hermes-strategies = { path = "crates/hermes-strategies" }
 hermes-market-watch = { path = "crates/hermes-market-watch" }
 hermes-copilot-lite = { path = "crates/hermes-copilot-lite" }
 hermes-talk = { path = "crates/hermes-talk", default-features = false }
+hermes-tasks = { path = "crates/hermes-tasks" }
+hermes-verticals = { path = "crates/hermes-verticals" }
+hermes-datasources = { path = "crates/hermes-datasources" }
+hermes-accounts = { path = "crates/hermes-accounts" }
+hermes-billing = { path = "crates/hermes-billing" }
+hermes-browser-driver = { path = "crates/hermes-browser-driver" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -113,6 +126,12 @@ async-trait = "0.1"
 # TODO: re-enable after CI can reliably fetch pdfium (liteparse-pdfium-sys build.rs download)
 # liteparse = { version = "2", default-features = false }
 uuid = { version = "1", features = ["v4", "serde"] }
+ulid = { version = "1", features = ["serde"] }
+rmp-serde = "1"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+dashmap = "6"
 base64 = "0.22"
 bytes = "1"
 encoding_rs = "0.8"

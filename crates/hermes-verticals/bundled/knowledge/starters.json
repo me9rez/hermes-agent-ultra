@@ -1,0 +1,7 @@
+[
+  {
+    "key": "vertical.knowledge.starter.import_urls",
+    "icon": "link",
+    "prompt_template": "帮我整理这些收藏链接，按主题分类并梳理知识脉络"
+  }
+]

@@ -1,0 +1,5 @@
+{
+  "default": "user_custom",
+  "default_mode": "cloud",
+  "allowed": ["user_custom"]
+}

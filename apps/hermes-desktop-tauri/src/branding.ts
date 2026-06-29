@@ -1,0 +1,5 @@
+export const BRAND_NAME = 'Terra'
+export const BRAND_SHORT = 'Terra'
+export const BRAND_TAGLINE = 'Task-centric AI platform'
+export const BRAND_URL = 'https://terra.local'
+export const BRAND_SUPPORT_EMAIL = 'support@terra.local'

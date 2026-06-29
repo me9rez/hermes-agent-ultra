@@ -41,3 +41,7 @@ dist/
 .cargo\config.toml
 
 /target-check
+hermes-agent-2026.6.5/
+apps/*
+!apps/hermes-desktop-tauri/
+sdk/

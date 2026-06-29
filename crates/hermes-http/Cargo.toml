@@ -21,6 +21,10 @@ hermes-tools = { workspace = true }
 hermes-config = { workspace = true }
 hermes-gateway = { workspace = true }
 hermes-telemetry = { workspace = true }
+ulid = { workspace = true }
+hermes-tasks = { workspace = true }
+hermes-verticals = { workspace = true }
+hermes-datasources = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

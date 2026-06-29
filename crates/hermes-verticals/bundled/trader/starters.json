@@ -1,0 +1,13 @@
+[
+  {
+    "key": "vertical.trader.starter.daily_brief",
+    "icon": "sunrise",
+    "prompt_template": "帮我看下今天 A 股的资金流向和板块轮动，重点关注科技和新能源板块",
+    "suggested_artifacts": ["report_md", "chart_png"]
+  },
+  {
+    "key": "vertical.trader.starter.sector_rotation",
+    "icon": "rotate",
+    "prompt_template": "近 5 个交易日哪些板块涨幅靠前？后续可能轮动到哪？"
+  }
+]

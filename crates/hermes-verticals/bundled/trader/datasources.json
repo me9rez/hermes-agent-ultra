@@ -1,0 +1,5 @@
+{
+  "default": "akshare",
+  "default_mode": "cloud",
+  "allowed": ["akshare", "user_custom"]
+}

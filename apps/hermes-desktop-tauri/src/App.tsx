@@ -8,6 +8,7 @@ import { ThemeProvider } from '@/themes'
 
 import DesktopController from './app/index'
 import HeroDemoView from './app/hero-demo'
+import TerraApp from './app/terra'
 
 export default function App() {
   return (
@@ -18,6 +19,7 @@ export default function App() {
             <ErrorBoundary>
               <Routes>
                 <Route element={<HeroDemoView />} path="/hero-demo" />
+                <Route element={<TerraApp />} path="/terra/*" />
                 <Route element={<DesktopController />} path="*" />
               </Routes>
             </ErrorBoundary>

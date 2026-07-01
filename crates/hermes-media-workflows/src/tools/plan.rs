@@ -8,6 +8,9 @@ use crate::backends::FlowyMediaServices;
 use crate::credits::estimate_workflow_credits;
 use crate::platform::{default_aspect_for_platform, routing_rationale};
 use crate::preview::build_prompt_preview;
+use crate::video_segment::{
+    parse_duration_secs_from_text, plan_segment_durations, route_long_video_template,
+};
 use crate::workflows::WorkflowPlan;
 use crate::workflows::templates::{
     builtin_template, default_template_inputs, list_builtin_templates, suggest_template_id,
@@ -49,7 +52,7 @@ impl ToolHandler for MediaWorkflowPlanHandler {
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        let template_id = params
+        let mut template_id = params
             .get("workflow_id")
             .and_then(|v| v.as_str())
             .map(str::trim)
@@ -62,6 +65,22 @@ impl ToolHandler for MediaWorkflowPlanHandler {
                     &self.media_config.workflows.default_templates,
                 )
             });
+
+        let model_for_routing = params
+            .get("model")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.media_config.video.model.clone());
+
+        let target_duration = params
+            .get("duration")
+            .and_then(|v| v.as_u64())
+            .map(|d| d as u32)
+            .or_else(|| parse_duration_secs_from_text(objective))
+            .unwrap_or(self.media_config.video.default_duration);
+
+        template_id = route_long_video_template(&template_id, target_duration, &model_for_routing);
 
         let def = builtin_template(&template_id).ok_or_else(|| {
             ToolError::InvalidParams(format!(
@@ -82,6 +101,8 @@ impl ToolHandler for MediaWorkflowPlanHandler {
         }
         if let Some(duration) = params.get("duration") {
             inputs["duration"] = duration.clone();
+        } else {
+            inputs["duration"] = json!(target_duration);
         }
         if let Some(ratio) = params.get("aspect_ratio") {
             inputs["aspect_ratio"] = ratio.clone();
@@ -103,14 +124,14 @@ impl ToolHandler for MediaWorkflowPlanHandler {
             }
         }
 
-        if template_id == "img2video_direct"
+        if (template_id == "img2video_direct" || template_id == "long_img2video_direct")
             && inputs
                 .get("image_url")
                 .and_then(|v| v.as_str())
                 .is_none_or(|s| s.trim().is_empty())
         {
             return Err(ToolError::InvalidParams(
-                "img2video_direct requires image_url — pass the user's reference image URL".into(),
+                "img2video_direct / long_img2video_direct requires image_url — pass the user's reference image URL".into(),
             ));
         }
 
@@ -166,6 +187,8 @@ impl ToolHandler for MediaWorkflowPlanHandler {
 
         let plan = WorkflowPlan::from_definition(&def, inputs);
         let rationale = routing_rationale(&template_id, objective, has_image);
+        let max_clip = crate::video_segment::max_clip_duration_for_model(&model_for_routing);
+        let segment_plan = plan_segment_durations(target_duration, max_clip);
 
         let next_tool = if preview_requested {
             "media_workflow_run after user confirms the preview"
@@ -177,6 +200,13 @@ impl ToolHandler for MediaWorkflowPlanHandler {
             "plan": plan,
             "workflow_id": template_id,
             "routing_rationale": rationale,
+            "segment_plan": {
+                "target_duration_secs": segment_plan.target_duration_secs,
+                "max_clip_secs": segment_plan.max_clip_secs,
+                "segment_durations": segment_plan.segment_durations,
+                "segment_count": segment_plan.segment_count(),
+                "requires_ffmpeg": segment_plan.segment_count() > 1,
+            },
             "available_templates": list_builtin_templates(),
             "credits": credit_estimate.to_json(balance),
             "prompt_preview": prompt_preview,
@@ -203,7 +233,12 @@ fn post_action_hints(template_id: &str) -> Vec<&'static str> {
             "image_upscale — enhance resolution",
             "img2video_direct — animate the result",
         ],
-        "prompt_refine_txt2video" | "img2video_direct" | "img2video" => vec![
+        "prompt_refine_txt2video"
+        | "img2video_direct"
+        | "img2video"
+        | "long_txt2video"
+        | "long_img2video_direct"
+        | "long_img2video" => vec![
             "video_extend — continue from last frame",
             "image_variation — new keyframe take",
         ],

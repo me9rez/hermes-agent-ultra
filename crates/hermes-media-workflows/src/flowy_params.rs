@@ -27,16 +27,17 @@ pub fn normalize_video_resolution(model: &str, resolution: &str) -> Option<Strin
     Some(r)
 }
 
-/// Cap duration for fast Seedance variants (upstream often max 5–10s).
+/// Cap duration for Seedance (upstream max ~10s per task).
 pub fn normalize_video_duration(model: &str, duration: u32) -> u32 {
-    let model_lower = model.to_ascii_lowercase();
-    if model_lower.contains("seedance") && model_lower.contains("fast") && duration > 10 {
+    let max_clip = crate::video_segment::max_clip_duration_for_model(model);
+    if duration > max_clip {
         tracing::warn!(
             model,
             duration,
-            "clamping video duration to 10s for Seedance fast model"
+            max_clip,
+            "single video_generate request exceeds max clip; use long video workflow for longer targets"
         );
-        10
+        max_clip
     } else {
         duration
     }

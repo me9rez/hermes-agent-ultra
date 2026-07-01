@@ -1,7 +1,7 @@
 ---
 name: flowy-media-generation
 description: "Generate images and videos via Flowy cloud APIs (Hermes media tools). Covers prompt writing, workflow selection, async polling, and MEDIA: delivery."
-version: 1.2.0
+version: 1.3.0
 metadata:
   hermes:
     tags:
@@ -27,6 +27,7 @@ Use Hermes Flowy-backed tools (`image_generate`, `video_generate`, `media_workfl
 | Edit / style / change background (user image) | `media_workflow_plan` with `image_url` → `img2img` |
 | Animate user image | `media_workflow_plan` with `image_url` → `img2video_direct` |
 | Storyboard / multi-shot narrative / 很多场景 / 分镜 | `media_workflow_plan` → `storyboard_multi` (**not** `video_generate`) |
+| Long video (>10s, e.g. 20s) | `media_workflow_plan` with `duration: 20` or \"20秒\" in objective → `long_txt2video` / `long_img2video*` (auto split + concat; needs **ffmpeg** on PATH) |
 | Variations / upscale / extend clip | `image_variation`, `image_upscale`, `video_extend` workflows |
 | Cancel long run | `media_workflow_cancel` with `run_id` |
 | Seedance multimodal (first/last frame, ref video/audio) | `video_generate` or workflow with `last_frame_url`, `reference_*` |
@@ -99,6 +100,18 @@ For `video_generate` / video workflow steps, optional parameters:
 
 Model ids must come from `hermes media models` (catalog `id`), not guessed upstream names.
 
+## Long video (>10 seconds)
+
+Seedance accepts **at most ~10s per API call**. For ~20s or longer:
+
+1. `media_workflow_plan` with `duration` (seconds) or natural language (e.g. \"生成20秒视频\")
+2. Hermes auto-selects `long_txt2video`, `long_img2video_direct`, or `long_img2video`
+3. Each segment is generated at ≤10s; the **last frame** of segment N becomes the **first frame** of segment N+1 (即梦-style continuity)
+4. Segments are concatenated locally with **ffmpeg** (`requires_ffmpeg: true` in `segment_plan`)
+5. Credits scale with **total** target duration (e.g. 20s ≈ 2× single-clip cost)
+
+Do **not** call `video_generate` once with `duration: 20` — it will be clamped to 10s.
+
 ## Storyboard (`storyboard_multi`)
 
 For 分镜 / storyboard / 叙事 / **很多场景** / 多镜头 requests:
@@ -138,4 +151,4 @@ hermes media config set check_credits true
 hermes media config set storyboard_max_shots 3
 ```
 
-Workflow templates: `txt2img`, `prompt_refine_txt2video`, `img2video_direct`, `storyboard_multi`.
+Workflow templates: `txt2img`, `prompt_refine_txt2video`, `long_txt2video`, `img2video_direct`, `long_img2video*`, `storyboard_multi`.

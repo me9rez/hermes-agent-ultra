@@ -223,6 +223,104 @@ steps:
       resolution: "$inputs.resolution"
 "#;
 
+const LONG_TXT2VIDEO: &str = r#"
+id: long_txt2video
+version: 1
+description: Long text-to-video — split into Seedance clips, chain last-frame, concat
+inputs:
+  prompt: { type: string, required: true }
+  duration: { type: integer, default: 20 }
+  aspect_ratio: { type: string, default: "16:9" }
+  resolution: { type: string, default: "720p" }
+steps:
+  - id: refine_prompt
+    kind: prompt_refine
+    input:
+      prompt: "$inputs.prompt"
+      medium: video
+      aspect_ratio: "$inputs.aspect_ratio"
+  - id: generate
+    kind: video_long_generate
+    depends_on: [refine_prompt]
+    input:
+      prompt: "$steps.refine_prompt.video_prompt"
+      negative_prompt: "$steps.refine_prompt.negative_prompt"
+      duration: "$inputs.duration"
+      aspect_ratio: "$inputs.aspect_ratio"
+      resolution: "$inputs.resolution"
+"#;
+
+const LONG_IMG2VIDEO_DIRECT: &str = r#"
+id: long_img2video_direct
+version: 1
+description: Long image-to-video — chained clips from user reference image
+inputs:
+  prompt: { type: string, required: true }
+  image_url: { type: string, required: true }
+  duration: { type: integer, default: 20 }
+  aspect_ratio: { type: string, default: "9:16" }
+  resolution: { type: string, default: "720p" }
+steps:
+  - id: refine_motion
+    kind: prompt_refine
+    input:
+      prompt: "$inputs.prompt"
+      medium: motion
+      aspect_ratio: "$inputs.aspect_ratio"
+      has_reference_image: true
+  - id: generate
+    kind: video_long_generate
+    depends_on: [refine_motion]
+    input:
+      prompt: "$steps.refine_motion.motion_prompt"
+      negative_prompt: "$steps.refine_motion.negative_prompt"
+      image_url: "$inputs.image_url"
+      duration: "$inputs.duration"
+      aspect_ratio: "$inputs.aspect_ratio"
+      resolution: "$inputs.resolution"
+"#;
+
+const LONG_IMG2VIDEO: &str = r#"
+id: long_img2video
+version: 1
+description: Long video with keyframe - chained Seedance clips from generated first frame
+inputs:
+  prompt: { type: string, required: true }
+  duration: { type: integer, default: 20 }
+  aspect_ratio: { type: string, default: "16:9" }
+  resolution: { type: string, default: "720p" }
+steps:
+  - id: refine_scene
+    kind: prompt_refine
+    input:
+      prompt: "$inputs.prompt"
+      medium: image
+      aspect_ratio: "$inputs.aspect_ratio"
+  - id: keyframe
+    kind: image_generate
+    depends_on: [refine_scene]
+    input:
+      prompt: "$steps.refine_scene.image_prompt"
+  - id: refine_motion
+    kind: prompt_refine
+    depends_on: [keyframe]
+    input:
+      prompt: "$inputs.prompt"
+      medium: motion
+      aspect_ratio: "$inputs.aspect_ratio"
+      has_reference_image: true
+  - id: generate
+    kind: video_long_generate
+    depends_on: [refine_motion]
+    input:
+      prompt: "$steps.refine_motion.motion_prompt"
+      negative_prompt: "$steps.refine_motion.negative_prompt"
+      image_url: "$steps.keyframe.best_url"
+      duration: "$inputs.duration"
+      aspect_ratio: "$inputs.aspect_ratio"
+      resolution: "$inputs.resolution"
+"#;
+
 const IMG2VIDEO: &str = r#"
 id: img2video
 version: 1
@@ -330,8 +428,11 @@ pub fn list_builtin_templates() -> Vec<&'static str> {
         "txt2img",
         "img2img",
         "prompt_refine_txt2video",
+        "long_txt2video",
         "img2video_direct",
+        "long_img2video_direct",
         "img2video",
+        "long_img2video",
         "storyboard_to_video",
         "storyboard_multi",
         "image_variation",
@@ -346,8 +447,11 @@ pub fn builtin_template(id: &str) -> Option<WorkflowDefinition> {
         "txt2img" => TXT2IMG,
         "img2img" => IMG2IMG,
         "prompt_refine_txt2video" => PROMPT_REFINE_TXT2VIDEO,
+        "long_txt2video" => LONG_TXT2VIDEO,
         "img2video_direct" => IMG2VIDEO_DIRECT,
+        "long_img2video_direct" => LONG_IMG2VIDEO_DIRECT,
         "img2video" => IMG2VIDEO,
+        "long_img2video" => LONG_IMG2VIDEO,
         "storyboard_to_video" => STORYBOARD_VIDEO,
         "storyboard_multi" => STORYBOARD_MULTI,
         "image_variation" => IMAGE_VARIATION,
@@ -403,7 +507,11 @@ pub fn suggest_template_id(
             return resolve_template_default("img2img", defaults, "img2img");
         }
         if is_video_motion_intent(objective) || lower.contains("图生视频") {
-            return resolve_template_default("img2video", defaults, "img2video_direct");
+            let base = resolve_template_default("img2video", defaults, "img2video_direct");
+            if let Some(dur) = crate::video_segment::parse_duration_secs_from_text(objective) {
+                return crate::video_segment::route_long_video_template(&base, dur, "seedance");
+            }
+            return base;
         }
         return resolve_template_default("img2img", defaults, "img2img");
     }
@@ -419,7 +527,11 @@ pub fn suggest_template_id(
         return resolve_template_default("storyboard", defaults, "storyboard_multi");
     }
     if lower.contains("视频") || lower.contains("video") {
-        return resolve_template_default("txt2video", defaults, "prompt_refine_txt2video");
+        let base = resolve_template_default("txt2video", defaults, "prompt_refine_txt2video");
+        if let Some(dur) = crate::video_segment::parse_duration_secs_from_text(objective) {
+            return crate::video_segment::route_long_video_template(&base, dur, "seedance");
+        }
+        return base;
     }
     resolve_template_default("txt2img", defaults, "txt2img")
 }
@@ -464,6 +576,12 @@ pub fn default_template_inputs(template_id: &str, prompt: &str, platform: Option
         "video_extend" => json!({
             "prompt": prompt,
             "duration": 5,
+            "aspect_ratio": aspect,
+            "resolution": "720p"
+        }),
+        "long_txt2video" | "long_img2video" | "long_img2video_direct" => json!({
+            "prompt": prompt,
+            "duration": 20,
             "aspect_ratio": aspect,
             "resolution": "720p"
         }),
@@ -531,11 +649,15 @@ mod tests {
     }
 
     #[test]
-    fn suggest_img2video_for_motion_intent() {
+    fn suggest_long_video_from_duration_in_objective() {
         let defaults = MediaWorkflowTemplateMap::default();
-        assert_eq!(
-            suggest_template_id("让这张图动起来", true, &defaults),
-            "img2video_direct"
-        );
+        let id = suggest_template_id("生成一段约20秒的产品宣传视频", false, &defaults);
+        assert_eq!(id, "long_txt2video");
+    }
+
+    #[test]
+    fn route_long_img2video_for_keyframe_workflow() {
+        let routed = crate::video_segment::route_long_video_template("img2video", 25, "seedance");
+        assert_eq!(routed, "long_img2video");
     }
 }

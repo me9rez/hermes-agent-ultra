@@ -24,8 +24,9 @@ The `hermes-cli` platform toolset includes `media_workflow` when Flowy is config
 
 - `txt2img` — refine + generate + QA (with auto retry on QA failure)
 - `img2img` — edit/style transfer from a reference image
-- `prompt_refine_txt2video` — text-to-video
-- `img2video_direct` / `img2video` — image-to-video paths
+- `prompt_refine_txt2video` — text-to-video (≤10s per clip)
+- `long_txt2video` / `long_img2video_direct` / `long_img2video` — **long video** (>10s): split into Seedance clips, last-frame chain, ffmpeg concat
+- `img2video_direct` / `img2video` — image-to-video paths (≤10s)
 - `storyboard_multi` — multi-shot narrative (preview + selective render)
 - Post-actions: `image_variation`, `image_upscale`, `video_extend`
 
@@ -53,6 +54,15 @@ media:
 ## Platform defaults
 
 Pass `platform: wecom` (or `telegram`) to `media_workflow_plan` for mobile-friendly `9:16` defaults.
+
+## Long video (>10 seconds)
+
+Seedance limits each generation to about **10 seconds**. For 20s+ targets:
+
+1. Pass `duration: 20` to `media_workflow_plan`, or write the length in the objective (e.g. \"20秒\")
+2. Plan returns `segment_plan` (clip breakdown) and routes to a `long_*` template
+3. Requires **ffmpeg** on the agent host for frame extract + concat
+4. Credit estimate uses total target duration
 
 ## Progress
 

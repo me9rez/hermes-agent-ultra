@@ -36,6 +36,15 @@ pub fn routing_rationale(template_id: &str, objective: &str, has_image: bool) ->
         "prompt_refine_txt2video" => {
             "Video intent without reference image — prompt_refine_txt2video separates scene detail from motion.".into()
         }
+        "long_txt2video" => {
+            "Target duration exceeds Seedance single-clip limit (~10s) — long_txt2video splits into chained segments and concat with ffmpeg.".into()
+        }
+        "long_img2video_direct" => {
+            "Long image-to-video — multiple Seedance clips chained via last-frame → first-frame from the user's reference.".into()
+        }
+        "long_img2video" => {
+            "Long video with keyframe — generates a keyframe then chained img2video segments for scene continuity.".into()
+        }
         "txt2img" => "Image intent — txt2img refines visual detail then generates with QA.".into(),
         "image_variation" => "Variation request — reuses prompt with a new seed for alternate takes.".into(),
         "image_upscale" => "Upscale/enhance request — img2img-style pass targeting higher detail.".into(),

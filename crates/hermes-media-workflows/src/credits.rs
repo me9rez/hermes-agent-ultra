@@ -24,8 +24,11 @@ pub fn estimate_workflow_credits(
         "simple_txt2img" => (1, 0),
         "txt2img" | "img2img" => (1, 0),
         "prompt_refine_txt2video" => (0, duration),
+        "long_txt2video" => (0, duration),
         "img2video_direct" => (0, duration),
+        "long_img2video_direct" => (0, duration),
         "img2video" | "storyboard_to_video" => (1, duration),
+        "long_img2video" => (1, duration),
         "storyboard_multi" => (max_shots, max_shots.saturating_mul(duration)),
         "image_variation" | "image_upscale" => (1, 0),
         "video_extend" => (0, duration),
@@ -96,5 +99,16 @@ mod tests {
         );
         assert_eq!(est.image_operations, 3);
         assert_eq!(est.video_seconds, 15);
+    }
+
+    #[test]
+    fn long_video_credits_scale_with_duration() {
+        let cfg = MediaGenConfig::default();
+        let est = estimate_workflow_credits("long_txt2video", &json!({"duration": 20}), &cfg);
+        assert_eq!(est.video_seconds, 20);
+        assert_eq!(
+            est.video_credits,
+            20u64 * cfg.workflows.video_credits_per_second
+        );
     }
 }

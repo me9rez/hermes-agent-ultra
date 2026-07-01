@@ -14,12 +14,17 @@ use crate::backends::flowy_video::FlowyVideoGenBackend;
 use crate::backends::traits::{FlowyMediaBackend, MediaGenerationBackend, MediaImageRequest};
 use crate::llm_refine::{plan_storyboard, refine_with_llm_or_template};
 use crate::progress::{
+    WorkflowStepProgress, long_video_concat, long_video_planning, long_video_segment,
     prompt_refine_working, report_intermediate_artifact, report_media_progress,
     report_workflow_step_event, storyboard_planning, storyboard_shot_image, storyboard_shot_video,
-    workflow_started, workflow_step_progress, WorkflowStepProgress,
+    workflow_started, workflow_step_progress,
 };
 use crate::prompt_refine::RefineInput;
 use crate::qa::{qa_check_image, qa_check_video};
+use crate::video_segment::{
+    concat_videos, extract_last_frame_png, persist_concatenated_video, plan_segment_durations,
+    png_file_to_data_url, require_ffmpeg, segment_video_prompt,
+};
 
 pub struct WorkflowExecutor {
     pub(crate) services: FlowyMediaServices,
@@ -266,6 +271,10 @@ impl WorkflowExecutor {
         match step.kind.as_str() {
             "image_generate" => self.run_image_step(input).await,
             "video_generate" => self.run_video_step(run_id, input).await,
+            "video_long_generate" => {
+                self.run_long_video_step(run_id, workflow_id, step_no, step_total, input)
+                    .await
+            }
             "prompt_refine" => self.run_prompt_refine(input).await,
             "storyboard_multi" => {
                 self.run_storyboard_multi(run_id, workflow_id, step_no, step_total, input)
@@ -399,6 +408,182 @@ impl WorkflowExecutor {
             "motion_prompt": input.get("motion_prompt").and_then(|v| v.as_str()),
             "video_url": parsed.get("video"),
             "local_path": parsed.pointer("/assets/0/local_path").or_else(|| parsed.get("local_path")),
+            "output": parsed,
+        }))
+    }
+
+    async fn run_long_video_step(
+        &self,
+        run_id: &str,
+        workflow_id: &str,
+        step_no: usize,
+        step_total: usize,
+        input: &Value,
+    ) -> Result<Value, ToolError> {
+        use std::path::PathBuf;
+
+        use crate::delivery::{MediaProvenance, VideoTaskMeta, video_generation_response};
+
+        let base_prompt = input
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParams("long video step missing prompt".into()))?;
+        let target_duration = input
+            .get("duration")
+            .and_then(|v| v.as_u64())
+            .map(|d| d as u32)
+            .filter(|d| *d > 0)
+            .unwrap_or(self.services.media.video.default_duration);
+
+        let model = self
+            .services
+            .resolve_video_model(input.get("model").and_then(|v| v.as_str()))
+            .await?;
+        let max_clip = crate::video_segment::max_clip_duration_for_model(&model);
+        let plan = plan_segment_durations(target_duration, max_clip);
+        let segment_total = plan.segment_count();
+
+        report_media_progress(long_video_planning(
+            plan.target_duration_secs,
+            segment_total,
+            max_clip,
+        ));
+
+        if segment_total > 1 {
+            require_ffmpeg()?;
+        }
+
+        let work_dir = hermes_config::hermes_home()
+            .join("media")
+            .join("segments")
+            .join(run_id);
+        tokio::fs::create_dir_all(&work_dir)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("create segment work dir: {e}")))?;
+
+        let mut segment_paths: Vec<PathBuf> = Vec::with_capacity(segment_total);
+        let mut segment_artifacts = Vec::with_capacity(segment_total);
+        let mut chain_image_url = input
+            .get("image_url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string);
+
+        for (idx, &clip_secs) in plan.segment_durations.iter().enumerate() {
+            if self.control.is_cancelled(run_id) {
+                return Err(ToolError::ExecutionFailed("workflow cancelled".into()));
+            }
+
+            report_workflow_step_event(WorkflowStepProgress {
+                run_id,
+                workflow_id,
+                step_no,
+                step_total,
+                phase: "video_long_generate",
+                message: long_video_segment(idx + 1, segment_total, clip_secs),
+                pct: Some(((idx * 100) / segment_total.max(1)).min(95) as u8),
+                artifact_preview: None,
+            });
+
+            let seg_prompt = segment_video_prompt(base_prompt, idx, segment_total);
+            let mut seg_input = input.clone();
+            if let Some(obj) = seg_input.as_object_mut() {
+                obj.insert("prompt".into(), json!(seg_prompt));
+                obj.insert("duration".into(), json!(clip_secs));
+                if let Some(url) = chain_image_url.clone() {
+                    obj.insert("image_url".into(), json!(url));
+                } else {
+                    obj.remove("image_url");
+                }
+                obj.insert("model".into(), json!(model));
+            }
+
+            let seg_out = self.run_video_step(run_id, &seg_input).await?;
+            let seg_path = ensure_local_video_path(&seg_out, &model).await?;
+            segment_paths.push(seg_path.clone());
+
+            if let Some(path_str) = local_path_from_step_output(&seg_out) {
+                report_intermediate_artifact(
+                    run_id,
+                    workflow_id,
+                    step_no,
+                    step_total,
+                    "video",
+                    &path_str,
+                );
+                segment_artifacts.push(json!({
+                    "segment": idx + 1,
+                    "duration_secs": clip_secs,
+                    "local_path": path_str,
+                }));
+            }
+
+            if idx + 1 < segment_total {
+                let frame_path = work_dir.join(format!("seg_{idx}_last.png"));
+                extract_last_frame_png(&seg_path, &frame_path).await?;
+                chain_image_url = Some(png_file_to_data_url(&frame_path)?);
+            }
+        }
+
+        let output_path = work_dir.join("concat_output.mp4");
+        if segment_total > 1 {
+            report_media_progress(long_video_concat(segment_total));
+            concat_videos(&segment_paths, &output_path).await?;
+        } else {
+            tokio::fs::copy(&segment_paths[0], &output_path)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("copy segment video: {e}")))?;
+        }
+
+        let artifact =
+            persist_concatenated_video(&output_path, "flowy", &model, plan.target_duration_secs)
+                .await?;
+
+        let task = VideoTaskMeta {
+            local_id: format!("long-{run_id}"),
+            task_id: String::new(),
+            status: 1,
+        };
+        let provenance = MediaProvenance::for_api_call(
+            base_prompt,
+            input
+                .get("negative_prompt")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            None,
+            None,
+        );
+        let remote_url = artifact.remote_url.clone().unwrap_or_default();
+        let file_fallback = format!("file://{}", artifact.local_path.display());
+        let video_ref = if remote_url.is_empty() {
+            file_fallback.as_str()
+        } else {
+            remote_url.as_str()
+        };
+        let response_str = video_generation_response(
+            &model,
+            video_ref,
+            Some(&artifact),
+            &task,
+            provenance,
+            None,
+        );
+        let parsed: Value = serde_json::from_str(&response_str)
+            .map_err(|e| ToolError::ExecutionFailed(format!("long video response JSON: {e}")))?;
+
+        Ok(json!({
+            "raw": parsed,
+            "api_prompt": base_prompt,
+            "negative_prompt": input.get("negative_prompt").and_then(|v| v.as_str()),
+            "video_url": parsed.get("video"),
+            "local_path": artifact.local_path.to_string_lossy(),
+            "segment_plan": {
+                "target_duration_secs": plan.target_duration_secs,
+                "max_clip_secs": plan.max_clip_secs,
+                "segment_durations": plan.segment_durations,
+                "segment_count": segment_total,
+            },
+            "segment_artifacts": segment_artifacts,
             "output": parsed,
         }))
     }
@@ -713,6 +898,37 @@ fn local_path_from_step_output(output: &Value) -> Option<String> {
         .or_else(|| output.get("local_path"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+async fn ensure_local_video_path(
+    output: &Value,
+    model: &str,
+) -> Result<std::path::PathBuf, ToolError> {
+    use std::path::PathBuf;
+
+    use crate::assets::persist_from_url;
+
+    if let Some(path) = local_path_from_step_output(output) {
+        let p = PathBuf::from(&path);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    let url = output
+        .pointer("/raw/video")
+        .or_else(|| output.get("video_url"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            ToolError::ExecutionFailed(
+                "video segment generated but no local_path or remote URL for ffmpeg".into(),
+            )
+        })?;
+    if url.starts_with("file://") {
+        return Ok(PathBuf::from(url.trim_start_matches("file://")));
+    }
+    let artifact = persist_from_url(url, "flowy", model).await?;
+    Ok(artifact.local_path)
 }
 
 fn clear_outputs_from(

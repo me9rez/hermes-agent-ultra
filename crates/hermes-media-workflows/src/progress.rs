@@ -174,6 +174,9 @@ pub fn workflow_step_progress(
             format!("{prefix}：正在生成{label}（{step_id}）")
         }
         "video_generate" => format!("{prefix}：正在生成视频片段（{step_id}）"),
+        "video_long_generate" => {
+            format!("{prefix}：正在分段生成长视频并拼接（{step_id}）")
+        }
         "storyboard_multi" => {
             format!("{prefix}：正在规划分镜并依次生成各镜头（{step_id}）")
         }
@@ -205,6 +208,20 @@ pub fn storyboard_shot_image(shot: usize, total: usize) -> String {
 
 pub fn storyboard_shot_video(shot: usize, total: usize, duration_secs: u32) -> String {
     format!("分镜 {shot}/{total}：正在将该镜头转为约 {duration_secs} 秒视频…")
+}
+
+pub fn long_video_planning(target_secs: u32, segment_count: usize, max_clip_secs: u32) -> String {
+    format!(
+        "目标时长约 {target_secs} 秒 — Seedance 单次最多 {max_clip_secs} 秒，将拆分为 {segment_count} 段并首尾帧衔接后拼接"
+    )
+}
+
+pub fn long_video_segment(segment: usize, total: usize, clip_secs: u32) -> String {
+    format!("长视频第 {segment}/{total} 段：正在生成约 {clip_secs} 秒片段…")
+}
+
+pub fn long_video_concat(segment_count: usize) -> String {
+    format!("{segment_count} 段视频已生成，正在用 ffmpeg 拼接为完整成片…")
 }
 
 pub fn image_credits_check() -> &'static str {

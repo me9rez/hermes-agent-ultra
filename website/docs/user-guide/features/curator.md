@@ -31,8 +31,8 @@ If you want to see what the curator *would* do before it runs for real, run `her
 
 A run has two phases:
 
-1. **Automatic transitions** (deterministic, no LLM). Skills unused for `stale_after_days` (30) become `stale`; skills unused for `archive_after_days` (90) are moved to `~/.hermes/skills/.archive/`.
-2. **LLM review** (single aux-model pass, `max_iterations=8`). The forked agent surveys the agent-created skills, can read any of them with `skill_view`, and decides per-skill whether to keep, patch (via `skill_manage`), consolidate overlapping ones, or archive via the terminal tool.
+1. **Automatic transitions** (deterministic, no LLM, zero tokens). Skills unused for `stale_after_days` (30) become `stale`; skills unused for `archive_after_days` (90) are moved to `~/.hermes/skills/.archive/`.
+2. **LLM review** (single aux-model pass, `max_iterations=8`) — **off by default**. The forked agent surveys the agent-created skills, can read any of them with `skill_view`, and decides per-skill whether to keep, patch (via `skill_manage`), consolidate overlapping ones, or archive via the terminal tool. Enable with `curator.consolidate: true` or the `--consolidate` flag.
 
 Pinned skills are off-limits to both the curator's auto-transitions and the agent's own `skill_manage` tool. See [Pinning a skill](#pinning-a-skill) below.
 
@@ -47,9 +47,27 @@ curator:
   min_idle_hours: 2
   stale_after_days: 30
   archive_after_days: 90
+  consolidate: false            # OFF by default — prune-only, zero token cost
 ```
 
 To disable entirely, set `curator.enabled: false`.
+
+### Consolidation (LLM merge pass) — opt-in
+
+By default, the curator runs in **prune-only** mode: it applies deterministic
+inactivity transitions (mark stale / archive long-unused skills) and **skips**
+the forked aux-model review entirely. This costs **zero tokens**.
+
+If you want the curator to also merge overlapping skills into class-level
+umbrellas (the old behavior), set `curator.consolidate: true` in your
+`config.yaml`, or pass `--consolidate` on a single run:
+
+```bash
+hermes curator run --consolidate   # force LLM merge pass for this run only
+```
+
+Without the flag (and with `consolidate: false` in config), `/curator run`
+completes after Phase 1 in milliseconds with no LLM invocation.
 
 ### Running the review on a cheaper aux model
 
@@ -84,7 +102,8 @@ Earlier releases used a one-off `curator.auxiliary.{provider,model}` block. That
 
 ```bash
 hermes curator status         # last run, counts, pinned list, LRU top 5
-hermes curator run            # trigger a review now (blocks until the LLM pass finishes)
+hermes curator run            # prune-only (deterministic stale/archive, zero tokens)
+hermes curator run --consolidate  # also run the LLM merge pass (costs tokens)
 hermes curator run --background  # fire-and-forget: start the LLM pass in a background thread
 hermes curator run --dry-run  # preview only — report without any mutations
 hermes curator backup         # take a manual snapshot of ~/.hermes/skills/

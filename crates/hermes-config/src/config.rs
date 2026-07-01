@@ -269,6 +269,15 @@ pub struct CuratorConfig {
     /// Whether to prune unused builtin skills.
     #[serde(default = "default_prune_builtins")]
     pub prune_builtins: bool,
+    /// Whether to run the LLM consolidation (umbrella-building) pass.
+    ///
+    /// OFF by default. When off, a curator run does ONLY the deterministic
+    /// inactivity prune (mark stale / archive long-unused skills) and skips
+    /// the forked aux-model review entirely — no consolidation, no
+    /// umbrella-building, no aux-model cost. Set `curator.consolidate: true`
+    /// to opt back into the LLM pass that merges overlapping skills.
+    #[serde(default = "default_consolidate")]
+    pub consolidate: bool,
 }
 
 fn default_curator_enabled() -> bool {
@@ -289,6 +298,9 @@ fn default_archive_after_days() -> u64 {
 fn default_prune_builtins() -> bool {
     true
 }
+fn default_consolidate() -> bool {
+    false
+}
 
 impl Default for CuratorConfig {
     fn default() -> Self {
@@ -299,6 +311,7 @@ impl Default for CuratorConfig {
             stale_after_days: default_stale_after_days(),
             archive_after_days: default_archive_after_days(),
             prune_builtins: default_prune_builtins(),
+            consolidate: default_consolidate(),
         }
     }
 }

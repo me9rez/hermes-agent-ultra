@@ -1,4 +1,4 @@
-//! # hermes-config
+ //! # hermes-config
 //!
 //! Configuration management for the hermes-agent system.
 //!

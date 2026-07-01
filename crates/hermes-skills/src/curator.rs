@@ -129,6 +129,10 @@ pub struct CuratorConfig {
     pub archive_after_days: u64,
     #[serde(default = "default_prune_builtins")]
     pub prune_builtins: bool,
+    /// Whether to run the LLM consolidation (umbrella-building) pass.
+    /// OFF by default — prune-only, zero token cost.
+    #[serde(default = "default_consolidate")]
+    pub consolidate: bool,
 }
 
 fn default_enabled() -> bool {
@@ -149,6 +153,9 @@ fn default_archive_after_days() -> u64 {
 fn default_prune_builtins() -> bool {
     true
 }
+fn default_consolidate() -> bool {
+    false
+}
 
 impl Default for CuratorConfig {
     fn default() -> Self {
@@ -159,6 +166,7 @@ impl Default for CuratorConfig {
             stale_after_days: default_stale_after_days(),
             archive_after_days: default_archive_after_days(),
             prune_builtins: default_prune_builtins(),
+            consolidate: default_consolidate(),
         }
     }
 }
@@ -546,14 +554,25 @@ where
         apply_automatic_transitions(store, config)
     };
 
-    // Phase 2: LLM review (optional)
+    // Phase 2: LLM review (optional) — gated by `config.consolidate`.
+    //
+    // When consolidation is OFF (the default), the curator does ONLY the
+    // deterministic inactivity prune above — no forked aux-model review, no
+    // umbrella-building, no aux-model cost.
     let llm_review = if let Some(runner) = llm_runner {
-        let prompt = build_curator_prompt(store);
-        match runner(prompt).await {
-            Ok(result) => Some(result),
-            Err(e) => {
-                tracing::warn!("curator LLM review failed: {}", e);
-                return Err(e);
+        if !config.consolidate {
+            tracing::info!(
+                "curator: consolidation off — skipping LLM review pass (prune-only)"
+            );
+            None
+        } else {
+            let prompt = build_curator_prompt(store);
+            match runner(prompt).await {
+                Ok(result) => Some(result),
+                Err(e) => {
+                    tracing::warn!("curator LLM review failed: {}", e);
+                    return Err(e);
+                }
             }
         }
     } else {

@@ -83,7 +83,7 @@ pub enum GatewayCommandResult {
     /// Curator status query.
     CuratorStatus,
     /// Curator run (automatic transitions).
-    CuratorRun { dry_run: bool },
+    CuratorRun { dry_run: bool, consolidate: bool },
     /// Curator pause.
     CuratorPause,
     /// Curator resume.
@@ -785,7 +785,8 @@ pub fn handle_command(input: &str) -> GatewayCommandResult {
                 "status" | "" => GatewayCommandResult::CuratorStatus,
                 "run" => {
                     let dry_run = tokens.contains(&"--dry-run");
-                    GatewayCommandResult::CuratorRun { dry_run }
+                    let consolidate = tokens.contains(&"--consolidate");
+                    GatewayCommandResult::CuratorRun { dry_run, consolidate }
                 }
                 "pause" => GatewayCommandResult::CuratorPause,
                 "resume" => GatewayCommandResult::CuratorResume,

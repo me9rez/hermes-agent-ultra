@@ -1215,6 +1215,14 @@ impl Gateway {
         lines.push(format!("  interval: every {}h", config.interval_hours));
         lines.push(format!("  stale after: {}d", config.stale_after_days));
         lines.push(format!("  archive after: {}d", config.archive_after_days));
+        lines.push(format!(
+            "  consolidate: {}",
+            if config.consolidate {
+                "on"
+            } else {
+                "off (prune-only; LLM merge pass opt-in)"
+            }
+        ));
         lines.push(String::new());
         lines.push(format!("agent-created skills: {} total", report.len()));
 
@@ -1234,7 +1242,7 @@ impl Gateway {
         hermes_agent::evolution_ledger::format_evolve_status(&home, &config)
     }
 
-    pub(crate) fn execute_curator_run(&self, dry_run: bool) -> String {
+    pub(crate) fn execute_curator_run(&self, dry_run: bool, consolidate: bool) -> String {
         let store = hermes_skills::UsageStore::new();
         let config = &self.config.curator;
         let result = hermes_skills::apply_automatic_transitions(&store, config);
@@ -1260,10 +1268,24 @@ impl Gateway {
             ));
             let _ = hermes_skills::save_curator_state(&store, &state);
             lines.push("State updated.".to_string());
-            lines.push(
-                "\n🤖 LLM review is running in background, results will appear here shortly…"
-                    .to_string(),
-            );
+
+            // Phase 2: LLM review — gated by `consolidate`.
+            // When consolidation is OFF (the default), skip the forked aux-model
+            // review entirely — no consolidation, no umbrella-building, no
+            // aux-model cost.
+            let effective_consolidate = consolidate || config.consolidate;
+            if effective_consolidate {
+                lines.push(
+                    "\n🤖 LLM review is running in background, results will appear here shortly…"
+                        .to_string(),
+                );
+            } else {
+                lines.push(
+                    "\nPhase 2 — LLM review: skipped (consolidation off)\n\
+                     Pass --consolidate or set `curator.consolidate: true` to enable the LLM merge pass."
+                        .to_string(),
+                );
+            }
         }
 
         lines.join("\n")

@@ -572,6 +572,10 @@ fn curator_config_default_values_match_spec() {
         config.prune_builtins,
         "default prune_builtins should be true"
     );
+    assert!(
+        !config.consolidate,
+        "default consolidate should be false (prune-only, zero token cost)"
+    );
 }
 
 #[test]
@@ -583,6 +587,7 @@ fn curator_config_json_roundtrip() {
         stale_after_days: 15,
         archive_after_days: 60,
         prune_builtins: false,
+        consolidate: true,
     };
     let json = serde_json::to_string_pretty(&config).expect("serialize");
     let roundtripped: CuratorConfig = serde_json::from_str(&json).expect("deserialize");

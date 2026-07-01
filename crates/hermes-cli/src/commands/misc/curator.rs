@@ -39,6 +39,14 @@ pub(crate) async fn handle_curator_command(
                     "  archive after: {}d\n",
                     curator_config.archive_after_days
                 ));
+                out.push_str(&format!(
+                    "  consolidate: {}\n",
+                    if curator_config.consolidate {
+                        "on"
+                    } else {
+                        "off (prune-only; LLM merge pass opt-in)"
+                    }
+                ));
                 if let Some(countdown) = next_run_countdown(&state, &curator_config) {
                     out.push_str(&format!("  next run eligible: {}\n", countdown));
                 }
@@ -83,6 +91,14 @@ pub(crate) async fn handle_curator_command(
                     curator_status_label(&curator_config, &state),
                     curator_config.interval_hours
                 ));
+                out.push_str(&format!(
+                    "consolidate: {}\n",
+                    if curator_config.consolidate {
+                        "on"
+                    } else {
+                        "off (prune-only; LLM merge pass opt-in)"
+                    }
+                ));
                 if let Some(countdown) = next_run_countdown(&state, &curator_config) {
                     out.push_str(&format!("next run eligible: {}\n", countdown));
                 }
@@ -94,9 +110,13 @@ pub(crate) async fn handle_curator_command(
             }
         }
         "run" => {
-            let dry_run = args
-                .get(1)
-                .is_some_and(|s| s.eq_ignore_ascii_case("--dry-run"));
+            // Parse flags: --dry-run and --consolidate can appear in any order
+            let dry_run = args.iter().any(|s| s.eq_ignore_ascii_case("--dry-run"));
+            // --consolidate forces the LLM consolidation pass on for this run,
+            // overriding the config default (off). When the flag is absent,
+            // fall back to the config value.
+            let consolidate = args.iter().any(|s| s.eq_ignore_ascii_case("--consolidate"))
+                || curator_config.consolidate;
 
             // Gate checks
             if !curator_config.enabled {
@@ -109,7 +129,7 @@ pub(crate) async fn handle_curator_command(
                 return Ok(CommandResult::Handled);
             }
 
-            // Phase 1: deterministic auto-transitions (fast, milliseconds)
+            // Phase 1: deterministic auto-transitions (fast, milliseconds, zero tokens)
             let phase1 = hermes_skills::apply_automatic_transitions(&store, &curator_config);
             let mut out = format!(
                 "── curator run ──\nPhase 1 — Auto transitions:\n│ checked: {} │ stale: {} │ archived: {} │ reactivated: {} │",
@@ -121,7 +141,22 @@ pub(crate) async fn handle_curator_command(
                 return Ok(CommandResult::Handled);
             }
 
-            // Phase 2: LLM review (slow, 30-120s)
+            // Phase 2: LLM review (slow, 30-120s) — gated by `consolidate`
+            //
+            // When consolidation is OFF (the default), the curator does ONLY
+            // the deterministic inactivity prune above — no forked aux-model
+            // review, no umbrella-building, no aux-model cost.
+            if !consolidate {
+                let _ = write!(
+                    out,
+                    "\nPhase 2 — LLM review: skipped (consolidation off)\n\
+                     Pass --consolidate or set `curator.consolidate: true` to enable the LLM merge pass."
+                );
+                emit_command_output(host, &out);
+                save_post_run_state(&store, None);
+                return Ok(CommandResult::Handled);
+            }
+
             // Build the curator prompt and spawn an LLM agent via llm_runner
             let prompt = hermes_skills::build_curator_prompt(&store);
             let agent = host.agent().clone();
@@ -282,6 +317,7 @@ fn curator_config_from_app(host: &impl crate::app::ModelRuntime) -> hermes_skill
         stale_after_days: gc.stale_after_days,
         archive_after_days: gc.archive_after_days,
         prune_builtins: gc.prune_builtins,
+        consolidate: gc.consolidate,
     }
 }
 

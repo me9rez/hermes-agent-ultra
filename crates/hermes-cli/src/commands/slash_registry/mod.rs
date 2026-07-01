@@ -49,6 +49,7 @@ pub(crate) enum SlashHandlerId {
     Pet,
     Skills,
     Curator,
+    Learn,
     Tools,
     Toolcards,
     Toolsets,
@@ -276,6 +277,10 @@ static REGISTRY_ENTRIES: &[RegistryEntry] = &[
     RegistryEntry {
         id: SlashHandlerId::Curator,
         canonical: "/curator",
+    },
+    RegistryEntry {
+        id: SlashHandlerId::Learn,
+        canonical: "/learn",
     },
     RegistryEntry {
         id: SlashHandlerId::Tools,

@@ -1382,8 +1382,69 @@ pub async fn run(mut app: App) -> Result<(), AgentError> {
                                         state.status_message =
                                             format!("Running {command_name}…");
                                         draw_frame_now(&mut tui, &app, &mut state)?;
-                                        match app.handle_input(&input).await {
-                                            Ok(_) => {
+
+                                        // Record the slash command in input history and
+                                        // UI transcript, replicating what App::handle_input
+                                        // does internally.
+                                        app.input_history_mut().push(trimmed.clone());
+                                        *app.history_index_mut() = app.input_history().len();
+                                        if app.stream_attached() {
+                                            app.push_ui_user(trimmed.clone());
+                                        }
+
+                                        // Call handle_slash_command directly instead of
+                                        // app.handle_input().  When the result is RunAgent,
+                                        // submit the agent turn asynchronously via
+                                        // agent_lane so that stream chunks are processed
+                                        // by the event loop while the phase is still
+                                        // "processing".  Running the agent synchronously
+                                        // inside handle_input causes finish_processing_cycle
+                                        // to be called before buffered stream chunks are
+                                        // drained, panicking in processing_mut().
+                                        let slash_parts: Vec<&str> =
+                                            trimmed.splitn(2, ' ').collect();
+                                        let slash_cmd = slash_parts[0];
+                                        let slash_args: Vec<&str> = slash_parts
+                                            .get(1)
+                                            .map(|s| s.split_whitespace().collect())
+                                            .unwrap_or_default();
+                                        match crate::commands::handle_slash_command(
+                                            &mut app,
+                                            slash_cmd,
+                                            &slash_args,
+                                        )
+                                        .await
+                                        {
+                                            Ok(crate::commands::CommandResult::Quit) => {
+                                                state.finish_processing_cycle("✔ completed in");
+                                                app.set_running(false);
+                                                state.status_message.clear();
+                                            }
+                                            Ok(crate::commands::CommandResult::RunAgent(message)) => {
+                                                // Submit the agent turn asynchronously,
+                                                // same as regular user messages. The
+                                                // AgentRunComplete event will call
+                                                // finish_processing_cycle when done.
+                                                let user_message =
+                                                    app.prepare_user_message(&message);
+                                                app.messages_mut()
+                                                    .push(Message::user(user_message));
+                                                state.status_message =
+                                                    "Processing...".to_string();
+                                                agent_lane.submit(StandardAgentRunRequest {
+                                                    agent: app.agent().clone(),
+                                                    messages: app.messages().to_vec(),
+                                                    stream_enabled: app.config().streaming.enabled,
+                                                    tool_schemas: app.tool_schemas().to_vec(),
+                                                    stream_handle: app.stream_handle().cloned(),
+                                                    session_id: app.session_id().to_string(),
+                                                    result_tx: tui.stream_sender(),
+                                                });
+                                            }
+                                            Ok(
+                                                crate::commands::CommandResult::Handled
+                                                | crate::commands::CommandResult::NeedsAgent,
+                                            ) => {
                                                 state.finish_processing_cycle("✔ completed in");
                                                 if let Some(prefill) =
                                                     app.take_pending_input_prefill()

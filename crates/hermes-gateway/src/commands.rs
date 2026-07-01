@@ -102,6 +102,11 @@ pub enum GatewayCommandResult {
     EvolveStatus,
     /// Plan-then-execute mode (`/plan-mode` on messaging channels).
     PlanMode { args: String },
+    /// Learn a reusable skill from anything the user describes.
+    /// Rewrites the turn to a standards-guided prompt and falls through to
+    /// normal agent processing. The live agent gathers the sources the user
+    /// described and authors the skill via `skill_manage`.
+    Learn { prompt: String, ack: String },
     /// Unknown command.
     Unknown(String),
     /// No-op (command handled internally).
@@ -310,6 +315,12 @@ pub fn all_commands() -> Vec<CommandInfo> {
             aliases: &[],
             description: "Show runtime background review / evolution status",
             usage: "/evolve [status]",
+        },
+        CommandInfo {
+            name: "/learn",
+            aliases: &[],
+            description: "Learn a reusable skill from anything you describe (dirs, URLs, this chat, notes)",
+            usage: "/learn <what to learn from>",
         },
         CommandInfo {
             name: "/help",
@@ -812,6 +823,25 @@ pub fn handle_command(input: &str) -> GatewayCommandResult {
                 ),
             }
         }
+        "/learn" => {
+            // Open-ended: rewrite the turn to a standards-guided prompt and fall
+            // through to normal agent processing. The live agent gathers the
+            // sources the user described (dirs via read_file, URLs via
+            // web_extract, this conversation, pasted text) and authors the skill
+            // via skill_manage. Mirrors the /blueprint fall-through so role
+            // alternation is preserved. No engine, works on any backend.
+            let learn_req = args.trim();
+            let ack = if learn_req.is_empty() {
+                "Learning a skill from this conversation…"
+            } else {
+                "Learning a skill from what you described…"
+            };
+            let prompt = hermes_tools::learn_prompt::build_learn_prompt(learn_req);
+            GatewayCommandResult::Learn {
+                prompt,
+                ack: ack.to_string(),
+            }
+        }
         "/help" | "/commands" => {
             let mut help = String::from("📖 **Available Commands:**\n\n");
             for cmd_info in all_commands() {
@@ -1111,6 +1141,36 @@ mod tests {
     // -----------------------------------------------------------------------
     // BatchCommandClass / classify_batch_class tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_learn_command_with_args() {
+        match handle_command("/learn the REST client in ~/projects/acme-sdk") {
+            GatewayCommandResult::Learn { prompt, ack } => {
+                assert!(prompt.contains("the REST client in ~/projects/acme-sdk"));
+                assert!(prompt.contains("skill_manage"));
+                assert!(prompt.contains("[/learn]"));
+                assert!(ack.contains("what you described"));
+            }
+            other => panic!("Expected Learn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_learn_command_without_args() {
+        match handle_command("/learn") {
+            GatewayCommandResult::Learn { prompt, ack } => {
+                assert!(prompt.contains("conversation"));
+                assert!(prompt.contains("skill_manage"));
+                assert!(ack.contains("this conversation"));
+            }
+            other => panic!("Expected Learn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_learn_is_known_gateway_command() {
+        assert!(is_known_gateway_command("/learn"));
+    }
 
     #[test]
     fn test_classify_fire_and_forget() {

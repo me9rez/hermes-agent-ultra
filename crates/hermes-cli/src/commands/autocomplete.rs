@@ -71,6 +71,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/curator",
         "Skill curator/control-plane compatibility surface",
     ),
+    (
+        "/learn",
+        "Learn a reusable skill from anything you describe (dirs, URLs, this chat, notes)",
+    ),
     ("/tools", "List registered tools"),
     (
         "/toolcards",

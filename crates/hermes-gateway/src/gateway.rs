@@ -463,7 +463,8 @@ impl Gateway {
         match result {
             GatewayCommandResult::PlanMode { .. }
             | GatewayCommandResult::BackgroundTask { .. }
-            | GatewayCommandResult::BtwTask { .. } => Some(result),
+            | GatewayCommandResult::BtwTask { .. }
+            | GatewayCommandResult::Learn { .. } => Some(result),
             _ => None,
         }
     }

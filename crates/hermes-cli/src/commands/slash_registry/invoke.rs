@@ -84,6 +84,7 @@ pub async fn invoke_handler(
         SlashHandlerId::Pet => super::super::runtime_ui::handle_pet_command(host, args),
         SlashHandlerId::Skills => super::super::skills::handle_skills_command(host, args).await,
         SlashHandlerId::Curator => super::super::misc::handle_curator_command(host, args).await,
+        SlashHandlerId::Learn => handle_learn_command(host, args),
         SlashHandlerId::Tools => super::super::misc::handle_tools_command(host, args),
         SlashHandlerId::Toolcards => super::super::misc::handle_toolcards_command(host, args),
         SlashHandlerId::Toolsets => super::super::infra::handle_toolsets_command(host),
@@ -174,4 +175,26 @@ pub async fn invoke_handler(
             Ok(CommandResult::Quit)
         }
     }
+}
+
+/// Handle `/learn` — distill a reusable skill from anything the user describes.
+///
+/// Open-ended: the argument is free text describing the source(s) — a
+/// directory, a URL, "what we just did", pasted notes. We build a
+/// standards-guided prompt and inject it onto the agent's input queue; the
+/// live agent gathers the material with the tools it already has and
+/// authors the skill via `skill_manage`. No engine, no model-tool
+/// footprint, works on any terminal backend.
+fn handle_learn_command(
+    host: &mut impl crate::app::SlashCommandHost,
+    args: &[&str],
+) -> Result<CommandResult, AgentError> {
+    let user_request = args.join(" ");
+    let msg = hermes_tools::learn_prompt::build_learn_prompt(&user_request);
+    if !user_request.trim().is_empty() {
+        emit_command_output(host, "⚡ Learning a skill from what you described...");
+    } else {
+        emit_command_output(host, "⚡ Learning a skill from this conversation...");
+    }
+    Ok(CommandResult::RunAgent(msg))
 }

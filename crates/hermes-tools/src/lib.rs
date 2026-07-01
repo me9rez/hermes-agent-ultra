@@ -26,6 +26,7 @@ pub mod equity_slash_delivery;
 pub mod equity_web_fill;
 pub mod kanban;
 pub mod kanban_failure;
+pub mod learn_prompt;
 pub mod media_extract;
 pub mod plan_mode;
 pub mod register;
@@ -70,6 +71,7 @@ pub use equity_slash_delivery::{
     try_equity_slash_delivery, wants_md_only_attachment,
 };
 pub use kanban::{KANBAN_TASK_ENV, kanban_block_reason, kanban_task_from_env};
+pub use learn_prompt::{AUTHORING_STANDARDS, build_learn_prompt};
 pub use kanban_failure::{
     KanbanFailureOptions, KanbanFailureOutcome, record_iteration_budget_exhausted,
     record_task_failure,

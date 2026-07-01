@@ -1254,6 +1254,16 @@ pub(crate) fn append_transcript_message_lines(
     if matches!(msg.role, hermes_core::MessageRole::System) {
         return;
     }
+    // Hide slash-command rewrite prompts (e.g. /learn, /skills invoke) that
+    // are pushed as user messages for the agent but should not clutter the
+    // visible transcript.  These always start with "[/" or "[SYSTEM:".
+    if msg.role == hermes_core::MessageRole::User {
+        if let Some(content) = msg.content.as_deref() {
+            if content.starts_with("[/") || content.starts_with("[SYSTEM:") {
+                return;
+            }
+        }
+    }
     if *rendered_messages > 0 && matches!(state.view_density, ViewDensity::Detailed) {
         lines.push(Line::from(String::new()));
     }

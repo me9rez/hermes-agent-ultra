@@ -4,6 +4,18 @@ use hermes_core::AgentError;
 
 use crate::commands::{CommandResult, emit_command_output};
 
+/// Read the first markdown heading from a SKILL.md file as its title.
+fn read_skill_title(skill_md: &std::path::Path) -> String {
+    std::fs::read_to_string(skill_md)
+        .ok()
+        .and_then(|c| {
+            c.lines()
+                .find(|l| l.starts_with('#'))
+                .map(|l| l.trim_start_matches('#').trim().to_string())
+        })
+        .unwrap_or_else(|| "(no description)".to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SkillsSlashInvocation {
     action: Option<String>,
@@ -170,24 +182,38 @@ pub(crate) async fn handle_skills_command(
     if let Ok(entries) = std::fs::read_dir(&skills_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            let skill_md = path.join("SKILL.md");
-            if !path.is_dir() || !skill_md.exists() {
+            if !path.is_dir() {
                 continue;
             }
-            let name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let title = std::fs::read_to_string(&skill_md)
-                .ok()
-                .and_then(|c| {
-                    c.lines()
-                        .find(|l| l.starts_with('#'))
-                        .map(|l| l.trim_start_matches('#').trim().to_string())
-                })
-                .unwrap_or_else(|| "(no description)".to_string());
-            skills.push((name, title));
+            // Case 1: skill at top level — skills/<name>/SKILL.md
+            let skill_md = path.join("SKILL.md");
+            if skill_md.exists() {
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let title = read_skill_title(&skill_md);
+                skills.push((name, title));
+                continue;
+            }
+            // Case 2: skill under a category — skills/<category>/<name>/SKILL.md
+            if let Ok(cat_entries) = std::fs::read_dir(&path) {
+                for cat_entry in cat_entries.flatten() {
+                    let cat_path = cat_entry.path();
+                    let cat_skill_md = cat_path.join("SKILL.md");
+                    if !cat_path.is_dir() || !cat_skill_md.exists() {
+                        continue;
+                    }
+                    let name = cat_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let title = read_skill_title(&cat_skill_md);
+                    skills.push((name, title));
+                }
+            }
         }
     }
     skills.sort_by(|a, b| a.0.cmp(&b.0));

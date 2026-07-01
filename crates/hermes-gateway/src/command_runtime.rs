@@ -124,6 +124,15 @@ pub(crate) async fn apply_command(
             apply_plan_mode(gw, incoming, session_key, args).await
         }
 
+        // ── learn (fall-through to agent) ──────────────────────────────
+        GatewayCommandResult::Learn { prompt, ack } => {
+            // Send the ack message, then set the pending inbound text so the
+            // rewritten prompt falls through to normal agent processing.
+            gw.send_incoming_reply(incoming, &ack, None).await?;
+            gw.set_pending_inbound_text(session_key, prompt).await;
+            Ok(false)
+        }
+
         // ── tool ──────────────────────────────────────────────────────────
         result @ (GatewayCommandResult::ListTools { .. }
         | GatewayCommandResult::EnableTool { .. }

@@ -32,7 +32,10 @@ fi
 rm -rf "${OUT}"
 mkdir -p "${OUT}/bin" "${OUT}/lib" "${OUT}/models"
 
-cp -f "${BIN}" "${OUT}/bin/hermes-agent-ultra"
+cp -f "${BIN}" "${OUT}/bin/.hermes-agent-ultra.bin"
+chmod +x "${OUT}/bin/.hermes-agent-ultra.bin"
+patchelf --force-rpath --set-rpath '$ORIGIN/../lib' "${OUT}/bin/.hermes-agent-ultra.bin"
+cp "${ROOT}/scripts/talk/board_bin_wrapper.sh" "${OUT}/bin/hermes-agent-ultra"
 chmod +x "${OUT}/bin/hermes-agent-ultra"
 
 cp -a "${GCC}/libc/lib/ld-linux-aarch64.so.1" "${OUT}/lib/"
@@ -52,6 +55,15 @@ cp "${RKAUDIO}/lib/librknnrt.so" "${OUT}/lib/"
 for lib in librockasr.so librockx2.so librockx_modules.so librkllmrt.so \
            librknn3_api.so libonnxruntime.so libgomp.so.1; do
   [[ -f "${RKAUDIO}/lib/${lib}" ]] && cp "${RKAUDIO}/lib/${lib}" "${OUT}/lib/"
+done
+
+# RUNPATH on the binary does not apply to transitive .so deps (e.g. librktts -> librknnrt).
+# RPATH on bundled SDK libs lets the loader resolve siblings from lib/.
+for lib in librktts.so librknnrt.so librockasr.so librockx2.so librockx_modules.so \
+           librkllmrt.so librknn3_api.so libonnxruntime.so libgomp.so.1; do
+  so="${OUT}/lib/${lib}"
+  [[ -f "${so}" ]] || continue
+  patchelf --force-rpath --set-rpath '$ORIGIN' "${so}"
 done
 
 # Rockchip TTS models + dictionaries (.models preferred, SDK fallback)
@@ -106,5 +118,6 @@ cp "${ROOT}/scripts/talk/start_board.sh" "${OUT}/start.sh"
 chmod +x "${OUT}/start.sh"
 
 echo "Bundled: ${OUT}"
-echo "On board: cd ${OUT} && ./start.sh"
-echo "  (first run: ~/.hermes-agent-ultra + hermes-talk/config.toml; models linked from bundle)"
+echo "On board: cd ${OUT} && ./start.sh --help"
+echo "  Voice dialog: ./start.sh talk run"
+echo "  Full CLI also via: bin/hermes-agent-ultra <subcommand>"

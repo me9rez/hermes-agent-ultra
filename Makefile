@@ -134,7 +134,7 @@ PACKAGE_TALK_ENV  := ROOT=$(ROOT) DIST_DIR=$(DIST) MODELS_ROOT=$(MODELS_ROOT) BI
         build-talk build-talk-rockchip-dev build-talk-windows release-talk release-talk-rockchip release-talk-rockchip-arm64 \
         debug-talk-rockchip-arm64 \
         package-talk package-talk-windows package-talk-linux package-talk-macos \
-        package-talk-rockchip package-talk-rockchip-dev prefetch-talk-aarch64 ensure-talk-models \
+        package-talk-rockchip package-talk-rockchip-dev hermes-talk-rk3588-dev prefetch-talk-aarch64 ensure-talk-models \
         fetch-talk-sherpa-runtime fetch-talk-sherpa-runtime-windows \
         download-talk-models download-talk-models-windows download-talk-models-unix \
         check-talk-models check-talk-models-windows check-talk-models-unix \
@@ -336,7 +336,7 @@ release-talk-rockchip-arm64: $(GCC_AARCH64) $(MOLD_BIN) $(TALK_RKAUDIO)/librktts
 	$(CROSS_AARCH64_ENV) \
 	RUSTFLAGS="-C link-arg=-static-libstdc++ -C link-arg=-static-libgcc" \
 	$(CROSS) build --release --target $(ARM64_TARGET) $(TALK_PKG_RK)
-	patchelf --set-rpath '$$ORIGIN/lib' $(ARM64_RELEASE)
+	patchelf --force-rpath --set-rpath '$$ORIGIN/../lib' $(ARM64_RELEASE)
 	@echo "Built $(ARM64_RELEASE) (features: $(TALK_FEATURES_RK))"
 
 debug-talk-rockchip-arm64: $(GCC_AARCH64) $(MOLD_BIN) $(TALK_RKAUDIO)/librktts_c_api.a $(TALK_RKAUDIO)/lib
@@ -344,7 +344,7 @@ debug-talk-rockchip-arm64: $(GCC_AARCH64) $(MOLD_BIN) $(TALK_RKAUDIO)/librktts_c
 	$(CROSS_AARCH64_ENV) \
 	RUSTFLAGS="-C link-arg=-static-libstdc++ -C link-arg=-static-libgcc" \
 	$(CROSS) build --target $(ARM64_TARGET) $(TALK_PKG_RK)
-	patchelf --set-rpath '$$ORIGIN/lib' $(ARM64_DEBUG)
+	patchelf --force-rpath --set-rpath '$$ORIGIN/../lib' $(ARM64_DEBUG)
 	@echo "Built $(ARM64_DEBUG) (debug, features: $(TALK_FEATURES_RK))"
 
 build-talk-rockchip-dev: debug-talk-rockchip-arm64
@@ -413,6 +413,8 @@ package-talk-rockchip-dev: debug-talk-rockchip-arm64
 	OUT_NAME=hermes-talk-rk3588-dev \
 	BIN_PATH=$(ARM64_DEBUG) \
 	$(TALK_SCRIPTS)/package_aarch64_rockchip.sh
+
+hermes-talk-rk3588-dev: package-talk-rockchip-dev
 
 package-talk: package-talk-$(HOST_OS)
 

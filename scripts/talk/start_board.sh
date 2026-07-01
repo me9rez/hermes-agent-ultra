@@ -1,5 +1,5 @@
 #!/bin/sh
-# Rockchip board launcher: init Hermes home + talk config/assets, then start voice dialog.
+# Rockchip board launcher: init Hermes home + talk bundle assets, then run hermes CLI.
 set -eu
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -109,4 +109,4 @@ export RUST_LOG="${RUST_LOG:-info,rustls=warn,hyper=warn,h2=warn}"
 
 exec "${DIR}/lib/ld-linux-aarch64.so.1" \
     --library-path "${DIR}/lib" \
-    "${DIR}/bin/hermes-agent-ultra" talk "$@"
+    "${DIR}/bin/.hermes-agent-ultra.bin" "$@"

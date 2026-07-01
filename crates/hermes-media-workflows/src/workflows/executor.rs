@@ -9,6 +9,7 @@ use hermes_core::ToolError;
 use super::control::WorkflowRunControl;
 use super::definition::{WorkflowDefinition, WorkflowPlan, WorkflowStep};
 use super::store::{WorkflowRunRecord, WorkflowRunStatus, WorkflowRunStore};
+use super::templates::builtin_template;
 use crate::backends::FlowyMediaServices;
 use crate::backends::flowy_video::FlowyVideoGenBackend;
 use crate::backends::traits::{FlowyMediaBackend, MediaGenerationBackend, MediaImageRequest};
@@ -22,8 +23,11 @@ use crate::progress::{
 use crate::prompt_refine::RefineInput;
 use crate::qa::{qa_check_image, qa_check_video};
 use crate::video_segment::{
-    concat_videos, extract_last_frame_png, persist_concatenated_video, plan_segment_durations,
-    png_file_to_data_url, segment_video_prompt,
+    LongVideoCheckpoint, checkpoint_matches_plan, clear_long_video_checkpoint, concat_videos,
+    extract_last_frame_png, long_video_resume_hint, long_video_work_dir,
+    persist_concatenated_video, plan_segment_durations, png_file_to_data_url,
+    read_long_video_checkpoint, segment_video_file, segment_video_prompt,
+    write_long_video_checkpoint,
 };
 
 pub struct WorkflowExecutor {
@@ -94,19 +98,62 @@ impl WorkflowExecutor {
             )));
         };
         record.status = WorkflowRunStatus::Running;
+        record.error = None;
         self.store.save(&record);
+        self.execute_workflow_steps(run_id, def, &mut record, 0, false)
+            .await
+    }
 
+    /// Resume a failed long-video (or other) workflow from the last incomplete step.
+    pub async fn resume_run(&self, run_id: &str) -> Result<WorkflowRunRecord, ToolError> {
+        let Some(mut record) = self.store.get(run_id) else {
+            return Err(ToolError::ExecutionFailed(format!(
+                "workflow run not found: {run_id}"
+            )));
+        };
+        if record.status == WorkflowRunStatus::Succeeded {
+            return Ok(record);
+        }
+        if record.status == WorkflowRunStatus::Running {
+            return Err(ToolError::ExecutionFailed(format!(
+                "workflow run {run_id} is still running"
+            )));
+        }
+        let def = workflow_definition_for_record(&record)?;
+        let order = topo_sort(&def.steps)?;
+        let start_idx = compute_resume_step_index(&order, &record);
+        if start_idx >= order.len() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "workflow run {run_id} has no resumable steps"
+            )));
+        }
         record.status = WorkflowRunStatus::Running;
+        record.error = None;
         self.store.save(&record);
+        report_media_progress(format!(
+            "恢复媒体工作流（run_id={run_id}，从第 {} 步继续）…",
+            start_idx + 1
+        ));
+        self.execute_workflow_steps(run_id, &def, &mut record, start_idx, true)
+            .await
+    }
 
+    async fn execute_workflow_steps(
+        &self,
+        run_id: &str,
+        def: &WorkflowDefinition,
+        record: &mut WorkflowRunRecord,
+        start_idx: usize,
+        restoring: bool,
+    ) -> Result<WorkflowRunRecord, ToolError> {
         let order = topo_sort(&def.steps)?;
         let step_total = order.len();
-        report_media_progress(workflow_started(&def.id, step_total));
+        if !restoring {
+            report_media_progress(workflow_started(&def.id, step_total));
+        }
 
-        let mut ctx: HashMap<String, Value> = HashMap::new();
-        ctx.insert("inputs".into(), def.inputs.clone());
-
-        let mut step_idx = 0usize;
+        let mut ctx = build_workflow_context(def, record);
+        let mut step_idx = start_idx;
         let mut workflow_retries = 0u32;
         const MAX_WORKFLOW_RESTARTS: u32 = 2;
 
@@ -115,7 +162,7 @@ impl WorkflowExecutor {
                 record.status = WorkflowRunStatus::Cancelled;
                 record.error = Some("workflow cancelled by user".into());
                 record.current_step = None;
-                self.store.save(&record);
+                self.store.save(record);
                 return Err(ToolError::ExecutionFailed("workflow cancelled".into()));
             }
 
@@ -127,7 +174,7 @@ impl WorkflowExecutor {
                 .ok_or_else(|| ToolError::ExecutionFailed(format!("missing step {step_id}")))?;
 
             record.current_step = Some(step_id.clone());
-            self.store.save(&record);
+            self.store.save(record);
 
             let resolved_input = resolve_value(&step.input, &ctx);
             let medium = resolved_input.get("medium").and_then(|v| v.as_str());
@@ -175,14 +222,14 @@ impl WorkflowExecutor {
                             attempt = workflow_retries,
                             "workflow restarting from earlier step after failure"
                         );
-                        clear_outputs_from(&mut ctx, &mut record, &order, restart_idx);
+                        clear_outputs_from(&mut ctx, record, &order, restart_idx);
                         step_idx = restart_idx;
                         continue;
                     }
                     record.status = WorkflowRunStatus::Failed;
                     record.error = Some(err.to_string());
                     record.current_step = None;
-                    self.store.save(&record);
+                    self.store.save(record);
                     return Err(err);
                 }
             };
@@ -207,15 +254,15 @@ impl WorkflowExecutor {
 
             insert_step_output(&mut ctx, &step_id, output.clone());
             record.step_outputs.insert(step_id.clone(), output);
-            self.store.save(&record);
+            self.store.save(record);
             step_idx += 1;
         }
 
         record.status = WorkflowRunStatus::Succeeded;
         record.current_step = None;
         record.artifacts = collect_artifacts(&record.step_outputs);
-        self.store.save(&record);
-        Ok(record)
+        self.store.save(record);
+        Ok(record.clone())
     }
 
     async fn run_step_with_retry(
@@ -453,10 +500,7 @@ impl WorkflowExecutor {
             crate::video_segment::ensure_ffmpeg_ready().await?;
         }
 
-        let work_dir = hermes_config::hermes_home()
-            .join("media")
-            .join("segments")
-            .join(run_id);
+        let work_dir = long_video_work_dir(run_id);
         tokio::fs::create_dir_all(&work_dir)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("create segment work dir: {e}")))?;
@@ -469,10 +513,54 @@ impl WorkflowExecutor {
             .filter(|s| !s.trim().is_empty())
             .map(str::to_string);
 
-        for (idx, &clip_secs) in plan.segment_durations.iter().enumerate() {
+        let mut start_idx = 0usize;
+        if let Some(checkpoint) = read_long_video_checkpoint(&work_dir)
+            && checkpoint_matches_plan(&checkpoint, &plan, &model, base_prompt)
+        {
+            start_idx = checkpoint.next_segment_index.min(segment_total);
+            for (i, path_str) in checkpoint.completed_segments.iter().enumerate() {
+                let path = PathBuf::from(path_str);
+                let resolved = if path.is_file() {
+                    path
+                } else {
+                    segment_video_file(&work_dir, i)
+                };
+                if resolved.is_file() {
+                    segment_paths.push(resolved);
+                    if let Some(clip_secs) = plan.segment_durations.get(i) {
+                        segment_artifacts.push(json!({
+                            "segment": i + 1,
+                            "duration_secs": clip_secs,
+                            "local_path": segment_paths[i].to_string_lossy(),
+                        }));
+                    }
+                }
+            }
+            chain_image_url = checkpoint.chain_image_url.or(chain_image_url);
+            if start_idx > 0
+                && start_idx < segment_total
+                && chain_image_url.is_none()
+                && let Some(prev) = segment_paths.last()
+            {
+                let frame_path = work_dir.join(format!("seg_{}_last.png", start_idx - 1));
+                extract_last_frame_png(prev, &frame_path).await?;
+                chain_image_url = Some(png_file_to_data_url(&frame_path)?);
+            }
+            if start_idx > 0 && start_idx < segment_total {
+                report_media_progress(format!(
+                    "恢复长视频任务：已完成 {start_idx}/{segment_total} 段，继续生成…"
+                ));
+            } else if start_idx >= segment_total && segment_paths.len() >= segment_total {
+                report_media_progress("所有分段已就绪，正在拼接长视频…");
+            }
+        }
+
+        for idx in start_idx..segment_total {
             if self.control.is_cancelled(run_id) {
                 return Err(ToolError::ExecutionFailed("workflow cancelled".into()));
             }
+
+            let clip_secs = plan.segment_durations[idx];
 
             report_workflow_step_event(WorkflowStepProgress {
                 run_id,
@@ -498,9 +586,53 @@ impl WorkflowExecutor {
                 obj.insert("model".into(), json!(model));
             }
 
-            let seg_out = self.run_video_step(run_id, &seg_input).await?;
-            let seg_path = ensure_local_video_path(&seg_out, &model).await?;
-            segment_paths.push(seg_path.clone());
+            let seg_out = match self.run_video_step(run_id, &seg_input).await {
+                Ok(out) => out,
+                Err(err) => {
+                    let checkpoint = LongVideoCheckpoint {
+                        target_duration_secs: plan.target_duration_secs,
+                        max_clip_secs: plan.max_clip_secs,
+                        segment_durations: plan.segment_durations.clone(),
+                        model: model.clone(),
+                        base_prompt: base_prompt.to_string(),
+                        next_segment_index: idx,
+                        completed_segments: segment_paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect(),
+                        chain_image_url: chain_image_url.clone(),
+                    };
+                    let _ = write_long_video_checkpoint(&work_dir, &checkpoint).await;
+                    return Err(long_video_resume_hint(run_id, &err));
+                }
+            };
+
+            let seg_path = match ensure_local_video_path(&seg_out, &model).await {
+                Ok(path) => path,
+                Err(err) => {
+                    let checkpoint = LongVideoCheckpoint {
+                        target_duration_secs: plan.target_duration_secs,
+                        max_clip_secs: plan.max_clip_secs,
+                        segment_durations: plan.segment_durations.clone(),
+                        model: model.clone(),
+                        base_prompt: base_prompt.to_string(),
+                        next_segment_index: idx,
+                        completed_segments: segment_paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect(),
+                        chain_image_url: chain_image_url.clone(),
+                    };
+                    let _ = write_long_video_checkpoint(&work_dir, &checkpoint).await;
+                    return Err(long_video_resume_hint(run_id, &err));
+                }
+            };
+
+            let stable_path = segment_video_file(&work_dir, idx);
+            tokio::fs::copy(&seg_path, &stable_path)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("persist segment file: {e}")))?;
+            segment_paths.push(stable_path.clone());
 
             if let Some(path_str) = local_path_from_step_output(&seg_out) {
                 report_intermediate_artifact(
@@ -511,18 +643,34 @@ impl WorkflowExecutor {
                     "video",
                     &path_str,
                 );
-                segment_artifacts.push(json!({
-                    "segment": idx + 1,
-                    "duration_secs": clip_secs,
-                    "local_path": path_str,
-                }));
             }
+            segment_artifacts.push(json!({
+                "segment": idx + 1,
+                "duration_secs": clip_secs,
+                "local_path": stable_path.to_string_lossy(),
+            }));
 
-            if idx + 1 < segment_total {
+            let next_index = idx + 1;
+            if next_index < segment_total {
                 let frame_path = work_dir.join(format!("seg_{idx}_last.png"));
-                extract_last_frame_png(&seg_path, &frame_path).await?;
+                extract_last_frame_png(&stable_path, &frame_path).await?;
                 chain_image_url = Some(png_file_to_data_url(&frame_path)?);
             }
+
+            let checkpoint = LongVideoCheckpoint {
+                target_duration_secs: plan.target_duration_secs,
+                max_clip_secs: plan.max_clip_secs,
+                segment_durations: plan.segment_durations.clone(),
+                model: model.clone(),
+                base_prompt: base_prompt.to_string(),
+                next_segment_index: next_index,
+                completed_segments: segment_paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+                chain_image_url: chain_image_url.clone(),
+            };
+            write_long_video_checkpoint(&work_dir, &checkpoint).await?;
         }
 
         let output_path = work_dir.join("concat_output.mp4");
@@ -538,6 +686,7 @@ impl WorkflowExecutor {
         let artifact =
             persist_concatenated_video(&output_path, "flowy", &model, plan.target_duration_secs)
                 .await?;
+        clear_long_video_checkpoint(&work_dir).await;
 
         let task = VideoTaskMeta {
             local_id: format!("long-{run_id}"),
@@ -934,6 +1083,50 @@ fn insert_step_output(ctx: &mut HashMap<String, Value>, step_id: &str, output: V
     }
 }
 
+fn build_workflow_context(
+    def: &WorkflowDefinition,
+    record: &WorkflowRunRecord,
+) -> HashMap<String, Value> {
+    let mut ctx = HashMap::new();
+    ctx.insert("inputs".into(), def.inputs.clone());
+    for (step_id, output) in &record.step_outputs {
+        insert_step_output(&mut ctx, step_id, output.clone());
+    }
+    ctx
+}
+
+fn compute_resume_step_index(order: &[String], record: &WorkflowRunRecord) -> usize {
+    for (idx, step_id) in order.iter().enumerate() {
+        if !record.step_outputs.contains_key(step_id) {
+            return idx;
+        }
+    }
+    if read_long_video_checkpoint(&long_video_work_dir(&record.run_id))
+        .is_some_and(|cp| !cp.is_complete())
+    {
+        return order.len().saturating_sub(1);
+    }
+    order.len()
+}
+
+fn workflow_definition_for_record(
+    record: &WorkflowRunRecord,
+) -> Result<WorkflowDefinition, ToolError> {
+    let template = builtin_template(&record.workflow_id).ok_or_else(|| {
+        ToolError::ExecutionFailed(format!(
+            "unknown workflow template for resume: {}",
+            record.workflow_id
+        ))
+    })?;
+    Ok(WorkflowDefinition {
+        id: record.workflow_id.clone(),
+        version: template.version,
+        description: template.description,
+        inputs: record.inputs.clone(),
+        steps: template.steps,
+    })
+}
+
 fn clear_outputs_from(
     ctx: &mut HashMap<String, Value>,
     record: &mut WorkflowRunRecord,
@@ -1095,6 +1288,28 @@ mod tests {
             "HTTP 503 temporarily unavailable".into()
         )));
         assert!(!is_retryable_error(&ToolError::InvalidParams("bad".into())));
+    }
+
+    #[test]
+    fn compute_resume_step_index_skips_completed_steps() {
+        let order = vec!["refine_prompt".into(), "generate".into()];
+        let mut record = WorkflowRunRecord {
+            run_id: "run-1".into(),
+            workflow_id: "long_txt2video".into(),
+            status: WorkflowRunStatus::Failed,
+            inputs: json!({}),
+            current_step: None,
+            step_outputs: HashMap::from([(
+                "refine_prompt".into(),
+                json!({"video_prompt": "scene"}),
+            )]),
+            artifacts: vec![],
+            error: Some("insufficient credits".into()),
+        };
+        assert_eq!(compute_resume_step_index(&order, &record), 1);
+
+        record.step_outputs.clear();
+        assert_eq!(compute_resume_step_index(&order, &record), 0);
     }
 
     #[test]

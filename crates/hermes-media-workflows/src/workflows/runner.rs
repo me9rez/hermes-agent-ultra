@@ -62,6 +62,14 @@ impl WorkflowRunner {
         self.executor.run_plan(plan).await
     }
 
+    /// Resume a failed workflow (e.g. long video after credit top-up).
+    pub async fn resume_run_sync(
+        &self,
+        run_id: &str,
+    ) -> Result<super::store::WorkflowRunRecord, ToolError> {
+        self.executor.resume_run(run_id).await
+    }
+
     /// Start async run; returns `run_id` immediately.
     pub fn spawn_plan(self: &Arc<Self>, plan: WorkflowPlan) -> Result<String, ToolError> {
         let def = WorkflowDefinition {

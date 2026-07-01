@@ -103,6 +103,34 @@ impl WorkflowRunStore {
     fn run_path(&self, run_id: &str) -> PathBuf {
         self.root.join(run_id).join("state.json")
     }
+
+    /// All persisted runs, newest state file first.
+    pub fn list_records_newest_first(&self) -> Vec<WorkflowRunRecord> {
+        let mut records = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return records;
+        };
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let Some(run_id) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if let Some(record) = self.get(&run_id) {
+                records.push(record);
+            }
+        }
+        records.sort_by_key(|b| std::cmp::Reverse(self.record_mtime(b)));
+        records
+    }
+
+    fn record_mtime(&self, record: &WorkflowRunRecord) -> std::time::SystemTime {
+        self.run_path(&record.run_id)
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    }
 }
 
 impl Default for WorkflowRunStore {

@@ -18,6 +18,7 @@ pub fn gateway_media_system_hint(has_workflow_tools: bool) -> String {
         "- User already sent an image URL for video → workflow with `image_url` (img2video_direct); for edits → img2img.".to_string(),
         "- Multi-scene / storyboard / 分镜 / 很多场景 → `media_workflow_plan` with `storyboard_multi` (NOT `video_generate`). Never invent a storyboard table while generating a single 5s clip.".to_string(),
         "- Long video (>10s, e.g. 20s) → use `video_generate` with `duration: 20` or write \"20秒\" in the prompt (auto-segments + concat), OR `media_workflow_plan` for preview/credits. Hermes auto-installs ffmpeg when needed.".to_string(),
+        "- If long-video generation failed mid-way (e.g. insufficient credits), after top-up call `media_workflow_run` with `resume_run_id` from the failed run, or call `video_generate` again with the same duration (auto-resumes saved segments). Never deliver a single 10s clip when the user asked for 20s.".to_string(),
         "Deliver files via MEDIA:/local_path from tool results. Do NOT redirect users to Kling, Sora, Pika, 海螺, etc.".to_string(),
         "Post-actions: image_variation, image_upscale, video_extend workflows for iterate/upscale/extend.".to_string(),
         "Always include `user_prompt_block` from tool results in your reply so the user sees the final prompt sent to the image/video API (WeCom, CLI, Telegram, etc.).".to_string(),

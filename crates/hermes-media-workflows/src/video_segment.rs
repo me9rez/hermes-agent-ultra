@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use hermes_config::RuntimeDep;
 use hermes_core::ToolError;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+
+use crate::workflows::store::{WorkflowRunRecord, WorkflowRunStatus, WorkflowRunStore};
 
 use crate::assets::persist_bytes;
 use crate::progress::report_media_progress;
@@ -304,6 +307,124 @@ pub async fn concat_videos(segment_paths: &[PathBuf], output_path: &Path) -> Res
     Ok(())
 }
 
+/// On-disk checkpoint for resuming long-video generation after credit/network failures.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LongVideoCheckpoint {
+    pub target_duration_secs: u32,
+    pub max_clip_secs: u32,
+    pub segment_durations: Vec<u32>,
+    pub model: String,
+    pub base_prompt: String,
+    /// Index of the next segment to generate (0-based).
+    pub next_segment_index: usize,
+    pub completed_segments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_image_url: Option<String>,
+}
+
+impl LongVideoCheckpoint {
+    pub fn segment_total(&self) -> usize {
+        self.segment_durations.len()
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.next_segment_index >= self.segment_total()
+            && self.completed_segments.len() >= self.segment_total()
+    }
+}
+
+pub fn long_video_work_dir(run_id: &str) -> PathBuf {
+    hermes_config::hermes_home()
+        .join("media")
+        .join("segments")
+        .join(run_id)
+}
+
+pub fn segment_video_file(work_dir: &Path, index: usize) -> PathBuf {
+    work_dir.join(format!("seg_{index}.mp4"))
+}
+
+fn checkpoint_file(work_dir: &Path) -> PathBuf {
+    work_dir.join("checkpoint.json")
+}
+
+pub fn read_long_video_checkpoint(work_dir: &Path) -> Option<LongVideoCheckpoint> {
+    let data = std::fs::read_to_string(checkpoint_file(work_dir)).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+pub async fn write_long_video_checkpoint(
+    work_dir: &Path,
+    checkpoint: &LongVideoCheckpoint,
+) -> Result<(), ToolError> {
+    tokio::fs::create_dir_all(work_dir)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("create long video work dir: {e}")))?;
+    let json = serde_json::to_string_pretty(checkpoint)
+        .map_err(|e| ToolError::ExecutionFailed(format!("serialize checkpoint: {e}")))?;
+    tokio::fs::write(checkpoint_file(work_dir), json)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("write checkpoint: {e}")))?;
+    Ok(())
+}
+
+pub async fn clear_long_video_checkpoint(work_dir: &Path) {
+    let _ = tokio::fs::remove_file(checkpoint_file(work_dir)).await;
+}
+
+pub fn checkpoint_matches_plan(
+    checkpoint: &LongVideoCheckpoint,
+    plan: &SegmentPlan,
+    model: &str,
+    base_prompt: &str,
+) -> bool {
+    checkpoint.target_duration_secs == plan.target_duration_secs
+        && checkpoint.max_clip_secs == plan.max_clip_secs
+        && checkpoint.segment_durations == plan.segment_durations
+        && checkpoint.model == model
+        && checkpoint.base_prompt.trim() == base_prompt.trim()
+}
+
+/// Newest failed long-video run with a resumable on-disk checkpoint for the target duration.
+pub fn find_resumable_long_video_run(
+    store: &WorkflowRunStore,
+    target_duration_secs: u32,
+) -> Option<WorkflowRunRecord> {
+    store
+        .list_records_newest_first()
+        .into_iter()
+        .find(|record| record_is_resumable(record, target_duration_secs))
+}
+
+fn record_is_resumable(record: &WorkflowRunRecord, target_duration_secs: u32) -> bool {
+    if record.status != WorkflowRunStatus::Failed {
+        return false;
+    }
+    if !record.workflow_id.starts_with("long_") {
+        return false;
+    }
+    let work_dir = long_video_work_dir(&record.run_id);
+    let Some(cp) = read_long_video_checkpoint(&work_dir) else {
+        return false;
+    };
+    cp.target_duration_secs == target_duration_secs && !cp.is_complete()
+}
+
+pub fn long_video_resume_hint(run_id: &str, err: &ToolError) -> ToolError {
+    let msg = err.to_string();
+    let lower = msg.to_ascii_lowercase();
+    let credit_note = if lower.contains("insufficient credits") || lower.contains("积分") {
+        " After topping up credits,"
+    } else {
+        ""
+    };
+    ToolError::ExecutionFailed(format!(
+        "{msg}.{credit_note} resume with media_workflow_run(resume_run_id=\"{run_id}\") \
+         or call video_generate with the same duration (auto-continues saved segments). \
+         Do NOT deliver a single 10s clip when the user asked for a longer video."
+    ))
+}
+
 /// Persist concatenated output as a [`MediaArtifact`].
 pub async fn persist_concatenated_video(
     path: &Path,
@@ -374,6 +495,38 @@ mod tests {
         let p = segment_video_prompt("一只猫在奔跑", 1, 2);
         assert!(p.contains("2"));
         assert!(p.contains("猫"));
+    }
+
+    #[test]
+    fn checkpoint_tracks_partial_progress() {
+        let cp = LongVideoCheckpoint {
+            target_duration_secs: 20,
+            max_clip_secs: 10,
+            segment_durations: vec![10, 10],
+            model: "seedance".into(),
+            base_prompt: "promo".into(),
+            next_segment_index: 1,
+            completed_segments: vec!["/tmp/seg_0.mp4".into()],
+            chain_image_url: None,
+        };
+        assert!(!cp.is_complete());
+        let plan = plan_segment_durations(20, 10);
+        assert!(checkpoint_matches_plan(&cp, &plan, "seedance", "promo"));
+    }
+
+    #[test]
+    fn checkpoint_complete_when_all_segments_done() {
+        let cp = LongVideoCheckpoint {
+            target_duration_secs: 20,
+            max_clip_secs: 10,
+            segment_durations: vec![10, 10],
+            model: "seedance".into(),
+            base_prompt: "promo".into(),
+            next_segment_index: 2,
+            completed_segments: vec!["/a.mp4".into(), "/b.mp4".into()],
+            chain_image_url: None,
+        };
+        assert!(cp.is_complete());
     }
 
     #[test]

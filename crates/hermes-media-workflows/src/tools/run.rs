@@ -27,6 +27,16 @@ impl MediaWorkflowRunHandler {
 #[async_trait]
 impl ToolHandler for MediaWorkflowRunHandler {
     async fn execute(&self, params: Value) -> Result<String, ToolError> {
+        if let Some(run_id) = params
+            .get("resume_run_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let record = self.runner.resume_run_sync(run_id).await?;
+            return Ok(serialize_run_result(&record));
+        }
+
         let plan: WorkflowPlan = if let Some(plan_val) = params.get("plan") {
             serde_json::from_value(plan_val.clone())
                 .map_err(|e| ToolError::InvalidParams(format!("invalid plan: {e}")))?
@@ -92,6 +102,13 @@ impl ToolHandler for MediaWorkflowRunHandler {
     fn schema(&self) -> ToolSchema {
         let mut props = IndexMap::new();
         props.insert(
+            "resume_run_id".into(),
+            json!({
+                "type": "string",
+                "description": "Resume a failed media workflow run (e.g. long video after credit top-up). Use run_id from the earlier failure; do NOT start a new 10s clip."
+            }),
+        );
+        props.insert(
             "plan".into(),
             json!({"type":"object","description":"Plan object from media_workflow_plan"}),
         );
@@ -112,7 +129,7 @@ impl ToolHandler for MediaWorkflowRunHandler {
         );
         tool_schema(
             "media_workflow_run",
-            "Execute a media workflow plan (refined prompts, image/video pipeline). Async by default — poll media_workflow_status. Completed runs include user_prompt_block with final API prompts to show the user.",
+            "Execute a media workflow plan (refined prompts, image/video pipeline). Async by default — poll media_workflow_status. Use resume_run_id to continue a failed long-video job after topping up credits.",
             JsonSchema::object(props, vec![]),
         )
     }

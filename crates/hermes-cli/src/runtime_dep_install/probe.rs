@@ -5,7 +5,7 @@ use reqwest::Client;
 use tokio::time::timeout;
 use tracing::debug;
 
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Parallel reachability probe; returns the index of the fastest responding URL.
 pub async fn pick_fastest_url(client: &Client, urls: &[&str]) -> Option<usize> {

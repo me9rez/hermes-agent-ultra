@@ -170,9 +170,13 @@ pub async fn ensure_ffmpeg(quiet: bool) -> Result<PathBuf, FfmpegInstallError> {
         .map_err(|e| FfmpegInstallError::Download(e.to_string()))?;
 
     let urls: Vec<&str> = mirrors.iter().map(|m| m.url).collect();
-    let start_idx = pick_fastest_url(&client, &urls)
-        .await
-        .ok_or(FfmpegInstallError::ProbeFailed)?;
+    let start_idx = match pick_fastest_url(&client, &urls).await {
+        Some(idx) => idx,
+        None => {
+            debug!("ffmpeg mirror probe failed; will try mirrors in order");
+            0
+        }
+    };
 
     std::fs::create_dir_all(home.join("bin"))?;
 
